@@ -16,7 +16,7 @@ Once status becomes `approved`, quarter-plan and commander-plan are immutable pl
 
 ## Closed Resource Intervals
 
-See `.workflow/team.md` for personal coefficients and closed intervals.
+See `planning/team.md` for personal coefficients and closed intervals.
 
 ## Approval History
 

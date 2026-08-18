@@ -11,8 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-CONFIG_PATH = Path(".workflow/code-repos.json")
+from workspace_paths import code_registry_path
 
 
 def utc_now() -> str:
@@ -22,7 +21,7 @@ def utc_now() -> str:
 def inspection_state_dir(project: Path) -> Path:
     base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")).expanduser()
     key = hashlib.sha256(str(project).encode("utf-8")).hexdigest()[:12]
-    return base / "analyst-harness/code-inspection" / key
+    return base / "coda-analyst-harness/code-inspection" / key
 
 
 def run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -35,13 +34,13 @@ def run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def load_registry(project: Path) -> dict:
-    path = project / CONFIG_PATH
+    path = code_registry_path()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Не удалось прочитать {path}: {exc}") from exc
     if payload.get("schema_version") != 2 or not isinstance(payload.get("repositories"), list):
-        raise ValueError(".workflow/code-repos.json должен соответствовать схеме 2")
+        raise ValueError("реестр кода обвязки должен соответствовать схеме 2")
     return payload
 
 

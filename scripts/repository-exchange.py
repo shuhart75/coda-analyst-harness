@@ -13,6 +13,7 @@ from pathlib import Path
 
 SOURCE_REMOTE = "changeswork-copy-local"
 BRANCH = "main"
+FORBIDDEN_CONTENT_PATHS = (".workflow", ".vscode", "AGENTS.md")
 
 
 def utc_now() -> str:
@@ -50,6 +51,16 @@ def require_branch(path: Path, name: str) -> None:
     if result.returncode != 0 or result.stdout.strip() != BRANCH:
         current = result.stdout.strip() or "detached HEAD"
         raise ValueError(f"{name}: ожидалась ветка {BRANCH}, найдена {current}")
+
+
+def embedded_harness_paths(path: Path) -> list[str]:
+    return [item for item in FORBIDDEN_CONTENT_PATHS if (path / item).exists()]
+
+
+def require_content_only(path: Path, name: str) -> None:
+    embedded = embedded_harness_paths(path)
+    if embedded:
+        raise ValueError(f"{name} содержит встроенную обвязку: {', '.join(embedded)}")
 
 
 def update_ff(path: Path, name: str) -> None:
@@ -186,8 +197,10 @@ def sync_command(args: argparse.Namespace) -> int:
             require_branch(path, name)
         update_ff(source, "changeswork-copy")
         update_ff(documents, "documents")
+        require_content_only(source, "changeswork-copy")
         configure_source_remote(documents, source)
         merge_source(documents)
+        require_content_only(documents, "documents")
         metadata = verified_reverse_patch(root, source, documents)
         if not args.no_push:
             push_documents(documents)
@@ -209,6 +222,7 @@ def reverse_diff_command(args: argparse.Namespace) -> int:
         for path, name in ((source, "changeswork-copy"), (documents, "documents")):
             require_clean(path, name)
             require_branch(path, name)
+            require_content_only(path, name)
         metadata = verified_reverse_patch(root, source, documents)
         print(json.dumps({"status": "created", "reverse_diff": metadata}, ensure_ascii=False, indent=2))
         return 0
@@ -220,18 +234,25 @@ def status_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     source, documents = repositories(root)
     report = []
+    trees: dict[str, str] = {}
     for path, name in ((source, "changeswork-copy"), (documents, "documents")):
         branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
         head = git(path, "rev-parse", "HEAD")
         dirty = git(path, "status", "--porcelain=v1")
+        tree = git(path, "rev-parse", "HEAD^{tree}").stdout.strip()
+        trees[name] = tree
         report.append({
             "id": name,
             "branch": branch.stdout.strip() if branch.returncode == 0 else None,
             "commit": head.stdout.strip(),
             "worktree": "clean" if not dirty.stdout else "dirty",
+            "tree": tree,
+            "embedded_harness_paths": embedded_harness_paths(path),
         })
-    print(json.dumps({"status": "ok", "repositories": report}, ensure_ascii=False, indent=2))
-    return 0
+    identical = trees.get("changeswork-copy") == trees.get("documents")
+    clean_content = not any(item["embedded_harness_paths"] for item in report)
+    print(json.dumps({"status": "ok" if clean_content else "invalid", "repositories_identical": identical, "repositories": report}, ensure_ascii=False, indent=2))
+    return 0 if clean_content else 1
 
 
 def parser() -> argparse.ArgumentParser:

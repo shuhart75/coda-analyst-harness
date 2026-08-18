@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
+from workspace_paths import team_path
+
 
 ROLE_COLORS = {"AN": "LightGreen", "BE": "LightBlue", "FE": "LightCoral", "QA": "Gold"}
 ROLE_DEFAULT_EFFICIENCY = {"AN": 0.80, "BE": 0.70, "FE": 0.65, "QA": 0.80}
@@ -140,7 +142,7 @@ def load_closed_days(gantt_dir: Path) -> set[date]:
 
 
 def load_team(project: Path) -> tuple[dict[str, list[str]], dict[str, float], dict[str, set[date]]]:
-    path = project / ".workflow/team.md"
+    path = team_path(project)
     resources = {role: [] for role in ROLE_ORDER}
     coefficients: dict[str, float] = {}
     closed: dict[str, set[date]] = {}

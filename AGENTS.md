@@ -6,7 +6,7 @@ This repository defines a reusable workflow harness.
 
 - The repository root is the workspace root.
 - If `.workspace-state/workspace.json`, `coda-analyst.code-workspace`, or any of `documents/`, `coda/`, and `changeswork-copy/` is absent, run `python3 scripts/workspace.py bootstrap` before the user's substantive request. Do not ask for repository URLs; the product URLs are fixed by this harness.
-- Work on requirements, plans and factual progress only in `documents/` and follow `documents/AGENTS.md` plus its active mode.
+- Work on requirements, plans and factual progress only in `documents/`. The harness contract stays in this root; `documents/` must not contain an embedded `.workflow`, `AGENTS.md`, or `.vscode` harness copy.
 - Treat `coda/` as read-only during analytical work. It is available only for bounded implementation research.
 - Treat `changeswork-copy/` as pull-only. Never commit or push there during normal analyst work. Transfer differences back only through a verified reverse patch in `reverse-diffs/`.
 - Only `documents/` may be pushed by this harness.
@@ -21,24 +21,24 @@ This repository defines a reusable workflow harness.
 
 ## Always read first
 
-When working inside a project that uses this harness, read in this order:
+When working in this workspace, read in this order:
 
 1. `AGENTS.md`
-2. `.workflow/llm-contract.md`
-3. `.workflow/requirements-profile.md` before authoring or substantially rewriting requirements
-4. `.workflow/agent-delegation.md`
-5. `.workflow/skills-policy.md`
-6. `.workflow/tooling-policy.md`
-7. `.workflow/context-policy.md`
-8. `.workflow/research-policy.md`
-9. `.workflow/code-inspection.md`
-10. `.workflow/run-loop.md`
-11. `.workflow/harness.json`
-12. `.workflow/run-state/session-brief.md` when present
-13. `.workflow/active-mode.md`
-14. `.workflow/modes/<active-mode>.md`
-15. `.workflow/team.md` before planning resources or regenerating actual-progress
-16. relevant files under `.workflow/overrides/`
+2. `core/llm-contract.md`
+3. `core/requirements-profile.md` before authoring or substantially rewriting requirements
+4. `core/agent-delegation.md`
+5. `core/skills-policy.md`
+6. `core/tooling-policy.md`
+7. `core/context-policy.md`
+8. `core/research-policy.md`
+9. `core/code-inspection.md`
+10. `core/run-loop.md`
+11. `.workspace-state/run-state/session-brief.md` when present
+12. `.workspace-state/active-mode.md`
+13. `modes/<active-mode>.md`
+14. `documents/README.md`
+15. `documents/planning/team.md` before planning resources or regenerating actual-progress
+16. relevant files under `documents/context/project-rules/`
 
 ## Primary workflow rule
 
@@ -49,9 +49,9 @@ Treat workflow mode as a hard guardrail.
 
 ## Canonical distinctions
 
-Project-local intake templates live in `.workflow/templates/intake/`. Use them before scaffolding a new feature from an external folder or an unstructured initiative.
+Intake templates live in `templates/intake/`. Use them before scaffolding a new feature from an external folder or an unstructured initiative.
 
-Project-local requirement templates live in `.workflow/templates/requirements/`. Use them as the active template source when writing or updating requirement packs.
+Requirement templates live in `templates/requirements/`. Use them as the active template source when writing or updating requirement packs.
 
 - `planning story` is a planning and estimation unit only.
 - `implementation task` is an execution tracking unit only.
@@ -84,34 +84,34 @@ Use React + MUI without a build step unless a project override explicitly says o
 
 ## LLM contract
 
-The project-local `.workflow/llm-contract.md` is the canonical CLI-neutral contract for Codex, Claude, Qwen, VSCodium agents, and similar assistants. Follow it before applying mode-specific rules.
+`core/llm-contract.md` is the canonical CLI-neutral contract for Codex, Claude, Qwen, VSCodium agents, and similar assistants. Follow it before applying mode-specific rules.
 
 ## Companion policies
 
-Project-local files `.workflow/agent-delegation.md`, `.workflow/skills-policy.md` and `.workflow/tooling-policy.md` define how an LLM should use delegation, reusable skills, and tools within this workflow.
+Files `core/agent-delegation.md`, `core/skills-policy.md` and `core/tooling-policy.md` define how an LLM should use delegation, reusable skills, and tools within this workflow.
 
 ## Consistency backlog
 
-When a local change affects neighboring requirements, baseline artifacts, or prototypes and cannot be fully propagated immediately, record it in `.workflow/consistency-backlog.md`.
+When a local change affects neighboring requirements, baseline artifacts, or prototypes and cannot be fully propagated immediately, record it in `documents/planning/consistency-backlog.md`.
 
 ## Command catalog
 
-Use `.workflow/command-catalog.md` to interpret short workflow commands like `делаем требования`, `обнови реальный прогресс`, `актуализируй прототипы`, or `промоуть в baseline`.
+Use `templates/workflow/command-catalog.template.md` to interpret short workflow commands like `делаем требования`, `обнови реальный прогресс`, `актуализируй прототипы`, or `промоуть в baseline`.
 
-Use `.workflow/command-cheatsheet.md` as the preferred quick-reference list of ready-to-send Russian prompt phrasings.
+Use `templates/workflow/command-cheatsheet.template.md` as the preferred quick-reference list of ready-to-send Russian prompt phrasings.
 
 ## Context and research
 
 Context summaries, checkpoints and research files are internal harness operations, not extra commands the user must remember.
 
-- Use `.workflow/context-policy.md` to decide when to create or refresh context summaries and checkpoints.
-- Use `.workflow/research-policy.md` to run role-based research for large features, slices, prototypes, development handoff, implementation planning and QA checks.
+- Use `core/context-policy.md` to decide when to create or refresh context summaries and checkpoints.
+- Use `core/research-policy.md` to run role-based research for large features, slices, prototypes, development handoff, implementation planning and QA checks.
 - Treat `.research/`, context summaries and external memory as auxiliary. Accepted findings must be transferred into the authoritative planning, requirements, prototype, execution, release or baseline artifacts.
 
 ## Analyst code inspection
 
-- Use `.workflow/code-inspection.md` when the analyst asks to inspect code or when current implementation facts are needed for planning or requirements.
-- Resolve `coda` through `.workflow/code-repos.json`; never require the user to provide a path in each prompt.
+- Use `core/code-inspection.md` when the analyst asks to inspect code or when current implementation facts are needed for planning or requirements.
+- Resolve `coda` through `templates/workflow/code-repos.template.json`; never require the user to provide a path in each prompt.
 - Treat `coda` as read-only in analyst work. Record its branch, commit and worktree state before inspection and verify that they are unchanged afterward.
 - Inspect one contour at a time. Read that contour's local instructions, locate exact identifiers, then open only matched modules and nearby tests, contracts or migrations.
 - Code observations are commit-bound auxiliary evidence, not automatic business requirements or baseline updates.
@@ -123,8 +123,8 @@ Context summaries, checkpoints and research files are internal harness operation
 
 ## Executable harness
 
-- Run `.workflow/tools/harnessctl.py doctor <project>` before broad workflow changes.
-- Use `.workflow/tools/harnessctl.py session-brief <project>` for progressive context disclosure.
+- Run `python3 scripts/harnessctl.py doctor documents` before broad workflow changes.
+- Use `python3 scripts/harnessctl.py session-brief documents` for progressive context disclosure.
 - Approved quarter and commander plans are immutable planning baselines.
 - Route later scope into task candidates and actual-progress instead of rewriting an approved plan.
 
@@ -133,5 +133,5 @@ Context summaries, checkpoints and research files are internal harness operation
 - Write requirement prose in Russian.
 - Keep English only for exact code, paths, API/database identifiers, enum values, and fixed external-system names.
 - Prefer a Russian explanation before an unavoidable special term.
-- Run `.workflow/tools/validate-language.py` for changed requirements before completion.
-- Run `.workflow/tools/validate-requirements-profile.py` for changed root documents that use the profile marker.
+- Run `python3 scripts/validate-language.py documents` for changed requirements before completion.
+- Run `python3 scripts/validate-requirements-profile.py documents` for changed root documents that use the profile marker.

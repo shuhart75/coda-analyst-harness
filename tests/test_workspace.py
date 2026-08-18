@@ -43,8 +43,8 @@ class CodaWorkspaceTests(unittest.TestCase):
             "changeswork-copy",
             {
                 "README.md": "# Source\n",
-                "AGENTS.md": "# Project rules\n",
-                ".workflow/marker": "configured\n",
+                "planning/team.md": "# Команда\n",
+                "context/project-rules/README.md": "# Правила проекта\n",
                 "shared.txt": "base\n",
             },
         )
@@ -116,6 +116,13 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertFalse(metadata["repositories_identical"])
             check = run("git", "-C", str(workspace / "changeswork-copy"), "apply", "--check", str(patch))
             self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+            applied = root / "applied-source"
+            self.assertEqual(run("git", "clone", str(workspace / "changeswork-copy"), str(applied)).returncode, 0)
+            self.assertEqual(run("git", "-C", str(applied), "apply", str(patch)).returncode, 0)
+            self.assertEqual(run("git", "-C", str(applied), "add", ".").returncode, 0)
+            applied_tree = run("git", "-C", str(applied), "write-tree").stdout.strip()
+            documents_tree = run("git", "-C", str(documents), "rev-parse", "HEAD^{tree}").stdout.strip()
+            self.assertEqual(applied_tree, documents_tree)
 
             remote_check = root / "documents-remote-check"
             self.assertEqual(run("git", "clone", str(documents_remote), str(remote_check)).returncode, 0)

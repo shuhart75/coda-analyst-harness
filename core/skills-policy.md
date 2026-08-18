@@ -19,7 +19,7 @@ Use a skill only when it adds repeatable domain value or enforces a stable workf
 - `research-analyst` — bounded role-based research over requirements, prototypes, source materials or code.
 - `qa-analyst` — slice-level checks, negative scenarios and coverage matrices.
 
-The harness ships CLI-neutral skill contracts under `.workflow/skills/`. Native agent platforms may wrap these contracts, but their mode, inputs, write scope, and validation rules remain canonical.
+The harness ships CLI-neutral skill contracts under `skills/`. Native agent platforms may wrap these contracts, but their mode, inputs, write scope, and validation rules remain canonical.
 
 ## Skill input discipline
 

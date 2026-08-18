@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 2 ]]; then
-  echo "Usage: $0 <project-root> <mode>"
+if [[ $# -ne 1 ]]; then
+  echo "Usage: $0 <mode>"
   exit 1
 fi
 
-PROJECT_ROOT="$1"
-MODE="$2"
-MODE_FILE="$PROJECT_ROOT/.workflow/modes/${MODE}.md"
-ACTIVE_FILE="$PROJECT_ROOT/.workflow/active-mode.md"
+HARNESS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MODE="$1"
+MODE_FILE="$HARNESS_ROOT/modes/${MODE}.md"
+ACTIVE_FILE="$HARNESS_ROOT/.workspace-state/active-mode.md"
 
 if [[ ! -f "$MODE_FILE" ]]; then
   echo "Mode file not found: $MODE_FILE"
   exit 1
 fi
 
+mkdir -p "$(dirname "$ACTIVE_FILE")"
 cat > "$ACTIVE_FILE" <<EOF2
 # Active Mode
 
 mode: $MODE
 
 ## Mode File
-.workflow/modes/$MODE.md
+modes/$MODE.md
 EOF2
 
-echo "Active mode set to '$MODE' in $PROJECT_ROOT"
+echo "Active mode set to '$MODE'"

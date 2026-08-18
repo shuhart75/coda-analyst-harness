@@ -12,7 +12,6 @@ SLICE="$3"
 INSTALL_MODE="${4:-create}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SLICE_DIR="$PROJECT_ROOT/features/$FEATURE/slices/$SLICE"
-PROJECT_TEMPLATE_DIR="$PROJECT_ROOT/.workflow/templates/requirements"
 
 if [[ -d "$SLICE_DIR" && -n "$(find "$SLICE_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" && "$INSTALL_MODE" == "create" ]]; then
   echo "Slice already exists: $SLICE_DIR"
@@ -32,11 +31,7 @@ install_file() {
   cp "$source" "$target"
 }
 
-if [[ -d "$PROJECT_TEMPLATE_DIR" ]]; then
-  REQUIREMENTS_TEMPLATE_DIR="$PROJECT_TEMPLATE_DIR"
-else
-  REQUIREMENTS_TEMPLATE_DIR="$ROOT_DIR/templates/requirements"
-fi
+REQUIREMENTS_TEMPLATE_DIR="$ROOT_DIR/templates/requirements"
 
 mkdir -p "$SLICE_DIR/requirements" "$SLICE_DIR/delivery-prototype" "$SLICE_DIR/execution/tasks" "$SLICE_DIR/.research" "$SLICE_DIR/testing"
 install_file "$REQUIREMENTS_TEMPLATE_DIR/slice.template.md" "$SLICE_DIR/slice.md"

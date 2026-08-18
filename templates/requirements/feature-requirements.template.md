@@ -8,7 +8,7 @@
 Функциональность: `features/<feature-slug>/feature.md`
 Квартал: `<YYYY-QN>`
 Дата обновления: `<YYYY-MM-DD>`
-Шаблон: `.workflow/templates/requirements/feature-requirements.template.md`
+Шаблон: `templates/requirements/feature-requirements.template.md`
 
 ## Оглавление
 

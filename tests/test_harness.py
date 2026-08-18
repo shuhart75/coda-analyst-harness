@@ -13,14 +13,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, text=True, capture_output=True, check=False)
+def run(*args: str, env: dict | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, text=True, capture_output=True, check=False, env=env)
 
 
 class HarnessTests(unittest.TestCase):
     def scaffold(self, root: Path) -> Path:
         project = root / "project"
         result = run("bash", str(ROOT / "scripts/scaffold-project.sh"), str(project))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = run("git", "init", "-b", "main", str(project))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return project
 
@@ -117,23 +119,21 @@ class HarnessTests(unittest.TestCase):
     def test_clean_scaffold_passes_doctor(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
-            result = run(sys.executable, str(project / ".workflow/tools/harnessctl.py"), "doctor", str(project))
+            env = {**os.environ, "CODA_ANALYST_STATE_ROOT": str(Path(temp) / "state")}
+            result = run(sys.executable, str(ROOT / "scripts/harnessctl.py"), "doctor", str(project), env=env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_project_agent_contract_excludes_workspace_bootstrap(self) -> None:
+    def test_content_repository_has_no_embedded_harness(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
-            contract = (project / "AGENTS.md").read_text(encoding="utf-8")
-            self.assertIn("## Always read first", contract)
-            self.assertNotIn("## First launch and workspace ownership", contract)
-            self.assertNotIn("scripts/repository-exchange.py", contract)
-            self.assertNotIn("scripts/workspace.py bootstrap", contract)
+            for path in ("AGENTS.md", ".workflow", ".vscode"):
+                self.assertFalse((project / path).exists(), path)
 
     def test_structure_requires_complete_baseline_scaffold(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
             (project / "baseline/current/domain/aggregates.md").unlink()
-            result = run(sys.executable, str(project / ".workflow/tools/validate-structure.py"), str(project))
+            result = run(sys.executable, str(ROOT / "scripts/validate-structure.py"), str(project))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("baseline/current/domain/aggregates.md", result.stdout)
 
@@ -141,7 +141,7 @@ class HarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             documents, coda = self.scaffold_analyst_workspace(root)
-            tool = documents / ".workflow/tools/code-inspect.py"
+            tool = ROOT / "scripts/code-inspect.py"
 
             result = run(sys.executable, str(tool), "doctor", str(documents))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -195,7 +195,9 @@ class HarnessTests(unittest.TestCase):
             self.assertFalse((root / "AGENTS.md").exists())
             self.assertFalse((root / "rscon-analyst.code-workspace").exists())
 
-            run_file = documents / ".workflow/tools/harnessctl.py"
+            run_file = ROOT / "scripts/harnessctl.py"
+            state_root = root / "workspace-state"
+            run_env = {**os.environ, "CODA_ANALYST_STATE_ROOT": str(state_root)}
             result = run(
                 sys.executable,
                 str(run_file),
@@ -206,9 +208,10 @@ class HarnessTests(unittest.TestCase):
                 "code-root-test",
                 "--role",
                 "BE",
+                env=run_env,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            run_payload = json.loads((documents / ".workflow/runs/code-root-test/run.json").read_text(encoding="utf-8"))
+            run_payload = json.loads((state_root / "runs/code-root-test/run.json").read_text(encoding="utf-8"))
             self.assertEqual(Path(run_payload["code_root"]), coda / "backend")
 
             source = coda / "backend/src/Registry.java"
@@ -223,21 +226,22 @@ class HarnessTests(unittest.TestCase):
     def test_scaffold_contains_per_item_developer_handoff_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
-            contract = project / ".workflow/developer-handoff.md"
-            receipt = project / ".workflow/templates/handoff/developer-receipt.template.json"
-            manifest = project / ".workflow/templates/handoff/developer-manifest.template.json"
+            contract = ROOT / "core/developer-handoff.md"
+            receipt = ROOT / "templates/handoff/developer-receipt.template.json"
+            manifest = ROOT / "templates/handoff/developer-manifest.template.json"
             self.assertTrue(contract.exists())
             self.assertTrue(receipt.exists())
             self.assertTrue(manifest.exists())
             self.assertIn("delivered-with-deviations", contract.read_text(encoding="utf-8"))
             self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["schema_version"], 4)
             self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["delivery_policy"]["input"], "immutable-comparison-point")
-            self.assertTrue((project / ".workflow/tools/handoffctl.py").exists())
+            self.assertTrue((ROOT / "scripts/handoffctl.py").exists())
+            self.assertFalse((project / ".workflow").exists())
 
     def test_scaffold_contains_feature_delivery_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
-            templates = project / ".workflow/templates/handoff"
+            templates = ROOT / "templates/handoff"
             required = (
                 "handoff-root.feature.template.json",
                 "handoff-root-feature-agents.template.md",
@@ -264,21 +268,20 @@ class HarnessTests(unittest.TestCase):
             })
             self.assertEqual(root_manifest["agent_contract"]["path"], "AGENTS.md")
             self.assertTrue(root_manifest["agent_contract"]["required"])
-            registry = json.loads((project / ".workflow/code-repos.json").read_text(encoding="utf-8"))
+            registry = json.loads((ROOT / "templates/workflow/code-repos.template.json").read_text(encoding="utf-8"))
             self.assertEqual(registry["schema_version"], 2)
             coda = next(item for item in registry["repositories"] if item["id"] == "coda")
             self.assertEqual(coda["access"], "read-only")
             self.assertEqual(coda["location"]["relative_to_documents"], "../coda")
             self.assertEqual(coda["contours"]["backend"]["path"], "backend")
-            self.assertTrue((project / ".workflow/code-inspection.md").is_file())
-            self.assertTrue((project / ".workflow/tools/code-inspect.py").is_file())
-            self.assertTrue((project / ".workflow/templates/research/code-evidence.template.yaml").is_file())
-            self.assertTrue((project / ".workflow/templates/workspace/analyst-workspace-agents.template.md").is_file())
-            contract = (project / ".workflow/developer-handoff.md").read_text(encoding="utf-8")
+            self.assertTrue((ROOT / "core/code-inspection.md").is_file())
+            self.assertTrue((ROOT / "scripts/code-inspect.py").is_file())
+            self.assertTrue((ROOT / "templates/research/code-evidence.template.yaml").is_file())
+            contract = (ROOT / "core/developer-handoff.md").read_text(encoding="utf-8")
             self.assertIn("returns/decomposition-snapshots/", contract)
             self.assertIn("returns/implementation-results/", contract)
             self.assertIn("returns/test-results/", contract)
-            commands = (project / ".workflow/command-cheatsheet.md").read_text(encoding="utf-8")
+            commands = (ROOT / "templates/workflow/command-cheatsheet.template.md").read_text(encoding="utf-8")
             self.assertIn("сформируй пакет для разработки", commands)
             self.assertIn("передаём в разработку", commands)
             self.assertIn("отдаём требования разработчикам", commands)
@@ -290,10 +293,10 @@ class HarnessTests(unittest.TestCase):
     def test_scaffold_contains_requirements_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
-            self.assertTrue((project / ".workflow/requirements-profile.md").exists())
-            self.assertTrue((project / ".workflow/tools/validate-requirements-profile.py").exists())
-            readable = (project / ".workflow/templates/requirements/feature-requirements.readable.template.md").read_text(encoding="utf-8")
-            detailed = (project / ".workflow/templates/requirements/feature-requirements.template.md").read_text(encoding="utf-8")
+            self.assertTrue((ROOT / "core/requirements-profile.md").exists())
+            self.assertTrue((ROOT / "scripts/validate-requirements-profile.py").exists())
+            readable = (ROOT / "templates/requirements/feature-requirements.readable.template.md").read_text(encoding="utf-8")
+            detailed = (ROOT / "templates/requirements/feature-requirements.template.md").read_text(encoding="utf-8")
             for text in (readable, detailed):
                 self.assertIn("ISO/IEC/IEEE 29148:2018", text)
                 self.assertIn("## Нефункциональные требования", text)
@@ -337,7 +340,7 @@ class HarnessTests(unittest.TestCase):
                 "| SCN-DEMO-001 | Решение | core | не сформирована | TEST-DEMO-001 | не сформирована | не получена |\n",
                 encoding="utf-8",
             )
-            tool = project / ".workflow/tools/validate-requirements-profile.py"
+            tool = ROOT / "scripts/validate-requirements-profile.py"
             result = run(sys.executable, str(tool), str(project), "--feature", "demo")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             requirements.write_text(requirements.read_text(encoding="utf-8").replace("Система должна сохранить", "Система может сохранить"), encoding="utf-8")
@@ -356,7 +359,7 @@ class HarnessTests(unittest.TestCase):
     def test_handoff_root_supersedes_unclaimed_revision_and_detects_package_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
-            tool = project / ".workflow/tools/handoffctl.py"
+            tool = ROOT / "scripts/handoffctl.py"
             result = run(sys.executable, str(tool), "init", str(project), "demo", "demo-be-change", "--role", "BE", "--source-task-id", "CAND-DEMO-BE-001", "--source-task-path", "features/demo/tasks/be-change.md")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             root = project / "features/demo/handoffs/demo-be-change"
@@ -389,7 +392,7 @@ class HarnessTests(unittest.TestCase):
     def test_publish_stops_when_previous_revision_is_in_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
-            tool = project / ".workflow/tools/handoffctl.py"
+            tool = ROOT / "scripts/handoffctl.py"
             result = run(sys.executable, str(tool), "init", str(project), "demo", "demo-be-change", "--role", "BE", "--source-task-id", "CAND-DEMO-BE-001", "--source-task-path", "features/demo/tasks/be-change.md")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             root = project / "features/demo/handoffs/demo-be-change"
@@ -418,7 +421,7 @@ class HarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             project = self.scaffold(base)
-            tool = project / ".workflow/tools/handoffctl.py"
+            tool = ROOT / "scripts/handoffctl.py"
             result = run(
                 sys.executable,
                 str(tool),
@@ -493,9 +496,12 @@ class HarnessTests(unittest.TestCase):
     def test_active_mode_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
-            active = project / ".workflow/active-mode.md"
-            active.write_text(active.read_text(encoding="utf-8").replace("modes/planning.md", "modes/requirements.md"), encoding="utf-8")
-            result = run(sys.executable, str(project / ".workflow/tools/validate-workflow.py"), str(project))
+            state_root = Path(temp) / "state"
+            state_root.mkdir()
+            active = state_root / "active-mode.md"
+            active.write_text("# Active Mode\n\nmode: planning\n\n## Mode File\nmodes/requirements.md\n", encoding="utf-8")
+            env = {**os.environ, "CODA_ANALYST_STATE_ROOT": str(state_root)}
+            result = run(sys.executable, str(ROOT / "scripts/validate-workflow.py"), str(project), env=env)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("active mode mismatch", result.stdout)
 
@@ -510,14 +516,15 @@ class HarnessTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(feature.read_text(encoding="utf-8"), "USER CONTENT\n")
 
-    def test_project_merge_does_not_add_knowledge_placeholders(self) -> None:
+    def test_project_merge_adds_missing_structure_without_embedded_harness(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = Path(temp) / "existing"
             (project / "baseline/current/domain").mkdir(parents=True)
             result = run("bash", str(ROOT / "scripts/scaffold-project.sh"), str(project), "--merge")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertTrue((project / ".workflow/tools/harnessctl.py").exists())
-            self.assertFalse((project / "baseline/current/domain/aggregates.md").exists())
+            self.assertFalse((project / ".workflow").exists())
+            self.assertFalse((project / "AGENTS.md").exists())
+            self.assertTrue((project / "baseline/current/domain/aggregates.md").exists())
 
     def test_language_check_ignores_code_and_rejects_prose_anglicism(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -527,7 +534,7 @@ class HarnessTests(unittest.TestCase):
             requirements.write_text("# Требования\n\nScope работ. Код: `scope`.\n", encoding="utf-8")
             result = run(
                 sys.executable,
-                str(project / ".workflow/tools/validate-language.py"),
+                str(ROOT / "scripts/validate-language.py"),
                 str(project),
                 "--all",
             )
@@ -537,9 +544,11 @@ class HarnessTests(unittest.TestCase):
     def test_run_escalates_after_iteration_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
+            state_root = Path(temp) / "state"
+            env = {**os.environ, "CODA_ANALYST_STATE_ROOT": str(state_root)}
             result = run(
                 sys.executable,
-                str(project / ".workflow/tools/harnessctl.py"),
+                str(ROOT / "scripts/harnessctl.py"),
                 "run-init",
                 str(project),
                 "planning",
@@ -547,11 +556,12 @@ class HarnessTests(unittest.TestCase):
                 "test-run",
                 "--max-iterations",
                 "2",
+                env=env,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            run_file = project / ".workflow/runs/test-run/run.json"
+            run_file = state_root / "runs/test-run/run.json"
             for _ in range(2):
-                result = run(sys.executable, str(project / ".workflow/tools/harnessctl.py"), "run-advance", str(run_file), "fail")
+                result = run(sys.executable, str(ROOT / "scripts/harnessctl.py"), "run-advance", str(run_file), "fail", env=env)
                 self.assertEqual(result.returncode, 0)
             payload = json.loads(run_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "escalated")
@@ -563,7 +573,7 @@ class HarnessTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             result = run(
                 sys.executable,
-                str(project / ".workflow/tools/harnessctl.py"),
+                str(ROOT / "scripts/harnessctl.py"),
                 "plan-approve",
                 str(project),
                 "2026-Q3",
@@ -575,7 +585,7 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("## Immutability", state.read_text(encoding="utf-8"))
             quarter_plan = project / "planning/2026-Q3/gantt/quarter-plan.puml"
             quarter_plan.write_text(quarter_plan.read_text(encoding="utf-8") + "' tampered\n", encoding="utf-8")
-            result = run(sys.executable, str(project / ".workflow/tools/validate-planning.py"), str(project))
+            result = run(sys.executable, str(ROOT / "scripts/validate-planning.py"), str(project))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("approved plan was modified", result.stdout)
 

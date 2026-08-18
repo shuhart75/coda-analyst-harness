@@ -35,8 +35,8 @@ Use these lightweight artifacts when a feature, slice, planning track, prototype
 - `features/<feature>/planning/story-map.md`
 - `features/<feature>/execution-context.md`
 - `features/<feature>/slices/<slice>/context-summary.md`
-- `.workflow/run-state/current.md`
-- local code-inspection state under the user state directory, created by `.workflow/tools/code-inspect.py`
+- `.workspace-state/run-state/current.md`
+- local code-inspection state under the user state directory, created by `scripts/code-inspect.py`
 
 Keep each context summary short enough to read at the start of a small-window session. Prefer links to source files over copying full requirement text.
 
@@ -60,7 +60,7 @@ Do not expose these internal operations as user-facing commands unless the user 
 
 ## Checkpoints
 
-Before and after long-running work, update `.workflow/run-state/current.md` or a mode-specific checkpoint with:
+Before and after long-running work, update `.workspace-state/run-state/current.md` or a mode-specific checkpoint with:
 
 - active mode;
 - objective;

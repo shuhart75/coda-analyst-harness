@@ -7,6 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from workspace_paths import eval_config_path
+
 
 def run(command: list[str], cwd: Path | None = None) -> tuple[int, str]:
     result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=False)
@@ -14,7 +16,7 @@ def run(command: list[str], cwd: Path | None = None) -> tuple[int, str]:
 
 
 def evaluate_project(project: Path) -> int:
-    config = project / ".workflow/evals/golden-scenarios.json"
+    config = eval_config_path(project)
     if not config.exists():
         print(f"Missing project eval config: {config}")
         return 1
@@ -28,6 +30,10 @@ def evaluate_project(project: Path) -> int:
             if assertion_type == "exists":
                 if not path.exists():
                     failures.append(f"missing {assertion['path']}")
+                continue
+            if assertion_type == "not_exists":
+                if path.exists():
+                    failures.append(f"unexpected path {assertion['path']}")
                 continue
             if not path.is_file():
                 failures.append(f"missing file {assertion['path']}")
@@ -48,37 +54,8 @@ def evaluate_project(project: Path) -> int:
 def main() -> int:
     if len(sys.argv) > 1:
         return evaluate_project(Path(sys.argv[1]).resolve())
-    source = Path(__file__).resolve().parents[1]
-    metrics: dict[str, object] = {"scenarios": []}
-    scenarios: list[dict[str, object]] = metrics["scenarios"]  # type: ignore[assignment]
-
-    with tempfile.TemporaryDirectory(prefix="analyst-harness-eval-") as temp:
-        project = Path(temp) / "project"
-        code, output = run(["bash", str(source / "scripts/scaffold-project.sh"), str(project)])
-        scenarios.append({"name": "clean-scaffold", "passed": code == 0, "output": output[-1000:]})
-
-        code, output = run([sys.executable, str(project / ".workflow/tools/harnessctl.py"), "doctor", str(project)])
-        scenarios.append({"name": "clean-doctor", "passed": code == 0, "output": output[-1000:]})
-
-        active = project / ".workflow/active-mode.md"
-        active.write_text(active.read_text(encoding="utf-8").replace("modes/planning.md", "modes/requirements.md"), encoding="utf-8")
-        code, output = run([sys.executable, str(project / ".workflow/tools/validate-workflow.py"), str(project)])
-        scenarios.append({"name": "seeded-mode-mismatch", "passed": code != 0, "output": output[-1000:]})
-
-        active.write_text(active.read_text(encoding="utf-8").replace("modes/requirements.md", "modes/planning.md"), encoding="utf-8")
-        marker = project / "features/demo"
-        marker.mkdir(parents=True)
-        (marker / "feature.md").write_text("USER CONTENT\n", encoding="utf-8")
-        code, output = run(["bash", str(source / "scripts/scaffold-feature.sh"), str(project), "demo"])
-        preserved = (marker / "feature.md").read_text(encoding="utf-8") == "USER CONTENT\n"
-        scenarios.append({"name": "destructive-scaffold-blocked", "passed": code != 0 and preserved, "output": output[-1000:]})
-
-    passed = sum(1 for item in scenarios if item["passed"])
-    metrics["passed"] = passed
-    metrics["total"] = len(scenarios)
-    metrics["score"] = passed / len(scenarios) if scenarios else 0
-    print(json.dumps(metrics, ensure_ascii=False, indent=2))
-    return 0 if passed == len(scenarios) else 1
+    print("Usage: evaluate-harness.py <documents-repository>")
+    return 2
 
 
 if __name__ == "__main__":

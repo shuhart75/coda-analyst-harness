@@ -7,22 +7,23 @@ args = [arg for arg in sys.argv[1:] if arg not in {"--strict-features", "--warni
 strict_features = "--strict-features" in sys.argv[1:]
 warnings_as_errors = "--warnings-as-errors" in sys.argv[1:]
 ROOT = Path(args[0]) if args else Path(".")
+HARNESS_ROOT = Path(__file__).resolve().parents[1]
 
 required_workflow = [
-    ".workflow/context-policy.md",
-    ".workflow/research-policy.md",
-    ".workflow/templates/context/feature-context-summary.template.md",
-    ".workflow/templates/context/slice-context-summary.template.md",
-    ".workflow/templates/context/artifact-map.template.md",
-    ".workflow/templates/context/run-state.template.md",
-    ".workflow/templates/research/research-summary.template.md",
-    ".workflow/templates/handoff/slice-implementation-handoff.template.md",
-    ".workflow/templates/execution/implementation-plan.template.md",
-    ".workflow/templates/execution/task-candidates.template.md",
-    ".workflow/templates/requirements/developer-task-index.template.md",
-    ".workflow/templates/requirements/developer-task.template.md",
-    ".workflow/templates/testing/slice-test-plan.template.md",
-    ".workflow/templates/runs/run.template.json",
+    "core/context-policy.md",
+    "core/research-policy.md",
+    "templates/context/feature-context-summary.template.md",
+    "templates/context/slice-context-summary.template.md",
+    "templates/context/artifact-map.template.md",
+    "templates/context/run-state.template.md",
+    "templates/research/research-summary.template.md",
+    "templates/handoff/slice-implementation-handoff.template.md",
+    "templates/execution/implementation-plan.template.md",
+    "templates/execution/task-candidates.template.md",
+    "templates/requirements/developer-task-index.template.md",
+    "templates/requirements/developer-task.template.md",
+    "templates/testing/slice-test-plan.template.md",
+    "templates/runs/run.template.json",
 ]
 
 required_research_templates = [
@@ -39,13 +40,13 @@ missing = []
 warnings = []
 
 for item in required_workflow:
-    if not (ROOT / item).exists():
+    if not (HARNESS_ROOT / item).exists():
         missing.append(item)
 
-research_dir = ROOT / ".workflow/templates/research"
+research_dir = HARNESS_ROOT / "templates/research"
 for item in required_research_templates:
     if not (research_dir / item).exists():
-        missing.append(str(Path(".workflow/templates/research") / item))
+        missing.append(str(Path("templates/research") / item))
 
 features_dir = ROOT / "features"
 if strict_features and features_dir.exists():
@@ -89,7 +90,7 @@ if strict_features and features_dir.exists():
                         warnings.append(f"{test_plan.relative_to(ROOT)} has no coverage matrix section")
 
 if missing:
-    print("Missing context workflow files:")
+    print("Missing harness context files:")
     for item in missing:
         print(f"- {item}")
     sys.exit(1)

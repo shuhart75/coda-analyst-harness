@@ -378,7 +378,7 @@
       "- проверить affected requirements из domain-impact.md;",
       "- проверить affected baseline artifacts;",
       "- проверить affected prototypes и выставить sync status;",
-      "- обновить .workflow/consistency-backlog.md;",
+      "- обновить documents/planning/consistency-backlog.md;",
       "- явно перечислить, что исправлено, что отложено, что требует решения."
     ]
   },

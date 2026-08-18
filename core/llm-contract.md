@@ -7,25 +7,27 @@ This contract is CLI-neutral. It applies to Codex CLI, Claude Code, Qwen CLI, VS
 Before changing artifacts, read:
 
 1. `AGENTS.md`
-2. `.workflow/llm-contract.md`
-3. `.workflow/agent-delegation.md`
-4. `.workflow/skills-policy.md`
-5. `.workflow/tooling-policy.md`
-6. `.workflow/context-policy.md`
-7. `.workflow/research-policy.md`
-8. `.workflow/run-loop.md`
-9. `.workflow/harness.json`
-10. `.workflow/run-state/session-brief.md` when present
-11. `.workflow/active-mode.md`
-12. `.workflow/modes/<active-mode>.md`
-13. `.workflow/team.md` before planning resources or regenerating actual-progress
-14. relevant `.workflow/overrides/*.md`
+2. `core/llm-contract.md`
+3. `core/agent-delegation.md`
+4. `core/skills-policy.md`
+5. `core/tooling-policy.md`
+6. `core/context-policy.md`
+7. `core/research-policy.md`
+8. `core/run-loop.md`
+9. `.workspace-state/run-state/session-brief.md` when present
+10. `.workspace-state/active-mode.md`
+11. `modes/<active-mode>.md`
+12. `documents/README.md`
+13. `documents/planning/team.md` before planning resources or regenerating actual-progress
+14. relevant `documents/context/project-rules/*.md`
 15. relevant templates for the current action
-16. `baseline/current/` for the canonical deployed state when it exists
-17. relevant feature/slice source artifacts
-18. relevant `releases/` artifacts when finalizing a delivered change
+16. `documents/baseline/current/` for the canonical deployed state when it exists
+17. relevant feature/slice source artifacts under `documents/`
+18. relevant `documents/releases/` artifacts when finalizing a delivered change
 
 If the user points to a folder with current-system docs/screenshots/change requests, inspect that folder first and keep source references in the produced artifacts.
+
+Unless a path explicitly starts with a harness directory such as `core/`, `modes/`, `scripts/`, `skills/`, `templates/` or `.workspace-state/`, resolve project paths such as `baseline/`, `context/`, `planning/`, `features/` and `releases/` under `documents/`.
 
 
 ## Small-context operating rules
@@ -35,7 +37,7 @@ Treat context management as an internal harness responsibility. Users should not
 When work is broad, long-running, or likely to exceed a small context window:
 - read existing `context-summary.md`, `artifact-map.md`, planning context and run-state files before broad source artifacts;
 - create or refresh feature/slice/planning/execution context summaries when source-of-truth artifacts change substantially;
-- update `.workflow/run-state/current.md` or an equivalent checkpoint before and after long passes;
+- update `.workspace-state/run-state/current.md` or an equivalent checkpoint before and after long passes;
 - keep facts, inferences, assumptions and open questions separate;
 - transfer accepted research findings into authoritative artifacts instead of leaving them only in `.research/` or chat.
 
@@ -44,7 +46,7 @@ External memory systems are optional accelerators. Repository markdown remains t
 
 ## Command interpretation rules
 
-Treat short natural-language workflow commands from `.workflow/command-catalog.md` as first-class instructions.
+Treat short natural-language workflow commands from `templates/workflow/command-catalog.template.md` as first-class instructions.
 
 When the user uses a command from that catalog or a near-equivalent phrase:
 - map it to the intended workflow mode and action;
@@ -55,7 +57,7 @@ When the user uses a command from that catalog or a near-equivalent phrase:
 
 If the command references impacted requirements, prototypes, or rollback of a known decision, consult:
 - `features/*/domain-impact.md`;
-- `.workflow/consistency-backlog.md`;
+- `documents/planning/consistency-backlog.md`;
 - `releases/*` and `baseline/current/` when relevant.
 
 If multiple commands conflict, prioritize the most recent explicit user instruction and state the assumption briefly.
@@ -72,7 +74,7 @@ When the user says `новая фича`, or gives a folder and says this is a n
 - compare it against existing `features/*`;
 - compare it against legacy planning and source materials when relevant;
 - separate existing system coverage from the true new delta;
-- write the result to `planning/intake/<candidate-slug>.md` using `.workflow/templates/intake/feature-intake.template.md`;
+- write the result to `planning/intake/<candidate-slug>.md` using `templates/intake/feature-intake.template.md`;
 - return proposed feature slug, proposed slices, affected baseline artifacts, affected existing features, Q2 scope draft, and workflow gaps before any scaffold step.
 
 Only create the feature structure after the intake result is accepted or the user explicitly asks to proceed.
@@ -100,7 +102,7 @@ If the user asks for work outside the active mode, either switch mode explicitly
 - `development task card` is created and confirmed by developers under `returns/development-tasks/`. It describes one future Jira task and one contour, is self-contained, and may have an estimate or Jira key, but neither is required.
 - Each development task card must be created from the package template, keep every required section populated, and retain the full `Короткие команды разработчика` block after every edit.
 - Receiver-side context is disclosed progressively: active `handoff.json`, compact request and manifest, one relevant contour of packaged requirements, that contour's local SDD, matched code, then nearby tests. Do not load all of `coda` or both contours without a recorded cross-contour dependency.
-- Analyst-side code access is also progressive and read-only. Resolve the sibling `coda` clone through `.workflow/code-repos.json`, snapshot it with `code-inspect.py begin`, inspect one contour and bounded matches, then prove no code-repository changes with `code-inspect.py verify`.
+- Analyst-side code access is also progressive and read-only. Resolve the sibling `coda` clone through `templates/workflow/code-repos.template.json`, snapshot it with `code-inspect.py begin`, inspect one contour and bounded matches, then prove no code-repository changes with `code-inspect.py verify`.
 - A feature manifest may use atomic `REQ-*`/`SCN-*` traceability or explicit `legacy-sections` compatibility. Never manufacture identifiers missing from an older source document.
 - `features/<feature>/requirements.md` is the primary control page and authored source for requirements; each slice must have its own ordered section there.
 - `slice card` and slice FE/BE packs are derived artifacts cut from the root feature requirements, not parallel independent sources. Slices remain the primary testing units; development cards and implementation receipts provide supporting context.
@@ -132,14 +134,14 @@ If the user asks for work outside the active mode, either switch mode explicitly
 - If the user asks for a standalone PlantUML export without includes, expand the generated view into a separate file and leave the include-based source intact.
 - For actual-progress execution tasks, tasks that have `Progress % = 0` and no actual dates are not allowed to render in the past. On each regeneration, the generator moves their rendered start to today, or the next open day, without changing the markdown source dates.
 - Within one feature section, not-started backend/API tasks should lead not-started frontend tasks. Frontend tasks may render no earlier than 3 open days after the earliest not-started backend task in the same feature.
-- Not-started execution tasks must not overload resource lanes. Use `.workflow/team.md` as the roster, keep each resource at no more than one full-time task per open day, and use available resources as fully as possible before pushing work later.
+- Not-started execution tasks must not overload resource lanes. Use `documents/planning/team.md` as the roster, keep each resource at no more than one full-time task per open day, and use available resources as fully as possible before pushing work later.
 - If a not-started task has no explicit executor, has a `TBD_*` executor, or references a non-roster resource lane, assign it by role from `Role`, task id prefix, executor alias or summary. Preserve explicit valid roster lanes, but still shift dates if needed to avoid overload.
 - Keep baseline `PLAN ...` story bars visible for plan-vs-fact comparison even when execution tasks are shifted forward by the current date.
 
 ## Resource naming
 
 - Role estimates and semantic task roles use `AN / BE / FE / QA`.
-- The project-local roster lives in `.workflow/team.md`.
+- The project-local roster lives in `documents/planning/team.md`.
 - Default PlantUML resource lanes are `A1`, `A2`, `A3`, `B1`, `B2`, `B3`, `F1`, `F2`, `Q1`, `Q2`, `Q3`.
 - Accepted aliases for resource/executor input:
   - analyst: `A`, `AN`, `analyst`, `аналитик`;
@@ -165,12 +167,12 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 ## Requirements rules
 
 - Requirements are living markdown artifacts until release fixation.
-- `.workflow/requirements-profile.md` is the shared root-document contract based on ISO/IEC/IEEE 29148:2018. It adapts the standard and does not claim full conformity.
-- Write requirements by the project-local template in `.workflow/templates/requirements/`, not freeform.
+- `core/requirements-profile.md` is the shared root-document contract based on ISO/IEC/IEEE 29148:2018. It adapts the standard and does not claim full conformity.
+- Write requirements by the harness template in `templates/requirements/`, not freeform.
 - Start from `features/<feature>/requirements.md` as the primary feature-level requirement page and only place where feature requirements are authored from scratch.
 - Build that page by the selected project-local requirements format:
-  - new readable format: `.workflow/templates/requirements/feature-requirements.readable.template.md` plus `*.readable.template.md` slice/FE/BE packs;
-  - old detailed format: `.workflow/templates/requirements/feature-requirements.template.md` plus the original slice/FE/BE templates.
+  - new readable format: `templates/requirements/feature-requirements.readable.template.md` plus `*.readable.template.md` slice/FE/BE packs;
+  - old detailed format: `templates/requirements/feature-requirements.template.md` plus the original slice/FE/BE templates.
 - If the user names the format, obey it. If the feature already exists and the user does not name a format, preserve the current feature format. For a new feature without an explicit choice, use the new readable format.
 - Do not mix new and old requirement formats inside one feature unless the user explicitly asks for a migration or comparison.
 - Requirement diagrams must be PlantUML; do not introduce Mermaid blocks.
@@ -184,9 +186,9 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - Requirement prose must be written in Russian. Avoid English words and transliterated anglicisms when a clear Russian formulation exists.
 - English is allowed only for exact code, file paths, API/database identifiers, enum values, and fixed external-system names.
 - Run the project language validator for changed requirement files before presenting the work as complete.
-- Run `.workflow/tools/validate-requirements-profile.py` for changed profiled root documents. Do not force legacy documents into the profile during an unrelated edit.
+- Run `scripts/validate-requirements-profile.py` for changed profiled root documents. Do not force legacy documents into the profile during an unrelated edit.
 - Keep business requirements, system requirements, acceptance criteria, API contracts and examples traceable to source materials.
-- When current implementation facts affect requirements, inspect the registered local `coda` clone automatically under `.workflow/code-inspection.md`. Record the exact commit and relative evidence paths; do not infer business intent from code alone.
+- When current implementation facts affect requirements, inspect the registered local `coda` clone automatically under `core/code-inspection.md`. Record the exact commit and relative evidence paths; do not infer business intent from code alone.
 - Analyst code inspection improves the requirement input but does not replace the receiving SDD's comparison against its current code before decomposition and implementation.
 - Only the user-owner may mark requirements as approved. Record the approver and date, and create a new revision for later semantic changes.
 
@@ -203,9 +205,9 @@ Quick local sweep order:
 
 1. update `features/<feature>/requirements.md`;
 2. update the derived slice cards and FE/BE detail packs that repeat the changed rule;
-3. update `features/<feature>/domain-impact.md` and `.workflow/consistency-backlog.md` if the change affects consistency tracking;
+3. update `features/<feature>/domain-impact.md` and `documents/planning/consistency-backlog.md` if the change affects consistency tracking;
 4. run a targeted text search, or equivalent local find-in-files sweep, across the current feature and any explicitly affected artifacts for superseded terms;
-   if available, use `.workflow/tools/find-stale-terms.py` as the fast default helper;
+   if available, use `scripts/find-stale-terms.py` as the fast default helper;
 5. specifically check for superseded:
    - old endpoint names;
    - old field names;
@@ -241,7 +243,7 @@ Minimum required steps:
 - list affected requirements;
 - list affected baseline artifacts;
 - list affected prototypes even if they will be updated later;
-- update `.workflow/consistency-backlog.md` for any impact not propagated immediately.
+- update `documents/planning/consistency-backlog.md` for any impact not propagated immediately.
 
 The agent that edits local requirements performs first-pass impact detection. The main agent confirms and normalizes impact during consistency sweep. Release-finalization performs the final consistency gate before baseline promotion.
 
@@ -249,7 +251,7 @@ Shared requirements and canonical baseline updates must be integrated by the mai
 
 ## Prototype consistency rules
 
-Prototype updates are optional unless the prototype is an active scope-demo or delivery-handoff artifact. Still, affected prototypes must be listed in `domain-impact.md` and/or `.workflow/consistency-backlog.md` so the user can later say "актуализируй прототипы" and the agent has a concrete target list.
+Prototype updates are optional unless the prototype is an active scope-demo or delivery-handoff artifact. Still, affected prototypes must be listed in `domain-impact.md` and/or `documents/planning/consistency-backlog.md` so the user can later say "актуализируй прототипы" and the agent has a concrete target list.
 
 Use prototype sync statuses:
 - `must-update-now`;
@@ -278,11 +280,10 @@ Partial rollback:
 
 - Never modify copied legacy/original source folders unless the user explicitly asks. For `changesWork`, read or copy only.
 - Preserve user edits; do not revert unrelated changes.
-- In a standalone project workspace, prefer project-local tools under `.workflow/tools/`.
+- Run all workflow tools from the harness `scripts/` directory and pass `documents` as the project root.
 - Before the final response after file edits, and always before a commit, review the current-turn diff for necessity, correctness and conciseness. Fix in-scope issues; report or ask about issues that are out of mode, touch unrelated user changes, or require a business decision.
-- After planning/execution gantt edits, run `.workflow/tools/sync-quarter-gantt.py <project>/planning/<quarter>/gantt` when available.
-- After structural edits, run `.workflow/tools/validate-structure.py <project>` and `.workflow/tools/validate-links.py <project>` when available.
-- If working from the harness repo instead of a standalone project, the equivalent scripts may also exist under `scripts/`.
+- After planning/execution gantt edits, run `scripts/sync-quarter-gantt.py <project>/planning/<quarter>/gantt` when available.
+- After structural edits, run `scripts/validate-structure.py <project>` and `scripts/validate-links.py <project>` when available.
 - If validation fails, fix the cause or report the exact residual issue.
 
 ## Baseline and release rules

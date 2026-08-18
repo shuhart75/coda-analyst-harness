@@ -33,7 +33,7 @@
 
 Before promoting a release into `baseline/current/`:
 - review every included feature's `domain-impact.md`;
-- review `.workflow/consistency-backlog.md`;
+- review `documents/planning/consistency-backlog.md`;
 - block promotion if there are unresolved `domain-wide` items that affect released scope;
 - either propagate or explicitly defer cross-feature items;
 - write rollback notes for decisions that supersede or revert previous released decisions.

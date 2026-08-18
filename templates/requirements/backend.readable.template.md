@@ -6,7 +6,7 @@
 Область: `<MVP / release / stretch>`
 Дата обновления: `<YYYY-MM-DD>`
 Формат: **новый лёгкий**
-Шаблон: `.workflow/templates/requirements/backend.readable.template.md`
+Шаблон: `templates/requirements/backend.readable.template.md`
 
 ## Цель среза
 

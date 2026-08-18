@@ -9,7 +9,7 @@
 Квартал: `<YYYY-QN>`
 Дата обновления: `<YYYY-MM-DD>`
 Формат: **новый лёгкий**
-Шаблон: `.workflow/templates/requirements/feature-requirements.readable.template.md`
+Шаблон: `templates/requirements/feature-requirements.readable.template.md`
 
 ## Как читать документ
 

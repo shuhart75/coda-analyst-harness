@@ -6,7 +6,7 @@ Produce or update living requirement packs from canonical baseline, source mater
 
 ## Main inputs
 
-- `.workflow/templates/requirements/`
+- `templates/requirements/`
 - `baseline/current/`
 - `context/source-materials/current-system/requirements/`
 - `context/source-materials/current-system/screenshots/`
@@ -14,9 +14,9 @@ Produce or update living requirement packs from canonical baseline, source mater
 - `context/source-materials/current-system/diagrams/`
 - `context/source-materials/change-requests/`
 
-Use `.workflow/templates/requirements/` as the active project-local template source. Do not write requirement packs freeform when these templates exist.
+Use `templates/requirements/` as the active project-local template source. Do not write requirement packs freeform when these templates exist.
 
-The common quality and structure contract is `.workflow/requirements-profile.md`. It is based on ISO/IEC/IEEE 29148:2018 but does not claim full standards conformance. Both root formats implement the same profile; they differ only in presentation density and the amount of technical detail.
+The common quality and structure contract is `core/requirements-profile.md`. It is based on ISO/IEC/IEEE 29148:2018 but does not claim full standards conformance. Both root formats implement the same profile; they differ only in presentation density and the amount of technical detail.
 
 ## Requirement format selection
 
@@ -55,7 +55,7 @@ Selection rules:
 - `features/<feature>/requirements.md` is the primary and authoritative requirements document for the feature.
 - Slice cards and FE/BE packs are derived artifacts. They are not authored as independent parallel truths.
 - If a slice pack reveals a missing rule, contradiction, or new requirement, update the root feature document first and only then re-derive the slice artifacts.
-- Context summaries, artifact maps and `.research/` files are auxiliary. Accepted findings must be transferred into the root feature document, slice packs, `domain-impact.md` or `.workflow/consistency-backlog.md`.
+- Context summaries, artifact maps and `.research/` files are auxiliary. Accepted findings must be transferred into the root feature document, slice packs, `domain-impact.md` or `documents/planning/consistency-backlog.md`.
 
 ## Writing order
 
@@ -65,9 +65,9 @@ Selection rules:
 4. Create or update `slices/*/requirements/frontend.md` and `slices/*/requirements/backend.md` as detailed annexes derived from the corresponding root section.
 5. Do not invent slice scope that is absent from the root feature document without editing the root feature document first.
 
-The root feature document must follow the selected root template. The old detailed root template is `.workflow/templates/requirements/feature-requirements.template.md`; the new readable root template is `.workflow/templates/requirements/feature-requirements.readable.template.md`.
+The root feature document must follow the selected root template. The old detailed root template is `templates/requirements/feature-requirements.template.md`; the new readable root template is `templates/requirements/feature-requirements.readable.template.md`.
 
-For every new root document, keep the profile marker `Профиль требований: **АС КОДА / ISO/IEC/IEEE 29148:2018**`. Existing legacy documents remain valid until a substantial rewrite or explicit migration. A profiled document must contain the mandatory sections, atomic normative `REQ-*`, explicit `SCN-*`, verification methods, cross-feature impacts, dependencies, completion criteria and traceability defined by `.workflow/requirements-profile.md`.
+For every new root document, keep the profile marker `Профиль требований: **АС КОДА / ISO/IEC/IEEE 29148:2018**`. Existing legacy documents remain valid until a substantial rewrite or explicit migration. A profiled document must contain the mandatory sections, atomic normative `REQ-*`, explicit `SCN-*`, verification methods, cross-feature impacts, dependencies, completion criteria and traceability defined by `core/requirements-profile.md`.
 
 Only the user-owner may change a requirements document to `утверждён`. An approved document must record the approver and approval date. A developer receipt results in a new analytical decision or document revision; it never rewrites the historical meaning of an already transmitted revision.
 
@@ -79,7 +79,7 @@ If the task replaces one requirement variant with another, remove stale mentions
 - `features/<feature>/slices/*/slice.md`;
 - `features/<feature>/slices/*/requirements/frontend.md`;
 - `features/<feature>/slices/*/requirements/backend.md`;
-- `features/<feature>/domain-impact.md` and `.workflow/consistency-backlog.md` when they describe the replaced variant.
+- `features/<feature>/domain-impact.md` and `documents/planning/consistency-backlog.md` when they describe the replaced variant.
 
 Examples of stale tails to search for:
 
@@ -95,7 +95,7 @@ Examples of stale tails to search for:
 Keep consistency work proportional to the size of the change.
 
 - For a small local edit, do a quick feature-local sweep with targeted text search or equivalent local find-in-files and stop when the changed feature is clean.
-- For domain, lifecycle, role, API-semantic, shared-UI or neighboring-feature changes, expand into a full sweep with `domain-impact.md`, `.workflow/consistency-backlog.md`, and affected baseline artifacts.
+- For domain, lifecycle, role, API-semantic, shared-UI or neighboring-feature changes, expand into a full sweep with `domain-impact.md`, `documents/planning/consistency-backlog.md`, and affected baseline artifacts.
 - Do not turn every minor wording fix into a whole-repo audit.
 
 ## Impact detection requirement
@@ -105,7 +105,7 @@ Any requirement change must be checked for consistency impact.
 If the change affects domain rules, lifecycle, roles, API semantics, data model, neighboring features, or shared UI behavior:
 - update `features/*/domain-impact.md`;
 - list affected requirements and prototypes;
-- update `.workflow/consistency-backlog.md` when propagation is deferred;
+- update `documents/planning/consistency-backlog.md` when propagation is deferred;
 - do not silently mutate `baseline/current/` unless the active task explicitly includes baseline update.
 
 Обязательные доработки соседних функциональностей входят в объём работ и верхнеуровневую оценку инициирующей функциональности. Фиксируй их в отдельном разделе `Доработки затронутых функциональностей` корневых требований, а не только в `domain-impact.md`.
@@ -118,8 +118,8 @@ If the change affects domain rules, lifecycle, roles, API semantics, data model,
 
 Если функциональность однозначно не следует из текущего контекста, сначала спроси, какую функциональность передавать. Далее выполни единый проход готовности:
 
-1. Проверь корневые требования по `.workflow/requirements-profile.md`: цель, границы, исключения, участники, предпосылки, правила, состояния и переходы, данные, права, интеграции, ошибки, отрицательные и граничные случаи, наблюдаемые критерии приёмки.
-2. Проверь внутреннюю непротиворечивость и соответствие относящемуся к функциональности `baseline/current/`. Если требование зависит от фактического API, данных, статусов, ролей, проверок или уже реализованного поведения, выполни точечное исследование локального `coda` по `.workflow/code-inspection.md`. Не сверяй весь код. Зафиксируй коммит и доказательства; принимающая SDD всё равно повторно сверяет требования со своей актуальной веткой перед реализацией.
+1. Проверь корневые требования по `core/requirements-profile.md`: цель, границы, исключения, участники, предпосылки, правила, состояния и переходы, данные, права, интеграции, ошибки, отрицательные и граничные случаи, наблюдаемые критерии приёмки.
+2. Проверь внутреннюю непротиворечивость и соответствие относящемуся к функциональности `baseline/current/`. Если требование зависит от фактического API, данных, статусов, ролей, проверок или уже реализованного поведения, выполни точечное исследование локального `coda` по `core/code-inspection.md`. Не сверяй весь код. Зафиксируй коммит и доказательства; принимающая SDD всё равно повторно сверяет требования со своей актуальной веткой перед реализацией.
 3. Проверь раздел влияний. Каждая обязательная доработка соседней функциональности должна входить в объём, иметь критерий завершения и быть отражена в нужных требованиях и срезах.
 4. Проверь срезы и подробные требования контуров: они производны от корневого документа, не расходятся с ним и покрывают требования, сценарии, влияния и проверки.
 5. Проверь устойчивые идентификаторы и трассировку, зависимости, открытые вопросы, устаревшие хвосты, ссылки и русский язык.
@@ -148,8 +148,8 @@ If the change affects domain rules, lifecycle, roles, API semantics, data model,
 - Требования пишутся на русском языке.
 - Английская форма допускается только для точного кода, пути, API/БД-идентификатора, значения перечисления или закреплённого названия внешней системы.
 - В обычном тексте используй русские формулировки и избегай англицизмов, даже если они короче.
-- Перед завершением прохода запусти `.workflow/tools/validate-language.py` для изменённой функциональности.
-- Запусти `.workflow/tools/validate-requirements-profile.py` для изменённой функциональности. Документы прежнего формата без маркера профиля пропускаются до их осознанного перевода.
+- Перед завершением прохода запусти `scripts/validate-language.py` для изменённой функциональности.
+- Запусти `scripts/validate-requirements-profile.py` для изменённой функциональности. Документы прежнего формата без маркера профиля пропускаются до их осознанного перевода.
 - Языковой контроль является частью обязательного второго прохода и выполняется до фиксации результата.
 
 ## Tail cleanup gate
@@ -167,9 +167,9 @@ For `делаем требования`, `актуализируй требов�
 - create or refresh `features/<feature>/context-summary.md` after substantial root requirement changes;
 - create or refresh `features/<feature>/artifact-map.md` when authored, derived or auxiliary artifacts change;
 - create or refresh `features/<feature>/slices/<slice>/context-summary.md` when a slice card or FE/BE pack is created or materially changed;
-- run role-based research from `.workflow/research-policy.md` when requirements are large, ambiguous, cross-cutting, or code/source-material inspection is needed;
+- run role-based research from `core/research-policy.md` when requirements are large, ambiguous, cross-cutting, or code/source-material inspection is needed;
 - automatically inspect the registered local `coda` clone when a current implementation fact is necessary, without asking the user for repository paths;
-- keep analyst code access read-only and complete the before/after verification from `.workflow/code-inspection.md`;
+- keep analyst code access read-only and complete the before/after verification from `core/code-inspection.md`;
 - run the completeness checklist before presenting slice requirements as ready;
 - update a checkpoint before and after long decomposition or derivation passes.
 

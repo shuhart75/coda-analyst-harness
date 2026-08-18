@@ -23,7 +23,7 @@ The common workspace gives the LLM filesystem access to the registered repositor
 
 ## Resolution and setup
 
-Repository identity, accepted remotes, default relative location and contours are stored in `.workflow/code-repos.json`.
+Repository identity, accepted remotes, default relative location and contours are stored in `templates/workflow/code-repos.template.json`.
 
 Resolution order:
 

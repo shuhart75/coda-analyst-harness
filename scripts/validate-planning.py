@@ -7,6 +7,8 @@ import hashlib
 import sys
 from pathlib import Path
 
+from workspace_paths import approved_plans_path
+
 
 ROLE_ORDER = ("AN", "BE", "FE", "QA")
 ROLE_LIMITS = {"AN": None, "BE": 5, "FE": 10, "QA": 10}
@@ -129,7 +131,7 @@ def main() -> int:
         validate_estimates(path, root, errors, warnings)
     for path in sorted(root.glob("features/*/slices/*/execution/task-candidates.md")):
         validate_task_candidates(path, root, errors, warnings)
-    approved_snapshots = root / ".workflow/run-state/approved-plans"
+    approved_snapshots = approved_plans_path(root)
     for state in sorted(root.glob("planning/*/plan-state.md")):
         text = state.read_text(encoding="utf-8", errors="ignore")
         if re.search(r"^Status:\s*`?approved`?\s*$", text, re.MULTILINE | re.IGNORECASE):

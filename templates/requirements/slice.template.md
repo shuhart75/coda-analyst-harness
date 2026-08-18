@@ -41,9 +41,9 @@
 
 ## Шаблоны requirement packs
 
-- `.workflow/templates/requirements/feature-requirements.template.md`
-- `.workflow/templates/requirements/frontend.template.md`
-- `.workflow/templates/requirements/backend.template.md`
+- `templates/requirements/feature-requirements.template.md`
+- `templates/requirements/frontend.template.md`
+- `templates/requirements/backend.template.md`
 
 ## Пакеты требований
 

@@ -1,15 +1,15 @@
 # VSCodium Adapter
 
-Suggested files for projects that use this harness:
+The adapter files remain in the harness:
 
 - `.vscode/settings.json`
 - `.vscode/tasks.json`
 - `.vscode/workflow.code-snippets`
 
-`scaffold-project.sh` copies these files into the target project automatically.
+`scaffold-project.sh` does not copy these files into the content repository. The generated multi-root workspace addresses both `analyst-harness` and `documents` explicitly.
 
 - Tasks provide explicit mode switches, including `release-finalization` for baseline promotion work.
-- Tasks also expose local structure/link validation inside the standalone project workspace.
+- Tasks run tools from the harness against the `documents` workspace root.
 - `workflow.code-snippets` provides two kinds of helpers:
   - prompt starters for the canonical natural-language workflow commands;
   - markdown skeletons for planning stories and implementation task registries.

@@ -6,6 +6,8 @@ import re
 import sys
 from pathlib import Path
 
+from workspace_paths import run_state_path
+
 
 ID_RE = re.compile(r"\b(?:REQ|AC|DEC|STORY|TASK|CAND|TEST|IMPL)-[A-Z0-9][A-Z0-9-]*\b")
 HEADING_ID_RE = re.compile(r"^#{1,6}\s+((?:REQ|AC|DEC|STORY|TASK|CAND|TEST|IMPL)-[A-Z0-9][A-Z0-9-]*)\b", re.MULTILINE)
@@ -54,7 +56,7 @@ def main() -> int:
     errors: list[str] = []
 
     for path in sorted(base.rglob("*.md")):
-        if ".git" in path.parts or (".workflow" in path.parts and "templates" in path.parts):
+        if ".git" in path.parts:
             continue
         rel = str(path.relative_to(root))
         text = path.read_text(encoding="utf-8", errors="ignore")
@@ -83,7 +85,7 @@ def main() -> int:
         if identifier not in definitions:
             errors.append(f"unresolved trace id {identifier}: referenced by {', '.join(paths)}")
 
-    output = root / ".workflow/run-state/trace-index.json"
+    output = run_state_path() / "trace-index.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(

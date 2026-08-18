@@ -4,8 +4,10 @@
     {
       "name": "workflow-bootstrap",
       "assertions": [
-        {"type": "exists", "path": ".workflow/harness.json"},
-        {"type": "contains", "path": ".workflow/run-loop.md", "value": "Approved quarter and commander plans are immutable"}
+        {"type": "exists", "path": "planning/team.md"},
+        {"type": "exists", "path": "planning/consistency-backlog.md"},
+        {"type": "not_exists", "path": ".workflow"},
+        {"type": "not_exists", "path": "AGENTS.md"}
       ]
     }
   ]

@@ -7,6 +7,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from workspace_paths import language_policy_path
+
 
 REQUIREMENT_PATTERNS = (
     "features/*/requirements.md",
@@ -80,7 +82,7 @@ def main() -> int:
     parser.add_argument("--all", action="store_true", help="scan all requirement files, not only changed files")
     args = parser.parse_args()
     root = Path(args.project).resolve()
-    policy_path = root / ".workflow/language-policy.json"
+    policy_path = language_policy_path()
     if not policy_path.exists():
         print(f"Missing language policy: {policy_path}")
         return 1

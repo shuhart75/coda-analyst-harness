@@ -8,6 +8,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from workspace_paths import ensure_local_state
+
 
 DEFAULT_REPOSITORIES = {
     "documents": "ssh://git@stash.delta.sbrf.ru:7999/rscon/documents.git",
@@ -28,10 +30,6 @@ def utc_now() -> str:
 
 def root_path(explicit: str | None) -> Path:
     return Path(explicit).expanduser().resolve() if explicit else Path(__file__).resolve().parents[1]
-
-
-def harness_source() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def repository_urls() -> dict[str, str]:
@@ -77,6 +75,7 @@ def clone_or_validate(root: Path, name: str, url: str) -> Path:
 def write_workspace(root: Path) -> Path:
     payload = {
         "folders": [
+            {"name": "analyst-harness", "path": "."},
             {"name": "documents", "path": "documents"},
             {"name": "coda-read-only", "path": "coda"},
             {"name": "changeswork-copy-pull-only", "path": "changeswork-copy"},
@@ -91,19 +90,11 @@ def write_workspace(root: Path) -> Path:
     return path
 
 
-def ensure_documents_harness(root: Path, documents: Path) -> None:
-    if (documents / ".workflow").is_dir() and (documents / "AGENTS.md").is_file():
-        return
-    result = run("bash", str(harness_source() / "scripts/scaffold-project.sh"), str(documents), "--merge")
-    if result.returncode != 0:
-        raise ValueError(f"Не удалось установить аналитическую обвязку в documents: {(result.stdout + result.stderr).strip()}")
-
-
 def bootstrap_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     urls = repository_urls()
     repositories = {name: clone_or_validate(root, name, url) for name, url in urls.items()}
-    ensure_documents_harness(root, repositories["documents"])
+    ensure_local_state()
     workspace = write_workspace(root)
     state_dir = root / ".workspace-state"
     state_dir.mkdir(parents=True, exist_ok=True)

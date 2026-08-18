@@ -5,14 +5,23 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from workspace_paths import (
+    active_mode_path,
+    approved_plans_path,
+    code_registry_path,
+    ensure_local_state,
+    harness_root,
+    project_rules_path,
+    run_state_path,
+    runs_path,
+)
 
-SCHEMA_VERSION = 1
+
 RUN_STAGES = {
     "planning": [
         "intake",
@@ -67,214 +76,8 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def git_commit(root: Path) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else "unknown"
-
-
-def git_dirty(root: Path) -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(root), "status", "--porcelain"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.returncode == 0 and bool(result.stdout.strip())
-
-
-def source_root(value: str | None) -> Path:
-    if value:
-        root = Path(value).resolve()
-    else:
-        candidate = Path(__file__).resolve().parents[1]
-        root = candidate if (candidate / "core").is_dir() else Path.cwd()
-    if not (root / "VERSION").is_file() or not (root / "core").is_dir():
-        raise SystemExit(f"Not an analyst-harness source root: {root}")
-    return root
-
-
-def managed_sources(root: Path) -> dict[str, Path]:
-    result: dict[str, Path] = {
-        "AGENTS.md": root / "templates/workflow/project-agents.template.md",
-        ".workflow/llm-contract.md": root / "core/llm-contract.md",
-        ".workflow/agent-delegation.md": root / "core/agent-delegation.md",
-        ".workflow/skills-policy.md": root / "core/skills-policy.md",
-        ".workflow/tooling-policy.md": root / "core/tooling-policy.md",
-        ".workflow/context-policy.md": root / "core/context-policy.md",
-        ".workflow/research-policy.md": root / "core/research-policy.md",
-        ".workflow/code-inspection.md": root / "core/code-inspection.md",
-        ".workflow/run-loop.md": root / "core/run-loop.md",
-        ".workflow/developer-handoff.md": root / "core/developer-handoff.md",
-        ".workflow/requirements-profile.md": root / "core/requirements-profile.md",
-        ".workflow/tools/switch-mode.sh": root / "adapters/cli/switch-mode.sh",
-        ".workflow/tools/start-session.sh": root / "adapters/cli/start-session.sh",
-        ".vscode/settings.json": root / "adapters/vscodium/settings.json",
-        ".vscode/tasks.json": root / "adapters/vscodium/tasks.json",
-        ".vscode/workflow.code-snippets": root / "adapters/vscodium/snippets.code-snippets",
-        ".workflow/command-catalog.md": root / "templates/workflow/command-catalog.template.md",
-        ".workflow/command-cheatsheet.md": root / "templates/workflow/command-cheatsheet.template.md",
-    }
-    for mode in (root / "modes").glob("*.md"):
-        result[f".workflow/modes/{mode.name}"] = mode
-    for script in (
-        "harnessctl.py",
-        "validate-structure.py",
-        "validate-links.py",
-        "validate-context.py",
-        "validate-workflow.py",
-        "validate-planning.py",
-        "validate-trace.py",
-        "validate-language.py",
-        "validate-requirements-profile.py",
-        "sync-quarter-gantt.py",
-        "sync-planning-gantt.py",
-        "calibrate-planning.py",
-        "sync-actual-progress-overlay.py",
-        "find-stale-terms.py",
-        "expand-plantuml-includes.py",
-        "evaluate-harness.py",
-        "validate-handoff.py",
-        "handoffctl.py",
-        "code-inspect.py",
-    ):
-        result[f".workflow/tools/{script}"] = root / "scripts" / script
-    for dirname in (
-        "context",
-        "evals",
-        "execution",
-        "handoff",
-        "intake",
-        "planning",
-        "prototypes",
-        "requirements",
-        "research",
-        "runs",
-        "testing",
-        "workspace",
-    ):
-        for path in (root / "templates" / dirname).rglob("*"):
-            if path.is_file():
-                rel = path.relative_to(root / "templates")
-                result[f".workflow/templates/{rel.as_posix()}"] = path
-    for path in (root / "skills").rglob("*"):
-        if path.is_file():
-            rel = path.relative_to(root / "skills")
-            result[f".workflow/skills/{rel.as_posix()}"] = path
-    return result
-
-
-def load_manifest(project: Path) -> dict:
-    path = project / ".workflow/harness.json"
-    if not path.exists():
-        raise SystemExit(f"Missing harness manifest: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def write_manifest(project: Path, source: Path) -> Path:
-    managed: dict[str, dict[str, str]] = {}
-    for target, src in managed_sources(source).items():
-        dst = project / target
-        if src.is_file() and dst.is_file():
-            managed[target] = {
-                "source_sha256": sha256(src),
-                "installed_sha256": sha256(dst),
-            }
-    manifest = {
-        "schema_version": SCHEMA_VERSION,
-        "harness_version": (source / "VERSION").read_text(encoding="utf-8").strip(),
-        "source_commit": git_commit(source),
-        "source_dirty": git_dirty(source),
-        "installed_at": utc_now(),
-        "managed_files": managed,
-        "project_owned": [
-            ".workflow/active-mode.md",
-            ".workflow/team.md",
-            ".workflow/code-repos.json",
-            ".workflow/language-policy.json",
-            ".workflow/evals/",
-            ".workflow/consistency-backlog.md",
-            ".workflow/overrides/",
-            ".workflow/run-state/",
-            ".workflow/runs/",
-            "README.md",
-        ],
-    }
-    path = project / ".workflow/harness.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
-
-
-def manifest_command(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
-    source = source_root(args.source)
-    print(write_manifest(project, source))
-    return 0
-
-
-def diff_command(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
-    source = source_root(args.source)
-    manifest = load_manifest(project)
-    sources = managed_sources(source)
-    changes = 0
-    for target, src in sorted(sources.items()):
-        dst = project / target
-        if not dst.exists():
-            print(f"MISSING {target}")
-            changes += 1
-        elif sha256(src) != sha256(dst):
-            installed = manifest.get("managed_files", {}).get(target, {}).get("installed_sha256")
-            state = "LOCAL" if installed and installed != sha256(dst) else "UPSTREAM"
-            print(f"{state} {target}")
-            changes += 1
-    if changes == 0:
-        print("Harness files are synchronized")
-    return 1 if changes else 0
-
-
-def upgrade_command(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
-    source = source_root(args.source)
-    manifest = load_manifest(project)
-    conflicts: list[str] = []
-    updates: list[tuple[Path, Path, str]] = []
-    for target, src in sorted(managed_sources(source).items()):
-        dst = project / target
-        installed = manifest.get("managed_files", {}).get(target, {}).get("installed_sha256")
-        if not dst.exists():
-            updates.append((src, dst, target))
-        elif sha256(src) == sha256(dst):
-            continue
-        elif installed and installed != sha256(dst):
-            conflicts.append(target)
-        else:
-            updates.append((src, dst, target))
-    for _, _, target in updates:
-        print(f"UPDATE {target}")
-    for target in conflicts:
-        print(f"CONFLICT {target}")
-    if args.apply and not conflicts:
-        for src, dst, _ in updates:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-        write_manifest(project, source)
-        print(f"Applied {len(updates)} managed updates")
-    elif args.apply and conflicts:
-        print("No files changed because managed-file conflicts require resolution")
-        return 1
-    else:
-        print("Dry run. Pass --apply to install conflict-free updates.")
-    return 1 if conflicts else 0
-
-
 def run_tool(project: Path, name: str, extra: list[str] | None = None) -> int:
-    command = [sys.executable, str(project / ".workflow/tools" / name), str(project)]
+    command = [sys.executable, str(harness_root() / "scripts" / name), str(project)]
     command.extend(extra or [])
     return subprocess.run(command, check=False).returncode
 
@@ -290,10 +93,7 @@ def doctor_command(args: argparse.Namespace) -> int:
         run_tool(project, "validate-planning.py"),
         run_tool(project, "validate-trace.py", ["--strict"] if args.strict else []),
     ]
-    if args.source:
-        diff_args = argparse.Namespace(project=str(project), source=args.source)
-        codes.append(diff_command(diff_args))
-    handoff_tool = project / ".workflow/tools/handoffctl.py"
+    handoff_tool = harness_root() / "scripts/handoffctl.py"
     for manifest in sorted(project.glob("features/*/handoffs/*/handoff.json")):
         codes.append(
             subprocess.run(
@@ -322,15 +122,17 @@ def requirements_check_command(args: argparse.Namespace) -> int:
 
 def session_brief_command(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
-    active = (project / ".workflow/active-mode.md").read_text(encoding="utf-8", errors="ignore")
+    ensure_local_state()
+    active = active_mode_path().read_text(encoding="utf-8", errors="ignore")
     mode = next((line.split(":", 1)[1].strip() for line in active.splitlines() if line.startswith("mode:")), "unknown")
-    paths = [
-        "AGENTS.md",
-        ".workflow/llm-contract.md",
-        ".workflow/code-inspection.md",
-        ".workflow/code-repos.json",
-        f".workflow/modes/{mode}.md",
+    harness_paths = [
+        harness_root() / "AGENTS.md",
+        harness_root() / "core/llm-contract.md",
+        harness_root() / "core/code-inspection.md",
+        code_registry_path(),
+        harness_root() / f"modes/{mode}.md",
     ]
+    paths: list[str] = []
     if args.feature:
         paths.extend(
             [
@@ -350,14 +152,16 @@ def session_brief_command(args: argparse.Namespace) -> int:
             ]
         )
     existing = [path for path in paths if (project / path).exists()]
-    output = project / ".workflow/run-state/session-brief.md"
+    output = run_state_path() / "session-brief.md"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         "# Session Brief\n\n"
         f"Generated: `{utc_now()}`  \nActive mode: `{mode}`  \n"
         f"Feature: `{args.feature or '-'}`  \nSlice: `{args.slice or '-'}`\n\n"
         "## Read First\n\n"
+        + "".join(f"- `{path}`\n" for path in harness_paths if path.exists())
         + "".join(f"- `{path}`\n" for path in existing)
+        + "".join(f"- `{path}`\n" for path in sorted(project_rules_path(project).glob("*.md")))
         + "\n## Guardrails\n\n"
         "- Repository artifacts remain the source of truth.\n"
         "- Respect the active mode write boundary.\n"
@@ -371,15 +175,16 @@ def session_brief_command(args: argparse.Namespace) -> int:
 
 def run_init_command(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
+    ensure_local_state()
     stages = RUN_STAGES[args.kind]
     run_id = args.run_id or f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{args.kind}"
-    run_dir = project / ".workflow/runs" / run_id
+    run_dir = runs_path() / run_id
     if run_dir.exists():
         raise SystemExit(f"Run already exists: {run_dir}")
     run_dir.mkdir(parents=True)
     code_root = args.code_root
     if not code_root and args.role:
-        repos_path = project / ".workflow/code-repos.json"
+        repos_path = code_registry_path()
         if repos_path.exists():
             registry = json.loads(repos_path.read_text(encoding="utf-8"))
             repositories = registry.get("repositories", {})
@@ -428,6 +233,7 @@ def run_init_command(args: argparse.Namespace) -> int:
         "feature": args.feature,
         "slice": args.slice,
         "role": args.role,
+        "project_root": str(project),
         "code_root": code_root,
         "max_iterations_per_stage": args.max_iterations,
         "iteration": 0,
@@ -485,10 +291,10 @@ def run_advance_command(args: argparse.Namespace) -> int:
 def run_verify_command(args: argparse.Namespace) -> int:
     path = Path(args.run).resolve()
     payload = json.loads(path.read_text(encoding="utf-8"))
-    base = Path(payload.get("code_root") or args.project or path.parents[3]).resolve()
+    project_root = Path(args.project or payload.get("project_root") or Path.cwd()).resolve()
+    base = Path(payload.get("code_root") or project_root).resolve()
     results: list[dict[str, object]] = []
     failed = False
-    project_root = Path(args.project).resolve() if args.project else path.parents[3]
     for rel, expected in payload.get("input_hashes", {}).items():
         source = project_root / rel
         actual = sha256(source) if source.is_file() else "missing"
@@ -573,7 +379,7 @@ def plan_approve_command(args: argparse.Namespace) -> int:
         "files": {str(path.relative_to(project)): sha256(path) for path in targets if path.is_file()},
         "actualization_baseline": actualization_baseline,
     }
-    snapshot_path = project / ".workflow/run-state/approved-plans" / f"{args.quarter}.json"
+    snapshot_path = approved_plans_path(project) / f"{args.quarter}.json"
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(snapshot_path)
@@ -584,25 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Internal analyst-harness runtime")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    manifest = sub.add_parser("manifest")
-    manifest.add_argument("project")
-    manifest.add_argument("--source")
-    manifest.set_defaults(func=manifest_command)
-
-    diff = sub.add_parser("diff")
-    diff.add_argument("project")
-    diff.add_argument("--source", required=True)
-    diff.set_defaults(func=diff_command)
-
-    upgrade = sub.add_parser("upgrade")
-    upgrade.add_argument("project")
-    upgrade.add_argument("--source", required=True)
-    upgrade.add_argument("--apply", action="store_true")
-    upgrade.set_defaults(func=upgrade_command)
-
     doctor = sub.add_parser("doctor")
     doctor.add_argument("project")
-    doctor.add_argument("--source")
     doctor.add_argument("--strict", action="store_true")
     doctor.set_defaults(func=doctor_command)
 

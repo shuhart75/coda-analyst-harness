@@ -5,7 +5,7 @@
 Срез: `<slice-slug>`
 Область: `<MVP / release / stretch>`
 Дата обновления: `<YYYY-MM-DD>`
-Шаблон: `.workflow/templates/requirements/backend.template.md`
+Шаблон: `templates/requirements/backend.template.md`
 
 ## Связь с корневым документом требований
 

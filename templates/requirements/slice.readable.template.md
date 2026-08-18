@@ -5,7 +5,7 @@
 Порядок в требованиях функциональности: `<01>`
 Дата обновления: `<YYYY-MM-DD>`
 Формат: **новый лёгкий**
-Шаблон: `.workflow/templates/requirements/slice.readable.template.md`
+Шаблон: `templates/requirements/slice.readable.template.md`
 
 ## Назначение
 

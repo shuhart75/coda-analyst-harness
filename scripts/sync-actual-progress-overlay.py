@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+
+from workspace_paths import team_path
 import os
 import re
 import sys
@@ -270,7 +272,7 @@ def first_table_with(path: Path, required_header: str) -> list[dict[str, str]]:
 
 def load_team_resources(project_root: Path) -> dict[str, list[str]]:
     resources = {role: list(values) for role, values in DEFAULT_TEAM_RESOURCES.items()}
-    path = project_root / ".workflow/team.md"
+    path = team_path(project_root)
     if not path.exists():
         return resources
 
