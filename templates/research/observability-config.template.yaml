@@ -1,0 +1,9 @@
+role: observability-config
+summary: ""
+key_files: []
+logs: []
+metrics: []
+audit: []
+configuration: []
+operational_signals: []
+gaps: []

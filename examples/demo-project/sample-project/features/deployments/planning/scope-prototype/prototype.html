@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MUI Prototype</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@mui/material@5/umd/material-ui.development.js"></script>
+    <script src="https://unpkg.com/@emotion/react@11/dist/emotion-react.umd.min.js"></script>
+    <script src="https://unpkg.com/@emotion/styled@11/dist/emotion-styled.umd.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        background: #f4f6f8;
+        font-family: Roboto, Arial, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="text/babel">
+      const {
+        AppBar,
+        Box,
+        Button,
+        Card,
+        CardContent,
+        Chip,
+        Container,
+        Stack,
+        Toolbar,
+        Typography,
+      } = MaterialUI;
+
+      const mockRows = [
+        { id: 1, title: "Example item", status: "In review" },
+        { id: 2, title: "Another item", status: "Draft" },
+      ];
+
+      function App() {
+        return (
+          <React.Fragment>
+            <AppBar position="static" color="inherit" elevation={0}>
+              <Toolbar>
+                <Typography variant="h6" sx={{ flexGrow: 1 }}>
+                  MUI Prototype
+                </Typography>
+                <Button variant="contained">Primary Action</Button>
+              </Toolbar>
+            </AppBar>
+            <Container maxWidth="lg" sx={{ py: 4 }}>
+              <Stack spacing={3}>
+                <Box>
+                  <Typography variant="h4" gutterBottom>
+                    Screen Title
+                  </Typography>
+                  <Typography color="text.secondary">
+                    Replace this scaffold with feature-specific content.
+                  </Typography>
+                </Box>
+                <Stack spacing={2}>
+                  {mockRows.map((row) => (
+                    <Card key={row.id}>
+                      <CardContent>
+                        <Stack direction="row" justifyContent="space-between" alignItems="center">
+                          <Box>
+                            <Typography variant="h6">{row.title}</Typography>
+                            <Typography color="text.secondary">Item #{row.id}</Typography>
+                          </Box>
+                          <Chip label={row.status} color="primary" variant="outlined" />
+                        </Stack>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </Stack>
+              </Stack>
+            </Container>
+          </React.Fragment>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    </script>
+  </body>
+</html>

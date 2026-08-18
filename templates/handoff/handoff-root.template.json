@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "transport_policy": {
+    "creation": "on-request",
+    "repository_archives": "forbidden",
+    "destination": "~/Downloads"
+  },
+  "package_id": "<package-id>",
+  "feature": "<feature-slug>",
+  "role": "<BE|FE>",
+  "source_task": {
+    "id": "<task-id>",
+    "path": "features/<feature-slug>/tasks/<task-file>.md"
+  },
+  "status": "draft",
+  "active_revision": null,
+  "next_sdd_action": {
+    "action": "wait",
+    "reason": "Нет отправленной редакции",
+    "revision": null,
+    "revision_state": null,
+    "claimed_by": null,
+    "package_path": null,
+    "transport_path": null,
+    "receipt_path": null
+  },
+  "allowed_revision_states": [
+    "draft",
+    "sent",
+    "in-progress",
+    "paused",
+    "receipt-received",
+    "reviewed",
+    "superseded",
+    "archived",
+    "cancelled"
+  ],
+  "allowed_sdd_actions": [
+    "wait",
+    "process",
+    "continue",
+    "stop-and-report",
+    "no-action"
+  ],
+  "allowed_receipt_expectations": [
+    "required",
+    "optional",
+    "not-expected",
+    "received"
+  ],
+  "revisions": []
+}

@@ -1,0 +1,80 @@
+{
+  "schema_version": 6,
+  "package_id": "<package-id>",
+  "package_revision": 1,
+  "package_kind": "external-requirements-to-development",
+  "request": {
+    "id": "<request-id>",
+    "version": 1,
+    "title": "<Название>",
+    "role": "<BE|FE>",
+    "estimate_person_days": 1
+  },
+  "target": {
+    "repository": "<repository>",
+    "contour": "<contour>",
+    "sdd_root": "<path>"
+  },
+  "payload": [
+    {
+      "path": "request.md",
+      "sha256": "<sha256>",
+      "purpose": "Самодостаточные неизменяемые требования"
+    }
+  ],
+  "requirements": [
+    "REQ-<ID>-001"
+  ],
+  "scenarios": [
+    "SCN-<ID>-001"
+  ],
+  "scenario_requirement_map": {
+    "SCN-<ID>-001": [
+      "REQ-<ID>-001"
+    ]
+  },
+  "delivery_policy": {
+    "input": "immutable-comparison-point",
+    "execution": "autonomous-within-unambiguous-goal",
+    "technical_approach": "developer-owned",
+    "order_and_commit_split": "developer-owned",
+    "independent_work": "continue",
+    "scope_difference": "report-do-not-hide",
+    "additional_delivery": "report-separately",
+    "feedback": "receipt-then-analyst-review",
+    "stop_after": "implementation-verification-commits-and-receipt"
+  },
+  "allowed_package_statuses": [
+    "pending",
+    "delivered",
+    "delivered-with-deviations",
+    "partially-delivered",
+    "no-change-required",
+    "not-delivered",
+    "rejected-package"
+  ],
+  "allowed_coverage_statuses": [
+    "pending",
+    "already-implemented",
+    "implemented-as-required",
+    "implemented-with-deviation",
+    "implemented-with-scope-change",
+    "partially-implemented",
+    "not-implemented",
+    "deferred",
+    "blocked-dependency",
+    "blocked-input-ambiguity",
+    "not-applicable"
+  ],
+  "allowed_follow_up_recommendations": [
+    "pending",
+    "no-action",
+    "promote-to-baseline",
+    "update-requirement",
+    "keep-open",
+    "defer",
+    "move-to-other-change",
+    "cancel",
+    "investigate"
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "kind": "implementation-result",
+  "package_id": "<package-id>",
+  "package_revision": 1,
+  "decomposition_revision": 1,
+  "task_id": "DEV-<BE|FE>-001",
+  "result_revision": 1,
+  "jira_key": null,
+  "status": "draft",
+  "started_at": null,
+  "completed_at": null,
+  "source_before": {
+    "commit": null,
+    "branch": null,
+    "working_tree_state": "unknown"
+  },
+  "source_after": {
+    "commit": null,
+    "branch": null,
+    "working_tree_state": "unknown"
+  },
+  "commits": [],
+  "requirement_results": [
+    {
+      "requirement": "REQ-<ID>-001",
+      "status": "not-implemented",
+      "behavior_before": null,
+      "delivered_behavior": null,
+      "deviation_from_input": null,
+      "remaining_work": null,
+      "evidence": []
+    }
+  ],
+  "scenario_results": [
+    {
+      "scenario": "SCN-<ID>-001",
+      "status": "not-implemented",
+      "behavior_before": null,
+      "delivered_behavior": null,
+      "deviation_from_input": null,
+      "remaining_work": null,
+      "evidence": []
+    }
+  ],
+  "additional_deliveries": [],
+  "remaining_work": [],
+  "verification": [],
+  "notes": null
+}

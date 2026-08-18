@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "kind": "technical-decomposition",
+  "package_id": "<package-id>",
+  "package_revision": 1,
+  "decomposition_revision": 1,
+  "status": "draft",
+  "confirmed_by": null,
+  "confirmed_at": null,
+  "source_revisions": {
+    "backend": null,
+    "frontend": null
+  },
+  "tasks": [
+    {
+      "id": "DEV-<BE|FE>-001",
+      "contour": "<backend|frontend>",
+      "decomposition_status": "proposed",
+      "card_path": "DEV-<BE|FE>-001.md",
+      "estimate_days": null,
+      "estimate_source": null,
+      "size_exception_reason": null,
+      "jira_key": null,
+      "requirements": [],
+      "scenarios": [],
+      "impacts": [],
+      "dependencies": []
+    }
+  ],
+  "coverage": {
+    "unassigned_requirements": [],
+    "unassigned_scenarios": [],
+    "unassigned_impacts": []
+  },
+  "checks": [],
+  "notes": null
+}

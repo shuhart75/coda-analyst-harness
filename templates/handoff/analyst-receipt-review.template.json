@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "package_id": "<package-id>",
+  "package_revision": 1,
+  "receipt_sha256": "<sha256>",
+  "status": "draft",
+  "allowed_statuses": [
+    "draft",
+    "approved"
+  ],
+  "allowed_dispositions": [
+    "pending",
+    "promote-to-baseline",
+    "update-requirement",
+    "keep-open",
+    "defer",
+    "move-to-other-change",
+    "cancel",
+    "investigate",
+    "no-action"
+  ],
+  "requirement_dispositions": [
+    {
+      "requirement": "REQ-<ID>-001",
+      "disposition": "pending",
+      "destination": null,
+      "reason": null,
+      "applied_changes": []
+    }
+  ],
+  "additional_delivery_dispositions": [
+    {
+      "additional_delivery": "ADD-<ID>-001",
+      "disposition": "pending",
+      "destination": null,
+      "reason": null,
+      "applied_changes": []
+    }
+  ],
+  "baseline_updates": [],
+  "requirement_updates": [],
+  "deferred_or_moved_work": [],
+  "cancelled_work": [],
+  "consistency_updates": [],
+  "approved_by": null,
+  "approved_at": null,
+  "notes": null
+}

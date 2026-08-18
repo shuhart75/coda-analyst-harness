@@ -1,0 +1,102 @@
+{
+  "schema_version": 4,
+  "package_id": "<package-id>",
+  "package_revision": 1,
+  "request_id": "<request-id>",
+  "request_version": 1,
+  "request_sha256": "<sha256>",
+  "target_repository": "<repository>",
+  "target_contour": "<contour>",
+  "received_at": null,
+  "completed_at": null,
+  "source_before": {
+    "commit": null,
+    "branch": null,
+    "working_tree_state": "unknown",
+    "relevant_uncommitted_paths": []
+  },
+  "source_after": {
+    "commit": null,
+    "branch": null,
+    "working_tree_state": "unknown",
+    "relevant_uncommitted_paths": []
+  },
+  "status": "pending",
+  "status_reason": null,
+  "allowed_statuses": [
+    "pending",
+    "delivered",
+    "delivered-with-deviations",
+    "partially-delivered",
+    "no-change-required",
+    "not-delivered",
+    "rejected-package"
+  ],
+  "allowed_coverage_statuses": [
+    "pending",
+    "already-implemented",
+    "implemented-as-required",
+    "implemented-with-deviation",
+    "implemented-with-scope-change",
+    "partially-implemented",
+    "not-implemented",
+    "deferred",
+    "blocked-dependency",
+    "blocked-input-ambiguity",
+    "not-applicable"
+  ],
+  "allowed_follow_up_recommendations": [
+    "pending",
+    "no-action",
+    "promote-to-baseline",
+    "update-requirement",
+    "keep-open",
+    "defer",
+    "move-to-other-change",
+    "cancel",
+    "investigate"
+  ],
+  "commits": [],
+  "generated_or_changed_artifacts": [],
+  "requirement_coverage": [
+    {
+      "requirement": "REQ-<ID>-001",
+      "status": "pending",
+      "behavior_before": null,
+      "delivered_behavior": null,
+      "deviation_from_input": null,
+      "remaining_work": null,
+      "follow_up_recommendation": "pending",
+      "suggested_destination": null,
+      "evidence": [],
+      "commit_sha256": [],
+      "verification": [],
+      "note": null
+    }
+  ],
+  "scenario_coverage": [
+    {
+      "scenario": "SCN-<ID>-001",
+      "status": "pending",
+      "behavior_before": null,
+      "delivered_behavior": null,
+      "deviation_from_input": null,
+      "remaining_work": null,
+      "follow_up_recommendation": "pending",
+      "suggested_destination": null,
+      "covered_by": [
+        "REQ-<ID>-001"
+      ],
+      "evidence": [],
+      "commit_sha256": [],
+      "verification": [],
+      "note": null
+    }
+  ],
+  "additional_deliveries": [],
+  "remaining_work": [],
+  "baseline_feedback": [],
+  "requirements_feedback": [],
+  "verification": [],
+  "notes": null
+}

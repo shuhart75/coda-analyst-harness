@@ -1,0 +1,47 @@
+{
+  "schema_version": 2,
+  "workspace": {
+    "layout": "sibling-clones",
+    "documents_repository": {
+      "id": "documents",
+      "accepted_remote_urls": [
+        "ssh://git@stash.delta.sbrf.ru:7999/rscon/documents.git",
+        "https://stash.delta.sbrf.ru/scm/rscon/documents.git"
+      ]
+    }
+  },
+  "repositories": [
+    {
+      "id": "coda",
+      "purpose": "Исходный код АС КОДА",
+      "access": "read-only",
+      "location": {
+        "environment": "CODA_REPO",
+        "relative_to_documents": "../coda"
+      },
+      "accepted_remote_urls": [
+        "ssh://git@stash.delta.sbrf.ru:7999/rscon/coda.git",
+        "https://stash.delta.sbrf.ru/scm/rscon/coda.git"
+      ],
+      "expected_branch": null,
+      "contours": {
+        "backend": {
+          "path": "backend"
+        },
+        "frontend": {
+          "path": "frontend"
+        }
+      },
+      "instruction_patterns": [
+        "AGENTS.md",
+        "**/AGENTS.md",
+        "CLAUDE.md",
+        "**/CLAUDE.md",
+        "openspec/README.md",
+        "**/openspec/README.md",
+        ".sdd/README.md",
+        "**/.sdd/README.md"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Workflow: Planning",
+      "type": "shell",
+      "command": "bash ${workspaceFolder}/.workflow/tools/switch-mode.sh ${workspaceFolder} planning"
+    },
+    {
+      "label": "Workflow: Requirements",
+      "type": "shell",
+      "command": "bash ${workspaceFolder}/.workflow/tools/switch-mode.sh ${workspaceFolder} requirements"
+    },
+    {
+      "label": "Workflow: Scope Prototype",
+      "type": "shell",
+      "command": "bash ${workspaceFolder}/.workflow/tools/switch-mode.sh ${workspaceFolder} scope-prototype"
+    },
+    {
+      "label": "Workflow: Delivery Prototype",
+      "type": "shell",
+      "command": "bash ${workspaceFolder}/.workflow/tools/switch-mode.sh ${workspaceFolder} delivery-prototype"
+    },
+    {
+      "label": "Workflow: Execution Update",
+      "type": "shell",
+      "command": "bash ${workspaceFolder}/.workflow/tools/switch-mode.sh ${workspaceFolder} execution-update"
+    }
+  ]
+}

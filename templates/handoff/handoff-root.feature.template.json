@@ -1,0 +1,49 @@
+{
+  "schema_version": 3,
+  "package_kind": "feature-delivery",
+  "transport_policy": {
+    "creation": "on-request",
+    "repository_archives": "forbidden",
+    "destination": "~/Downloads"
+  },
+  "package_id": "<package-id>",
+  "feature": "<feature-slug>",
+  "agent_contract": {
+    "path": "AGENTS.md",
+    "schema_version": 1,
+    "required": true,
+    "sha256": null
+  },
+  "source_requirements": {
+    "path": "features/<feature-slug>/requirements.md"
+  },
+  "status": "draft",
+  "active_revision": null,
+  "next_sdd_action": {
+    "action": "wait",
+    "reason": "Нет отправленной редакции",
+    "revision": null,
+    "revision_state": null,
+    "claimed_by": null,
+    "package_path": null,
+    "transport_path": null,
+    "returns_path": null
+  },
+  "allowed_revision_states": [
+    "draft",
+    "sent",
+    "in-progress",
+    "paused",
+    "superseded",
+    "archived",
+    "cancelled"
+  ],
+  "allowed_sdd_actions": [
+    "wait",
+    "process",
+    "continue",
+    "stop-and-report",
+    "no-action"
+  ],
+  "revisions": []
+}

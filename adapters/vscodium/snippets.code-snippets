@@ -1,0 +1,516 @@
+{
+  "Workflow: Feature Intake Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-intake",
+    "body": [
+      "новая фича",
+      "",
+      "Источник: `${1:/absolute/or/project/path}`",
+      "Квартал: ${2:2026-Q2}",
+      "Контекст: ${3:что это за инициатива}",
+      "",
+      "Нужно:",
+      "- сделать feature intake/preflight;",
+      "- сопоставить с baseline/current, existing features и legacy planning;",
+      "- отделить existing coverage от новой дельты;",
+      "- предложить feature slug и slices;",
+      "- перечислить baseline gaps, planning gaps и workflow gaps;",
+      "- ничего не создавать в features/ до отдельного подтверждения."
+    ]
+  },
+  "Workflow: Planning Mode Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-plan",
+    "body": [
+      "занимаемся планированием",
+      "",
+      "Квартал: ${1:2026-Q2}",
+      "Входные материалы: ${2:путь к описанию/скринам/change request}",
+      "Цель: ${3:что планируем}",
+      "",
+      "Нужно:",
+      "- разложить scope на feature/slice и planning stories;",
+      "- подготовить HLE с якорными оценками в человеко-днях по AN/FE/BE/QA;",
+      "- обновить quarter-plan и commander-plan в PlantUML;",
+      "- отметить риски, зависимости и вопросы для команды."
+    ]
+  },
+  "Workflow: Requirements Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-req",
+    "body": [
+      "делаем требования",
+      "",
+      "В папке `${1:context/source-materials/change-requests/...}` лежат описание текущей системы, скрины и материалы по доработке.",
+      "Доработка: ${2:краткое описание}",
+      "Feature: ${3:feature-slug}",
+      "Формат требований: ${4|новый лёгкий,старый подробный|}",
+      "",
+      "Нужно:",
+      "- проверить baseline/current и доменную модель;",
+      "- собрать или обновить `features/${3:feature-slug}/requirements.md` по шаблону;",
+      "- только потом разложить root requirements по slices и detail packs;",
+      "- выявить влияние на соседние требования, baseline и прототипы;",
+      "- обновить domain-impact.md и consistency-backlog.md при необходимости."
+    ]
+  },
+  "Workflow: Requirement Tail Cleanup Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-req-tails",
+    "body": [
+      "проверь хвосты требований",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Что заменили: ${2:старый endpoint / field / status / label}",
+      "Новый вариант: ${3:новый endpoint / field / status / label}",
+      "",
+      "Нужно:",
+      "- сделать быстрый feature-local sweep;",
+      "- проверить `features/${1:feature-slug}/requirements.md`; ",
+      "- проверить slice cards и FE/BE detail packs, где повторяется это правило;",
+      "- проверить domain-impact.md и consistency-backlog.md, если они описывают старый вариант;",
+      "- использовать targeted search по старым названиям;",
+      "- не расширять проверку на весь репозиторий, если нет cross-feature/domain-wide признаков."
+    ]
+  },
+  "Workflow: Slice Decomposition Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-slices",
+    "body": [
+      "разложи требования на срезы",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Root requirements: ${2:features/${1:feature-slug}/requirements.md}",
+      "",
+      "Нужно:",
+      "- разложить root requirements на проверяемые срезы;",
+      "- автоматически проверить полноту и границы срезов;",
+      "- при найденных пробелах сначала предложить правку root requirements;",
+      "- не создавать параллельный источник истины;",
+      "- спросить меня только при противоречии, непроверяемом правиле или влиянии на соседние фичи."
+    ]
+  },
+  "Workflow: Slice Detail Requirements Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-slice-details",
+    "body": [
+      "подготовь детальные требования по срезам",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slices: ${2:all / slice-slug}",
+      "",
+      "Нужно:",
+      "- взять root requirements как источник истины;",
+      "- автоматически обновить контекст срезов и проверить полноту;",
+      "- подготовить slice cards и FE/BE detail packs;",
+      "- спорные места вернуть в root requirements, а не оставлять только в детализации."
+    ]
+  },
+  "Workflow: Developer Tasks Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-dev-tasks",
+    "body": [
+      "разложи требования на задачи разработки",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Root requirements: ${2:features/${1:feature-slug}/requirements.md}",
+      "",
+      "Нужно:",
+      "- создать или обновить `features/${1:feature-slug}/tasks/index.md`; ",
+      "- создать по одному файлу на каждую задачу в `features/${1:feature-slug}/tasks/`; ",
+      "- одна задача = одна роль, один технический результат, одна граница отдельного изменения;",
+      "- каждый файл задачи сделать самодостаточным: правила, данные, ограничения, критерии приёмки, проверки и исключения должны быть внутри файла;",
+      "- ссылки на требования, проверки и связанные срезы использовать для трассируемости, а не вместо содержания задачи;",
+      "- добавить отметку синхронизации с требованиями, чтобы при последующих правках требований было понятно какие задачи обновлять;",
+      "- не менять planning stories, quarter-plan, commander-plan и actual-progress без отдельной команды."
+    ]
+  },
+  "Workflow: Scope Prototype Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-scope-proto",
+    "body": [
+      "делаем презентационный прототип",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Материалы: ${2:путь к требованиям/скринам/заметкам}",
+      "Базовый референс: ${3:какой текущий прототип/скрин/страница берется за основу}",
+      "",
+      "Нужно:",
+      "- сначала проверить существующие прототипы и скриншоты этой feature;",
+      "- выбрать и зафиксировать визуальную базу;",
+      "- сделать или обновить только общий `features/${1:feature-slug}/prototype.html` без slice-макетов;",
+      "- root prototype должен быть кликабельным пользовательским макетом всей feature, без комментариев для фронта внутри HTML;",
+      "- показать ideal и MVP, добавить fake data и кликабельные переходы;",
+      "- продолжать работу только с общим prototype, пока я не подтвержу, что он согласован."
+    ]
+  },
+  "Workflow: Delivery Prototype Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-delivery-proto",
+    "body": [
+      "делаем прототип для разработки",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "Root prototype: ${3:features/.../prototype.html}",
+      "",
+      "Перед началом проверь `features/${1:feature-slug}/prototype-notes.md`.",
+      "Если там нет явных строк `Пользователь подтвердил, что общий prototype завершён: да` и `Можно переходить к slice delivery prototypes: да`,",
+      "ничего в `slices/*/delivery-prototype/*` не меняй и сообщи, что сначала нужно окнуть общий root prototype.",
+      "",
+      "Если подтверждение есть, тогда:",
+      "- взять root prototype и `features/${1:feature-slug}/requirements.md` как основу;",
+      "- сделать schematic handoff prototype для slice `features/${1:feature-slug}/slices/${2:slice-slug}/delivery-prototype/prototype.html`;",
+      "- использовать только MUI-компоненты;",
+      "- вынести frontend-пояснения и допущения в slice-level notes."
+    ]
+  },
+  "Workflow: Slice Frontend Prototype Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-slice-proto",
+    "body": [
+      "создай прототип среза для фронта",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "",
+      "Нужно:",
+      "- проверить подтверждение общего root prototype;",
+      "- взять root prototype и требования среза как основу;",
+      "- создать или обновить slice-level handoff prototype;",
+      "- автоматически сверить прототип с требованиями среза;",
+      "- если найдёшь расхождение, не замалчивай его: верни вопрос в требования или prototype notes."
+    ]
+  },
+  "Workflow: Execution Update Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-progress",
+    "body": [
+      "обновляем прогресс",
+      "",
+      "Квартал: ${1:2026-Q2}",
+      "Изменение: ${2:задача RSCON-... завершена / задачу ... взял ... / добавить реальные задачи вместо story ...}",
+      "",
+      "Нужно:",
+      "- обновить md-карточки implementation tasks;",
+      "- обновить planning/actualization.md;",
+      "- пересчитать проценты PLAN-задач по связанным реальным задачам;",
+      "- обновить actual-progress PlantUML с marker `Мы сейчас здесь`;",
+      "- сохранить mapping many-to-many, если одна задача закрывает несколько stories."
+    ]
+  },
+  "Workflow: Slice Development Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-dev-slice",
+    "body": [
+      "возьми срез в разработку",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "Кодовая база: ${3:/path/to/code/repo}",
+      "",
+      "Нужно:",
+      "- собрать краткий контекст среза по требованиям, прототипу и проверкам;",
+      "- подготовить implementation-handoff;",
+      "- если кодовая база доступна, разобрать срез по коду в границах затронутого модуля;",
+      "- не менять требования без отдельного вопроса."
+    ]
+  },
+  "Workflow: Developer Task Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-dev-task",
+    "body": [
+      "возьми задачу в разработку",
+      "",
+      "Requirements repo: ${1:/path/to/requirements/repo}",
+      "Code repo: ${2:/path/to/code/repo}",
+      "Task file: ${3:features/<feature>/tasks/<task>.md}",
+      "",
+      "Нужно:",
+      "- работать строго по одному указанному файлу задачи;",
+      "- строить план реализации от указанного файла задачи;",
+      "- связанные требования, проверки и срезы открывать только для проверки свежести или при найденном противоречии;",
+      "- разобрать код в границах задачи;",
+      "- подготовить план реализации и проверки;",
+      "- код пока не менять, если я явно не попросил начать реализацию."
+    ]
+  },
+  "Workflow: Slice Implementation Plan Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-impl-plan",
+    "body": [
+      "предложи план реализации",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "",
+      "Нужно:",
+      "- использовать требования, прототип и implementation-handoff;",
+      "- каждая задача должна ссылаться на требование или критерий проверки;",
+      "- план не заменяет planning stories;",
+      "- отдельно перечислить проверки для завершения."
+    ]
+  },
+  "Workflow: Start Implementation Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-impl-start",
+    "body": [
+      "начни реализацию",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "Задача плана: ${3:first / task-id}",
+      "",
+      "Нужно:",
+      "- использовать implementation-plan и handoff;",
+      "- выполнять только согласованный scope;",
+      "- обновлять checkpoint после значимого шага;",
+      "- остановиться и спросить, если требования, прототип или проверки противоречат друг другу."
+    ]
+  },
+  "Workflow: Continue Implementation Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-impl-continue",
+    "body": [
+      "продолжи реализацию",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "",
+      "Нужно:",
+      "- восстановиться с последнего checkpoint;",
+      "- сверить implementation-plan, текущий diff и проверки;",
+      "- продолжить следующую незавершённую задачу;",
+      "- кратко показать что сделано, что осталось и какие проверки выполнены."
+    ]
+  },
+  "Workflow: Review Preparation Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-review",
+    "body": [
+      "подготовь к ревью",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "",
+      "Нужно:",
+      "- сверить изменения с требованиями, прототипом и проверками;",
+      "- дать краткую сводку изменённых файлов и поведения;",
+      "- перечислить выполненные проверки;",
+      "- отдельно указать риски, допущения и открытые вопросы."
+    ]
+  },
+  "Workflow: Slice QA Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-qa-slice",
+    "body": [
+      "подготовь проверки по срезу",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "",
+      "Нужно:",
+      "- собрать пользовательские, серверные, интеграционные и технические проверки;",
+      "- добавить негативные и граничные сценарии;",
+      "- построить покрытие требование -> проверки;",
+      "- предположения пометить отдельно."
+    ]
+  },
+  "Workflow: Slice Prototype Check Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-qa-proto",
+    "body": [
+      "проверь прототип по срезу",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "",
+      "Нужно:",
+      "- сравнить slice prototype с требованиями среза;",
+      "- проверить состояния, роли, ошибки и обязательные действия;",
+      "- сверить с test-plan, если он уже есть;",
+      "- найденные расхождения вернуть в требования, prototype notes или список пробелов."
+    ]
+  },
+  "Workflow: Slice Implementation Check Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-qa-impl",
+    "body": [
+      "проверь реализацию по срезу",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "",
+      "Нужно:",
+      "- сравнить готовое поведение с требованиями среза;",
+      "- сверить реализацию с prototype и test-plan;",
+      "- отметить выполненные и невыполненные проверки;",
+      "- не исправлять требования молча, если реализация выявила пробел."
+    ]
+  },
+  "Workflow: Gap Capture Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-gaps",
+    "body": [
+      "зафиксируй найденные пробелы",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Slice: ${2:slice-slug}",
+      "Источник: ${3:requirements/prototype/implementation/testing}",
+      "",
+      "Нужно:",
+      "- перечислить найденные пробелы и источник обнаружения;",
+      "- отделить факты, предположения и вопросы;",
+      "- предложить куда вернуть каждый пункт: requirements, prototype, implementation-plan, test-plan или consistency-backlog;",
+      "- не менять источник истины без явного подтверждения, если решение спорное."
+    ]
+  },
+  "Workflow: Consistency Sweep Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-consistency",
+    "body": [
+      "проверь консистентность требований",
+      "",
+      "Scope проверки: ${1:feature/release/decision/all}",
+      "Decision ID или feature: ${2:DEC-... / feature-slug}",
+      "",
+      "Нужно:",
+      "- проверить affected requirements из domain-impact.md;",
+      "- проверить affected baseline artifacts;",
+      "- проверить affected prototypes и выставить sync status;",
+      "- обновить .workflow/consistency-backlog.md;",
+      "- явно перечислить, что исправлено, что отложено, что требует решения."
+    ]
+  },
+  "Workflow: Standalone PlantUML Export Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-puml-export",
+    "body": [
+      "собери puml без инклюдов",
+      "",
+      "Источник: ${1:planning/2026-Q2/gantt/actual-progress.puml}",
+      "Выходной файл: ${2:planning/2026-Q2/gantt/actual-progress-confluence.puml}",
+      "",
+      "Нужно:",
+      "- развернуть все `!include` в standalone PlantUML;",
+      "- сохранить результат отдельным export-файлом;",
+      "- не переписывать include-based source;",
+      "- оставить BEGIN INCLUDE / END INCLUDE markers для трассировки."
+    ]
+  },
+  "Workflow: Domain Decision Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-decision",
+    "body": [
+      "зафиксируй доменное решение",
+      "",
+      "Feature: ${1:feature-slug}",
+      "Decision ID: ${2:DEC-FEATURE-001}",
+      "Решение: ${3:что меняется}",
+      "Причина: ${4:почему так}",
+      "",
+      "Нужно обновить domain-impact.md:",
+      "- status и consistency level;",
+      "- affected requirements;",
+      "- affected baseline artifacts;",
+      "- affected prototypes;",
+      "- rollback notes;",
+      "- consistency-backlog для незакрытых последствий."
+    ]
+  },
+  "Workflow: Release Finalization Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-release",
+    "body": [
+      "финализируем релиз",
+      "",
+      "Квартал: ${1:2026-Q2}",
+      "Release ID: ${2:release-id}",
+      "Фичи: ${3:feature-slug-1, feature-slug-2}",
+      "",
+      "Нужно:",
+      "- собрать релизный пакет в releases/<quarter>/<release-id>/;",
+      "- зафиксировать итоговые требования;",
+      "- закрыть или явно отложить consistency backlog;",
+      "- подготовить baseline promotion notes."
+    ]
+  },
+  "Workflow: Baseline Promotion Prompt": {
+    "scope": "markdown,plaintext",
+    "prefix": "wf-baseline",
+    "body": [
+      "промоуть в baseline",
+      "",
+      "Release package: ${1:releases/2026-Q2/release-id}",
+      "Новая версия baseline: ${2:vYYYY.MM.DD}",
+      "",
+      "Нужно:",
+      "- сохранить предыдущий baseline в baseline/versions/;",
+      "- промоутить финальные требования и доменные изменения в baseline/current/;",
+      "- обновить baseline/current/VERSION.md;",
+      "- записать promoted-baseline-version.md в release package;",
+      "- не переписывать release history задним числом."
+    ]
+  },
+  "Planning Story Card": {
+    "scope": "markdown",
+    "prefix": "wf-story",
+    "body": [
+      "# STORY-${1:FEATURE}-${2:001}",
+      "",
+      "Status: draft",
+      "Type: ${3|FE,BE,Fullstack,Analysis,Integration,QA|}",
+      "Feature: ${4:feature-slug}",
+      "Slice: ${5:slice-slug}",
+      "",
+      "## Summary",
+      "$6",
+      "",
+      "## Description",
+      "$7",
+      "",
+      "## Ideal Scope",
+      "",
+      "## MVP Scope",
+      "",
+      "## Analyst Anchor Estimate",
+      "- AN: ${8:0.0} pd",
+      "- FE: ${9:0.0} pd",
+      "- BE: ${10:0.0} pd",
+      "- QA: ${11:0.0} pd",
+      "- Total: ${12:0.0} pd",
+      "",
+      "## Team Estimate",
+      "- AN: ${13:0.0} pd",
+      "- FE: ${14:0.0} pd",
+      "- BE: ${15:0.0} pd",
+      "- QA: ${16:0.0} pd",
+      "- Total: ${17:0.0} pd",
+      "",
+      "## Agreed Estimate",
+      "- AN: ${18:0.0} pd",
+      "- FE: ${19:0.0} pd",
+      "- BE: ${20:0.0} pd",
+      "- QA: ${21:0.0} pd",
+      "- Total: ${22:0.0} pd",
+      "",
+      "## Dependencies And Assumptions",
+      "",
+      "## Related Requirements",
+      "",
+      "## Related Prototype",
+      ""
+    ]
+  },
+  "Implementation Tasks Table": {
+    "scope": "markdown",
+    "prefix": "wf-tasks",
+    "body": [
+      "# Implementation Tasks",
+      "",
+      "| Jira | Summary | Role | Estimate (d) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress | Related Stories | Details |",
+      "|---|---|---|---:|---|---|---|---|---|---|---:|---|---|",
+      "| ${1:RSCON-0000} | ${2:summary} | ${3|FE,BE,QA,Analysis,Integration|} | ${4:0.0} | ${5:executor} | ${6:YYYY-MM-DD} | ${7:YYYY-MM-DD} | ${8:YYYY-MM-DD} | ${9:YYYY-MM-DD} | ${10|todo,in-progress,done,blocked,cancelled|} | ${11:0}% | ${12:STORY-...} | ${13:tasks/RSCON-0000.md} |"
+    ]
+  }
+}

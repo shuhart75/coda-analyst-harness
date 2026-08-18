@@ -1,0 +1,29 @@
+@startgantt
+title Реальный прогресс - 2026-Q2
+Project starts 2026-04-01
+saturday are closed
+sunday are closed
+
+printscale daily zoom 1.5
+projectscale daily
+today is colored in LightSalmon
+!$now = %now()
+[Мы сейчас здесь] as [TODAY_MARK] happens %date("YYYY-MM-dd", $now)
+
+<style>
+ganttDiagram {
+  task {
+    BackGroundColor lightblue
+  }
+  milestone {
+    BackGroundColor orange
+    FontColor black
+  }
+}
+</style>
+' Реальный прогресс
+
+!include preamble/common.puml
+
+' No feature include files yet
+@endgantt

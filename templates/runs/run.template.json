@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "<run-id>",
+  "kind": "<planning|requirements|implementation|qa>",
+  "status": "active",
+  "stage": "<first-stage>",
+  "feature": "<feature-slug>",
+  "slice": "<slice-slug-or-null>",
+  "max_iterations_per_stage": 3,
+  "verifiers": [
+    {
+      "name": "targeted tests",
+      "argv": ["<test-command>", "<arg>"],
+      "cwd": "."
+    }
+  ]
+}

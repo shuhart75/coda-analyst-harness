@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "kind": "slice-test-result",
+  "package_id": "<package-id>",
+  "package_revision": 1,
+  "decomposition_revision": 1,
+  "slice_id": "<slice-id>",
+  "result_revision": 1,
+  "status": "draft",
+  "tested_at": null,
+  "code_revisions": {
+    "backend": null,
+    "frontend": null
+  },
+  "related_tasks": [],
+  "implementation_receipts": [],
+  "requirement_results": [
+    {
+      "requirement": "REQ-<ID>-001",
+      "status": "not-tested",
+      "evidence": []
+    }
+  ],
+  "scenario_results": [
+    {
+      "scenario": "SCN-<ID>-001",
+      "status": "not-tested",
+      "evidence": []
+    }
+  ],
+  "findings": [],
+  "blocked_scope": [],
+  "verification": [],
+  "notes": null
+}

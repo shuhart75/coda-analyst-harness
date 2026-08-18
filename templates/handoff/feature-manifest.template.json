@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "package_kind": "feature-requirements-to-delivery",
+  "package_id": "<package-id>",
+  "package_revision": 1,
+  "feature": "<feature-slug>",
+  "request": {
+    "title": "<Название функциональности>",
+    "requirements_path": "requirements.md"
+  },
+  "payload": [],
+  "requirements": [],
+  "scenarios": [],
+  "impacts": [],
+  "traceability": {
+    "mode": "atomic-identifiers",
+    "requirement_unit": "REQ-*",
+    "note": "Атомарная трассировка по устойчивым идентификаторам требований."
+  },
+  "slices": [],
+  "target": {
+    "repository": "coda",
+    "contours": [
+      "backend",
+      "frontend"
+    ]
+  },
+  "decomposition_policy": {
+    "owner": "development",
+    "one_contour_per_task": true,
+    "target_days": [
+      1,
+      3
+    ],
+    "maximum_days": {
+      "backend": 5,
+      "frontend": 10
+    },
+    "estimate": "optional",
+    "jira_key": "optional",
+    "confirmation_delivery": "automatic-non-blocking"
+  },
+  "testing_policy": {
+    "primary_unit": "slice",
+    "development_cards": "supporting-context",
+    "implementation_receipts": "supporting-evidence"
+  }
+}

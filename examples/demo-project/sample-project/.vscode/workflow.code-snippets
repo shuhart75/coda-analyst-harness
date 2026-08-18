@@ -1,0 +1,38 @@
+{
+  "Planning Story": {
+    "scope": "markdown",
+    "prefix": "wf-story",
+    "body": [
+      "# STORY-${1:FEATURE}-${2:001}",
+      "",
+      "## Summary",
+      "$3",
+      "",
+      "## Description",
+      "$4",
+      "",
+      "## Ideal Scope",
+      "",
+      "## MVP Scope",
+      "",
+      "## Analyst Anchor Estimate",
+      "",
+      "## Team Estimate",
+      "",
+      "## Agreed Estimate",
+      "",
+      "## Dependencies And Assumptions",
+      ""
+    ]
+  },
+  "Execution Tasks Table": {
+    "scope": "markdown",
+    "prefix": "wf-tasks",
+    "body": [
+      "# Implementation Tasks",
+      "",
+      "| Jira | Summary | Role | Estimate (d) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Related Stories | Details |",
+      "|---|---|---|---:|---|---|---|---|---|---|---|---|"
+    ]
+  }
+}

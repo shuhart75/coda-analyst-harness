@@ -1,0 +1,14 @@
+{
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 700,
+  "editor.formatOnSave": true,
+  "editor.linkedEditing": true,
+  "workbench.editor.enablePreview": false,
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.expand": false,
+  "explorer.fileNesting.patterns": {
+    "feature.md": "references.md",
+    "slice.md": "requirements/*.md, delivery-prototype/*, execution/*",
+    "prototype.html": "notes.md"
+  }
+}
