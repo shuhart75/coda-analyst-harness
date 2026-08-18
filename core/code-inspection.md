@@ -4,21 +4,22 @@ This policy governs read-only use of a locally cloned code repository by analyst
 
 ## Repository layout
 
-The recommended analyst machine layout is one dedicated parent directory containing two independent sibling clones:
+The `coda-analyst-harness` clone is the workspace root and contains three independent product repositories:
 
 ```text
 <workspace>/
 ├── AGENTS.md
-├── rscon-analyst.code-workspace
+├── coda-analyst.code-workspace
 ├── documents/
+├── changeswork-copy/
 └── coda/
     ├── backend/
     └── frontend/
 ```
 
-`documents` remains the requirements and planning repository. `coda` remains an independent code repository. Do not merge them, create a submodule, or place a symlink to `coda` inside `documents`.
+`documents` remains the requirements and planning repository. `coda` remains an independent code repository. `changeswork-copy` participates only in the exchange process defined by `core/repository-exchange.md`. Do not create submodules or symlinks between these repositories.
 
-The common parent gives the LLM filesystem access to both repositories. It does not authorize whole-repository reading and does not place all code into model context.
+The common workspace gives the LLM filesystem access to the registered repositories. It does not authorize whole-repository reading and does not place all code into model context.
 
 ## Resolution and setup
 
@@ -31,7 +32,7 @@ Resolution order:
 
 The harness must not store analyst-machine absolute paths in committed project files.
 
-`code-inspect.py setup` creates the common parent `AGENTS.md` and `rscon-analyst.code-workspace`. These are local workspace files outside both repositories.
+`python3 scripts/workspace.py bootstrap` creates the repositories and `coda-analyst.code-workspace`. Do not use `code-inspect.py setup` to replace the root `AGENTS.md`; the root contract belongs to this harness.
 
 ## Read-only contract
 

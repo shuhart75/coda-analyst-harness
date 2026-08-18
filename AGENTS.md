@@ -2,6 +2,23 @@
 
 This repository defines a reusable workflow harness.
 
+## First launch and workspace ownership
+
+- The repository root is the workspace root.
+- If `.workspace-state/workspace.json`, `coda-analyst.code-workspace`, or any of `documents/`, `coda/`, and `changeswork-copy/` is absent, run `python3 scripts/workspace.py bootstrap` before the user's substantive request. Do not ask for repository URLs; the product URLs are fixed by this harness.
+- Work on requirements, plans and factual progress only in `documents/` and follow `documents/AGENTS.md` plus its active mode.
+- Treat `coda/` as read-only during analytical work. It is available only for bounded implementation research.
+- Treat `changeswork-copy/` as pull-only. Never commit or push there during normal analyst work. Transfer differences back only through a verified reverse patch in `reverse-diffs/`.
+- Only `documents/` may be pushed by this harness.
+
+## Repository exchange commands
+
+- `синкани репы`, `синхронизируй репозитории`, `обнови documents из changeswork-copy`: run `python3 scripts/repository-exchange.py sync`. This explicitly authorizes updating both local clones, merging `changeswork-copy/main` into `documents/main`, generating a verified reverse patch, and pushing only `documents/main`.
+- `синкани без отправки`, `обнови локально без push`: run `python3 scripts/repository-exchange.py sync --no-push`.
+- `сделай обратный дифф`, `собери обратную заплату`, `подготовь изменения для changeswork-copy`: run `python3 scripts/repository-exchange.py reverse-diff`. Do not apply or push the patch unless the user separately asks.
+- `обнови код`, `обнови coda`: run `python3 scripts/workspace.py update-code`. This is a separate read-only fast-forward update and is not part of repository exchange.
+- Never hide a failed fetch, merge, patch verification, or push. A merge conflict stops the operation and is aborted; no file-copy fallback is permitted.
+
 ## Always read first
 
 When working inside a project that uses this harness, read in this order:
@@ -98,6 +115,11 @@ Context summaries, checkpoints and research files are internal harness operation
 - Treat `coda` as read-only in analyst work. Record its branch, commit and worktree state before inspection and verify that they are unchanged afterward.
 - Inspect one contour at a time. Read that contour's local instructions, locate exact identifiers, then open only matched modules and nearby tests, contracts or migrations.
 - Code observations are commit-bound auxiliary evidence, not automatic business requirements or baseline updates.
+
+## Repository exchange policy
+
+- Follow `core/repository-exchange.md` for all operations between `changeswork-copy` and `documents`.
+- Do not use `rsync`, file copying, force push, automatic conflict resolution, or destructive cleanup as a substitute for Git merge.
 
 ## Executable harness
 

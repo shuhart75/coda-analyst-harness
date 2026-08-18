@@ -8,7 +8,7 @@
 
 ```text
 workspace/
-├── analyst-harness/     # исходная обвязка
+├── coda-analyst-harness/ # исходная обвязка
 ├── changeswork-copy/    # требования, планы и общие пакеты
 └── coda/                # необязательный локальный клон кода для сверки
     ├── backend/         # собственная SDD
