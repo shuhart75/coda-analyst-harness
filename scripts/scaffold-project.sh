@@ -43,7 +43,7 @@ mkdir -p "$TARGET/context/current-system" "$TARGET/context/change-requests"
 mkdir -p "$TARGET/baseline/current/domain/state-machines" "$TARGET/baseline/current/requirements" "$TARGET/baseline/current/api" "$TARGET/baseline/current/ui" "$TARGET/baseline/current/data" "$TARGET/baseline/current/decisions" "$TARGET/baseline/versions"
 mkdir -p "$TARGET/planning/intake" "$TARGET/features" "$TARGET/releases"
 
-cp "$ROOT_DIR/AGENTS.md" "$TARGET/AGENTS.md"
+cp "$ROOT_DIR/templates/workflow/project-agents.template.md" "$TARGET/AGENTS.md"
 cp "$ROOT_DIR/core/llm-contract.md" "$TARGET/.workflow/llm-contract.md"
 cp "$ROOT_DIR/core/agent-delegation.md" "$TARGET/.workflow/agent-delegation.md"
 cp "$ROOT_DIR/core/skills-policy.md" "$TARGET/.workflow/skills-policy.md"

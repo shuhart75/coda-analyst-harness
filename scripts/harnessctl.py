@@ -100,7 +100,7 @@ def source_root(value: str | None) -> Path:
 
 def managed_sources(root: Path) -> dict[str, Path]:
     result: dict[str, Path] = {
-        "AGENTS.md": root / "AGENTS.md",
+        "AGENTS.md": root / "templates/workflow/project-agents.template.md",
         ".workflow/llm-contract.md": root / "core/llm-contract.md",
         ".workflow/agent-delegation.md": root / "core/agent-delegation.md",
         ".workflow/skills-policy.md": root / "core/skills-policy.md",

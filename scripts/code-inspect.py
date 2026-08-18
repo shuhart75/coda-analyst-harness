@@ -320,38 +320,10 @@ def locate_command(args: argparse.Namespace) -> int:
 
 
 def setup_command(args: argparse.Namespace) -> int:
-    project = Path(args.project).resolve()
-    registry = load_registry(project)
-    documents = documents_identity(project, registry)
-    if not documents["origin_matches_registry"]:
-        raise ValueError("origin documents не совпадает с реестром")
-    entry = repository_entry(registry, args.repository)
-    repository = resolve_repository(project, entry)
-    git_snapshot(repository, entry, None)
-    if project.parent != repository.parent:
-        raise ValueError("Для общей рабочей области documents и coda должны быть соседними каталогами")
-    root = project.parent
-    template = project / ".workflow/templates/workspace/analyst-workspace-agents.template.md"
-    text = template.read_text(encoding="utf-8")
-    text = text.replace("<documents-dir>", project.name).replace("<coda-dir>", repository.name)
-    agents = root / "AGENTS.md"
-    if agents.exists() and agents.read_text(encoding="utf-8") != text and not args.force:
-        raise ValueError(f"{agents} уже существует и отличается; используй --force только после проверки")
-    agents.write_text(text, encoding="utf-8")
-    workspace = root / "rscon-analyst.code-workspace"
-    workspace_payload = {
-        "folders": [
-            {"name": "documents", "path": project.name},
-            {"name": "coda", "path": repository.name},
-        ],
-        "settings": {
-            "files.exclude": {"**/.git": True},
-            "search.exclude": {"**/.git": True, "**/node_modules": True, "**/build": True},
-        },
-    }
-    workspace.write_text(json.dumps(workspace_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print_json({"root": str(root), "agents": str(agents), "workspace": str(workspace)})
-    return 0
+    raise ValueError(
+        "рабочая область КОДА создаётся только командой "
+        "python3 scripts/workspace.py bootstrap из корня coda-analyst-harness"
+    )
 
 
 def parser() -> argparse.ArgumentParser:

@@ -120,6 +120,15 @@ class HarnessTests(unittest.TestCase):
             result = run(sys.executable, str(project / ".workflow/tools/harnessctl.py"), "doctor", str(project))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_project_agent_contract_excludes_workspace_bootstrap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.scaffold(Path(temp))
+            contract = (project / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("## Always read first", contract)
+            self.assertNotIn("## First launch and workspace ownership", contract)
+            self.assertNotIn("scripts/repository-exchange.py", contract)
+            self.assertNotIn("scripts/workspace.py bootstrap", contract)
+
     def test_analyst_workspace_resolves_and_guards_code_repository(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -173,10 +182,10 @@ class HarnessTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
             result = run(sys.executable, str(tool), "setup", str(documents))
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("Договор общей рабочей области аналитика", (root / "AGENTS.md").read_text(encoding="utf-8"))
-            workspace = json.loads((root / "rscon-analyst.code-workspace").read_text(encoding="utf-8"))
-            self.assertEqual([item["path"] for item in workspace["folders"]], ["documents", "coda"])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("scripts/workspace.py bootstrap", result.stdout)
+            self.assertFalse((root / "AGENTS.md").exists())
+            self.assertFalse((root / "rscon-analyst.code-workspace").exists())
 
             run_file = documents / ".workflow/tools/harnessctl.py"
             result = run(
