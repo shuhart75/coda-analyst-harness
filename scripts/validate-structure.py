@@ -111,6 +111,7 @@ required = [
     ".workflow/skills/implementation-loop/SKILL.md",
     ".workflow/skills/qa-loop/SKILL.md",
     "baseline/current/VERSION.md",
+    "baseline/current/domain/aggregates.md",
     "baseline/current/domain",
     "baseline/current/requirements",
     "baseline/current/api",

@@ -129,6 +129,14 @@ class HarnessTests(unittest.TestCase):
             self.assertNotIn("scripts/repository-exchange.py", contract)
             self.assertNotIn("scripts/workspace.py bootstrap", contract)
 
+    def test_structure_requires_complete_baseline_scaffold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.scaffold(Path(temp))
+            (project / "baseline/current/domain/aggregates.md").unlink()
+            result = run(sys.executable, str(project / ".workflow/tools/validate-structure.py"), str(project))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("baseline/current/domain/aggregates.md", result.stdout)
+
     def test_analyst_workspace_resolves_and_guards_code_repository(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
