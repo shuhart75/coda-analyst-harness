@@ -4,20 +4,22 @@ This policy governs read-only use of a locally cloned code repository by analyst
 
 ## Repository layout
 
-The `coda-analyst-harness` clone is the workspace root and contains three independent product repositories:
+The `coda-analyst-harness` clone is the workspace root and contains three independent product repositories, only two of which have working trees:
 
 ```text
 <workspace>/
 ├── AGENTS.md
 ├── coda-analyst.code-workspace
 ├── documents/
-├── changeswork-copy/
+├── .workspace-state/
+│   └── repositories/
+│       └── changeswork-copy.git/  # hidden bare mirror, no worktree
 └── coda/
     ├── backend/
     └── frontend/
 ```
 
-`documents` remains the requirements and planning repository. `coda` remains an independent code repository. `changeswork-copy` participates only in the exchange process defined by `core/repository-exchange.md`. Do not create submodules or symlinks between these repositories.
+`documents` remains the requirements and planning repository. `coda` remains an independent code repository. The hidden bare mirror `changeswork-copy` participates only in the exchange process defined by `core/repository-exchange.md`; it is not a code-inspection target and must not be accessed directly. Do not create submodules or symlinks between these repositories.
 
 The common workspace gives the LLM filesystem access to the registered repositories. It does not authorize whole-repository reading and does not place all code into model context.
 

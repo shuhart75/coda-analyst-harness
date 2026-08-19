@@ -5,19 +5,21 @@ This repository defines a reusable workflow harness.
 ## First launch and workspace ownership
 
 - The repository root is the workspace root.
-- If `.workspace-state/workspace.json`, `coda-analyst.code-workspace`, or any of `documents/`, `coda/`, and `changeswork-copy/` is absent, run `python3 scripts/workspace.py bootstrap` before the user's substantive request. Do not ask for repository URLs; the product URLs are fixed by this harness.
+- If `.workspace-state/workspace.json`, `.workspace-state/repositories/changeswork-copy.git`, `coda-analyst.code-workspace`, `documents/`, or `coda/` is absent, run `python3 scripts/workspace.py bootstrap` before the user's substantive request. Do not ask for repository URLs; the product URLs are fixed by this harness.
 - Work on requirements, plans and factual progress only in `documents/`. The harness contract stays in this root; `documents/` must not contain an embedded `.workflow`, `AGENTS.md`, or `.vscode` harness copy.
 - Treat `coda/` as read-only during analytical work. It is available only for bounded implementation research.
-- Treat `changeswork-copy/` as pull-only. Never commit or push there during normal analyst work. Transfer differences back only through a verified reverse patch in `reverse-diffs/`.
+- `changeswork-copy` exists only as the bare mirror `.workspace-state/repositories/changeswork-copy.git`. It has no working tree and must never be opened, edited, checked out, committed to, used as a command working directory, or added to the editor workspace. Only `scripts/workspace.py` and `scripts/repository-exchange.py` may access it.
+- A legacy root `changeswork-copy/`, when found by `bootstrap`, is retired under `.workspace-state/retired-repositories/` and is never an exchange input. Never restore, inspect, edit or use a retired checkout unless the user explicitly requests recovery of its files.
 - Only `documents/` may be pushed by this harness.
 
 ## Repository exchange commands
 
-- `синкани репы`, `синхронизируй репозитории`, `обнови documents из changeswork-copy`: run `python3 scripts/repository-exchange.py sync`. This explicitly authorizes updating both local clones, merging `changeswork-copy/main` into `documents/main`, generating a verified reverse patch, and pushing only `documents/main`.
+- `синкани репы`, `синхронизируй репозитории`, `обнови documents из changeswork-copy`: run `python3 scripts/repository-exchange.py sync`. This explicitly authorizes fetching the hidden source mirror, updating `documents/main`, merging `changeswork-copy/main`, generating a verified reverse patch, and pushing only `documents/main`.
 - `синкани без отправки`, `обнови локально без push`: run `python3 scripts/repository-exchange.py sync --no-push`.
 - `сделай обратный дифф`, `собери обратную заплату`, `подготовь изменения для changeswork-copy`: run `python3 scripts/repository-exchange.py reverse-diff`. Do not apply or push the patch unless the user separately asks.
 - `обнови код`, `обнови coda`: run `python3 scripts/workspace.py update-code`. This is a separate read-only fast-forward update and is not part of repository exchange.
 - Never hide a failed fetch, merge, patch verification, or push. A merge conflict stops the operation and is aborted; no file-copy fallback is permitted.
+- Any tracked path outside Unicode NFC blocks synchronization before it reaches `documents`.
 
 ## Always read first
 

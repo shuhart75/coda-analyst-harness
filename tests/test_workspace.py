@@ -73,7 +73,6 @@ class CodaWorkspaceTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.configure_identity(workspace / "documents")
-        self.configure_identity(workspace / "changeswork-copy")
         return workspace, source_work, documents_remote, environment
 
     def test_bootstrap_and_exchange_create_verified_reverse_patch(self) -> None:
@@ -82,9 +81,22 @@ class CodaWorkspaceTests(unittest.TestCase):
             workspace, source_work, documents_remote, environment = self.prepare_workspace(root)
             state = json.loads((workspace / ".workspace-state/workspace.json").read_text(encoding="utf-8"))
             self.assertEqual(set(state["repositories"]), {"documents", "coda", "changeswork-copy"})
+            self.assertEqual(state["schema_version"], 2)
+            self.assertEqual(state["repositories"]["changeswork-copy"]["storage"], "bare-mirror")
             self.assertTrue((workspace / "coda-analyst.code-workspace").is_file())
-            for name in ("coda", "changeswork-copy"):
-                push_url = run("git", "-C", str(workspace / name), "remote", "get-url", "--push", "origin")
+            workspace_config = json.loads(
+                (workspace / "coda-analyst.code-workspace").read_text(encoding="utf-8")
+            )
+            self.assertNotIn(
+                "changeswork-copy",
+                {folder["path"] for folder in workspace_config["folders"]},
+            )
+            self.assertFalse((workspace / "changeswork-copy").exists())
+            source_mirror = workspace / ".workspace-state/repositories/changeswork-copy.git"
+            bare = run("git", "-C", str(source_mirror), "rev-parse", "--is-bare-repository")
+            self.assertEqual(bare.stdout.strip(), "true")
+            for repository in (workspace / "coda", source_mirror):
+                push_url = run("git", "-C", str(repository), "remote", "get-url", "--push", "origin")
                 self.assertEqual(push_url.stdout.strip(), "DISABLED_BY_CODA_ANALYST_HARNESS")
 
             documents = workspace / "documents"
@@ -114,15 +126,32 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertTrue(patch.is_file())
             self.assertTrue(metadata["verified"])
             self.assertFalse(metadata["repositories_identical"])
-            check = run("git", "-C", str(workspace / "changeswork-copy"), "apply", "--check", str(patch))
-            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
             applied = root / "applied-source"
-            self.assertEqual(run("git", "clone", str(workspace / "changeswork-copy"), str(applied)).returncode, 0)
+            self.assertEqual(run("git", "clone", str(source_mirror), str(applied)).returncode, 0)
+            check = run("git", "-C", str(applied), "apply", "--check", str(patch))
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
             self.assertEqual(run("git", "-C", str(applied), "apply", str(patch)).returncode, 0)
             self.assertEqual(run("git", "-C", str(applied), "add", ".").returncode, 0)
             applied_tree = run("git", "-C", str(applied), "write-tree").stdout.strip()
             documents_tree = run("git", "-C", str(documents), "rev-parse", "HEAD^{tree}").stdout.strip()
             self.assertEqual(applied_tree, documents_tree)
+
+            status = run(
+                sys.executable,
+                str(ROOT / "scripts/repository-exchange.py"),
+                "--root",
+                str(workspace),
+                "status",
+                env=environment,
+            )
+            self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+            status_payload = json.loads(status.stdout)
+            source_status = next(
+                item for item in status_payload["repositories"]
+                if item["id"] == "changeswork-copy"
+            )
+            self.assertEqual(source_status["storage"], "bare-mirror")
+            self.assertIsNone(source_status["worktree"])
 
             remote_check = root / "documents-remote-check"
             self.assertEqual(run("git", "clone", str(documents_remote), str(remote_check)).returncode, 0)
@@ -171,6 +200,107 @@ class CodaWorkspaceTests(unittest.TestCase):
             status = run("git", "-C", str(documents), "status", "--porcelain=v1")
             self.assertEqual(status.stdout, "")
             self.assertFalse((documents / ".git/MERGE_HEAD").exists())
+
+    def test_bootstrap_retires_dirty_legacy_source_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_work, source_remote = self.create_seed(
+                root,
+                "changeswork-copy",
+                {"README.md": "# Source\n", "shared.txt": "base\n"},
+            )
+            documents_remote = root / "documents.git"
+            self.assertEqual(run("git", "clone", "--bare", str(source_remote), str(documents_remote)).returncode, 0)
+            _, coda_remote = self.create_seed(root, "coda", {"backend/app.py": "VALUE = 1\n"})
+            workspace = root / "workspace"
+            workspace.mkdir()
+            legacy = workspace / "changeswork-copy"
+            self.assertEqual(run("git", "clone", str(source_remote), str(legacy)).returncode, 0)
+            (legacy / "accidental.txt").write_text("must be preserved\n", encoding="utf-8")
+            environment = {
+                **os.environ,
+                "CODA_ANALYST_DOCUMENTS_URL": str(documents_remote),
+                "CODA_ANALYST_CODA_URL": str(coda_remote),
+                "CODA_ANALYST_SOURCE_URL": str(source_remote),
+            }
+
+            result = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "bootstrap",
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(legacy.exists())
+            state = json.loads((workspace / ".workspace-state/workspace.json").read_text(encoding="utf-8"))
+            retired = Path(state["retired_legacy_source"])
+            self.assertTrue((retired / "accidental.txt").is_file())
+            self.assertTrue((workspace / ".workspace-state/repositories/changeswork-copy.git").is_dir())
+
+            sync = run(
+                sys.executable,
+                str(ROOT / "scripts/repository-exchange.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
+
+    def test_exchange_rejects_non_nfc_source_path_without_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, source_work, _, environment = self.prepare_workspace(root)
+            decomposed = "Маршруты_согласовании\u0306.md"
+            (source_work / decomposed).write_text("source\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(source_work), "add", ".").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "non nfc").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
+
+            result = run(
+                sys.executable,
+                str(ROOT / "scripts/repository-exchange.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Unicode NFC", result.stdout)
+            self.assertNotIn(decomposed, run("git", "-C", str(workspace / "documents"), "ls-files").stdout)
+
+    def test_exchange_rejects_source_mirror_with_push_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, _, environment = self.prepare_workspace(root)
+            source_mirror = workspace / ".workspace-state/repositories/changeswork-copy.git"
+            self.assertEqual(
+                run(
+                    "git",
+                    "-C",
+                    str(source_mirror),
+                    "config",
+                    "--unset-all",
+                    "remote.origin.pushurl",
+                ).returncode,
+                0,
+            )
+
+            result = run(
+                sys.executable,
+                str(ROOT / "scripts/repository-exchange.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("запрет отправки", result.stdout)
 
 
 if __name__ == "__main__":

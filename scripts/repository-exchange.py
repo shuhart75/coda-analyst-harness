@@ -7,8 +7,11 @@ import json
 import os
 import subprocess
 import tempfile
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
+
+from workspace_paths import source_mirror_path
 
 
 SOURCE_REMOTE = "changeswork-copy-local"
@@ -32,10 +35,22 @@ def git(repository: Path, *args: str, env: dict | None = None) -> subprocess.Com
     return run("git", "-C", str(repository), *args, env=env)
 
 
-def require_repository(path: Path, name: str) -> None:
+def require_worktree_repository(path: Path, name: str) -> None:
     result = git(path, "rev-parse", "--show-toplevel")
     if result.returncode != 0 or Path(result.stdout.strip()).resolve() != path:
         raise ValueError(f"{name} не развёрнут как отдельный Git-репозиторий: {path}")
+
+
+def require_source_mirror(path: Path) -> None:
+    result = git(path, "rev-parse", "--is-bare-repository")
+    if result.returncode != 0 or result.stdout.strip() != "true":
+        raise ValueError(f"changeswork-copy не развёрнут как служебное bare-зеркало: {path}")
+    branch = git(path, "symbolic-ref", "--quiet", "HEAD")
+    if branch.returncode != 0 or branch.stdout.strip() != f"refs/heads/{BRANCH}":
+        raise ValueError("changeswork-copy: bare-зеркало должно указывать HEAD на main")
+    push_url = git(path, "remote", "get-url", "--push", "origin")
+    if push_url.returncode != 0 or push_url.stdout.strip() != "DISABLED_BY_CODA_ANALYST_HARNESS":
+        raise ValueError("changeswork-copy: запрет отправки в origin снят или повреждён")
 
 
 def require_clean(path: Path, name: str) -> None:
@@ -53,6 +68,27 @@ def require_branch(path: Path, name: str) -> None:
         raise ValueError(f"{name}: ожидалась ветка {BRANCH}, найдена {current}")
 
 
+def tracked_paths(repository: Path, commit: str) -> list[str]:
+    result = git(repository, "ls-tree", "-rz", "--name-only", commit)
+    if result.returncode != 0:
+        raise ValueError(f"Не удалось прочитать имена файлов {commit}: {result.stderr.strip()}")
+    return [item for item in result.stdout.split("\0") if item]
+
+
+def require_nfc_paths(repository: Path, commit: str, name: str) -> None:
+    invalid = [
+        path for path in tracked_paths(repository, commit)
+        if path != unicodedata.normalize("NFC", path)
+    ]
+    if invalid:
+        details = ", ".join(repr(path) for path in invalid[:5])
+        suffix = "" if len(invalid) <= 5 else f" и ещё {len(invalid) - 5}"
+        raise ValueError(
+            f"{name} содержит имена файлов не в Unicode NFC: {details}{suffix}. "
+            "Исправь имена в upstream до синхронизации"
+        )
+
+
 def embedded_harness_paths(path: Path) -> list[str]:
     return [item for item in FORBIDDEN_CONTENT_PATHS if (path / item).exists()]
 
@@ -63,6 +99,13 @@ def require_content_only(path: Path, name: str) -> None:
         raise ValueError(f"{name} содержит встроенную обвязку: {', '.join(embedded)}")
 
 
+def require_source_content_only(source: Path, commit: str) -> None:
+    roots = {path.split("/", 1)[0] for path in tracked_paths(source, commit)}
+    embedded = [item for item in FORBIDDEN_CONTENT_PATHS if item in roots]
+    if embedded:
+        raise ValueError(f"changeswork-copy содержит встроенную обвязку: {', '.join(embedded)}")
+
+
 def update_ff(path: Path, name: str) -> None:
     fetched = git(path, "fetch", "origin", BRANCH)
     if fetched.returncode != 0:
@@ -70,6 +113,18 @@ def update_ff(path: Path, name: str) -> None:
     merged = git(path, "merge", "--ff-only", f"origin/{BRANCH}")
     if merged.returncode != 0:
         raise ValueError(f"{name}: локальную ветку нельзя обновить fast-forward: {merged.stderr.strip()}")
+
+
+def update_source_mirror(path: Path) -> None:
+    fetched = git(
+        path,
+        "fetch",
+        "--prune",
+        "origin",
+        f"+refs/heads/{BRANCH}:refs/heads/{BRANCH}",
+    )
+    if fetched.returncode != 0:
+        raise ValueError(f"changeswork-copy: fetch завершился ошибкой: {fetched.stderr.strip()}")
 
 
 def configure_source_remote(documents: Path, source: Path) -> None:
@@ -103,7 +158,7 @@ def merge_source(documents: Path) -> None:
 
 def verified_reverse_patch(root: Path, source: Path, documents: Path) -> dict:
     configure_source_remote(documents, source)
-    source_commit = git(source, "rev-parse", "HEAD").stdout.strip()
+    source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
     documents_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
     source_tree = git(source, "rev-parse", f"{source_commit}^{{tree}}").stdout.strip()
     documents_tree = git(documents, "rev-parse", f"{documents_commit}^{{tree}}").stdout.strip()
@@ -124,9 +179,6 @@ def verified_reverse_patch(root: Path, source: Path, documents: Path) -> dict:
     else:
         patch_path.write_text(diff.stdout, encoding="utf-8")
         latest.write_text(diff.stdout, encoding="utf-8")
-        checked = git(source, "apply", "--check", str(patch_path))
-        if checked.returncode != 0:
-            raise ValueError(f"Обратная заплата не применима к текущему changeswork-copy: {checked.stderr.strip()}")
         descriptor, raw_index_path = tempfile.mkstemp(prefix="coda-analyst-index-")
         os.close(descriptor)
         index_path = Path(raw_index_path)
@@ -134,9 +186,20 @@ def verified_reverse_patch(root: Path, source: Path, documents: Path) -> dict:
         try:
             environment = {**os.environ, "GIT_INDEX_FILE": str(index_path)}
             read_tree = git(source, "read-tree", source_commit, env=environment)
+            if read_tree.returncode != 0:
+                raise ValueError(
+                    f"Не удалось подготовить временный индекс changeswork-copy: "
+                    f"{read_tree.stderr.strip()}"
+                )
+            checked = git(source, "apply", "--cached", "--check", str(patch_path), env=environment)
+            if checked.returncode != 0:
+                raise ValueError(
+                    f"Обратная заплата не применима к текущему changeswork-copy: "
+                    f"{checked.stderr.strip()}"
+                )
             applied = git(source, "apply", "--cached", str(patch_path), env=environment)
             written = git(source, "write-tree", env=environment)
-            if read_tree.returncode or applied.returncode or written.returncode or written.stdout.strip() != documents_tree:
+            if applied.returncode or written.returncode or written.stdout.strip() != documents_tree:
                 raise ValueError("Проверка обратной заплаты не воспроизвела дерево documents")
         finally:
             index_path.unlink(missing_ok=True)
@@ -168,10 +231,10 @@ def push_documents(documents: Path) -> None:
 
 
 def repositories(root: Path) -> tuple[Path, Path]:
-    source = root / "changeswork-copy"
+    source = source_mirror_path(root)
     documents = root / "documents"
-    require_repository(source, "changeswork-copy")
-    require_repository(documents, "documents")
+    require_source_mirror(source)
+    require_worktree_repository(documents, "documents")
     return source, documents
 
 
@@ -192,12 +255,15 @@ def sync_command(args: argparse.Namespace) -> int:
     handle = lock(root)
     try:
         source, documents = repositories(root)
-        for path, name in ((source, "changeswork-copy"), (documents, "documents")):
-            require_clean(path, name)
-            require_branch(path, name)
-        update_ff(source, "changeswork-copy")
+        require_clean(documents, "documents")
+        require_branch(documents, "documents")
+        update_source_mirror(source)
         update_ff(documents, "documents")
-        require_content_only(source, "changeswork-copy")
+        source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
+        require_nfc_paths(source, source_commit, "changeswork-copy")
+        require_source_content_only(source, source_commit)
+        documents_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
+        require_nfc_paths(documents, documents_commit, "documents")
         configure_source_remote(documents, source)
         merge_source(documents)
         require_content_only(documents, "documents")
@@ -219,10 +285,14 @@ def reverse_diff_command(args: argparse.Namespace) -> int:
     handle = lock(root)
     try:
         source, documents = repositories(root)
-        for path, name in ((source, "changeswork-copy"), (documents, "documents")):
-            require_clean(path, name)
-            require_branch(path, name)
-            require_content_only(path, name)
+        require_clean(documents, "documents")
+        require_branch(documents, "documents")
+        require_content_only(documents, "documents")
+        source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
+        documents_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
+        require_nfc_paths(source, source_commit, "changeswork-copy")
+        require_nfc_paths(documents, documents_commit, "documents")
+        require_source_content_only(source, source_commit)
         metadata = verified_reverse_patch(root, source, documents)
         print(json.dumps({"status": "created", "reverse_diff": metadata}, ensure_ascii=False, indent=2))
         return 0
@@ -235,20 +305,34 @@ def status_command(args: argparse.Namespace) -> int:
     source, documents = repositories(root)
     report = []
     trees: dict[str, str] = {}
-    for path, name in ((source, "changeswork-copy"), (documents, "documents")):
-        branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
-        head = git(path, "rev-parse", "HEAD")
-        dirty = git(path, "status", "--porcelain=v1")
-        tree = git(path, "rev-parse", "HEAD^{tree}").stdout.strip()
-        trees[name] = tree
-        report.append({
-            "id": name,
-            "branch": branch.stdout.strip() if branch.returncode == 0 else None,
-            "commit": head.stdout.strip(),
-            "worktree": "clean" if not dirty.stdout else "dirty",
-            "tree": tree,
-            "embedded_harness_paths": embedded_harness_paths(path),
-        })
+    source_head = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
+    source_tree = git(source, "rev-parse", f"{source_head}^{{tree}}").stdout.strip()
+    source_roots = {path.split("/", 1)[0] for path in tracked_paths(source, source_head)}
+    source_embedded = [item for item in FORBIDDEN_CONTENT_PATHS if item in source_roots]
+    trees["changeswork-copy"] = source_tree
+    report.append({
+        "id": "changeswork-copy",
+        "branch": BRANCH,
+        "commit": source_head,
+        "storage": "bare-mirror",
+        "worktree": None,
+        "tree": source_tree,
+        "embedded_harness_paths": source_embedded,
+    })
+    branch = git(documents, "symbolic-ref", "--quiet", "--short", "HEAD")
+    head = git(documents, "rev-parse", "HEAD")
+    dirty = git(documents, "status", "--porcelain=v1")
+    tree = git(documents, "rev-parse", "HEAD^{tree}").stdout.strip()
+    trees["documents"] = tree
+    report.append({
+        "id": "documents",
+        "branch": branch.stdout.strip() if branch.returncode == 0 else None,
+        "commit": head.stdout.strip(),
+        "storage": "worktree",
+        "worktree": "clean" if not dirty.stdout else "dirty",
+        "tree": tree,
+        "embedded_harness_paths": embedded_harness_paths(documents),
+    })
     identical = trees.get("changeswork-copy") == trees.get("documents")
     clean_content = not any(item["embedded_harness_paths"] for item in report)
     print(json.dumps({"status": "ok" if clean_content else "invalid", "repositories_identical": identical, "repositories": report}, ensure_ascii=False, indent=2))

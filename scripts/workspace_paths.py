@@ -25,6 +25,16 @@ def runs_path() -> Path:
     return state_root() / "runs"
 
 
+def source_mirror_path(root: Path | None = None) -> Path:
+    workspace = root.resolve() if root else harness_root()
+    return workspace / ".workspace-state" / "repositories" / "changeswork-copy.git"
+
+
+def retired_repositories_path(root: Path | None = None) -> Path:
+    workspace = root.resolve() if root else harness_root()
+    return workspace / ".workspace-state" / "retired-repositories"
+
+
 def code_registry_path() -> Path:
     return harness_root() / "templates/workflow/code-repos.template.json"
 
