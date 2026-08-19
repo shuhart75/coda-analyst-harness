@@ -2,6 +2,8 @@
 from pathlib import Path
 import sys
 
+from workspace_entrypoint import embedded_harness_paths
+
 
 REQUIRED = [
     "README.md",
@@ -25,17 +27,10 @@ REQUIRED = [
     "features",
     "releases",
 ]
-FORBIDDEN = [
-    ".workflow",
-    ".vscode",
-    "AGENTS.md",
-]
-
-
 def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     missing = [path for path in REQUIRED if not (root / path).exists()]
-    embedded = [path for path in FORBIDDEN if (root / path).exists()]
+    embedded = embedded_harness_paths(root)
     if missing:
         print("Missing required content paths:")
         for item in missing:

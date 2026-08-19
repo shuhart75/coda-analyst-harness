@@ -80,7 +80,7 @@ Analyst-side actual execution tracking artifact with fields such as:
 - kind: `real` or `virtual`
 - role: `AN`, `BE`, `FE`, or `QA`
 - estimate
-- executor/resource lane from `documents/planning/team.md`: canonical `A<N>`, `B<N>`, `F<N>`, `Q<N>`, or `TBD_A` / `TBD_B` / `TBD_F` / `TBD_Q`
+- executor/resource lane from `PROJECT_ROOT/planning/team.md`: canonical `A<N>`, `B<N>`, `F<N>`, `Q<N>`, or `TBD_A` / `TBD_B` / `TBD_F` / `TBD_Q`
 - planned dates
 - actual dates
 - status
@@ -88,7 +88,7 @@ Analyst-side actual execution tracking artifact with fields such as:
 - related/replaced planning stories
 - optional description
 
-Not-started implementation tasks have `Progress % = 0` and no actual dates. In generated actual-progress gantt views, not-started tasks are rendered no earlier than the current date marker, frontend tasks are delayed until backend/API work in the same feature has had a 3-open-day lead, and resources are capacity-scheduled from `documents/planning/team.md` at no more than 100% per open workday.
+Not-started implementation tasks have `Progress % = 0` and no actual dates. In generated actual-progress gantt views, not-started tasks are rendered no earlier than the current date marker, frontend tasks are delayed until backend/API work in the same feature has had a 3-open-day lead, and resources are capacity-scheduled from `PROJECT_ROOT/planning/team.md` at no more than 100% per open workday.
 
 ## Domain impact note
 

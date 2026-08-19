@@ -60,7 +60,7 @@ def resolve_repository(project: Path, entry: dict) -> Path:
     if value:
         root = Path(value).expanduser()
     else:
-        relative = location.get("relative_to_documents")
+        relative = location.get("relative_to_analytical")
         if not isinstance(relative, str) or not relative:
             raise ValueError(f"Для {entry.get('id')} не задан относительный путь")
         root = project / relative
@@ -82,18 +82,18 @@ def contour_root(repository: Path, entry: dict, contour: str | None) -> Path:
     return root
 
 
-def documents_identity(project: Path, registry: dict) -> dict:
-    entry = registry.get("workspace", {}).get("documents_repository", {})
+def analytical_identity(project: Path, registry: dict) -> dict:
+    entry = registry.get("workspace", {}).get("analytical_repository", {})
     top = run_git(project, "rev-parse", "--show-toplevel")
     if top.returncode != 0 or Path(top.stdout.strip()).resolve() != project:
-        raise ValueError(f"documents не является корнем Git-репозитория: {project}")
+        raise ValueError(f"аналитический проект не является корнем Git-репозитория: {project}")
     head = run_git(project, "rev-parse", "HEAD")
     branch = run_git(project, "symbolic-ref", "--quiet", "--short", "HEAD")
     remotes = run_git(project, "remote", "get-url", "--all", "origin")
     remote_urls = [line.strip() for line in remotes.stdout.splitlines() if line.strip()]
     accepted = entry.get("accepted_remote_urls", [])
     return {
-        "repository": entry.get("id", "documents"),
+        "repository": entry.get("id", "analytics"),
         "root": str(project),
         "head": head.stdout.strip() if head.returncode == 0 else None,
         "branch": branch.stdout.strip() if branch.returncode == 0 else None,
@@ -180,11 +180,11 @@ def doctor_command(args: argparse.Namespace) -> int:
     warnings: list[str] = []
     reports: list[dict] = []
     try:
-        documents = documents_identity(project, registry)
-        if not documents["origin_matches_registry"]:
-            errors.append("documents: origin не совпадает с реестром")
+        analytical = analytical_identity(project, registry)
+        if not analytical["origin_matches_registry"]:
+            errors.append("аналитический проект: origin не совпадает с реестром")
     except ValueError as exc:
-        documents = None
+        analytical = None
         errors.append(str(exc))
     for entry in registry["repositories"]:
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
@@ -212,7 +212,7 @@ def doctor_command(args: argparse.Namespace) -> int:
             errors.append(str(exc))
     print_json({
         "status": "error" if errors else "ok",
-        "documents": documents,
+        "analytical": analytical,
         "repositories": reports,
         "warnings": warnings,
         "errors": errors,
@@ -231,7 +231,7 @@ def begin_command(args: argparse.Namespace) -> int:
     if not snapshot["branch_matches"]:
         raise ValueError(f"Ожидалась ветка {snapshot['expected_branch']}, найдена {snapshot['branch']}")
     if snapshot["worktree_state"] != "clean" and not args.allow_dirty:
-        raise ValueError("Рабочее дерево coda изменено; для исследования нужен чистый клон")
+        raise ValueError("Рабочее дерево роли code изменено; для исследования нужен чистый клон")
     state_dir = inspection_state_dir(project)
     state_dir.mkdir(parents=True, exist_ok=True)
     name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{entry['id']}-{args.contour or 'root'}-{uuid.uuid4().hex[:8]}.json"
@@ -240,7 +240,7 @@ def begin_command(args: argparse.Namespace) -> int:
         "schema_version": 1,
         "kind": "code-inspection",
         "started_at": utc_now(),
-        "documents_root": str(project),
+        "analytical_root": str(project),
         "feature": args.feature,
         "query": args.query,
         "initial": snapshot,
@@ -254,7 +254,7 @@ def begin_command(args: argparse.Namespace) -> int:
 def verify_command(args: argparse.Namespace) -> int:
     state_path = Path(args.state).resolve()
     payload = json.loads(state_path.read_text(encoding="utf-8"))
-    project = Path(payload["documents_root"]).resolve()
+    project = Path(payload["analytical_root"]).resolve()
     initial = payload["initial"]
     registry = load_registry(project)
     entry = repository_entry(registry, initial["repository"])
@@ -335,13 +335,13 @@ def parser() -> argparse.ArgumentParser:
 
     status = commands.add_parser("status")
     status.add_argument("project")
-    status.add_argument("--repository", default="coda")
+    status.add_argument("--repository", default="code")
     status.add_argument("--contour", choices=("backend", "frontend"))
     status.set_defaults(handler=status_command)
 
     begin = commands.add_parser("begin")
     begin.add_argument("project")
-    begin.add_argument("--repository", default="coda")
+    begin.add_argument("--repository", default="code")
     begin.add_argument("--contour", choices=("backend", "frontend"))
     begin.add_argument("--feature")
     begin.add_argument("--query")
@@ -355,7 +355,7 @@ def parser() -> argparse.ArgumentParser:
     locate = commands.add_parser("locate")
     locate.add_argument("project")
     locate.add_argument("query")
-    locate.add_argument("--repository", default="coda")
+    locate.add_argument("--repository", default="code")
     locate.add_argument("--contour", required=True, choices=("backend", "frontend"))
     locate.add_argument("--regex", action="store_true")
     locate.add_argument("--max-results", type=int, default=50)
@@ -363,7 +363,7 @@ def parser() -> argparse.ArgumentParser:
 
     setup = commands.add_parser("setup")
     setup.add_argument("project")
-    setup.add_argument("--repository", default="coda")
+    setup.add_argument("--repository", default="code")
     setup.add_argument("--force", action="store_true")
     setup.set_defaults(handler=setup_command)
     return result

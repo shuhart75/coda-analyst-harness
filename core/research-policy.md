@@ -92,7 +92,7 @@ After research:
 2. Build `summary.md` with facts, inferences, assumptions and open questions.
 3. Deduplicate by stable keys: endpoint, field, role, status, screen, integration, config parameter, metric.
 4. Transfer accepted findings into source-of-truth files.
-5. Record unresolved propagation in `documents/planning/consistency-backlog.md`.
+5. Record unresolved propagation in `PROJECT_ROOT/planning/consistency-backlog.md`.
 
 ## Guardrails
 

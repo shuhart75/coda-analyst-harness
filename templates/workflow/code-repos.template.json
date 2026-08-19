@@ -2,8 +2,9 @@
   "schema_version": 2,
   "workspace": {
     "layout": "sibling-clones",
-    "documents_repository": {
-      "id": "documents",
+    "analytical_repository": {
+      "id": "analytics",
+      "repository_id": "documents",
       "accepted_remote_urls": [
         "ssh://git@stash.delta.sbrf.ru:7999/rscon/documents.git",
         "https://stash.delta.sbrf.ru/scm/rscon/documents.git"
@@ -12,12 +13,13 @@
   },
   "repositories": [
     {
-      "id": "coda",
+      "id": "code",
+      "repository_id": "coda",
       "purpose": "Исходный код АС КОДА",
       "access": "read-only",
       "location": {
         "environment": "CODA_REPO",
-        "relative_to_documents": "../coda"
+        "relative_to_analytical": "../coda"
       },
       "accepted_remote_urls": [
         "ssh://git@stash.delta.sbrf.ru:7999/rscon/coda.git",

@@ -11,10 +11,13 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-from workspace_paths import source_mirror_path
+from workspace_entrypoint import (
+    embedded_harness_paths as local_embedded_harness_paths,
+    write_local_entrypoint,
+)
 
 
-SOURCE_REMOTE = "changeswork-copy-local"
+SOURCE_REMOTE = "analyst-source-local"
 BRANCH = "main"
 FORBIDDEN_CONTENT_PATHS = (".workflow", ".vscode", "AGENTS.md")
 
@@ -41,16 +44,16 @@ def require_worktree_repository(path: Path, name: str) -> None:
         raise ValueError(f"{name} не развёрнут как отдельный Git-репозиторий: {path}")
 
 
-def require_source_mirror(path: Path) -> None:
+def require_source_mirror(path: Path, repository_id: str) -> None:
     result = git(path, "rev-parse", "--is-bare-repository")
     if result.returncode != 0 or result.stdout.strip() != "true":
-        raise ValueError(f"changeswork-copy не развёрнут как служебное bare-зеркало: {path}")
+        raise ValueError(f"Репозиторий роли source ({repository_id}) не развёрнут как bare-зеркало: {path}")
     branch = git(path, "symbolic-ref", "--quiet", "HEAD")
     if branch.returncode != 0 or branch.stdout.strip() != f"refs/heads/{BRANCH}":
-        raise ValueError("changeswork-copy: bare-зеркало должно указывать HEAD на main")
+        raise ValueError(f"{repository_id}: bare-зеркало роли source должно указывать HEAD на main")
     push_url = git(path, "remote", "get-url", "--push", "origin")
     if push_url.returncode != 0 or push_url.stdout.strip() != "DISABLED_BY_CODA_ANALYST_HARNESS":
-        raise ValueError("changeswork-copy: запрет отправки в origin снят или повреждён")
+        raise ValueError(f"{repository_id}: запрет отправки роли source снят или повреждён")
 
 
 def require_clean(path: Path, name: str) -> None:
@@ -59,6 +62,77 @@ def require_clean(path: Path, name: str) -> None:
         raise ValueError(f"Не удалось проверить {name}: {result.stderr.strip()}")
     if result.stdout:
         raise ValueError(f"{name} содержит незакоммиченные изменения; сначала зафиксируй или убери их")
+
+
+def porcelain_entries(path: Path) -> list[tuple[str, str]]:
+    result = subprocess.run(
+        ("git", "-C", str(path), "status", "--porcelain=v1", "-z"),
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"Не удалось проверить рабочее дерево: {result.stderr.decode(errors='replace').strip()}")
+    entries = []
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        entries.append((raw[:2].decode("ascii", errors="replace"), raw[3:].decode("utf-8", errors="surrogateescape")))
+    return entries
+
+
+def filesystem_alias(repository: Path, tracked_path: str) -> Path | None:
+    expected = repository / tracked_path
+    parent = expected.parent
+    if not parent.is_dir():
+        return None
+    target = unicodedata.normalize("NFD", expected.name)
+    matches = [item for item in parent.iterdir() if unicodedata.normalize("NFD", item.name) == target]
+    return matches[0] if len(matches) == 1 and matches[0].is_file() else None
+
+
+def blob_bytes(repository: Path, revision: str, path: str) -> bytes:
+    result = subprocess.run(
+        ("git", "-C", str(repository), "show", f"{revision}:{path}"),
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"Не удалось прочитать {path} из {revision}")
+    return result.stdout
+
+
+def prepare_unicode_aliases(analytics: Path, source: Path, source_commit: str) -> list[str]:
+    entries = porcelain_entries(analytics)
+    if not entries:
+        return []
+    aliases: list[str] = []
+    for status, path in entries:
+        if status != " D" or path == unicodedata.normalize("NFC", path):
+            raise ValueError(
+                "Репозиторий роли analytics содержит обычные незакоммиченные изменения; "
+                "сначала зафиксируй или убери их"
+            )
+        remains = git(source, "cat-file", "-e", f"{source_commit}:{path}")
+        alias = filesystem_alias(analytics, path)
+        if remains.returncode == 0 or alias is None or alias.read_bytes() != blob_bytes(analytics, "HEAD", path):
+            raise ValueError(
+                f"Нельзя безопасно сопоставить ошибочное Unicode-имя {path}; "
+                "синхронизация остановлена без изменения файлов"
+            )
+        aliases.append(path)
+    return aliases
+
+
+def verify_unicode_aliases(analytics: Path, paths: list[str]) -> None:
+    for path in paths:
+        tracked = git(analytics, "ls-files", "--error-unmatch", "--", path)
+        if tracked.returncode != 0:
+            continue
+        alias = filesystem_alias(analytics, path)
+        if alias is None or alias.read_bytes() != blob_bytes(analytics, "HEAD", path):
+            raise ValueError(
+                f"Содержимое файла с ошибочным Unicode-именем изменилось после обновления: {path}"
+            )
 
 
 def require_branch(path: Path, name: str) -> None:
@@ -90,7 +164,7 @@ def require_nfc_paths(repository: Path, commit: str, name: str) -> None:
 
 
 def embedded_harness_paths(path: Path) -> list[str]:
-    return [item for item in FORBIDDEN_CONTENT_PATHS if (path / item).exists()]
+    return local_embedded_harness_paths(path)
 
 
 def require_content_only(path: Path, name: str) -> None:
@@ -99,11 +173,11 @@ def require_content_only(path: Path, name: str) -> None:
         raise ValueError(f"{name} содержит встроенную обвязку: {', '.join(embedded)}")
 
 
-def require_source_content_only(source: Path, commit: str) -> None:
+def require_source_content_only(source: Path, commit: str, repository_id: str) -> None:
     roots = {path.split("/", 1)[0] for path in tracked_paths(source, commit)}
     embedded = [item for item in FORBIDDEN_CONTENT_PATHS if item in roots]
     if embedded:
-        raise ValueError(f"changeswork-copy содержит встроенную обвязку: {', '.join(embedded)}")
+        raise ValueError(f"{repository_id} в роли source содержит встроенную обвязку: {', '.join(embedded)}")
 
 
 def update_ff(path: Path, name: str) -> None:
@@ -115,7 +189,7 @@ def update_ff(path: Path, name: str) -> None:
         raise ValueError(f"{name}: локальную ветку нельзя обновить fast-forward: {merged.stderr.strip()}")
 
 
-def update_source_mirror(path: Path) -> None:
+def update_source_mirror(path: Path, repository_id: str) -> None:
     fetched = git(
         path,
         "fetch",
@@ -124,7 +198,7 @@ def update_source_mirror(path: Path) -> None:
         f"+refs/heads/{BRANCH}:refs/heads/{BRANCH}",
     )
     if fetched.returncode != 0:
-        raise ValueError(f"changeswork-copy: fetch завершился ошибкой: {fetched.stderr.strip()}")
+        raise ValueError(f"{repository_id}: fetch роли source завершился ошибкой: {fetched.stderr.strip()}")
 
 
 def configure_source_remote(documents: Path, source: Path) -> None:
@@ -137,7 +211,7 @@ def configure_source_remote(documents: Path, source: Path) -> None:
         raise ValueError(f"Не удалось настроить локальный источник: {changed.stderr.strip()}")
     fetched = git(documents, "fetch", SOURCE_REMOTE, BRANCH)
     if fetched.returncode != 0:
-        raise ValueError(f"Не удалось прочитать локальный changeswork-copy: {fetched.stderr.strip()}")
+        raise ValueError(f"Не удалось прочитать локальное зеркало роли source: {fetched.stderr.strip()}")
 
 
 def merge_source(documents: Path) -> None:
@@ -151,17 +225,23 @@ def merge_source(documents: Path) -> None:
     if merged.returncode != 0:
         git(documents, "merge", "--abort")
         raise ValueError(
-            "changeswork-copy нельзя автоматически объединить с documents; "
+            "Роль source нельзя автоматически объединить с ролью analytics; "
             "слияние отменено, требуется осознанное разрешение конфликта"
         )
 
 
-def verified_reverse_patch(root: Path, source: Path, documents: Path) -> dict:
-    configure_source_remote(documents, source)
+def verified_reverse_patch(
+    root: Path,
+    source: Path,
+    analytics: Path,
+    source_id: str,
+    analytics_id: str,
+) -> dict:
+    configure_source_remote(analytics, source)
     source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
-    documents_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
+    documents_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
     source_tree = git(source, "rev-parse", f"{source_commit}^{{tree}}").stdout.strip()
-    documents_tree = git(documents, "rev-parse", f"{documents_commit}^{{tree}}").stdout.strip()
+    documents_tree = git(analytics, "rev-parse", f"{documents_commit}^{{tree}}").stdout.strip()
     output_dir = root / "reverse-diffs"
     output_dir.mkdir(parents=True, exist_ok=True)
     latest = output_dir / "reverse-diff-latest.patch"
@@ -169,7 +249,7 @@ def verified_reverse_patch(root: Path, source: Path, documents: Path) -> dict:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     patch_path = output_dir / f"reverse-diff-{timestamp}.patch"
 
-    diff = git(documents, "diff", "--binary", "--full-index", "--no-renames", source_commit, documents_commit, "--", ".")
+    diff = git(analytics, "diff", "--binary", "--full-index", "--no-renames", source_commit, documents_commit, "--", ".")
     if diff.returncode != 0:
         raise ValueError(f"Не удалось построить обратную заплату: {diff.stderr.strip()}")
 
@@ -188,29 +268,32 @@ def verified_reverse_patch(root: Path, source: Path, documents: Path) -> dict:
             read_tree = git(source, "read-tree", source_commit, env=environment)
             if read_tree.returncode != 0:
                 raise ValueError(
-                    f"Не удалось подготовить временный индекс changeswork-copy: "
+                    f"Не удалось подготовить временный индекс роли source: "
                     f"{read_tree.stderr.strip()}"
                 )
             checked = git(source, "apply", "--cached", "--check", str(patch_path), env=environment)
             if checked.returncode != 0:
                 raise ValueError(
-                    f"Обратная заплата не применима к текущему changeswork-copy: "
+                    f"Обратная заплата не применима к текущему состоянию роли source: "
                     f"{checked.stderr.strip()}"
                 )
             applied = git(source, "apply", "--cached", str(patch_path), env=environment)
             written = git(source, "write-tree", env=environment)
             if applied.returncode or written.returncode or written.stdout.strip() != documents_tree:
-                raise ValueError("Проверка обратной заплаты не воспроизвела дерево documents")
+                raise ValueError("Проверка обратной заплаты не воспроизвела дерево роли analytics")
         finally:
             index_path.unlink(missing_ok=True)
 
     metadata = {
         "schema_version": 1,
         "created_at": utc_now(),
-        "source_repository": "changeswork-copy",
+        "source_repository": source_id,
+        "analytics_repository": analytics_id,
         "source_commit": source_commit,
+        "analytics_commit": documents_commit,
         "documents_commit": documents_commit,
         "source_tree": source_tree,
+        "analytics_tree": documents_tree,
         "documents_tree": documents_tree,
         "repositories_identical": source_tree == documents_tree,
         "patch": str(patch_path) if patch_path else None,
@@ -221,21 +304,36 @@ def verified_reverse_patch(root: Path, source: Path, documents: Path) -> dict:
     return metadata
 
 
-def push_documents(documents: Path) -> None:
-    pushed = git(documents, "push", "origin", BRANCH)
+def push_analytics(analytics: Path, analytics_id: str) -> None:
+    pushed = git(analytics, "push", "origin", BRANCH)
     if pushed.returncode != 0:
         raise ValueError(
-            "documents не удалось отправить. Автоматическое повторное слияние не выполняется; "
+            f"{analytics_id} в роли analytics не удалось отправить. "
+            "Автоматическое повторное слияние не выполняется; "
             f"повтори синхронизацию после проверки удалённой ветки: {pushed.stderr.strip()}"
         )
 
 
-def repositories(root: Path) -> tuple[Path, Path]:
-    source = source_mirror_path(root)
-    documents = root / "documents"
-    require_source_mirror(source)
-    require_worktree_repository(documents, "documents")
-    return source, documents
+def role_repositories(root: Path) -> tuple[Path, Path, str, str]:
+    state_path = root / ".workspace-state/workspace.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Не удалось прочитать роли рабочей области {state_path}: {exc}") from exc
+    roles = state.get("roles", {})
+    source_role = roles.get("source", {})
+    analytics_role = roles.get("analytics", {})
+    source_id = source_role.get("repository")
+    analytics_id = analytics_role.get("repository")
+    if not source_id:
+        raise ValueError("Роль source отключена; обмен репозиториями недоступен")
+    if not analytics_id:
+        raise ValueError("Роль analytics не настроена")
+    source = Path(source_role.get("path", "")).resolve()
+    analytics = Path(analytics_role.get("path", "")).resolve()
+    require_source_mirror(source, source_id)
+    require_worktree_repository(analytics, f"{analytics_id} (analytics)")
+    return source, analytics, source_id, analytics_id
 
 
 def lock(root: Path):
@@ -254,25 +352,33 @@ def sync_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     handle = lock(root)
     try:
-        source, documents = repositories(root)
-        require_clean(documents, "documents")
-        require_branch(documents, "documents")
-        update_source_mirror(source)
-        update_ff(documents, "documents")
+        source, documents, source_id, analytics_id = role_repositories(root)
+        update_source_mirror(source, source_id)
         source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
-        require_nfc_paths(source, source_commit, "changeswork-copy")
-        require_source_content_only(source, source_commit)
-        documents_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
-        require_nfc_paths(documents, documents_commit, "documents")
+        require_nfc_paths(source, source_commit, f"{source_id} (source)")
+        require_source_content_only(source, source_commit, source_id)
+        unicode_aliases = prepare_unicode_aliases(documents, source, source_commit)
+        if not unicode_aliases:
+            require_clean(documents, f"{analytics_id} (analytics)")
+        require_branch(documents, f"{analytics_id} (analytics)")
+        update_ff(documents, f"{analytics_id} (analytics)")
+        verify_unicode_aliases(documents, unicode_aliases)
         configure_source_remote(documents, source)
         merge_source(documents)
-        require_content_only(documents, "documents")
-        metadata = verified_reverse_patch(root, source, documents)
+        documents_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
+        require_nfc_paths(documents, documents_commit, f"{analytics_id} (analytics)")
+        require_content_only(documents, analytics_id)
+        code_role = json.loads((root / ".workspace-state/workspace.json").read_text(encoding="utf-8"))["roles"].get("code", {})
+        code_path = Path(code_role["path"]).resolve() if code_role.get("path") else None
+        entrypoint = write_local_entrypoint(documents, root, code_path)
+        require_clean(documents, f"{analytics_id} (analytics)")
+        metadata = verified_reverse_patch(root, source, documents, source_id, analytics_id)
         if not args.no_push:
-            push_documents(documents)
+            push_analytics(documents, analytics_id)
         print(json.dumps({
             "status": "synchronized",
-            "documents_pushed": not args.no_push,
+            "analytics_pushed": not args.no_push,
+            "local_entrypoint": str(entrypoint),
             "reverse_diff": metadata,
         }, ensure_ascii=False, indent=2))
         return 0
@@ -284,16 +390,16 @@ def reverse_diff_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     handle = lock(root)
     try:
-        source, documents = repositories(root)
-        require_clean(documents, "documents")
-        require_branch(documents, "documents")
-        require_content_only(documents, "documents")
+        source, documents, source_id, analytics_id = role_repositories(root)
+        require_clean(documents, f"{analytics_id} (analytics)")
+        require_branch(documents, f"{analytics_id} (analytics)")
+        require_content_only(documents, f"{analytics_id} (analytics)")
         source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
         documents_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
-        require_nfc_paths(source, source_commit, "changeswork-copy")
-        require_nfc_paths(documents, documents_commit, "documents")
-        require_source_content_only(source, source_commit)
-        metadata = verified_reverse_patch(root, source, documents)
+        require_nfc_paths(source, source_commit, f"{source_id} (source)")
+        require_nfc_paths(documents, documents_commit, f"{analytics_id} (analytics)")
+        require_source_content_only(source, source_commit, source_id)
+        metadata = verified_reverse_patch(root, source, documents, source_id, analytics_id)
         print(json.dumps({"status": "created", "reverse_diff": metadata}, ensure_ascii=False, indent=2))
         return 0
     finally:
@@ -302,16 +408,17 @@ def reverse_diff_command(args: argparse.Namespace) -> int:
 
 def status_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
-    source, documents = repositories(root)
+    source, documents, source_id, analytics_id = role_repositories(root)
     report = []
     trees: dict[str, str] = {}
     source_head = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
     source_tree = git(source, "rev-parse", f"{source_head}^{{tree}}").stdout.strip()
     source_roots = {path.split("/", 1)[0] for path in tracked_paths(source, source_head)}
     source_embedded = [item for item in FORBIDDEN_CONTENT_PATHS if item in source_roots]
-    trees["changeswork-copy"] = source_tree
+    trees["source"] = source_tree
     report.append({
-        "id": "changeswork-copy",
+        "role": "source",
+        "repository": source_id,
         "branch": BRANCH,
         "commit": source_head,
         "storage": "bare-mirror",
@@ -323,9 +430,10 @@ def status_command(args: argparse.Namespace) -> int:
     head = git(documents, "rev-parse", "HEAD")
     dirty = git(documents, "status", "--porcelain=v1")
     tree = git(documents, "rev-parse", "HEAD^{tree}").stdout.strip()
-    trees["documents"] = tree
+    trees["analytics"] = tree
     report.append({
-        "id": "documents",
+        "role": "analytics",
+        "repository": analytics_id,
         "branch": branch.stdout.strip() if branch.returncode == 0 else None,
         "commit": head.stdout.strip(),
         "storage": "worktree",
@@ -333,18 +441,18 @@ def status_command(args: argparse.Namespace) -> int:
         "tree": tree,
         "embedded_harness_paths": embedded_harness_paths(documents),
     })
-    identical = trees.get("changeswork-copy") == trees.get("documents")
+    identical = trees.get("source") == trees.get("analytics")
     clean_content = not any(item["embedded_harness_paths"] for item in report)
     print(json.dumps({"status": "ok" if clean_content else "invalid", "repositories_identical": identical, "repositories": report}, ensure_ascii=False, indent=2))
     return 0 if clean_content else 1
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Обмен изменениями между changeswork-copy и documents")
+    result = argparse.ArgumentParser(description="Обмен изменениями между ролями source и analytics")
     result.add_argument("--root", help="Корень coda-analyst-harness; обычно определяется автоматически")
     commands = result.add_subparsers(dest="command", required=True)
     sync = commands.add_parser("sync")
-    sync.add_argument("--no-push", action="store_true", help="Не отправлять итоговую ветку documents")
+    sync.add_argument("--no-push", action="store_true", help="Не отправлять итоговую ветку роли analytics")
     sync.set_defaults(handler=sync_command)
     reverse_diff = commands.add_parser("reverse-diff")
     reverse_diff.set_defaults(handler=reverse_diff_command)

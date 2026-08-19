@@ -1,31 +1,32 @@
 # Repository Exchange Policy
 
-This policy governs the one-way integration path from `changeswork-copy` to `documents` and the verified reverse patch returned to the source maintainers.
+This policy governs the one-way integration path from role `source` to role `analytics` and the verified reverse patch returned to the source maintainers.
 
 ## Repository roles
 
 | Repository | Local access | Remote access | Purpose |
 |---|---|---|---|
-| `documents` | read and write | pull and push | Normal analyst work, requirements, planning and factual progress |
-| `changeswork-copy` | no working tree; hidden bare mirror | fetch only | Upstream analytical source received from GitHub |
-| `coda` | read only | pull only | Implementation evidence for analytical work |
+| `analytics` (`documents` by default) | read and write | pull and push | Normal analyst work, requirements, planning and factual progress |
+| `source` (`changeswork-copy` by default) | no working tree; hidden bare mirror | fetch only | Upstream analytical source received from GitHub |
+| `code` (`coda` by default) | read only | pull only | Implementation evidence for analytical work |
 
-The repositories are independent under the `coda-analyst-harness` root. `documents` and `coda` are normal clones. `changeswork-copy` is stored only at `.workspace-state/repositories/changeswork-copy.git` as a bare mirror, is excluded from the editor workspace, and has no files that an LLM can edit. They are not submodules and must not be copied into one another.
+The repositories are independent under the `coda-analyst-harness` root. Roles `analytics` and `code` use normal clones. Role `source` is stored only at `.workspace-state/repositories/<repository-id>.git` as a bare mirror, is excluded from the editor workspace, and has no files that an LLM can edit. They are not submodules and must not be copied into one another. Default roles are used without questions; reassignment is allowed only by an explicit analyst command.
 
 ## Synchronization transaction
 
 The command `repository-exchange.py sync` performs one guarded transaction:
 
 1. Acquire the workspace lock so a second exchange cannot run concurrently.
-2. Require a clean `documents/main` worktree and a valid `changeswork-copy` bare mirror.
-3. Fetch `changeswork-copy/main` directly into the bare mirror and fast-forward `documents/main`.
-4. Reject any tracked path that is not normalized to Unicode NFC.
-5. Fetch the local `changeswork-copy/main` commit into `documents` through a dedicated local remote.
-6. Merge it into `documents/main` with a normal non-fast-forward Git merge when needed.
+2. Require a valid `source` bare mirror and fetch `source/main` directly into it.
+3. Require a clean `analytics/main` worktree. The only exception is a verified filesystem-normalized alias of a non-NFC tracked path that is removed by the incoming source commit and whose bytes equal the indexed blob.
+4. Fast-forward `analytics/main` from its own origin.
+5. Reject any non-NFC path remaining in `source` or in the merged `analytics` tree.
+6. Fetch the local `source/main` commit into `analytics` through a dedicated local remote and merge it normally.
 7. Abort and stop on any conflict. Never overwrite the conflict with copied files.
-8. Compare the exact Git trees of the source commit and resulting `documents` commit.
-9. Create a binary-capable reverse patch and prove in a temporary Git index that applying it to the recorded source commit reproduces the exact `documents` tree.
-10. Push only `documents/main`, unless `--no-push` was explicitly requested.
+8. Require the merged analytics tree to contain no tracked embedded harness. A clean legacy embedded harness is removed only through the incoming Git commit; it is never deleted by file-copy logic.
+9. Create a local ignored `AGENTS.md` entry point in role `analytics` and prove that the worktree remains clean.
+10. Compare the exact Git trees, create a binary-capable reverse patch, and prove in a temporary Git index that applying it to the recorded source commit reproduces the exact analytics tree.
+11. Push only `analytics/main`, unless `--no-push` was explicitly requested.
 
 A failed fetch, non-fast-forward local update, merge, verification or push leaves a visible error. The command must not suppress it or silently choose a side.
 

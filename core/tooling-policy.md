@@ -46,7 +46,7 @@ When such capabilities exist, use them as optional accelerators, not as the only
 ## Consistency records
 
 - `features/*/domain-impact.md` stores per-feature impact and affected artifact lists.
-- `documents/planning/consistency-backlog.md` stores unresolved or deferred propagation work, including prototype drift and rollback propagation.
+- `PROJECT_ROOT/planning/consistency-backlog.md` stores unresolved or deferred propagation work, including prototype drift and rollback propagation.
 - Do not hide known inconsistency in chat only; record it in one of those files.
 
 ## Context and research records

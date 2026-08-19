@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -59,6 +60,7 @@ class CodaWorkspaceTests(unittest.TestCase):
         workspace.mkdir()
         environment = {
             **os.environ,
+            "CODA_ANALYST_STATE_ROOT": str(workspace / ".workspace-state"),
             "CODA_ANALYST_DOCUMENTS_URL": str(documents_remote),
             "CODA_ANALYST_CODA_URL": str(coda_remote),
             "CODA_ANALYST_SOURCE_URL": str(source_remote),
@@ -81,7 +83,11 @@ class CodaWorkspaceTests(unittest.TestCase):
             workspace, source_work, documents_remote, environment = self.prepare_workspace(root)
             state = json.loads((workspace / ".workspace-state/workspace.json").read_text(encoding="utf-8"))
             self.assertEqual(set(state["repositories"]), {"documents", "coda", "changeswork-copy"})
-            self.assertEqual(state["schema_version"], 2)
+            self.assertEqual(state["schema_version"], 3)
+            self.assertEqual(
+                {role: item["repository"] for role, item in state["roles"].items()},
+                {"analytics": "documents", "code": "coda", "source": "changeswork-copy"},
+            )
             self.assertEqual(state["repositories"]["changeswork-copy"]["storage"], "bare-mirror")
             self.assertTrue((workspace / "coda-analyst.code-workspace").is_file())
             workspace_config = json.loads(
@@ -100,6 +106,29 @@ class CodaWorkspaceTests(unittest.TestCase):
                 self.assertEqual(push_url.stdout.strip(), "DISABLED_BY_CODA_ANALYST_HARNESS")
 
             documents = workspace / "documents"
+            entrypoint = documents / "AGENTS.md"
+            self.assertTrue(entrypoint.is_file())
+            self.assertIn("analyst-harness-local-entrypoint:v1", entrypoint.read_text(encoding="utf-8"))
+            self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
+            self.assertEqual(run("git", "-C", str(documents), "check-ignore", "AGENTS.md").returncode, 0)
+            project_root = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "project-root",
+                env=environment,
+            )
+            self.assertEqual(project_root.returncode, 0, project_root.stdout + project_root.stderr)
+            self.assertEqual(Path(project_root.stdout.strip()), documents)
+            doctor = run(
+                sys.executable,
+                str(ROOT / "scripts/code-inspect.py"),
+                "doctor",
+                str(documents),
+                env=environment,
+            )
+            self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
             (documents / "documents-only.txt").write_text("analyst result\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", ".").returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "documents change").returncode, 0)
@@ -148,8 +177,9 @@ class CodaWorkspaceTests(unittest.TestCase):
             status_payload = json.loads(status.stdout)
             source_status = next(
                 item for item in status_payload["repositories"]
-                if item["id"] == "changeswork-copy"
+                if item["role"] == "source"
             )
+            self.assertEqual(source_status["repository"], "changeswork-copy")
             self.assertEqual(source_status["storage"], "bare-mirror")
             self.assertIsNone(source_status["worktree"])
 
@@ -219,6 +249,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             (legacy / "accidental.txt").write_text("must be preserved\n", encoding="utf-8")
             environment = {
                 **os.environ,
+                "CODA_ANALYST_STATE_ROOT": str(workspace / ".workspace-state"),
                 "CODA_ANALYST_DOCUMENTS_URL": str(documents_remote),
                 "CODA_ANALYST_CODA_URL": str(coda_remote),
                 "CODA_ANALYST_SOURCE_URL": str(source_remote),
@@ -301,6 +332,198 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("запрет отправки", result.stdout)
+
+    def test_sync_repairs_verified_unicode_alias_left_by_filesystem_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            old_name = "context/Маршруты_согласовании\u0306.md"
+            new_name = unicodedata.normalize("NFC", old_name)
+            self.assertNotEqual(old_name, new_name)
+            source_work, source_remote = self.create_seed(
+                root,
+                "changeswork-copy",
+                {"README.md": "# Source\n", old_name: "same content\n"},
+            )
+            documents_remote = root / "documents.git"
+            self.assertEqual(run("git", "clone", "--bare", str(source_remote), str(documents_remote)).returncode, 0)
+            (source_work / old_name).rename(source_work / new_name)
+            self.assertEqual(run("git", "-C", str(source_work), "add", "-A").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "normalize path").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
+            _, coda_remote = self.create_seed(root, "coda", {"backend/app.py": "VALUE = 1\n"})
+            workspace = root / "workspace"
+            workspace.mkdir()
+            environment = {
+                **os.environ,
+                "CODA_ANALYST_STATE_ROOT": str(workspace / ".workspace-state"),
+                "CODA_ANALYST_DOCUMENTS_URL": str(documents_remote),
+                "CODA_ANALYST_CODA_URL": str(coda_remote),
+                "CODA_ANALYST_SOURCE_URL": str(source_remote),
+            }
+            bootstrap = run(
+                sys.executable, str(ROOT / "scripts/workspace.py"), "--root", str(workspace), "bootstrap", env=environment
+            )
+            self.assertEqual(bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr)
+            analytics = workspace / "documents"
+            (analytics / old_name).rename(analytics / new_name)
+            exclude = analytics / ".git/info/exclude"
+            with exclude.open("a", encoding="utf-8") as handle:
+                handle.write(f"/{new_name}\n")
+            before = run("git", "-C", str(analytics), "status", "--porcelain=v1", "-z").stdout
+            self.assertIn(f" D {old_name}", before)
+            self.assertNotIn("??", before)
+
+            sync = run(
+                sys.executable,
+                str(ROOT / "scripts/repository-exchange.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
+            tracked = run("git", "-C", str(analytics), "ls-files", "-z").stdout.split("\0")
+            self.assertIn(new_name, tracked)
+            self.assertNotIn(old_name, tracked)
+            self.assertEqual(run("git", "-C", str(analytics), "status", "--porcelain=v1").stdout, "")
+
+    def test_sync_migrates_legacy_embedded_harness_and_preserves_both_histories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_work, source_remote = self.create_seed(
+                root,
+                "changeswork-copy",
+                {
+                    "README.md": "# Source\n",
+                    "AGENTS.md": "# Старая обвязка\n",
+                    ".workflow/active-mode.md": "mode: requirements\n",
+                    ".vscode/settings.json": "{}\n",
+                    "shared.txt": "base\n",
+                },
+            )
+            documents_remote = root / "documents.git"
+            self.assertEqual(run("git", "clone", "--bare", str(source_remote), str(documents_remote)).returncode, 0)
+            documents_work = root / "documents-work"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(documents_work)).returncode, 0)
+            self.configure_identity(documents_work)
+            (documents_work / "features/registry").mkdir(parents=True)
+            (documents_work / "features/registry/requirements.md").write_text("# Новые требования\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents_work), "add", ".").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents_work), "commit", "-m", "documents requirements").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents_work), "push", "origin", "main").returncode, 0)
+
+            for relative in ("AGENTS.md", ".workflow/active-mode.md", ".vscode/settings.json"):
+                (source_work / relative).unlink()
+            (source_work / ".workflow").rmdir()
+            (source_work / ".vscode").rmdir()
+            (source_work / "planning").mkdir()
+            (source_work / "planning/team.md").write_text("# Команда\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(source_work), "add", "-A").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "remove embedded harness").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
+
+            _, coda_remote = self.create_seed(root, "coda", {"backend/app.py": "VALUE = 1\n"})
+            workspace = root / "workspace"
+            workspace.mkdir()
+            environment = {
+                **os.environ,
+                "CODA_ANALYST_DOCUMENTS_URL": str(documents_remote),
+                "CODA_ANALYST_CODA_URL": str(coda_remote),
+                "CODA_ANALYST_SOURCE_URL": str(source_remote),
+            }
+            bootstrap = run(
+                sys.executable, str(ROOT / "scripts/workspace.py"), "--root", str(workspace), "bootstrap", env=environment
+            )
+            self.assertEqual(bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr)
+            state = json.loads((workspace / ".workspace-state/workspace.json").read_text(encoding="utf-8"))
+            self.assertTrue(state["migration"]["required"])
+            self.assertIsNone(state["local_entrypoint"])
+
+            sync = run(
+                sys.executable,
+                str(ROOT / "scripts/repository-exchange.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
+            analytics = workspace / "documents"
+            self.assertTrue((analytics / "features/registry/requirements.md").is_file())
+            self.assertTrue((analytics / "planning/team.md").is_file())
+            self.assertFalse((analytics / ".workflow").exists())
+            self.assertFalse((analytics / ".vscode").exists())
+            self.assertIn("analyst-harness-local-entrypoint:v1", (analytics / "AGENTS.md").read_text(encoding="utf-8"))
+            self.assertEqual(run("git", "-C", str(analytics), "status", "--porcelain=v1").stdout, "")
+
+    def test_project_paths_in_harness_root_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, _, environment = self.prepare_workspace(root)
+            (workspace / "features").mkdir()
+            result = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "project-root",
+                env=environment,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ошибочно созданы", result.stdout)
+
+    def test_roles_change_only_after_explicit_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, documents_remote = self.create_seed(root, "documents", {"README.md": "# Documents\n"})
+            _, coda_remote = self.create_seed(root, "coda", {"backend/app.py": "VALUE = 1\n"})
+            _, source_remote = self.create_seed(root, "changeswork-copy", {"README.md": "# Source\n"})
+            workspace = root / "workspace"
+            workspace.mkdir()
+            environment = {
+                **os.environ,
+                "CODA_ANALYST_STATE_ROOT": str(workspace / ".workspace-state"),
+                "CODA_ANALYST_DOCUMENTS_URL": str(documents_remote),
+                "CODA_ANALYST_CODA_URL": str(coda_remote),
+                "CODA_ANALYST_SOURCE_URL": str(source_remote),
+            }
+            default_status = run(
+                sys.executable, str(ROOT / "scripts/workspace.py"), "--root", str(workspace), "status", env=environment
+            )
+            default_payload = json.loads(default_status.stdout)
+            self.assertEqual(
+                [(item["role"], item["repository"]) for item in default_payload["repositories"]],
+                [("analytics", "documents"), ("code", "coda"), ("source", "changeswork-copy")],
+            )
+            configured = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "configure-roles",
+                "--analytics",
+                "changeswork-copy",
+                "--code",
+                "coda",
+                "--source",
+                "documents",
+                env=environment,
+            )
+            self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+            bootstrap = run(
+                sys.executable, str(ROOT / "scripts/workspace.py"), "--root", str(workspace), "bootstrap", env=environment
+            )
+            self.assertEqual(bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr)
+            state = json.loads((workspace / ".workspace-state/workspace.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["roles"]["analytics"]["repository"], "changeswork-copy")
+            self.assertEqual(state["roles"]["source"]["repository"], "documents")
+            self.assertTrue((workspace / "changeswork-copy/AGENTS.md").is_file())
+            self.assertTrue((workspace / ".workspace-state/repositories/documents.git").is_dir())
+            editor = json.loads((workspace / "coda-analyst.code-workspace").read_text(encoding="utf-8"))
+            self.assertIn("changeswork-copy", {item["path"] for item in editor["folders"]})
+            self.assertNotIn("changeswork-copy", editor["settings"]["files.exclude"])
 
 
 if __name__ == "__main__":

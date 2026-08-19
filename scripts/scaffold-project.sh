@@ -100,6 +100,9 @@ fi
 
 for forbidden in .workflow .vscode AGENTS.md; do
   if [[ -e "$TARGET/$forbidden" ]]; then
+    if [[ "$forbidden" == "AGENTS.md" ]] && grep -q "analyst-harness-local-entrypoint:v1" "$TARGET/$forbidden"; then
+      continue
+    fi
     echo "Embedded harness path is forbidden: $TARGET/$forbidden"
     exit 1
   fi

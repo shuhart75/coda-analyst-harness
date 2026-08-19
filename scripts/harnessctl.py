@@ -189,15 +189,15 @@ def run_init_command(args: argparse.Namespace) -> int:
             registry = json.loads(repos_path.read_text(encoding="utf-8"))
             repositories = registry.get("repositories", {})
             if registry.get("schema_version") == 2 and isinstance(repositories, list):
-                coda = next((item for item in repositories if isinstance(item, dict) and item.get("id") == "coda"), None)
-                if coda:
-                    location = coda.get("location", {})
+                code = next((item for item in repositories if isinstance(item, dict) and item.get("id") == "code"), None)
+                if code:
+                    location = code.get("location", {})
                     environment = location.get("environment")
                     configured = os.environ.get(environment, "") if isinstance(environment, str) else ""
-                    base = Path(configured).expanduser() if configured else project / location.get("relative_to_documents", "../coda")
+                    base = Path(configured).expanduser() if configured else project / location.get("relative_to_analytical", "../coda")
                     contour = {"BE": "backend", "FE": "frontend"}.get(args.role)
                     if contour:
-                        contour_path = coda.get("contours", {}).get(contour, {}).get("path")
+                        contour_path = code.get("contours", {}).get(contour, {}).get("path")
                         if contour_path:
                             base = base / contour_path
                     code_root = str(base.resolve())

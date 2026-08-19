@@ -4,22 +4,24 @@ This repository defines a reusable workflow harness.
 
 ## First launch and workspace ownership
 
-- The repository root is the workspace root.
-- If `.workspace-state/workspace.json`, `.workspace-state/repositories/changeswork-copy.git`, `coda-analyst.code-workspace`, `documents/`, or `coda/` is absent, run `python3 scripts/workspace.py bootstrap` before the user's substantive request. Do not ask for repository URLs; the product URLs are fixed by this harness.
-- Work on requirements, plans and factual progress only in `documents/`. The harness contract stays in this root; `documents/` must not contain an embedded `.workflow`, `AGENTS.md`, or `.vscode` harness copy.
-- Treat `coda/` as read-only during analytical work. It is available only for bounded implementation research.
-- `changeswork-copy` exists only as the bare mirror `.workspace-state/repositories/changeswork-copy.git`. It has no working tree and must never be opened, edited, checked out, committed to, used as a command working directory, or added to the editor workspace. Only `scripts/workspace.py` and `scripts/repository-exchange.py` may access it.
+- The `coda-analyst-harness` repository is `HARNESS_ROOT`. The repository assigned role `analytics` is `PROJECT_ROOT`.
+- Resolve `PROJECT_ROOT` with `python3 scripts/workspace.py project-root`; never infer it from the current directory or a repository name.
+- The default role mapping is fixed: `analytics=documents`, `code=coda`, `source=changeswork-copy`. Do not ask about roles or propose changing them during normal bootstrap. Use `configure-roles` only after an explicit analyst instruction to reassign roles.
+- If workspace state, a default-role repository, or the workspace file is absent, run `python3 scripts/workspace.py bootstrap` before the user's substantive request. Do not ask for repository URLs; the product URLs are fixed by this harness.
+- Work on requirements, plans and factual progress only under `PROJECT_ROOT`. The harness contract stays in `HARNESS_ROOT`; the tracked analytics tree must not contain an embedded `.workflow`, `.vscode`, or harness copy of `AGENTS.md`. A generated local `AGENTS.md` with marker `analyst-harness-local-entrypoint:v1` is allowed, ignored by Git, and must not be committed.
+- Treat the repository assigned role `code` as read-only during analytical work. It is available only for bounded implementation research.
+- The repository assigned role `source` exists only as a hidden bare mirror under `.workspace-state/repositories/`. It has no working tree and must never be opened, edited, checked out, committed to, used as a command working directory, or added to the editor workspace. Only `scripts/workspace.py` and `scripts/repository-exchange.py` may access it.
 - A legacy root `changeswork-copy/`, when found by `bootstrap`, is retired under `.workspace-state/retired-repositories/` and is never an exchange input. Never restore, inspect, edit or use a retired checkout unless the user explicitly requests recovery of its files.
-- Only `documents/` may be pushed by this harness.
+- Only the repository assigned role `analytics` may be pushed by this harness.
 
 ## Repository exchange commands
 
-- `синкани репы`, `синхронизируй репозитории`, `обнови documents из changeswork-copy`: run `python3 scripts/repository-exchange.py sync`. This explicitly authorizes fetching the hidden source mirror, updating `documents/main`, merging `changeswork-copy/main`, generating a verified reverse patch, and pushing only `documents/main`.
+- `синкани репы`, `синхронизируй репозитории`, `обнови documents из changeswork-copy`: run `python3 scripts/workspace.py bootstrap`, then `python3 scripts/repository-exchange.py sync`. This explicitly authorizes fetching `source`, updating `analytics/main`, merging `source/main`, migrating a clean legacy embedded harness, generating a verified reverse patch, and pushing only `analytics/main`.
 - `синкани без отправки`, `обнови локально без push`: run `python3 scripts/repository-exchange.py sync --no-push`.
 - `сделай обратный дифф`, `собери обратную заплату`, `подготовь изменения для changeswork-copy`: run `python3 scripts/repository-exchange.py reverse-diff`. Do not apply or push the patch unless the user separately asks.
 - `обнови код`, `обнови coda`: run `python3 scripts/workspace.py update-code`. This is a separate read-only fast-forward update and is not part of repository exchange.
 - Never hide a failed fetch, merge, patch verification, or push. A merge conflict stops the operation and is aborted; no file-copy fallback is permitted.
-- Any tracked path outside Unicode NFC blocks synchronization before it reaches `documents`.
+- A non-NFC path in `source` blocks synchronization. The one safe migration exception for `analytics` is a filesystem-normalized alias with identical bytes whose old tracked path is removed by the incoming `source` commit.
 
 ## Always read first
 
@@ -38,9 +40,9 @@ When working in this workspace, read in this order:
 11. `.workspace-state/run-state/session-brief.md` when present
 12. `.workspace-state/active-mode.md`
 13. `modes/<active-mode>.md`
-14. `documents/README.md`
-15. `documents/planning/team.md` before planning resources or regenerating actual-progress
-16. relevant files under `documents/context/project-rules/`
+14. `PROJECT_ROOT/README.md`
+15. `PROJECT_ROOT/planning/team.md` before planning resources or regenerating actual-progress
+16. relevant files under `PROJECT_ROOT/context/project-rules/`
 
 ## Primary workflow rule
 
@@ -94,7 +96,7 @@ Files `core/agent-delegation.md`, `core/skills-policy.md` and `core/tooling-poli
 
 ## Consistency backlog
 
-When a local change affects neighboring requirements, baseline artifacts, or prototypes and cannot be fully propagated immediately, record it in `documents/planning/consistency-backlog.md`.
+When a local change affects neighboring requirements, baseline artifacts, or prototypes and cannot be fully propagated immediately, record it in `PROJECT_ROOT/planning/consistency-backlog.md`.
 
 ## Command catalog
 
@@ -113,8 +115,8 @@ Context summaries, checkpoints and research files are internal harness operation
 ## Analyst code inspection
 
 - Use `core/code-inspection.md` when the analyst asks to inspect code or when current implementation facts are needed for planning or requirements.
-- Resolve `coda` through `templates/workflow/code-repos.template.json`; never require the user to provide a path in each prompt.
-- Treat `coda` as read-only in analyst work. Record its branch, commit and worktree state before inspection and verify that they are unchanged afterward.
+- Resolve role `code` through `.workspace-state/code-repos.json`; never require the user to provide a path in each prompt.
+- Treat role `code` as read-only in analyst work. Record its branch, commit and worktree state before inspection and verify that they are unchanged afterward.
 - Inspect one contour at a time. Read that contour's local instructions, locate exact identifiers, then open only matched modules and nearby tests, contracts or migrations.
 - Code observations are commit-bound auxiliary evidence, not automatic business requirements or baseline updates.
 
@@ -125,8 +127,8 @@ Context summaries, checkpoints and research files are internal harness operation
 
 ## Executable harness
 
-- Run `python3 scripts/harnessctl.py doctor documents` before broad workflow changes.
-- Use `python3 scripts/harnessctl.py session-brief documents` for progressive context disclosure.
+- Run `python3 scripts/harnessctl.py doctor "$PROJECT_ROOT"` before broad workflow changes.
+- Use `python3 scripts/harnessctl.py session-brief "$PROJECT_ROOT"` for progressive context disclosure.
 - Approved quarter and commander plans are immutable planning baselines.
 - Route later scope into task candidates and actual-progress instead of rewriting an approved plan.
 
@@ -135,5 +137,5 @@ Context summaries, checkpoints and research files are internal harness operation
 - Write requirement prose in Russian.
 - Keep English only for exact code, paths, API/database identifiers, enum values, and fixed external-system names.
 - Prefer a Russian explanation before an unavoidable special term.
-- Run `python3 scripts/validate-language.py documents` for changed requirements before completion.
-- Run `python3 scripts/validate-requirements-profile.py documents` for changed root documents that use the profile marker.
+- Run `python3 scripts/validate-language.py "$PROJECT_ROOT"` for changed requirements before completion.
+- Run `python3 scripts/validate-requirements-profile.py "$PROJECT_ROOT"` for changed root documents that use the profile marker.

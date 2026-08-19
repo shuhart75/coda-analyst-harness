@@ -4,33 +4,33 @@ This policy governs read-only use of a locally cloned code repository by analyst
 
 ## Repository layout
 
-The `coda-analyst-harness` clone is the workspace root and contains three independent product repositories, only two of which have working trees:
+The `coda-analyst-harness` clone is `HARNESS_ROOT` and contains three independent product repositories, only roles `analytics` and `code` having working trees:
 
 ```text
 <workspace>/
 ├── AGENTS.md
 ├── coda-analyst.code-workspace
-├── documents/
+├── documents/                    # default analytics, PROJECT_ROOT
 ├── .workspace-state/
 │   └── repositories/
 │       └── changeswork-copy.git/  # hidden bare mirror, no worktree
-└── coda/
+└── coda/                         # default code, read-only
     ├── backend/
     └── frontend/
 ```
 
-`documents` remains the requirements and planning repository. `coda` remains an independent code repository. The hidden bare mirror `changeswork-copy` participates only in the exchange process defined by `core/repository-exchange.md`; it is not a code-inspection target and must not be accessed directly. Do not create submodules or symlinks between these repositories.
+Role `analytics` remains the requirements and planning repository. Role `code` remains an independent code repository. The hidden bare mirror assigned role `source` participates only in the exchange process defined by `core/repository-exchange.md`; it is not a code-inspection target and must not be accessed directly. Do not create submodules or symlinks between these repositories.
 
 The common workspace gives the LLM filesystem access to the registered repositories. It does not authorize whole-repository reading and does not place all code into model context.
 
 ## Resolution and setup
 
-Repository identity, accepted remotes, default relative location and contours are stored in `templates/workflow/code-repos.template.json`.
+Repository identity, accepted remotes, relative location and contours are stored in `.workspace-state/code-repos.json`. The committed template contains only the default role mapping.
 
 Resolution order:
 
 1. environment variable declared by the repository entry, for example `CODA_REPO`;
-2. path relative to the `documents` clone, normally `../coda`.
+2. path relative to `PROJECT_ROOT`, normally `../coda` for the default role mapping.
 
 The harness must not store analyst-machine absolute paths in committed project files.
 

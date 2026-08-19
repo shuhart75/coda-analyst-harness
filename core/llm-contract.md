@@ -17,17 +17,17 @@ Before changing artifacts, read:
 9. `.workspace-state/run-state/session-brief.md` when present
 10. `.workspace-state/active-mode.md`
 11. `modes/<active-mode>.md`
-12. `documents/README.md`
-13. `documents/planning/team.md` before planning resources or regenerating actual-progress
-14. relevant `documents/context/project-rules/*.md`
+12. `PROJECT_ROOT/README.md`
+13. `PROJECT_ROOT/planning/team.md` before planning resources or regenerating actual-progress
+14. relevant `PROJECT_ROOT/context/project-rules/*.md`
 15. relevant templates for the current action
-16. `documents/baseline/current/` for the canonical deployed state when it exists
-17. relevant feature/slice source artifacts under `documents/`
-18. relevant `documents/releases/` artifacts when finalizing a delivered change
+16. `PROJECT_ROOT/baseline/current/` for the canonical deployed state when it exists
+17. relevant feature/slice source artifacts under `PROJECT_ROOT`
+18. relevant `PROJECT_ROOT/releases/` artifacts when finalizing a delivered change
 
 If the user points to a folder with current-system docs/screenshots/change requests, inspect that folder first and keep source references in the produced artifacts.
 
-Unless a path explicitly starts with a harness directory such as `core/`, `modes/`, `scripts/`, `skills/`, `templates/` or `.workspace-state/`, resolve project paths such as `baseline/`, `context/`, `planning/`, `features/` and `releases/` under `documents/`.
+`HARNESS_ROOT` is the `coda-analyst-harness` repository. Resolve `PROJECT_ROOT` only through `python3 HARNESS_ROOT/scripts/workspace.py --root HARNESS_ROOT project-root`. Unless a path explicitly starts with a harness directory such as `core/`, `modes/`, `scripts/`, `skills/`, `templates/` or `.workspace-state/`, resolve project paths such as `baseline/`, `context/`, `planning/`, `features/` and `releases/` under `PROJECT_ROOT`, regardless of the directory from which the LLM was launched.
 
 
 ## Small-context operating rules
@@ -57,7 +57,7 @@ When the user uses a command from that catalog or a near-equivalent phrase:
 
 If the command references impacted requirements, prototypes, or rollback of a known decision, consult:
 - `features/*/domain-impact.md`;
-- `documents/planning/consistency-backlog.md`;
+- `PROJECT_ROOT/planning/consistency-backlog.md`;
 - `releases/*` and `baseline/current/` when relevant.
 
 If multiple commands conflict, prioritize the most recent explicit user instruction and state the assumption briefly.
@@ -102,7 +102,7 @@ If the user asks for work outside the active mode, either switch mode explicitly
 - `development task card` is created and confirmed by developers under `returns/development-tasks/`. It describes one future Jira task and one contour, is self-contained, and may have an estimate or Jira key, but neither is required.
 - Each development task card must be created from the package template, keep every required section populated, and retain the full `Короткие команды разработчика` block after every edit.
 - Receiver-side context is disclosed progressively: active `handoff.json`, compact request and manifest, one relevant contour of packaged requirements, that contour's local SDD, matched code, then nearby tests. Do not load all of `coda` or both contours without a recorded cross-contour dependency.
-- Analyst-side code access is also progressive and read-only. Resolve the sibling `coda` clone through `templates/workflow/code-repos.template.json`, snapshot it with `code-inspect.py begin`, inspect one contour and bounded matches, then prove no code-repository changes with `code-inspect.py verify`.
+- Analyst-side code access is also progressive and read-only. Resolve role `code` through `.workspace-state/code-repos.json`, snapshot it with `code-inspect.py begin`, inspect one contour and bounded matches, then prove no code-repository changes with `code-inspect.py verify`.
 - A feature manifest may use atomic `REQ-*`/`SCN-*` traceability or explicit `legacy-sections` compatibility. Never manufacture identifiers missing from an older source document.
 - `features/<feature>/requirements.md` is the primary control page and authored source for requirements; each slice must have its own ordered section there.
 - `slice card` and slice FE/BE packs are derived artifacts cut from the root feature requirements, not parallel independent sources. Slices remain the primary testing units; development cards and implementation receipts provide supporting context.
@@ -134,14 +134,14 @@ If the user asks for work outside the active mode, either switch mode explicitly
 - If the user asks for a standalone PlantUML export without includes, expand the generated view into a separate file and leave the include-based source intact.
 - For actual-progress execution tasks, tasks that have `Progress % = 0` and no actual dates are not allowed to render in the past. On each regeneration, the generator moves their rendered start to today, or the next open day, without changing the markdown source dates.
 - Within one feature section, not-started backend/API tasks should lead not-started frontend tasks. Frontend tasks may render no earlier than 3 open days after the earliest not-started backend task in the same feature.
-- Not-started execution tasks must not overload resource lanes. Use `documents/planning/team.md` as the roster, keep each resource at no more than one full-time task per open day, and use available resources as fully as possible before pushing work later.
+- Not-started execution tasks must not overload resource lanes. Use `PROJECT_ROOT/planning/team.md` as the roster, keep each resource at no more than one full-time task per open day, and use available resources as fully as possible before pushing work later.
 - If a not-started task has no explicit executor, has a `TBD_*` executor, or references a non-roster resource lane, assign it by role from `Role`, task id prefix, executor alias or summary. Preserve explicit valid roster lanes, but still shift dates if needed to avoid overload.
 - Keep baseline `PLAN ...` story bars visible for plan-vs-fact comparison even when execution tasks are shifted forward by the current date.
 
 ## Resource naming
 
 - Role estimates and semantic task roles use `AN / BE / FE / QA`.
-- The project-local roster lives in `documents/planning/team.md`.
+- The project-local roster lives in `PROJECT_ROOT/planning/team.md`.
 - Default PlantUML resource lanes are `A1`, `A2`, `A3`, `B1`, `B2`, `B3`, `F1`, `F2`, `Q1`, `Q2`, `Q3`.
 - Accepted aliases for resource/executor input:
   - analyst: `A`, `AN`, `analyst`, `аналитик`;
@@ -188,7 +188,7 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - Run the project language validator for changed requirement files before presenting the work as complete.
 - Run `scripts/validate-requirements-profile.py` for changed profiled root documents. Do not force legacy documents into the profile during an unrelated edit.
 - Keep business requirements, system requirements, acceptance criteria, API contracts and examples traceable to source materials.
-- When current implementation facts affect requirements, inspect the registered local `coda` clone automatically under `core/code-inspection.md`. Record the exact commit and relative evidence paths; do not infer business intent from code alone.
+- When current implementation facts affect requirements, inspect the registered local repository assigned role `code` automatically under `core/code-inspection.md`. Record the exact commit and relative evidence paths; do not infer business intent from code alone.
 - Analyst code inspection improves the requirement input but does not replace the receiving SDD's comparison against its current code before decomposition and implementation.
 - Only the user-owner may mark requirements as approved. Record the approver and date, and create a new revision for later semantic changes.
 
@@ -205,7 +205,7 @@ Quick local sweep order:
 
 1. update `features/<feature>/requirements.md`;
 2. update the derived slice cards and FE/BE detail packs that repeat the changed rule;
-3. update `features/<feature>/domain-impact.md` and `documents/planning/consistency-backlog.md` if the change affects consistency tracking;
+3. update `features/<feature>/domain-impact.md` and `PROJECT_ROOT/planning/consistency-backlog.md` if the change affects consistency tracking;
 4. run a targeted text search, or equivalent local find-in-files sweep, across the current feature and any explicitly affected artifacts for superseded terms;
    if available, use `scripts/find-stale-terms.py` as the fast default helper;
 5. specifically check for superseded:
@@ -243,7 +243,7 @@ Minimum required steps:
 - list affected requirements;
 - list affected baseline artifacts;
 - list affected prototypes even if they will be updated later;
-- update `documents/planning/consistency-backlog.md` for any impact not propagated immediately.
+- update `PROJECT_ROOT/planning/consistency-backlog.md` for any impact not propagated immediately.
 
 The agent that edits local requirements performs first-pass impact detection. The main agent confirms and normalizes impact during consistency sweep. Release-finalization performs the final consistency gate before baseline promotion.
 
@@ -251,7 +251,7 @@ Shared requirements and canonical baseline updates must be integrated by the mai
 
 ## Prototype consistency rules
 
-Prototype updates are optional unless the prototype is an active scope-demo or delivery-handoff artifact. Still, affected prototypes must be listed in `domain-impact.md` and/or `documents/planning/consistency-backlog.md` so the user can later say "актуализируй прототипы" and the agent has a concrete target list.
+Prototype updates are optional unless the prototype is an active scope-demo or delivery-handoff artifact. Still, affected prototypes must be listed in `domain-impact.md` and/or `PROJECT_ROOT/planning/consistency-backlog.md` so the user can later say "актуализируй прототипы" and the agent has a concrete target list.
 
 Use prototype sync statuses:
 - `must-update-now`;
@@ -280,7 +280,7 @@ Partial rollback:
 
 - Never modify copied legacy/original source folders unless the user explicitly asks. For `changesWork`, read or copy only.
 - Preserve user edits; do not revert unrelated changes.
-- Run all workflow tools from the harness `scripts/` directory and pass `documents` as the project root.
+- Run all workflow tools from `HARNESS_ROOT/scripts/` and pass the resolved `PROJECT_ROOT` as the project root.
 - Before the final response after file edits, and always before a commit, review the current-turn diff for necessity, correctness and conciseness. Fix in-scope issues; report or ask about issues that are out of mode, touch unrelated user changes, or require a business decision.
 - After planning/execution gantt edits, run `scripts/sync-quarter-gantt.py <project>/planning/<quarter>/gantt` when available.
 - After structural edits, run `scripts/validate-structure.py <project>` and `scripts/validate-links.py <project>` when available.

@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from workspace_paths import eval_config_path
+from workspace_entrypoint import is_local_entrypoint
 
 
 def run(command: list[str], cwd: Path | None = None) -> tuple[int, str]:
@@ -32,7 +33,9 @@ def evaluate_project(project: Path) -> int:
                     failures.append(f"missing {assertion['path']}")
                 continue
             if assertion_type == "not_exists":
-                if path.exists():
+                if path.exists() and not (
+                    assertion["path"] == "AGENTS.md" and is_local_entrypoint(path)
+                ):
                     failures.append(f"unexpected path {assertion['path']}")
                 continue
             if not path.is_file():
