@@ -64,14 +64,13 @@ Requirement templates live in `templates/requirements/`. Use them as the active 
 
 ## Feature-centered structure
 
-Work should be grouped by:
-
-- `feature`
-- then `slice`
-- then FE/BE requirement packs and execution artifacts
+During analytical authoring, work is grouped by `feature` and the only authored requirements source is `PROJECT_ROOT/features/<feature>/requirements.md`. Do not create or refresh slices, FE/BE packs, task candidates, or a handoff package during ordinary requirement edits. Derive them only after an explicit package-preparation command.
 
 ## Developer handoff
 
+- Before editing an existing feature, run `requirementsctl.py status`. If it reports an unrecorded divergence from the last published revision, do not guess its origin: ask whether it came from analyst initiative or a registered developer receipt and record that answer first.
+- After every root requirement change, record its origin with `scripts/requirementsctl.py record-change`: `analyst` for an analyst-initiated change or `developer-receipt` with the receipt path for accepted developer feedback.
+- A developer-receipt change never creates a package revision and never refreshes slices. An analyst-initiated change after an existing package may produce one offer to prepare a new revision. Record the offer before asking; if declined, persist the refusal and do not ask again until an explicit preparation command.
 - Treat `сформируй пакет для разработки` and its documented Russian synonyms as one end-to-end analyst command: validate and safely repair requirements, ask one semantic question at a time when needed, then publish directly to `sent`. Do not leave a `ready` revision for analyst inspection.
 - For new work, send one `feature-delivery` package containing root requirements and slices; do not pre-author the final Jira decomposition under `features/<feature>/tasks/`.
 - In a received package, read `handoff.json`, then `request.md` and `manifest.json`, then only the requirements and slices for one selected contour. Read that contour's local SDD before opening matched code and nearby tests. Never load all of `coda` or both contours by default.

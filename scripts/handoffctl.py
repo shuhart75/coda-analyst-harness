@@ -768,6 +768,16 @@ def add_feature_revision(root: Path, manifest: dict[str, Any], args: argparse.Na
     revision = args.revision
     if any(item.get("revision") == revision for item in manifest.get("revisions", [])):
         raise ValueError(f"Revision already exists: {revision_name(revision)}")
+    project = root.parents[3]
+    preparation_state = project / "features" / manifest["feature"] / "requirements-state.json"
+    if preparation_state.is_file():
+        state = load(preparation_state)
+        offer = state.get("revision_offer")
+        if not isinstance(offer, dict) or offer.get("state") != "preparation-authorized":
+            raise ValueError(
+                "Подготовка редакции функциональности не разрешена; "
+                "после явной команды аналитика выполни requirementsctl.py begin-preparation"
+            )
     name = revision_name(revision)
     revision_root = root / "revisions" / name
     package = revision_root / "package"
@@ -798,7 +808,6 @@ def add_feature_revision(root: Path, manifest: dict[str, Any], args: argparse.Na
         for old, new in replacements.items():
             text = text.replace(old, new)
         target.write_text(text, encoding="utf-8")
-    project = root.parents[3]
     requirements_source = project / manifest["source_requirements"]["path"]
     if not requirements_source.is_file():
         raise ValueError(f"Feature requirements are missing: {requirements_source}")

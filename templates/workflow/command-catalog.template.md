@@ -8,7 +8,7 @@ This file documents short natural-language commands that switch context or trigg
 - If a command implies a mode switch, update `.workspace-state/active-mode.md` or explicitly state that the user should switch mode if the runtime cannot edit it.
 - After a mode switch, read the target mode file before editing artifacts.
 - If a command includes a folder/path, inspect that path before writing outputs.
-- If a command causes cross-feature/domain impact, update `features/*/domain-impact.md` and `planning/consistency-backlog.md` as needed.
+- If a command causes cross-feature/domain impact, respect the active mode: ordinary requirement authoring records it in the root requirements; package preparation or a separate domain-decision command may update `domain-impact.md` and the consistency backlog.
 - For small requirement edits, prefer a quick feature-local tail cleanup over a whole-repo audit.
 - If a command is ambiguous, make a reasonable assumption and state it briefly; ask only when the wrong assumption would create significant rework.
 
@@ -51,7 +51,7 @@ Examples:
 делаем требования
 В папке `context/source-materials/change-requests/packages-filtering` лежат текущие требования и новые скрины.
 Формат: новый лёгкий
-Нужно подготовить `features/<feature>/requirements.md` по выбранному шаблону, зафиксировать там порядок и границы срезов, а потом разложить root document по detail packs, обновить domain-impact и перечислить затронутые прототипы.
+Нужно подготовить только `features/<feature>/requirements.md` по выбранному шаблону, зафиксировать в нём возможные границы и порядок срезов и обновить влияния. Срезы и пакет пока не формировать.
 ```
 
 ```text
@@ -83,10 +83,11 @@ RSCON-2445 завершена вчера, RSCON-2451 взял второй фр�
 | `делаем прототип для разработки` | `delivery-prototype` | Switch into slice handoff mode, but block any slice edits until the root feature prototype is explicitly approved. |
 | `обновляем прогресс` | `execution-update` | Switch into implementation tracking mode. |
 | `финализируем релиз` | `release-finalization` | Switch into release/baseline promotion mode. |
-| `актуализируй требования` | `requirements` | Обновить требования и распространить влияние на производные срезы. |
-| `разложи требования на срезы` | `requirements` | Decompose root feature requirements into testable slices. |
-| `подготовь детальные требования по срезам` | `requirements` | Derive slice cards and interface/backend detail packs from root requirements. |
+| `актуализируй требования` | `requirements` | Обновить только корневые требования и зафиксировать источник изменения, не пересобирая срезы или пакет. |
+| `разложи требования на срезы` | `requirements` | Явно разрешить полный проход подготовки пакета: проверить корневой документ, построить срезы и опубликовать редакцию. |
+| `подготовь детальные требования по срезам` | `requirements` | Прежняя формулировка явной подготовки пакета; отдельно от опубликованной редакции срезы не создаются. |
 | `сформируй пакет для разработки` | `requirements` | Проверить и безопасно исправить требования, последовательно уточнить неоднозначности, затем сразу отправить неизменяемую редакцию в SDD без создания ZIP. |
+| `обработай квитанции реализации и тестирования` | `requirements` | Принять решения по факту, обновить корневые требования и текущее состояние без новых срезов и редакций пакета. |
 | `собери транспортный ZIP редакции <NNN>` | `requirements` | По явному требованию создать архив опубликованной редакции в `~/Downloads`, не меняя пакет и не сохраняя ZIP в репозитории. |
 | `приостанови редакцию пакета` | `requirements` | Set SDD action to wait or stop-and-report without rewriting the revision. |
 | `покажи состояние пакета` | `requirements` | Read `handoff.json` and report the single current SDD action. |
@@ -128,7 +129,7 @@ These are the recommended user-facing commands by role. Internal context refresh
 
 | Role | Commands | User gets |
 |---|---|---|
-| Analyst | `новая фича`, `занимаемся планированием`, `спланируй фичу`, `делаем требования`, `сходи в код`, `разложи требования на срезы`, `подготовь детальные требования по срезам`, `сформируй пакет для разработки`, `обнови фактический план по подтверждённой декомпозиции` | Планы, требования, подтверждённые кодом факты, срезы, отправленные редакции и фактическое выполнение. |
+| Analyst | `новая фича`, `занимаемся планированием`, `спланируй фичу`, `делаем требования`, `сходи в код`, `сформируй пакет для разработки`, `обработай квитанции реализации и тестирования`, `обнови фактический план по подтверждённой декомпозиции` | Планы, живые корневые требования, подтверждённые кодом факты, отправленные редакции и фактическое выполнение. |
 | Developer | `подготовь декомпозицию серверной части`, `подготовь декомпозицию клиентской части`, `проверь декомпозицию`, `декомпозиция подтверждена разработкой`, `подготовь список для Jira`, `возьми DEV-* в разработку` | Карточки будущих задач Jira, снимок декомпозиции и квитанции реализации. |
 | Tester | `возьми срез <id> в тестирование`, `подготовь проверки по срезу`, `собери негативные сценарии`, `сверь проверки с требованиями`, `зафиксируй найденные пробелы` | Проверки среза, покрытие и независимая квитанция тестирования. |
 
@@ -148,9 +149,7 @@ Treat these as equivalent user phrasings.
 | `обновляем прогресс` | `переходим к прогрессу`, `фиксируем прогресс`, `давай обновим прогресс`, `обновим статус задач`, `зафиксируем факт`, `включаем execution update` |
 | `финализируем релиз` | `переходим к релизу`, `собираем релиз`, `давай финализировать релиз`, `закрываем релизный цикл`, `готовим релизный пакет`, `включаем release finalization` |
 | `актуализируй требования` | `обнови требования`, `синхронизируй требования`, `подтяни требования`, `приведи требования в актуальное состояние` |
-| `разложи требования на срезы` | `разложи по срезам`, `нарежь требования на срезы`, `выдели срезы`, `подготовь срезы` |
-| `подготовь детальные требования по срезам` | `детализируй срезы`, `подготовь требования по каждому срезу`, `собери detail packs по срезам`, `подготовь FE/BE требования по срезам` |
-| `сформируй пакет для разработки` | `передаём в разработку`, `передаем в разработку`, `отдаём требования разработчикам`, `отдаем требования разработчикам`, `подготовь требования для разработки`, `собери пакет для разработчиков`, `подготовь пакет функциональности для технической декомпозиции`, `собери пакет функциональности`, `передай функциональность на декомпозицию` |
+| `сформируй пакет для разработки` | `передаём в разработку`, `передаем в разработку`, `отдаём требования разработчикам`, `отдаем требования разработчикам`, `подготовь требования для разработки`, `собери пакет для разработчиков`, `подготовь пакет функциональности для технической декомпозиции`, `собери пакет функциональности`, `передай функциональность на декомпозицию`, `разложи требования на срезы`, `разложи по срезам`, `нарежь требования на срезы`, `подготовь детальные требования по срезам`, `детализируй срезы`, `подготовь FE/BE требования по срезам` |
 | `проверь хвосты требований` | `дочисти хвосты`, `убери хвосты в требованиях`, `проверь старые упоминания`, `проверь что старый вариант нигде не остался`, `сделай локальную дочистку требований` |
 | `проверь консистентность требований` | `сделай consistency sweep`, `проверь консистентность`, `сверь требования`, `проверь что ничего не разъехалось`, `сделай сверку требований` |
 | `актуализируй прототипы` | `обнови прототипы`, `синхронизируй прототипы`, `подтяни прототипы`, `приведи макеты в актуальное состояние` |
@@ -192,11 +191,11 @@ Treat these as equivalent user phrasings.
 |---|---|---|
 | `новая фича` | `planning` | Switch mode, inspect source folder, run intake, do not scaffold yet. |
 | `занимаемся планированием` | `planning` | Switch mode, read baseline/current and current quarter planning. |
-| `делаем требования` | `requirements` | Switch mode, select new readable or old detailed format, read baseline/current and author the root feature requirements before deriving slices. |
+| `делаем требования` | `requirements` | Switch mode, select the format, read baseline/current and author only the root feature requirements. |
 | `сходи в код` | текущий аналитический режим | Разрешить путь из реестра, зафиксировать состояние `coda`, исследовать один контур, сообщить коммит и доказательства, затем проверить неизменность кодового репозитория. |
-| `разложи требования на срезы` | `requirements` | Switch mode if needed, refresh context, decompose root requirements into slices, then update root requirements first if decomposition exposes gaps. |
-| `подготовь детальные требования по срезам` | `requirements` | Switch mode if needed, refresh slice context, run completeness checks internally, then derive slice cards and detail packs. |
-| `сформируй пакет для разработки` | `requirements` | Переключить режим; проверить полноту, непротиворечивость, проверяемость, влияния, срезы, трассировку и язык; автоматически исправить только однозначное; при сомнениях задавать по одному вопросу; после успешной проверки создать и опубликовать редакцию как `sent`. |
+| `разложи требования на срезы` | `requirements` | Считать явной подготовкой пакета: сначала проверить корневые требования, затем построить срезы и опубликовать редакцию. |
+| `подготовь детальные требования по срезам` | `requirements` | Считать прежней формулировкой той же полной подготовки и публикации пакета. |
+| `сформируй пакет для разработки` | `requirements` | Переключить режим; проверить полноту, непротиворечивость, проверяемость, влияния, трассировку и язык корневого документа; автоматически исправить только однозначное; при сомнениях задавать по одному вопросу; затем построить срезы и опубликовать редакцию как `sent`. |
 | `приостанови редакцию пакета` | `requirements` | Change only the root lifecycle manifest; use stop-and-report when an already claimed revision must return partial fact. |
 | `покажи подтверждённую декомпозицию` | `execution-update` | Найти актуальный снимок декомпозиции и показать карточки, оценки и необязательные связи Jira. |
 | `обнови фактический план по подтверждённой декомпозиции` | `execution-update` | Материализовать выбранные аналитиком карточки, не меняя утверждённый план. |
@@ -235,18 +234,18 @@ Treat these as equivalent user phrasings.
 
 | User command | Meaning | Main artifacts |
 |---|---|---|
-| `давай сделаем требования` | Create or update the root feature requirement page first, then derive slice detail packs from it. | `features/*/requirements.md`, `features/*/slices/*/requirements/*.md` |
+| `давай сделаем требования` | Создать или обновить только корневой документ функциональности; производные материалы не формировать. | `features/*/requirements.md`, `features/*/requirements-state.json` |
 | `делаем требования в новом формате` | Use the new readable templates: business context in root, short visual slice packs, tester checklists in every slice, PlantUML only. | `templates/requirements/*.readable.template.md`, requirements |
 | `делаем требования в старом формате` | Use the old detailed templates and preserve the earlier Confluence-style structure. | `templates/requirements/feature-requirements.template.md`, requirements |
-| `актуализируй требования` | Обновить требования и распространить влияние на производные срезы. Уже отправленную редакцию и карточки разработчиков не переписывать. | requirements, slices, `domain-impact.md`, consistency backlog |
-| `проверь хвосты требований` | Run a quick feature-local cleanup for stale old wording, endpoints, fields, statuses or option names after a requirements edit. | current feature requirements, slice packs, `domain-impact.md`, local backlog items |
+| `актуализируй требования` | Обновить корневые требования, зафиксировать источник изменения и не трогать производные материалы. Уже отправленную редакцию и карточки разработчиков не переписывать. | requirements, `requirements-state.json` |
+| `проверь хвосты требований` | Проверить живые корневые требования; не считать хвостами неизменяемые пакеты и производные материалы прошлой передачи. | current feature requirements |
 | `проверь консистентность требований` | Run a consistency sweep across affected features and baseline. | requirements, `baseline/current/*`, `planning/consistency-backlog.md` |
 | `проверь русский язык требований` | Run the language validator for changed requirements; keep English only for exact technical identifiers and fixed special terms. | changed root/slice requirement files |
 | `сходи в код` | Inspect current implementation facts in one registered `coda` contour without changing it. | ad hoc answer or `features/*/.research/code-evidence.yaml`, then requirements when accepted |
-| `разложи по срезам` | Derive semantic slice cards and detail packs from the root feature requirements, not just FE/BE. | `features/<feature>/slices/*` |
-| `разложи требования на срезы` | Derive testable slices from root feature requirements and update root requirements first if gaps appear. | root requirements, slice list, `features/<feature>/slices/*` |
-| `подготовь детальные требования по срезам` | Prepare slice cards and interface/backend detail packs with internal completeness checks. | slice cards, FE/BE packs, checklist findings |
+| `разложи требования на срезы` | Явно разрешить полный проход подготовки и публикации пакета; срезы отдельно не оставлять. | root requirements, slices, handoff revision |
+| `подготовь детальные требования по срезам` | Прежняя формулировка той же явной подготовки пакета. | root requirements, slices, handoff revision |
 | `сформируй пакет для разработки` | Выполнить полный проход готовности требований; при содержательных сомнениях задавать аналитику по одному вопросу; затем создать транспорт и сразу опубликовать редакцию для SDD без промежуточного `ready`. | требования, срезы, `features/<feature>/handoffs/<package-id>/*` |
+| `обработай квитанции реализации и тестирования` | Обновить требования и текущее состояние на основании квитанций без пересборки срезов, предложения или создания новой редакции. | requirements, baseline, analyst review, `requirements-state.json` |
 | `приостанови редакцию пакета` | Tell SDD to wait or stop and report current fact, without mutating the input revision. | `handoff.json` |
 | `покажи состояние пакета` | Show active revision, expected receipt and exact next SDD action. | `handoff.json` |
 | `покажи подтверждённую декомпозицию` | Показать актуальный снимок карточек, который уже фоново доступен аналитику. | `returns/decomposition-snapshots/*` |

@@ -54,4 +54,6 @@ cat > "$FEATURE_DIR/references.md" <<EOF2
 EOF2
 fi
 
+python3 "$ROOT_DIR/scripts/requirementsctl.py" init "$PROJECT_ROOT" "$FEATURE" >/dev/null
+
 echo "Feature scaffold created at $FEATURE_DIR"

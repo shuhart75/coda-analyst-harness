@@ -36,7 +36,7 @@ Treat context management as an internal harness responsibility. Users should not
 
 When work is broad, long-running, or likely to exceed a small context window:
 - read existing `context-summary.md`, `artifact-map.md`, planning context and run-state files before broad source artifacts;
-- create or refresh feature/slice/planning/execution context summaries when source-of-truth artifacts change substantially;
+- create or refresh feature/planning/execution context summaries when their source-of-truth artifacts change substantially; refresh slice summaries only when the active mode owns a slice change or requirements package preparation has been explicitly authorized;
 - update `.workspace-state/run-state/current.md` or an equivalent checkpoint before and after long passes;
 - keep facts, inferences, assumptions and open questions separate;
 - transfer accepted research findings into authoritative artifacts instead of leaving them only in `.research/` or chat.
@@ -84,7 +84,7 @@ Only create the feature structure after the intake result is accepted or the use
 Treat the active mode as a write boundary.
 
 - `planning`: owns feature scope, planning stories, estimates, scope prototype, quarter-plan and commander-plan.
-- `requirements`: owns slices and FE/BE requirement packs.
+- `requirements`: owns the root requirements and, only during authorized package preparation, derived slices and FE/BE packs.
 - `scope-prototype`: owns planning-stage live prototypes for customer scope alignment.
 - `delivery-prototype`: owns slice-level React + MUI prototypes for frontend handoff.
 - `execution-update`: owns implementation tasks, actualization mapping, and actual-progress gantt.
@@ -105,7 +105,7 @@ If the user asks for work outside the active mode, either switch mode explicitly
 - Analyst-side code access is also progressive and read-only. Resolve role `code` through `.workspace-state/code-repos.json`, snapshot it with `code-inspect.py begin`, inspect one contour and bounded matches, then prove no code-repository changes with `code-inspect.py verify`.
 - A feature manifest may use atomic `REQ-*`/`SCN-*` traceability or explicit `legacy-sections` compatibility. Never manufacture identifiers missing from an older source document.
 - `features/<feature>/requirements.md` is the primary control page and authored source for requirements; each slice must have its own ordered section there.
-- `slice card` and slice FE/BE packs are derived artifacts cut from the root feature requirements, not parallel independent sources. Slices remain the primary testing units; development cards and implementation receipts provide supporting context.
+- `slice card` and slice FE/BE packs are derived transmission artifacts cut from the root feature requirements only during authorized package preparation, not parallel independent sources. Slices remain the primary testing units; development cards and implementation receipts provide supporting context.
 - `common feature prototype` lives in `features/<feature>/prototype.html`; the user iterates on it first as the visual source of truth.
 - `delivery prototype` is a slice-level schematic handoff artifact derived from the confirmed common feature prototype and root requirements.
 - `release package` captures the final delivered state before promotion into a new baseline.
@@ -176,13 +176,16 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - If the user names the format, obey it. If the feature already exists and the user does not name a format, preserve the current feature format. For a new feature without an explicit choice, use the new readable format.
 - Do not mix new and old requirement formats inside one feature unless the user explicitly asks for a migration or comparison.
 - Requirement diagrams must be PlantUML; do not introduce Mermaid blocks.
-- Derive slice cards and FE/BE detail packs from the corresponding sections of the root feature requirements.
-- When requirements are ready for technical decomposition, create a new immutable feature-package revision containing the root requirements and slices. Do not invent the final Jira breakdown in the analytical requirements pass.
-- `сформируй пакет для разработки` is an end-to-end publication command. Before creating a revision, validate completeness, consistency, verifiability, impacts, derived slices, traceability and Russian language. Apply only meaning-preserving corrections automatically. For every semantic ambiguity ask the analyst exactly one question and wait; do not create or publish a package while any blocking question remains. On success publish the revision directly as `sent` with `next_sdd_action.action = process`; there is no analyst-facing `ready` state. Do not create a ZIP unless the analyst explicitly requests it; create requested transport archives only in `~/Downloads`, never inside a repository.
+- During ordinary requirement work, edit only the root `requirements.md`. Do not create or refresh slice cards, FE/BE detail packs, task candidates, or package revisions after each change.
+- After changing the root document, record the change origin in `features/<feature>/requirements-state.json` through `scripts/requirementsctl.py record-change`.
+- Use `origin=developer-receipt` only for a change accepted from a registered developer receipt. Such a change never triggers slice regeneration, a package revision, or an offer to create one.
+- Use `origin=analyst` for an analyst-initiated change. If a package was already published, offer a new revision once. Call `mark-offered` before asking. If the analyst declines, call `decline-revision` and do not offer again until an explicit preparation command.
+- Derive slice cards and FE/BE detail packs only after `сформируй пакет для разработки`, an accepted one-time offer, or another explicit preparation synonym. Begin that pass with `requirementsctl.py begin-preparation`.
+- `сформируй пакет для разработки` is an end-to-end publication command. Before creating a revision, validate completeness, consistency, verifiability, impacts, traceability and Russian language in the root document; then derive current slices and validate them against that root. Apply only meaning-preserving corrections automatically. For every semantic ambiguity ask the analyst exactly one question and wait; do not create or publish a package while any blocking question remains. On success publish the revision directly as `sent`, record it with `requirementsctl.py mark-published`, and require `next_sdd_action.action = process`; there is no analyst-facing `ready` state. Do not create a ZIP unless the analyst explicitly requests it; create requested transport archives only in `~/Downloads`, never inside a repository.
 - Developer SDD creates self-contained cards in the package return area after targeted code research. Cards must be role-specific, linked to full requirements, checks and related slices, and detailed enough to be the primary implementation input.
-- When transmitted requirements change, do not rewrite a confirmed developer decomposition. Create a new input-package revision; the developer side may return a new decomposition snapshot.
+- When transmitted requirements change, do not rewrite a confirmed developer decomposition or any immutable input revision. A new input revision is created only after the analyst explicitly requests or accepts its preparation.
 - Receiving a decomposition snapshot does not change planning stories or approved plans. The analyst decides separately which cards to materialize into actual-progress.
-- If a slice artifact exposes a missing rule or contradiction, update `features/<feature>/requirements.md` first and only then re-derive the slice artifact.
+- If a slice artifact exposes a missing rule or contradiction during package preparation, update `features/<feature>/requirements.md` first and only then re-derive the slice artifact in the same authorized pass.
 - Requirement prose must be written in Russian. Avoid English words and transliterated anglicisms when a clear Russian formulation exists.
 - English is allowed only for exact code, file paths, API/database identifiers, enum values, and fixed external-system names.
 - Run the project language validator for changed requirement files before presenting the work as complete.
@@ -204,9 +207,9 @@ Use a two-speed approach:
 Quick local sweep order:
 
 1. update `features/<feature>/requirements.md`;
-2. update the derived slice cards and FE/BE detail packs that repeat the changed rule;
-3. update `features/<feature>/domain-impact.md` and `PROJECT_ROOT/planning/consistency-backlog.md` if the change affects consistency tracking;
-4. run a targeted text search, or equivalent local find-in-files sweep, across the current feature and any explicitly affected artifacts for superseded terms;
+2. do not touch existing slice cards or FE/BE detail packs outside an explicitly authorized package-preparation pass; they remain a snapshot of the last transmission and may be marked `stale` in `requirements-state.json`;
+3. record the complete impact in the root document; do not refresh `domain-impact.md` or derived requirement artifacts during ordinary authoring;
+4. run a targeted text search across the current root requirements and other authored sources, excluding immutable packages and intentionally stale slice snapshots;
    if available, use `scripts/find-stale-terms.py` as the fast default helper;
 5. specifically check for superseded:
    - old endpoint names;
@@ -236,14 +239,7 @@ Do not answer a minor local edit with a whole-repo reread or a broad manual audi
 
 When changing requirements, domain rules, lifecycle states, roles, API semantics, data model, or shared UI behavior, always perform impact detection in the same turn.
 
-Minimum required steps:
-- update or create `features/<feature>/domain-impact.md`;
-- assign a stable `Decision ID` for accepted or likely-to-be-accepted decisions;
-- classify impact as `local`, `cross-feature`, or `domain-wide`;
-- list affected requirements;
-- list affected baseline artifacts;
-- list affected prototypes even if they will be updated later;
-- update `PROJECT_ROOT/planning/consistency-backlog.md` for any impact not propagated immediately.
+During ordinary requirements authoring, put the decision, classification, affected requirements, baseline artifacts, prototypes and required neighboring work into the root `requirements.md`. Do not refresh `domain-impact.md`, slices or detailed packs. During an authorized package-preparation pass, propagate this accepted information into `domain-impact.md` and the derived package artifacts. A separate explicit domain-decision command may also update `domain-impact.md`; use `PROJECT_ROOT/planning/consistency-backlog.md` only for concrete work outside those derived artifacts that is deliberately deferred.
 
 The agent that edits local requirements performs first-pass impact detection. The main agent confirms and normalizes impact during consistency sweep. Release-finalization performs the final consistency gate before baseline promotion.
 

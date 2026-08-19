@@ -19,7 +19,7 @@ A failed check does not advance the run. Repeated failure reaches the configured
 ## Run Kinds
 
 - `planning`: intake, delta, role stories, estimates, dependencies, capacity schedule, review, approval.
-- `requirements`: root requirements, slices, detailed packs, cross-feature impact and tail cleanup.
+- `requirements`: root requirements, cross-feature impact and tail cleanup; slices and detailed packs only during explicit package preparation.
 - `implementation`: code research, implementation plan, one small change, deterministic checks, review.
 - `qa`: coverage, test design, execution, failure classification, routing gaps to their owner.
 
@@ -40,10 +40,19 @@ A failed check does not advance the run. Repeated failure reaches the configured
 
 - Cross-feature work caused by the current feature is part of the initiating feature scope and HLE.
 - Current requirements contain a dedicated `Доработки затронутых функциональностей` section.
-- Every impact row is covered by requirements, task candidates, and checks or explicitly marked `not applicable` with a reason.
+- Every impact row is covered by root requirements during authoring and by slices and checks when a package is explicitly prepared, or is marked `not applicable` with a reason.
 - Local stale tails block completion. Cross-mode propagation may be deferred only through a concrete consistency backlog record.
 - When requirements depend on current implementation, analyst research is bounded to one registered `coda` contour, records the exact commit, and verifies that the code worktree is unchanged.
 - Analyst code evidence improves the input but never replaces developer-side reconciliation against the implementation branch used for delivery.
+
+## Requirement Preparation Invariants
+
+- Ordinary requirement authoring changes only `features/<feature>/requirements.md` as the requirements artifact. The state file and bounded code-research evidence are control and auxiliary records, not a decomposition of the requirements.
+- Slices, contour packs, task candidates and handoff revisions are not created or refreshed until the analyst explicitly requests or accepts package preparation.
+- Every root change records `analyst` or `developer-receipt` origin in `requirements-state.json`.
+- A developer-receipt change never triggers a revision or slice regeneration.
+- After an analyst change to previously transmitted requirements, the LLM offers a new revision at most once. A refusal suppresses further offers until an explicit preparation command.
+- Explicit preparation validates the root first, then derives slices once, publishes one immutable revision and records the resulting hashes.
 
 ## Technical Decomposition Invariants
 

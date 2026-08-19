@@ -92,7 +92,7 @@ When code findings affect requirements, use `features/<feature>/.research/code-e
 - relative paths, symbols and short observations without copying source code;
 - related requirement identifiers and transfer destination.
 
-Code evidence is auxiliary and commit-bound. Accepted findings must be transferred into root requirements, derived slice packs, `domain-impact.md` or the consistency backlog. Do not update `baseline/current/` from code research outside the existing release-finalization rules.
+Code evidence is auxiliary and commit-bound. During ordinary requirements work, transfer accepted requirement findings only into the root `requirements.md`; record deferred cross-feature propagation in the consistency backlog when necessary. Transfer findings into derived slice packs and `domain-impact.md` only during an explicitly authorized package-preparation pass. Do not update `baseline/current/` from code research outside the existing release-finalization rules.
 
 ## Two-stage reconciliation
 
