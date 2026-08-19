@@ -89,6 +89,11 @@ class CodaWorkspaceTests(unittest.TestCase):
                 {"analytics": "documents", "code": "coda", "source": "changeswork-copy"},
             )
             self.assertEqual(state["repositories"]["changeswork-copy"]["storage"], "bare-mirror")
+            self.assertEqual(state["write_policy"]["code"]["allowed_paths"], [])
+            self.assertEqual(
+                state["write_policy"]["code"]["allowed_operations"],
+                ["initial-clone", "git-pull-ff-only-via-workspace"],
+            )
             self.assertTrue((workspace / "coda-analyst.code-workspace").is_file())
             workspace_config = json.loads(
                 (workspace / "coda-analyst.code-workspace").read_text(encoding="utf-8")
@@ -104,6 +109,9 @@ class CodaWorkspaceTests(unittest.TestCase):
             for repository in (workspace / "coda", source_mirror):
                 push_url = run("git", "-C", str(repository), "remote", "get-url", "--push", "origin")
                 self.assertEqual(push_url.stdout.strip(), "DISABLED_BY_CODA_ANALYST_HARNESS")
+            registry = json.loads((workspace / ".workspace-state/code-repos.json").read_text(encoding="utf-8"))
+            self.assertEqual(registry["schema_version"], 3)
+            self.assertEqual(registry["repositories"][0]["write_policy"]["allowed_paths"], [])
 
             documents = workspace / "documents"
             entrypoint = documents / "AGENTS.md"
@@ -121,6 +129,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertEqual(project_root.returncode, 0, project_root.stdout + project_root.stderr)
             self.assertEqual(Path(project_root.stdout.strip()), documents)
+
             doctor = run(
                 sys.executable,
                 str(ROOT / "scripts/code-inspect.py"),
@@ -200,6 +209,61 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertTrue((remote_check / "source-only.txt").is_file())
             self.assertTrue((remote_check / "documents-only.txt").is_file())
 
+    def test_protected_code_pull_and_full_sync_update_code_without_local_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, _, environment = self.prepare_workspace(root)
+            code = workspace / "coda"
+            config_before = (code / ".git/config").read_bytes()
+
+            repeated = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "bootstrap",
+                env=environment,
+            )
+            self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+            self.assertEqual((code / ".git/config").read_bytes(), config_before)
+
+            upstream = root / "code-upstream"
+            code_remote = Path(environment["CODA_ANALYST_CODA_URL"])
+            self.assertEqual(run("git", "clone", str(code_remote), str(upstream)).returncode, 0)
+            self.configure_identity(upstream)
+            (upstream / "backend/app.py").write_text("VALUE = 2\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(upstream), "add", ".").returncode, 0)
+            self.assertEqual(run("git", "-C", str(upstream), "commit", "-m", "code update").returncode, 0)
+            self.assertEqual(run("git", "-C", str(upstream), "push", "origin", "main").returncode, 0)
+
+            synchronized = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
+            payload = json.loads(synchronized.stdout)
+            self.assertEqual(payload["code_update"]["operation"], "git-pull-ff-only-via-workspace")
+            self.assertEqual((code / "backend/app.py").read_text(encoding="utf-8"), "VALUE = 2\n")
+            self.assertEqual(run("git", "-C", str(code), "status", "--porcelain=v1").stdout, "")
+            self.assertEqual((code / ".git/config").read_bytes(), config_before)
+
+            (code / "backend/app.py").write_text("LOCAL = 3\n", encoding="utf-8")
+            blocked = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "update-code",
+                env=environment,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("локальные изменения", blocked.stdout)
+
     def test_exchange_aborts_conflicting_merge_without_overwriting_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -226,6 +290,8 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("слияние отменено", result.stdout)
+            self.assertIn("inspect-source-analytics-conflict", result.stdout)
+            self.assertIn("skip-source-merge", result.stdout)
             self.assertEqual((documents / "shared.txt").read_text(encoding="utf-8"), "documents version\n")
             status = run("git", "-C", str(documents), "status", "--porcelain=v1")
             self.assertEqual(status.stdout, "")

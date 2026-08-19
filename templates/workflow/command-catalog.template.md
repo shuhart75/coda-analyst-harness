@@ -189,6 +189,8 @@ Treat these as equivalent user phrasings.
 
 | User command | Target mode | Required first action |
 |---|---|---|
+| `синкани репы` | текущий аналитический режим | Выполнить `workspace.py sync`: защищённо обновить `coda`, затем синхронизировать роли `source` и `analytics`. |
+| `обнови код` | текущий аналитический режим | Выполнить только `workspace.py update-code`, то есть защищённый `git pull --ff-only`; другие изменения кода запрещены. |
 | `новая фича` | `planning` | Switch mode, inspect source folder, run intake, do not scaffold yet. |
 | `занимаемся планированием` | `planning` | Switch mode, read baseline/current and current quarter planning. |
 | `делаем требования` | `requirements` | Switch mode, select the format, read baseline/current and author only the root feature requirements. |

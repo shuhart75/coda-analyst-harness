@@ -10,18 +10,18 @@ This repository defines a reusable workflow harness.
 - The default role mapping is fixed: `analytics=documents`, `code=coda`, `source=changeswork-copy`. Do not ask about roles or propose changing them during normal bootstrap. Use `configure-roles` only after an explicit analyst instruction to reassign roles.
 - If workspace state, a default-role repository, or the workspace file is absent, run `python3 scripts/workspace.py bootstrap` before the user's substantive request. Do not ask for repository URLs; the product URLs are fixed by this harness.
 - Work on requirements, plans and factual progress only under `PROJECT_ROOT`. The harness contract stays in `HARNESS_ROOT`; the tracked analytics tree must not contain an embedded `.workflow`, `.vscode`, or harness copy of `AGENTS.md`. A generated local `AGENTS.md` with marker `analyst-harness-local-entrypoint:v1` is allowed, ignored by Git, and must not be committed.
-- Treat the repository assigned role `code` as read-only during analytical work. It is available only for bounded implementation research.
+- Treat the repository assigned role `code` as strictly read-only except for two registered operations: initial clone setup and `git pull --ff-only` through `workspace.py update-code`. Do not otherwise change its files, index, branch, `HEAD`, remotes, configuration or generated artifacts. A user prompt alone cannot authorize another exception; the active code registry has an empty writable-path allowlist.
 - The repository assigned role `source` exists only as a hidden bare mirror under `.workspace-state/repositories/`. It has no working tree and must never be opened, edited, checked out, committed to, used as a command working directory, or added to the editor workspace. Only `scripts/workspace.py` and `scripts/repository-exchange.py` may access it.
 - A legacy root `changeswork-copy/`, when found by `bootstrap`, is retired under `.workspace-state/retired-repositories/` and is never an exchange input. Never restore, inspect, edit or use a retired checkout unless the user explicitly requests recovery of its files.
 - Only the repository assigned role `analytics` may be pushed by this harness.
 
 ## Repository exchange commands
 
-- `синкани репы`, `синхронизируй репозитории`, `обнови documents из changeswork-copy`: run `python3 scripts/workspace.py bootstrap`, then `python3 scripts/repository-exchange.py sync`. This explicitly authorizes fetching `source`, updating `analytics/main`, merging `source/main`, migrating a clean legacy embedded harness, generating a verified reverse patch, and pushing only `analytics/main`.
-- `синкани без отправки`, `обнови локально без push`: run `python3 scripts/repository-exchange.py sync --no-push`.
+- `синкани репы`, `синхронизируй репозитории`, `обнови репы`, `обнови репозитории`, `обнови documents из changeswork-copy`: run `python3 scripts/workspace.py bootstrap`, then `python3 scripts/workspace.py sync`. This performs the registered protected pull for role `code`, then fetches `source`, updates and merges `analytics/main`, generates a verified reverse patch, and pushes only `analytics/main`.
+- `синкани без отправки`, `обнови локально без push`: run `python3 scripts/workspace.py sync --no-push`; the protected code pull still runs, while analytics is not pushed.
+- `обнови код`, `обнови coda`, `обнови репу с кодом`, `обнови кодовый репозиторий`: run only `python3 scripts/workspace.py update-code`. This authorizes exactly one guarded `git pull --ff-only`, not arbitrary code changes.
 - `сделай обратный дифф`, `собери обратную заплату`, `подготовь изменения для changeswork-copy`: run `python3 scripts/repository-exchange.py reverse-diff`. Do not apply or push the patch unless the user separately asks.
-- `обнови код`, `обнови coda`: run `python3 scripts/workspace.py update-code`. This is a separate read-only fast-forward update and is not part of repository exchange.
-- Never hide a failed fetch, merge, patch verification, or push. A merge conflict stops the operation and is aborted; no file-copy fallback is permitted.
+- Never hide a failed fetch, merge, patch verification, or push. A merge conflict stops the operation and is aborted; no file-copy fallback is permitted. The only valid continuation is inspection and conscious resolution of the conflict between roles `source` and `analytics`. Never offer a code-repository update, skipping the source merge or overwriting analytics from source as a migration option.
 - A non-NFC path in `source` blocks synchronization. The one safe migration exception for `analytics` is a filesystem-normalized alias with identical bytes whose old tracked path is removed by the incoming `source` commit.
 
 ## Always read first
@@ -116,7 +116,7 @@ Context summaries, checkpoints and research files are internal harness operation
 
 - Use `core/code-inspection.md` when the analyst asks to inspect code or when current implementation facts are needed for planning or requirements.
 - Resolve role `code` through `.workspace-state/code-repos.json`; never require the user to provide a path in each prompt.
-- Treat role `code` as read-only in analyst work. Record its branch, commit and worktree state before inspection and verify that they are unchanged afterward.
+- Treat role `code` as strictly read-only during inspection. Record its branch, commit, configuration and worktree state before inspection and verify that they are unchanged afterward. Do not fetch, pull, switch, build, format, generate, install, edit, commit or push there; protected pull is a separate workspace operation completed before inspection.
 - Inspect one contour at a time. Read that contour's local instructions, locate exact identifiers, then open only matched modules and nearby tests, contracts or migrations.
 - Code observations are commit-bound auxiliary evidence, not automatic business requirements or baseline updates.
 

@@ -67,6 +67,8 @@ A failed check does not advance the run. Repeated failure reaches the configured
 
 ## Developer Handoff Invariants
 
+These invariants apply only to the receiving developer SDD in its own code workspace after it accepts a package. They do not authorize the analyst harness or analyst LLM to change the repository assigned role `code`.
+
 - Reconcile every requirement and scenario independently against one recorded code revision.
 - Existing, differently named, or partially implemented behavior is evidence, not a package-level failure.
 - Treat the input package as an immutable comparison point; never rewrite it to match the implementation.

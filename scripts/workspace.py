@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,7 @@ DEFAULT_ROLES = {
 }
 ROLE_CONFIG_NAME = "repository-roles.json"
 PROJECT_PATHS = ("baseline", "context", "features", "planning", "releases")
+CODE_PUSH_DISABLED = "DISABLED_BY_CODA_ANALYST_HARNESS"
 
 
 def utc_now() -> str:
@@ -118,10 +120,19 @@ def validate_origin(path: Path, name: str, url: str) -> None:
 def disable_push(path: Path, name: str) -> None:
     result = run(
         "git", "-C", str(path), "config", "remote.origin.pushurl",
-        "DISABLED_BY_CODA_ANALYST_HARNESS",
+        CODE_PUSH_DISABLED,
     )
     if result.returncode != 0:
         raise ValueError(f"Не удалось запретить push для {name}: {result.stderr.strip()}")
+
+
+def require_push_disabled(path: Path, name: str) -> None:
+    result = run("git", "-C", str(path), "remote", "get-url", "--push", "origin")
+    if result.returncode != 0 or result.stdout.strip() != CODE_PUSH_DISABLED:
+        raise ValueError(
+            f"Для существующего репозитория роли code ({name}) не закреплён запрет отправки; "
+            "аналитическая обвязка не будет менять его настройки"
+        )
 
 
 def enable_push(path: Path, name: str, url: str) -> None:
@@ -139,6 +150,16 @@ def clone_or_validate(root: Path, name: str, url: str) -> Path:
     if git_root(path) != path:
         raise ValueError(f"{path} не является корнем Git-репозитория")
     validate_origin(path, name, url)
+    return path
+
+
+def clone_code_once(root: Path, name: str, url: str) -> Path:
+    created = not (root / name).exists()
+    path = clone_or_validate(root, name, url)
+    if created:
+        disable_push(path, name)
+    else:
+        require_push_disabled(path, name)
     return path
 
 
@@ -241,6 +262,12 @@ def write_code_registry(
             "repository_id": code_id,
             "purpose": "Кодовый репозиторий для проверки требований",
             "access": "read-only",
+            "write_policy": {
+                "mode": "operations-only",
+                "allowed_paths": [],
+                "allowed_operations": ["initial-clone", "git-pull-ff-only-via-workspace"],
+                "user_prompt_can_override": False,
+            },
             "location": {
                 "environment": "CODA_REPO" if code_id == "coda" else None,
                 "relative_to_analytical": os.path.relpath(code, analytics),
@@ -254,7 +281,7 @@ def write_code_registry(
             ],
         })
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "workspace": {
             "layout": "role-based-sibling-clones",
             "analytical_repository": {
@@ -283,8 +310,7 @@ def bootstrap_command(args: argparse.Namespace) -> int:
     enable_push(repositories[analytics_id], analytics_id, urls[analytics_id])
     code_id = roles["code"]
     if code_id:
-        repositories[code_id] = clone_or_validate(root, code_id, urls[code_id])
-        disable_push(repositories[code_id], code_id)
+        repositories[code_id] = clone_code_once(root, code_id, urls[code_id])
     source_id = roles["source"]
     retired_source = None
     if source_id:
@@ -323,11 +349,15 @@ def bootstrap_command(args: argparse.Namespace) -> int:
         "migration": {
             "required": bool(legacy_harness),
             "embedded_harness_paths": legacy_harness,
-            "next_command": "repository-exchange.py sync" if legacy_harness else None,
+            "next_command": "workspace.py sync" if legacy_harness else None,
         },
         "write_policy": {
             "analytics": "read-write-push-allowed",
-            "code": "read-only" if code_id else "disabled",
+            "code": {
+                "access": "read-only",
+                "allowed_paths": [],
+                "allowed_operations": ["initial-clone", "git-pull-ff-only-via-workspace"],
+            } if code_id else {"access": "disabled", "allowed_paths": []},
             "source": "bare-mirror-fetch-only" if source_id else "disabled",
         },
         "retired_legacy_source": str(retired_source) if retired_source else None,
@@ -371,28 +401,89 @@ def status_command(args: argparse.Namespace) -> int:
     return 0 if status == "ready" else 1
 
 
-def update_code_command(args: argparse.Namespace) -> int:
-    root = root_path(args.root)
+def update_code(root: Path) -> dict:
     code_id = load_roles(root)["code"]
     if not code_id:
         raise ValueError("Роль code отключена")
     code = root / code_id
     if git_root(code) != code:
         raise ValueError(f"Репозиторий роли code ({code_id}) не развёрнут; сначала выполни bootstrap")
+    require_push_disabled(code, code_id)
+    validate_origin(code, code_id, repository_urls()[code_id])
     dirty = run("git", "-C", str(code), "status", "--porcelain=v1")
-    if dirty.stdout:
-        raise ValueError(f"Репозиторий роли code ({code_id}) содержит локальные изменения; автоматическое обновление остановлено")
+    if dirty.returncode != 0 or dirty.stdout:
+        raise ValueError(f"Репозиторий роли code ({code_id}) содержит локальные изменения; git pull запрещён")
     branch = run("git", "-C", str(code), "symbolic-ref", "--quiet", "--short", "HEAD")
     if branch.returncode != 0:
-        raise ValueError(f"Репозиторий роли code ({code_id}) находится в detached HEAD; автоматическое обновление остановлено")
+        raise ValueError(f"Репозиторий роли code ({code_id}) находится в detached HEAD; git pull запрещён")
     name = branch.stdout.strip()
-    fetch = run("git", "-C", str(code), "fetch", "origin", name)
-    if fetch.returncode != 0:
-        raise ValueError(f"Не удалось получить изменения роли code ({code_id}): {fetch.stderr.strip()}")
-    merge = run("git", "-C", str(code), "merge", "--ff-only", f"origin/{name}")
-    if merge.returncode != 0:
-        raise ValueError(f"Репозиторий роли code ({code_id}) нельзя обновить fast-forward: {merge.stderr.strip()}")
-    print(json.dumps({"status": "updated", "role": "code", "repository": code_id, "branch": name}, ensure_ascii=False, indent=2))
+    before = run("git", "-C", str(code), "rev-parse", "HEAD").stdout.strip()
+    pulled = run(
+        "git", "-C", str(code), "-c", "core.hooksPath=/dev/null",
+        "pull", "--ff-only", "--no-rebase", "origin", name,
+    )
+    if pulled.returncode != 0:
+        raise ValueError(f"Не удалось выполнить защищённый git pull роли code ({code_id}): {pulled.stderr.strip()}")
+    after_status = run("git", "-C", str(code), "status", "--porcelain=v1")
+    if after_status.returncode != 0 or after_status.stdout:
+        raise ValueError("Защищённый git pull оставил изменённое рабочее дерево роли code; требуется владелец кода")
+    require_push_disabled(code, code_id)
+    after = run("git", "-C", str(code), "rev-parse", "HEAD").stdout.strip()
+    return {
+        "status": "updated" if before != after else "current",
+        "role": "code",
+        "repository": code_id,
+        "branch": name,
+        "before": before,
+        "after": after,
+        "operation": "git-pull-ff-only-via-workspace",
+    }
+
+
+def update_code_command(args: argparse.Namespace) -> int:
+    print(json.dumps(update_code(root_path(args.root)), ensure_ascii=False, indent=2))
+    return 0
+
+
+def sync_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    code_result = update_code(root)
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("repository-exchange.py")),
+        "--root",
+        str(root),
+        "sync",
+    ]
+    if args.no_push:
+        command.append("--no-push")
+    exchange = run(*command)
+    if exchange.returncode != 0:
+        exchange_error = exchange.stdout.strip() or exchange.stderr.strip()
+        conflict = "source-analytics-merge-conflict" in exchange_error
+        print(json.dumps({
+            "status": "blocked",
+            "code_update": code_result,
+            "analytics_exchange": exchange_error,
+            "allowed_next_action": (
+                "inspect-source-analytics-conflict" if conflict else "inspect-analytics-exchange-error"
+            ),
+            "forbidden_alternatives": [
+                "repeat-code-update-as-fallback",
+                "skip-source-merge",
+                "overwrite-analytics-from-source",
+            ],
+        }, ensure_ascii=False, indent=2))
+        return exchange.returncode
+    try:
+        exchange_result = json.loads(exchange.stdout)
+    except json.JSONDecodeError:
+        exchange_result = {"output": exchange.stdout.strip()}
+    print(json.dumps({
+        "status": "synchronized",
+        "code_update": code_result,
+        "analytics_exchange": exchange_result,
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -443,8 +534,11 @@ def parser() -> argparse.ArgumentParser:
     project_root_parser.set_defaults(handler=project_root_command)
     status = commands.add_parser("status")
     status.set_defaults(handler=status_command)
-    update_code = commands.add_parser("update-code")
-    update_code.set_defaults(handler=update_code_command)
+    update_code_parser = commands.add_parser("update-code")
+    update_code_parser.set_defaults(handler=update_code_command)
+    sync = commands.add_parser("sync")
+    sync.add_argument("--no-push", action="store_true")
+    sync.set_defaults(handler=sync_command)
     return result
 
 

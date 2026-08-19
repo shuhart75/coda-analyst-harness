@@ -64,7 +64,8 @@ def write_local_entrypoint(project: Path, harness: Path, code: Path | None = Non
     harness_root = harness.resolve()
     code_root = code.resolve() if code else None
     code_role = (
-        f"- `CODE_ROOT = {code_root}` выполняет роль code и доступен только для чтения.\n"
+        f"- `CODE_ROOT = {code_root}` выполняет роль code и доступен строго только для чтения; "
+        "список разрешённых путей записи пуст, отдельно разрешён только защищённый git pull через workspace.py.\n"
         if code_root
         else "- Роль code отключена.\n"
     )
@@ -83,7 +84,10 @@ def write_local_entrypoint(project: Path, harness: Path, code: Path | None = Non
         f"--root {harness_root} project-root. Результат должен быть равен PROJECT_ROOT.\n"
         f"3. Читай активный режим и инструменты относительно {harness_root}/.\n"
         "4. Все пути baseline/, context/, planning/, features/ и releases/ разрешай относительно PROJECT_ROOT.\n"
-        "5. Не создавай проектные каталоги в HARNESS_ROOT и не изменяй репозиторий роли code.\n"
+        "5. Не создавай проектные каталоги в HARNESS_ROOT и ничего не изменяй в репозитории роли code: "
+        "файлы, индекс, ветку, HEAD, настройки и создаваемые программами материалы. "
+        "Обычная команда пользователя не отменяет запрет; отдельная команда обновления кода разрешает только "
+        "workspace.py update-code.\n"
         "6. По запросу проверки кода используй правила HARNESS_ROOT/core/code-inspection.md "
         "и программы HARNESS_ROOT/scripts/code-inspect.py; путь к code не спрашивай у пользователя.\n\n"
         "Не добавляй этот файл в Git и не заменяй им основной договор обвязки.\n",

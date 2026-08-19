@@ -189,6 +189,14 @@ class HarnessTests(unittest.TestCase):
             result = run(sys.executable, str(tool), "verify", str(state))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+            config_path = coda / ".git/config"
+            config_before = config_path.read_bytes()
+            config_path.write_bytes(config_before + b"\n# unexpected analyst-side change\n")
+            result = run(sys.executable, str(tool), "verify", str(state))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("repository_config_sha256", result.stdout)
+            config_path.write_bytes(config_before)
+
             result = run(sys.executable, str(tool), "setup", str(documents))
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("scripts/workspace.py bootstrap", result.stdout)
@@ -213,6 +221,16 @@ class HarnessTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             run_payload = json.loads((state_root / "runs/code-root-test/run.json").read_text(encoding="utf-8"))
             self.assertEqual(Path(run_payload["code_root"]), coda / "backend")
+            run_payload["verifiers"] = [{
+                "name": "forbidden-code-write",
+                "argv": [sys.executable, "-c", "from pathlib import Path; Path('forbidden').write_text('x')"],
+            }]
+            run_path = state_root / "runs/code-root-test/run.json"
+            run_path.write_text(json.dumps(run_payload), encoding="utf-8")
+            result = run(sys.executable, str(run_file), "run-verify", str(run_path), env=run_env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("роли code запрещён", result.stderr)
+            self.assertFalse((coda / "backend/forbidden").exists())
 
             source = coda / "backend/src/Registry.java"
             source.write_text(source.read_text(encoding="utf-8") + "// changed\n", encoding="utf-8")
@@ -222,6 +240,12 @@ class HarnessTests(unittest.TestCase):
             result = run(sys.executable, str(tool), "begin", str(documents), "--contour", "backend")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("нужен чистый клон", result.stdout)
+            result = run(sys.executable, str(tool), "doctor", str(documents))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("исследование заблокировано", result.stdout)
+            result = run(sys.executable, str(tool), "locate", str(documents), "productCode", "--contour", "backend")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("поиск заблокирован", result.stdout)
 
     def test_scaffold_contains_per_item_developer_handoff_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -269,10 +293,12 @@ class HarnessTests(unittest.TestCase):
             self.assertEqual(root_manifest["agent_contract"]["path"], "AGENTS.md")
             self.assertTrue(root_manifest["agent_contract"]["required"])
             registry = json.loads((ROOT / "templates/workflow/code-repos.template.json").read_text(encoding="utf-8"))
-            self.assertEqual(registry["schema_version"], 2)
+            self.assertEqual(registry["schema_version"], 3)
             code = next(item for item in registry["repositories"] if item["id"] == "code")
             self.assertEqual(code["repository_id"], "coda")
             self.assertEqual(code["access"], "read-only")
+            self.assertEqual(code["write_policy"]["allowed_paths"], [])
+            self.assertFalse(code["write_policy"]["user_prompt_can_override"])
             self.assertEqual(code["location"]["relative_to_analytical"], "../coda")
             self.assertEqual(code["contours"]["backend"]["path"], "backend")
             self.assertTrue((ROOT / "core/code-inspection.md").is_file())

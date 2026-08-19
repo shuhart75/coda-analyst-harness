@@ -8,7 +8,7 @@ This policy governs the one-way integration path from role `source` to role `ana
 |---|---|---|---|
 | `analytics` (`documents` by default) | read and write | pull and push | Normal analyst work, requirements, planning and factual progress |
 | `source` (`changeswork-copy` by default) | no working tree; hidden bare mirror | fetch only | Upstream analytical source received from GitHub |
-| `code` (`coda` by default) | read only | pull only | Implementation evidence for analytical work |
+| `code` (`coda` by default) | read only except registered protected pull | `git pull --ff-only` through `workspace.py` only | Implementation evidence for analytical work |
 
 The repositories are independent under the `coda-analyst-harness` root. Roles `analytics` and `code` use normal clones. Role `source` is stored only at `.workspace-state/repositories/<repository-id>.git` as a bare mirror, is excluded from the editor workspace, and has no files that an LLM can edit. They are not submodules and must not be copied into one another. Default roles are used without questions; reassignment is allowed only by an explicit analyst command.
 
@@ -28,7 +28,7 @@ The command `repository-exchange.py sync` performs one guarded transaction:
 10. Compare the exact Git trees, create a binary-capable reverse patch, and prove in a temporary Git index that applying it to the recorded source commit reproduces the exact analytics tree.
 11. Push only `analytics/main`, unless `--no-push` was explicitly requested.
 
-A failed fetch, non-fast-forward local update, merge, verification or push leaves a visible error. The command must not suppress it or silently choose a side.
+A failed fetch, non-fast-forward local update, merge, verification or push leaves a visible error. The command must not suppress it or silently choose a side. A merge conflict has one continuation: inspect the conflicting `source` and `analytics` versions and request a concrete resolution. Updating `code`, skipping the source merge and overwriting analytics from source are not migration alternatives.
 
 ## Reverse patch
 
@@ -44,6 +44,7 @@ The patch is intended for the maintainers of `changeswork-copy`. Normal analyst 
 
 - no `rsync` or recursive copy between repositories;
 - no `git push` from `changeswork-copy` or `coda`;
+- no checkout, switch, merge, reset, clean, commit, push, file generation or direct fetch/pull in `coda`; only the registered `workspace.py update-code` operation may execute protected `git pull --ff-only`;
 - no checkout, worktree, direct edit or ordinary Git command in the `changeswork-copy` mirror;
 - no `reset --hard`, `clean`, force push or automatic branch switching;
 - no ignored `pull`, merge or push failures;

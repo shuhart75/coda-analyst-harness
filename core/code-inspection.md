@@ -38,18 +38,18 @@ The harness must not store analyst-machine absolute paths in committed project f
 
 ## Read-only contract
 
-During analyst planning and requirements work, `coda` is read-only.
+During analyst planning and requirements work, `coda` is strictly read-only. The generated code registry contains an empty write allowlist. A conversational user request does not extend it.
 
 Before inspection:
 
 - resolve and validate the registered repository;
-- record branch, full commit, origin, contour and worktree state;
+- record branch, full commit, origin, contour, repository configuration and worktree state;
 - require a clean worktree for evidence used in requirements;
 - read the selected contour's own agent or SDD instructions.
 
-After inspection, compare branch, commit and worktree entries with the initial snapshot. Any change blocks completion until it is understood and removed by the repository owner.
+After inspection, compare branch, commit, repository configuration and worktree entries with the initial snapshot. Any change blocks completion until it is handled by the code-repository owner. The analyst LLM must not repair, reset or clean it.
 
-Do not fetch, pull, switch branches, build, generate, format, install dependencies, run migrations, edit code or execute commands that may create files unless the user explicitly requests a separate code operation.
+Do not fetch, pull, switch branches, build, generate, format, install dependencies, run migrations, edit code or execute commands that may create files during inspection. Protected `git pull --ff-only` is a separate registered workspace operation performed only through `workspace.py update-code` before a new inspection snapshot. The writable-path allowlist remains empty.
 
 This is a workflow guard, not an operating-system sandbox. Use a client-provided read-only mount for the `coda` root when available, but still perform the before/after verification.
 

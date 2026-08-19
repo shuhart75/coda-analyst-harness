@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "workspace": {
     "layout": "sibling-clones",
     "analytical_repository": {
@@ -17,6 +17,15 @@
       "repository_id": "coda",
       "purpose": "Исходный код АС КОДА",
       "access": "read-only",
+      "write_policy": {
+        "mode": "operations-only",
+        "allowed_paths": [],
+        "allowed_operations": [
+          "initial-clone",
+          "git-pull-ff-only-via-workspace"
+        ],
+        "user_prompt_can_override": false
+      },
       "location": {
         "environment": "CODA_REPO",
         "relative_to_analytical": "../coda"

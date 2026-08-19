@@ -30,6 +30,7 @@ def run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         capture_output=True,
         check=False,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
     )
 
 
@@ -39,14 +40,28 @@ def load_registry(project: Path) -> dict:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Не удалось прочитать {path}: {exc}") from exc
-    if payload.get("schema_version") != 2 or not isinstance(payload.get("repositories"), list):
-        raise ValueError("реестр кода обвязки должен соответствовать схеме 2")
+    if payload.get("schema_version") not in {2, 3} or not isinstance(payload.get("repositories"), list):
+        raise ValueError("реестр кода обвязки должен соответствовать схеме 2 или 3")
     return payload
 
 
 def repository_entry(registry: dict, repository_id: str) -> dict:
     for entry in registry["repositories"]:
         if isinstance(entry, dict) and entry.get("id") == repository_id:
+            if entry.get("access") != "read-only":
+                raise ValueError(f"Для {repository_id} не закреплён режим только для чтения")
+            policy = entry.get("write_policy") or {
+                "mode": "forbidden",
+                "allowed_paths": [],
+                "allowed_operations": [],
+                "user_prompt_can_override": False,
+            }
+            if (
+                not isinstance(policy, dict)
+                or policy.get("allowed_paths") != []
+                or policy.get("user_prompt_can_override") is not False
+            ):
+                raise ValueError(f"Для {repository_id} задана небезопасная политика записи")
             return entry
     raise ValueError(f"Репозиторий не зарегистрирован: {repository_id}")
 
@@ -116,8 +131,20 @@ def git_snapshot(repository: Path, entry: dict, contour: str | None) -> dict:
         ["git", "-C", str(repository), "status", "--porcelain=v1", "-z"],
         capture_output=True,
         check=False,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
     )
     remotes = run_git(repository, "remote", "get-url", "--all", "origin")
+    push_remote = run_git(repository, "remote", "get-url", "--push", "origin")
+    index_path_result = run_git(repository, "rev-parse", "--git-path", "index")
+    index_path = Path(index_path_result.stdout.strip()) if index_path_result.returncode == 0 else None
+    if index_path is not None and not index_path.is_absolute():
+        index_path = repository / index_path
+    index_sha256 = hashlib.sha256(index_path.read_bytes()).hexdigest() if index_path and index_path.is_file() else None
+    config_path_result = run_git(repository, "rev-parse", "--git-path", "config")
+    config_path = Path(config_path_result.stdout.strip()) if config_path_result.returncode == 0 else None
+    if config_path is not None and not config_path.is_absolute():
+        config_path = repository / config_path
+    config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest() if config_path and config_path.is_file() else None
     remote_urls = [line.strip() for line in remotes.stdout.splitlines() if line.strip()]
     accepted = entry.get("accepted_remote_urls", [])
     remote_match = bool(set(remote_urls) & set(accepted)) if accepted else True
@@ -153,7 +180,10 @@ def git_snapshot(repository: Path, entry: dict, contour: str | None) -> dict:
         "branch_matches": expected_branch in (None, "") or branch_name == expected_branch,
         "worktree_state": "clean" if not entries else "dirty",
         "worktree_entries": entries,
+        "index_sha256": index_sha256,
+        "repository_config_sha256": config_sha256,
         "origin_urls": remote_urls,
+        "push_url": push_remote.stdout.strip() if push_remote.returncode == 0 else None,
         "origin_matches_registry": remote_match,
         "instruction_files": instructions,
     }
@@ -170,7 +200,11 @@ def status_command(args: argparse.Namespace) -> int:
     repository = resolve_repository(project, entry)
     snapshot = git_snapshot(repository, entry, args.contour)
     print_json(snapshot)
-    return 0 if snapshot["origin_matches_registry"] and snapshot["branch_matches"] else 1
+    return 0 if (
+        snapshot["origin_matches_registry"]
+        and snapshot["branch_matches"]
+        and snapshot["worktree_state"] == "clean"
+    ) else 1
 
 
 def doctor_command(args: argparse.Namespace) -> int:
@@ -191,6 +225,7 @@ def doctor_command(args: argparse.Namespace) -> int:
             errors.append("Некорректная запись репозитория")
             continue
         try:
+            entry = repository_entry(registry, entry["id"])
             repository = resolve_repository(project, entry)
             report = git_snapshot(repository, entry, None)
             reports.append(report)
@@ -199,7 +234,7 @@ def doctor_command(args: argparse.Namespace) -> int:
             if not report["branch_matches"]:
                 errors.append(f"{entry['id']}: ожидалась ветка {report['expected_branch']}, найдена {report['branch']}")
             if report["worktree_state"] != "clean":
-                warnings.append(f"{entry['id']}: рабочее дерево изменено; доказательства для требований заблокированы")
+                errors.append(f"{entry['id']}: рабочее дерево изменено; исследование заблокировано до вмешательства владельца кода")
             for contour in entry.get("contours", {}):
                 contour_root(repository, entry, contour)
                 if not contour_root(repository, entry, contour).is_dir():
@@ -230,7 +265,7 @@ def begin_command(args: argparse.Namespace) -> int:
         raise ValueError("origin кодового репозитория не совпадает с реестром")
     if not snapshot["branch_matches"]:
         raise ValueError(f"Ожидалась ветка {snapshot['expected_branch']}, найдена {snapshot['branch']}")
-    if snapshot["worktree_state"] != "clean" and not args.allow_dirty:
+    if snapshot["worktree_state"] != "clean":
         raise ValueError("Рабочее дерево роли code изменено; для исследования нужен чистый клон")
     state_dir = inspection_state_dir(project)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -262,7 +297,10 @@ def verify_command(args: argparse.Namespace) -> int:
     current = git_snapshot(repository, entry, initial.get("contour"))
     changed = {
         key: {"before": initial.get(key), "after": current.get(key)}
-        for key in ("head", "branch", "worktree_entries")
+        for key in (
+            "head", "branch", "worktree_entries", "index_sha256",
+            "repository_config_sha256", "origin_urls", "push_url",
+        )
         if initial.get(key) != current.get(key)
     }
     payload["verified_at"] = utc_now()
@@ -282,6 +320,8 @@ def locate_command(args: argparse.Namespace) -> int:
     entry = repository_entry(registry, args.repository)
     repository = resolve_repository(project, entry)
     snapshot = git_snapshot(repository, entry, args.contour)
+    if snapshot["worktree_state"] != "clean":
+        raise ValueError("Рабочее дерево роли code изменено; поиск заблокирован до вмешательства владельца кода")
     search_root = Path(snapshot["contour_root"])
     command = [
         "rg",
@@ -345,7 +385,6 @@ def parser() -> argparse.ArgumentParser:
     begin.add_argument("--contour", choices=("backend", "frontend"))
     begin.add_argument("--feature")
     begin.add_argument("--query")
-    begin.add_argument("--allow-dirty", action="store_true")
     begin.set_defaults(handler=begin_command)
 
     verify = commands.add_parser("verify")

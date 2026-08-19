@@ -223,11 +223,27 @@ def merge_source(documents: Path) -> None:
         "-m", f"Merge {SOURCE_REMOTE}/{BRANCH}",
     )
     if merged.returncode != 0:
+        conflicts = [
+            line.strip()
+            for line in git(documents, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
+            if line.strip()
+        ]
         git(documents, "merge", "--abort")
-        raise ValueError(
-            "Роль source нельзя автоматически объединить с ролью analytics; "
-            "слияние отменено, требуется осознанное разрешение конфликта"
-        )
+        raise ValueError(json.dumps({
+            "status": "blocked",
+            "reason": "source-analytics-merge-conflict",
+            "message": (
+                "Роль source нельзя автоматически объединить с ролью analytics; "
+                "слияние отменено, требуется осознанное разрешение конфликта"
+            ),
+            "conflicting_paths": conflicts,
+            "allowed_next_action": "inspect-source-analytics-conflict",
+            "forbidden_alternatives": [
+                "repeat-code-update-as-fallback",
+                "skip-source-merge",
+                "overwrite-analytics-from-source",
+            ],
+        }, ensure_ascii=False))
 
 
 def verified_reverse_patch(

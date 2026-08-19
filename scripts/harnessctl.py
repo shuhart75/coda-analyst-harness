@@ -188,7 +188,7 @@ def run_init_command(args: argparse.Namespace) -> int:
         if repos_path.exists():
             registry = json.loads(repos_path.read_text(encoding="utf-8"))
             repositories = registry.get("repositories", {})
-            if registry.get("schema_version") == 2 and isinstance(repositories, list):
+            if registry.get("schema_version") in {2, 3} and isinstance(repositories, list):
                 code = next((item for item in repositories if isinstance(item, dict) and item.get("id") == "code"), None)
                 if code:
                     location = code.get("location", {})
@@ -288,11 +288,40 @@ def run_advance_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def registered_readonly_code_roots(project: Path) -> list[Path]:
+    path = code_registry_path()
+    if not path.is_file():
+        return []
+    registry = json.loads(path.read_text(encoding="utf-8"))
+    repositories = registry.get("repositories", [])
+    if registry.get("schema_version") not in {2, 3} or not isinstance(repositories, list):
+        return []
+    result: list[Path] = []
+    for entry in repositories:
+        if not isinstance(entry, dict) or entry.get("id") != "code":
+            continue
+        location = entry.get("location", {})
+        environment = location.get("environment")
+        configured = os.environ.get(environment, "") if isinstance(environment, str) else ""
+        relative = location.get("relative_to_analytical")
+        if configured:
+            result.append(Path(configured).expanduser().resolve())
+        elif isinstance(relative, str) and relative:
+            result.append((project / relative).resolve())
+    return result
+
+
 def run_verify_command(args: argparse.Namespace) -> int:
     path = Path(args.run).resolve()
     payload = json.loads(path.read_text(encoding="utf-8"))
     project_root = Path(args.project or payload.get("project_root") or Path.cwd()).resolve()
     base = Path(payload.get("code_root") or project_root).resolve()
+    for code_root in registered_readonly_code_roots(project_root):
+        if base == code_root or code_root in base.parents:
+            raise SystemExit(
+                "Запуск проверок в репозитории роли code запрещён аналитической обвязкой; "
+                "используй только code-inspect.py для чтения"
+            )
     results: list[dict[str, object]] = []
     failed = False
     for rel, expected in payload.get("input_hashes", {}).items():
@@ -309,6 +338,10 @@ def run_verify_command(args: argparse.Namespace) -> int:
             failed = True
             continue
         cwd = (base / verifier.get("cwd", ".")).resolve()
+        if cwd != base and base not in cwd.parents:
+            results.append({"name": name, "returncode": 2, "output": "verifier cwd leaves the permitted root"})
+            failed = True
+            continue
         result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
         results.append(
             {
