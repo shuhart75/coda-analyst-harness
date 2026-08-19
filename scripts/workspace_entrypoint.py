@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
@@ -61,11 +60,12 @@ def write_local_entrypoint(project: Path, harness: Path, code: Path | None = Non
             "обвязка не будет перезаписывать его"
         )
     exclude_local_entrypoint(project)
-    relative_harness = os.path.relpath(harness.resolve(), project.resolve())
-    relative_code = os.path.relpath(code.resolve(), project.resolve()) if code else None
+    project_root = project.resolve()
+    harness_root = harness.resolve()
+    code_root = code.resolve() if code else None
     code_role = (
-        f"- Каталог {relative_code}/ выполняет роль code и доступен только для чтения.\n"
-        if relative_code
+        f"- `CODE_ROOT = {code_root}` выполняет роль code и доступен только для чтения.\n"
+        if code_root
         else "- Роль code отключена.\n"
     )
     path.write_text(
@@ -74,16 +74,15 @@ def write_local_entrypoint(project: Path, harness: Path, code: Path | None = Non
         "Этот файл создан локально программой развёртывания, исключён через "
         ".git/info/exclude и не входит в аналитический Git-репозиторий.\n\n"
         "## Роли каталогов\n\n"
-        "- Текущий каталог выполняет роль analytics и является PROJECT_ROOT.\n"
-        f"- Каталог {relative_harness}/ выполняет роль harness и является HARNESS_ROOT.\n\n"
+        f"- `PROJECT_ROOT = {project_root}` выполняет роль analytics.\n"
+        f"- `HARNESS_ROOT = {harness_root}` содержит договоры и инструменты обвязки.\n\n"
         f"{code_role}\n"
         "## Обязательный порядок\n\n"
-        f"1. Прочитай {relative_harness}/AGENTS.md и {relative_harness}/core/llm-contract.md.\n"
-        f"2. Выполни python3 {relative_harness}/scripts/workspace.py "
-        f"--root {relative_harness} project-root. Результат должен совпасть с текущим каталогом.\n"
-        f"3. Читай активный режим и инструменты относительно {relative_harness}/.\n"
-        "4. Все пути baseline/, context/, planning/, features/ и releases/ "
-        "разрешай относительно текущего каталога.\n"
+        f"1. Прочитай {harness_root}/AGENTS.md и {harness_root}/core/llm-contract.md.\n"
+        f"2. Выполни python3 {harness_root}/scripts/workspace.py "
+        f"--root {harness_root} project-root. Результат должен быть равен PROJECT_ROOT.\n"
+        f"3. Читай активный режим и инструменты относительно {harness_root}/.\n"
+        "4. Все пути baseline/, context/, planning/, features/ и releases/ разрешай относительно PROJECT_ROOT.\n"
         "5. Не создавай проектные каталоги в HARNESS_ROOT и не изменяй репозиторий роли code.\n"
         "6. По запросу проверки кода используй правила HARNESS_ROOT/core/code-inspection.md "
         "и программы HARNESS_ROOT/scripts/code-inspect.py; путь к code не спрашивай у пользователя.\n\n"

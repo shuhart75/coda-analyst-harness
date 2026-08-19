@@ -83,7 +83,7 @@ python3 scripts/workspace.py status
 - из корня `coda-analyst-harness`;
 - непосредственно из репозитория роли `analytics`, штатно из `documents`.
 
-В обоих случаях модель обязана определить `HARNESS_ROOT`, получить `PROJECT_ROOT` командой `python3 scripts/workspace.py project-root` и записывать `baseline/`, `context/`, `planning/`, `features/` и `releases/` только в `PROJECT_ROOT`. При запуске из `documents` это обеспечивает местный игнорируемый `AGENTS.md`. Исследование роли `code` выполняется через корневые правила и `.workspace-state/code-repos.json`, поэтому путь к коду не зависит от места запуска задачи.
+В обоих случаях модель обязана определить `HARNESS_ROOT`, получить `PROJECT_ROOT` командой `python3 scripts/workspace.py project-root` и записывать `baseline/`, `context/`, `planning/`, `features/` и `releases/` только в `PROJECT_ROOT`. При запуске из `documents` местный игнорируемый `AGENTS.md` содержит абсолютные `HARNESS_ROOT`, `PROJECT_ROOT` и `CODE_ROOT` этой машины. Поэтому маршрутизация не зависит ни от имени репозитория, ни от текущего вложенного каталога, а исследование роли `code` выполняется через единую корневую обвязку.
 
 Существующую задачу, начатую в `documents` до обновления, можно продолжить там же после обновления корневой обвязки, `bootstrap` и успешной команды `синкани репы`.
 

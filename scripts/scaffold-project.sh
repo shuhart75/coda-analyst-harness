@@ -98,6 +98,23 @@ if [[ ! -e "$TARGET/planning/intake/README.md" ]]; then
   printf '# Входящие инициативы\n' > "$TARGET/planning/intake/README.md"
 fi
 
+for directory in \
+  context/source-materials/current-system/requirements \
+  context/source-materials/current-system/screenshots \
+  context/source-materials/current-system/prototypes \
+  context/source-materials/current-system/diagrams \
+  context/source-materials/change-requests \
+  context/current-system \
+  context/change-requests \
+  baseline/current/domain/state-machines \
+  baseline/versions \
+  planning/approved-plans \
+  features; do
+  if [[ -z "$(find "$TARGET/$directory" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    : > "$TARGET/$directory/.gitkeep"
+  fi
+done
+
 for forbidden in .workflow .vscode AGENTS.md; do
   if [[ -e "$TARGET/$forbidden" ]]; then
     if [[ "$forbidden" == "AGENTS.md" ]] && grep -q "analyst-harness-local-entrypoint:v1" "$TARGET/$forbidden"; then
