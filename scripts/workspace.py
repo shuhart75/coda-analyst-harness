@@ -687,6 +687,26 @@ def inspect_analytics_origin_conflict_command(args: argparse.Namespace) -> int:
     return inspected.returncode
 
 
+def repository_exchange_passthrough(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("repository-exchange.py")),
+        "--root",
+        str(root),
+        args.exchange_command,
+    ]
+    for option in ("snapshot", "side", "path"):
+        value = getattr(args, option, None)
+        if value is not None:
+            command.extend((f"--{option}", value))
+    result = run(*command)
+    output = result.stdout.strip() or result.stderr.strip()
+    if output:
+        print(output)
+    return result.returncode
+
+
 def project_root_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     require_clean_harness_boundary(root)
@@ -743,6 +763,25 @@ def parser() -> argparse.ArgumentParser:
     inspect_conflict.set_defaults(handler=inspect_conflict_command)
     inspect_analytics_origin = commands.add_parser("inspect-analytics-origin-conflict")
     inspect_analytics_origin.set_defaults(handler=inspect_analytics_origin_conflict_command)
+    snapshots = commands.add_parser("list-analytics-snapshots")
+    snapshots.set_defaults(
+        handler=repository_exchange_passthrough,
+        exchange_command="list-analytics-snapshots",
+    )
+    inspect_snapshot = commands.add_parser("inspect-analytics-snapshot")
+    inspect_snapshot.add_argument("--snapshot", required=True)
+    inspect_snapshot.set_defaults(
+        handler=repository_exchange_passthrough,
+        exchange_command="inspect-analytics-snapshot",
+    )
+    restore_snapshot = commands.add_parser("restore-analytics-snapshot-file")
+    restore_snapshot.add_argument("--snapshot", required=True)
+    restore_snapshot.add_argument("--side", choices=("base", "local", "incoming"), required=True)
+    restore_snapshot.add_argument("--path", required=True)
+    restore_snapshot.set_defaults(
+        handler=repository_exchange_passthrough,
+        exchange_command="restore-analytics-snapshot-file",
+    )
     return result
 
 

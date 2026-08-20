@@ -869,6 +869,21 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(inspection["conflicts"][0]["path"], "context/shared.txt")
             self.assertEqual(inspection["conflicts"][0]["kind"], "both-modified")
             self.assertEqual(inspection["conflicts"][0]["recommended_resolution"], "analyst-decision-required")
+            source_snapshot = inspection["protective_snapshot"]
+            self.assertEqual(source_snapshot["status"], "conflict")
+            source_snapshot_metadata = json.loads(
+                Path(source_snapshot["metadata"]).read_text(encoding="utf-8")
+            )
+            source_saved = source_snapshot_metadata["conflicts"][0]["saved_versions"]
+            source_snapshot_root = Path(source_snapshot["metadata"]).parent
+            self.assertEqual(
+                (source_snapshot_root / source_saved["local"]["file"]).read_text(encoding="utf-8"),
+                "documents version\n",
+            )
+            self.assertEqual(
+                (source_snapshot_root / source_saved["incoming"]["file"]).read_text(encoding="utf-8"),
+                "source version\n",
+            )
             self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
 
     def test_sync_merges_diverged_analytics_origin_without_conflicts(self) -> None:
@@ -905,12 +920,33 @@ class CodaWorkspaceTests(unittest.TestCase):
             origin_update = payload["analytics_exchange"]["analytics_origin_update"]
             self.assertEqual(origin_update["status"], "merged")
             self.assertEqual(origin_update["remote"], remote_head)
+            snapshot = origin_update["protective_snapshot"]
+            self.assertEqual(snapshot["status"], "completed")
+            self.assertTrue(snapshot["commits"]["result"])
+            snapshot_metadata = json.loads(Path(snapshot["metadata"]).read_text(encoding="utf-8"))
+            self.assertTrue(snapshot_metadata["ancestry_verified"])
+            self.assertEqual(snapshot_metadata["ancestor_checks"], {"local": True, "incoming": True})
+            for reference in snapshot["refs"].values():
+                if reference:
+                    self.assertEqual(
+                        run("git", "-C", str(documents), "show-ref", "--verify", "--quiet", reference).returncode,
+                        0,
+                    )
             self.assertTrue((documents / local_path).is_file())
             self.assertTrue((documents / remote_path).is_file())
             parents = run("git", "-C", str(documents), "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
             self.assertEqual(len(parents), 3)
             self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
             self.assertFalse((remote_work / local_path).exists(), "--no-push must not update analytics origin")
+            self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
+            remote_snapshot_refs = run(
+                "git",
+                "ls-remote",
+                str(documents_remote),
+                "refs/coda-analyst-harness/analytics-snapshots/*",
+            )
+            self.assertEqual(remote_snapshot_refs.returncode, 0)
+            self.assertEqual(remote_snapshot_refs.stdout, "")
 
     def test_sync_aborts_and_inspects_diverged_analytics_origin_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -968,6 +1004,36 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(inspection["conflicts"][0]["path"], shared)
             self.assertEqual(inspection["conflicts"][0]["kind"], "both-modified")
             self.assertEqual(inspection["conflicts"][0]["recommended_resolution"], "analyst-decision-required")
+            snapshot = inspection["protective_snapshot"]
+            self.assertEqual(snapshot["status"], "conflict")
+            snapshot_metadata = json.loads(Path(snapshot["metadata"]).read_text(encoding="utf-8"))
+            saved = snapshot_metadata["conflicts"][0]["saved_versions"]
+            snapshot_root = Path(snapshot["metadata"]).parent
+            self.assertEqual((snapshot_root / saved["local"]["file"]).read_text(encoding="utf-8"), "локальная версия\n")
+            self.assertEqual((snapshot_root / saved["incoming"]["file"]).read_text(encoding="utf-8"), "удалённая версия\n")
+            listed = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "list-analytics-snapshots",
+                env=environment,
+            )
+            self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+            listed_payload = json.loads(listed.stdout)
+            self.assertIn(snapshot["snapshot_id"], {item["snapshot_id"] for item in listed_payload["snapshots"]})
+            inspected_snapshot = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "inspect-analytics-snapshot",
+                "--snapshot",
+                snapshot["snapshot_id"],
+                env=environment,
+            )
+            self.assertEqual(inspected_snapshot.returncode, 0, inspected_snapshot.stdout + inspected_snapshot.stderr)
+            self.assertEqual(json.loads(inspected_snapshot.stdout)["snapshot_id"], snapshot["snapshot_id"])
 
             merging = run("git", "-C", str(documents), "merge", "origin/main")
             self.assertNotEqual(merging.returncode, 0)
@@ -996,6 +1062,114 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(active_inspection.returncode, 0, active_inspection.stdout + active_inspection.stderr)
             self.assertTrue(json.loads(active_inspection.stdout)["existing_merge_in_progress"])
             self.assertEqual(run("git", "-C", str(documents), "merge", "--abort").returncode, 0)
+
+            self.assertEqual(run("git", "-C", str(documents), "merge", "origin/main").returncode, 1)
+            self.assertEqual(run("git", "-C", str(documents), "checkout", "--theirs", "--", shared).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", shared).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "wrong conflict choice").returncode, 0)
+            self.assertEqual((documents / shared).read_text(encoding="utf-8"), "удалённая версия\n")
+
+            restored = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "restore-analytics-snapshot-file",
+                "--snapshot",
+                snapshot["snapshot_id"],
+                "--side",
+                "local",
+                "--path",
+                shared,
+                env=environment,
+            )
+            self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+            self.assertEqual((documents / shared).read_text(encoding="utf-8"), "локальная версия\n")
+            self.assertIn(shared, run("git", "-C", str(documents), "status", "--short").stdout)
+            self.assertEqual(run("git", "-C", str(documents), "diff", "--cached", "--name-only").stdout, "")
+            self.assertEqual(run("git", "-C", str(documents), "restore", "--", shared).returncode, 0)
+
+            rejected = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "restore-analytics-snapshot-file",
+                "--snapshot",
+                snapshot["snapshot_id"],
+                "--side",
+                "local",
+                "--path",
+                "../outside.md",
+                env=environment,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+
+            nonexistent = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "restore-analytics-snapshot-file",
+                "--snapshot",
+                snapshot["snapshot_id"],
+                "--side",
+                "local",
+                "--path",
+                "context/typo.md",
+                env=environment,
+            )
+            self.assertNotEqual(nonexistent.returncode, 0)
+            self.assertIn("отсутствует во всех сторонах снимка", nonexistent.stdout)
+
+    def test_analytics_only_fast_forward_keeps_protective_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            documents = workspace / "documents"
+            source_mirror = workspace / ".workspace-state/repositories/changeswork-copy.git"
+            shutil.rmtree(source_mirror)
+            refreshed = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "bootstrap",
+                env=environment,
+            )
+            self.assertEqual(refreshed.returncode, 0, refreshed.stdout + refreshed.stderr)
+
+            remote_work = root / "documents-fast-forward-work"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
+            self.configure_identity(remote_work)
+            path = "features/demo/requirements.md"
+            (remote_work / path).parent.mkdir(parents=True)
+            (remote_work / path).write_text("# Требования\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", path).returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote requirement").returncode, 0)
+            remote_head = run("git", "-C", str(remote_work), "rev-parse", "HEAD").stdout.strip()
+            self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
+
+            synchronized = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
+            payload = json.loads(synchronized.stdout)
+            self.assertEqual(payload["sync_mode"], "analytics-only")
+            update = payload["analytics_exchange"]["analytics_origin_update"]
+            self.assertEqual(update["status"], "fast-forwarded")
+            self.assertEqual(update["after"], remote_head)
+            self.assertEqual(update["protective_snapshot"]["status"], "completed")
+            metadata = json.loads(Path(update["protective_snapshot"]["metadata"]).read_text(encoding="utf-8"))
+            self.assertTrue(metadata["ancestry_verified"])
+            self.assertTrue((documents / path).is_file())
+            self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
 
     def test_bootstrap_retires_dirty_legacy_source_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

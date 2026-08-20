@@ -35,6 +35,25 @@ The command `repository-exchange.py sync` performs one guarded transaction:
 
 A failed fetch, merge, verification or push leaves a visible error. The command must not suppress it or silently choose a side. A conflict with `analytics/origin/main` continues through `inspect-analytics-origin-conflict`; a conflict with `source` continues through `inspect-source-analytics-conflict`. In either case the LLM requests one concrete resolution at a time. Updating `code`, rebasing or resetting analytics, force pushing, skipping the source merge and overwriting analytics from source are not migration alternatives.
 
+## Protective analytics snapshots
+
+Before any fast-forward or merge that can move `analytics/main`, the exchange creates local refs under `refs/coda-analyst-harness/analytics-snapshots/<id>/` and a description under `.workspace-state/analytics-snapshots/<id>/snapshot.json`. When a conflict occurs, the base, local and incoming versions of every conflicting file are copied into that snapshot before a harness-started merge is aborted.
+
+After an automatic merge, both original commits must be ancestors of the result. A failed ancestry check stops synchronization. Snapshot refs are local recovery state: push always names only `analytics/main`, so these refs are never published. The state directory is ignored by the harness repository.
+
+Recovery is explicit and path-scoped:
+
+```bash
+python3 scripts/workspace.py list-analytics-snapshots
+python3 scripts/workspace.py inspect-analytics-snapshot --snapshot <id>
+python3 scripts/workspace.py restore-analytics-snapshot-file \
+  --snapshot <id> \
+  --side <base|local|incoming> \
+  --path <exact-relative-path>
+```
+
+The restore command requires a clean `analytics/main`, accepts one exact file path that existed in at least one snapshot side, and never stages or commits the result. It deletes that one worktree file only when the explicitly selected snapshot side did not contain it. Automatic restoration, implicit side selection and directory restoration are prohibited.
+
 ## Reduced workspace
 
 The natural-language synchronization command always runs `workspace.py bootstrap` before `workspace.py sync`, so local instructions, the code registry and the editor workspace reflect the repositories that actually exist.
@@ -75,6 +94,7 @@ If `source` is absent, a new reverse patch cannot be built or verified. `reverse
 - no `reset --hard`, `clean`, force push or automatic branch switching;
 - no ignored `pull`, merge or push failures;
 - no automatic conflict resolution;
+- no deletion, rewriting or publication of local analytics protective snapshots;
 - no rebase, reset, force push or silent selection of one analytics history when local `analytics/main` and `origin/main` diverge;
 - no reverse patch created from a dirty `documents` worktree;
 - no `git add -A`, `git add .` or broad staging while repairing exchange state;
