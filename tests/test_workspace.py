@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -171,6 +172,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(run("git", "-C", str(source_work), "add", ".").returncode, 0)
             self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "source change").returncode, 0)
             self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
+            source_head = run("git", "-C", str(source_work), "rev-parse", "HEAD").stdout.strip()
 
             result = run(
                 sys.executable,
@@ -182,6 +184,12 @@ class CodaWorkspaceTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            sync_payload = json.loads(result.stdout)
+            self.assertEqual(sync_payload["status"], "analytics-synchronized-reverse-diff-pending")
+            self.assertEqual(sync_payload["source_analytics_state"], "reverse-diff-pending")
+            self.assertFalse(sync_payload["repositories_identical"])
+            self.assertIn("all-repositories-synchronized", sync_payload["forbidden_claims"])
+            self.assertIn("обратную заплату", sync_payload["next_action"])
             self.assertTrue((documents / "context/source-only.txt").is_file())
             patch = workspace / "reverse-diffs/reverse-diff-latest.patch"
             metadata = json.loads((workspace / "reverse-diffs/reverse-diff-latest.json").read_text(encoding="utf-8"))
@@ -190,6 +198,15 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertTrue(metadata["tree_verified"])
             self.assertTrue(metadata["content_policy_verified"])
             self.assertEqual(metadata["schema_version"], 2)
+            self.assertEqual(metadata["patch_sha256"], hashlib.sha256(patch.read_bytes()).hexdigest())
+            archived_patch = Path(metadata["patch"])
+            archived_metadata = Path(metadata["metadata"])
+            self.assertTrue(archived_patch.is_file())
+            self.assertTrue(archived_metadata.is_file())
+            self.assertIn(metadata["artifact_id"], archived_patch.name)
+            self.assertIn(metadata["artifact_id"], archived_metadata.name)
+            archived_patch_bytes = archived_patch.read_bytes()
+            archived_metadata_bytes = archived_metadata.read_bytes()
             self.assertEqual(metadata["changed_path_count"], len(metadata["changed_paths"]))
             self.assertEqual(metadata["approved_source_deletions"], [])
             self.assertTrue((documents / "context/source-materials/legacy/snapshot/.codex").is_file())
@@ -235,6 +252,12 @@ class CodaWorkspaceTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            completed_payload = json.loads(result.stdout)
+            self.assertEqual(completed_payload["source_analytics_state"], "reverse-diff-pending")
+            self.assertFalse(completed_payload["reverse_diff"]["repositories_identical"])
+            self.assertEqual(archived_patch.read_bytes(), archived_patch_bytes)
+            self.assertEqual(archived_metadata.read_bytes(), archived_metadata_bytes)
+            self.assertEqual(run("git", "-C", str(source_mirror), "rev-parse", "main").stdout.strip(), source_head)
             self.assertEqual(run("git", "-C", str(remote_check), "pull", "--ff-only").returncode, 0)
             self.assertTrue((remote_check / "context/source-only.txt").is_file())
             self.assertTrue((remote_check / "context/documents-only.txt").is_file())
@@ -277,6 +300,9 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
             payload = json.loads(synchronized.stdout)
+            self.assertEqual(payload["status"], "fully-synchronized")
+            self.assertEqual(payload["source_analytics_state"], "identical")
+            self.assertTrue(payload["repositories_identical"])
             self.assertEqual(payload["code_update"]["operation"], "git-pull-ff-only-via-workspace")
             self.assertEqual((code / "backend/app.py").read_text(encoding="utf-8"), "VALUE = 2\n")
             self.assertEqual(run("git", "-C", str(code), "status", "--porcelain=v1").stdout, "")
@@ -330,11 +356,18 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
             payload = json.loads(synchronized.stdout)
+            self.assertEqual(payload["status"], "analytics-synchronized-source-unavailable")
+            self.assertEqual(payload["source_analytics_state"], "source-unavailable")
+            self.assertIsNone(payload["repositories_identical"])
+            self.assertIn("all-repositories-synchronized", payload["forbidden_claims"])
             self.assertEqual(payload["sync_mode"], "analytics-only")
             self.assertIn(payload["code_update"]["status"], {"current", "updated"})
             self.assertEqual(payload["analytics_exchange"]["reverse_diff"]["reason"], "source-role-absent")
             self.assertFalse(payload["analytics_exchange"]["reverse_diff"]["verified"])
             self.assertFalse((workspace / "reverse-diffs/reverse-diff-latest.patch").exists())
+            unavailable_metadata = payload["analytics_exchange"]["reverse_diff"]
+            self.assertTrue(Path(unavailable_metadata["metadata"]).is_file())
+            self.assertIn(unavailable_metadata["artifact_id"], Path(unavailable_metadata["metadata"]).name)
             self.assertIn(
                 f"CODE_ROOT = {workspace / 'coda'}",
                 (documents / "AGENTS.md").read_text(encoding="utf-8"),
@@ -432,6 +465,9 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
             payload = json.loads(synchronized.stdout)
+            self.assertEqual(payload["status"], "analytics-synchronized-reverse-diff-pending")
+            self.assertEqual(payload["source_analytics_state"], "reverse-diff-pending")
+            self.assertFalse(payload["repositories_identical"])
             self.assertEqual(payload["sync_mode"], "source-analytics")
             self.assertEqual(payload["code_update"]["status"], "skipped")
             self.assertEqual(payload["code_update"]["reason"], "repository-absent")
@@ -491,6 +527,9 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
             payload = json.loads(synchronized.stdout)
+            self.assertEqual(payload["status"], "analytics-synchronized-source-unavailable")
+            self.assertEqual(payload["source_analytics_state"], "source-unavailable")
+            self.assertIsNone(payload["repositories_identical"])
             self.assertEqual(payload["sync_mode"], "analytics-only")
             self.assertEqual(payload["code_update"]["status"], "skipped")
             entrypoint = (documents / "AGENTS.md").read_text(encoding="utf-8")

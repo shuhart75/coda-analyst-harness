@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -50,6 +51,20 @@ DELETION_APPROVALS_FILE = "exchange-deletion-approvals.json"
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def atomic_write(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def root_path(explicit: str | None) -> Path:
@@ -564,8 +579,9 @@ def verified_reverse_patch(
     output_dir.mkdir(parents=True, exist_ok=True)
     latest = output_dir / "reverse-diff-latest.patch"
     metadata_path = output_dir / "reverse-diff-latest.json"
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     patch_path = output_dir / f"reverse-diff-{timestamp}.patch"
+    archived_metadata_path = output_dir / f"reverse-diff-{timestamp}.json"
 
     diff = git(analytics, "diff", "--binary", "--full-index", "--no-renames", source_commit, documents_commit, "--", ".")
     if diff.returncode != 0:
@@ -574,9 +590,15 @@ def verified_reverse_patch(
     if source_tree == documents_tree:
         latest.unlink(missing_ok=True)
         patch_path = None
+        patch_payload = None
+        patch_sha256 = None
     else:
-        patch_path.write_text(diff.stdout, encoding="utf-8")
-        latest.write_text(diff.stdout, encoding="utf-8")
+        patch_payload = diff.stdout.encode("utf-8")
+        patch_sha256 = hashlib.sha256(patch_payload).hexdigest()
+        descriptor, raw_patch_path = tempfile.mkstemp(prefix="coda-analyst-reverse-", suffix=".patch")
+        os.close(descriptor)
+        verification_patch = Path(raw_patch_path)
+        verification_patch.write_bytes(patch_payload)
         descriptor, raw_index_path = tempfile.mkstemp(prefix="coda-analyst-index-")
         os.close(descriptor)
         index_path = Path(raw_index_path)
@@ -589,18 +611,19 @@ def verified_reverse_patch(
                     f"Не удалось подготовить временный индекс роли source: "
                     f"{read_tree.stderr.strip()}"
                 )
-            checked = git(source, "apply", "--cached", "--check", str(patch_path), env=environment)
+            checked = git(source, "apply", "--cached", "--check", str(verification_patch), env=environment)
             if checked.returncode != 0:
                 raise ValueError(
                     f"Обратная заплата не применима к текущему состоянию роли source: "
                     f"{checked.stderr.strip()}"
                 )
-            applied = git(source, "apply", "--cached", str(patch_path), env=environment)
+            applied = git(source, "apply", "--cached", str(verification_patch), env=environment)
             written = git(source, "write-tree", env=environment)
             if applied.returncode or written.returncode or written.stdout.strip() != documents_tree:
                 raise ValueError("Проверка обратной заплаты не воспроизвела дерево роли analytics")
         finally:
             index_path.unlink(missing_ok=True)
+            verification_patch.unlink(missing_ok=True)
 
     changed = git(analytics, "diff", "--name-only", "-z", source_commit, documents_commit, "--", ".")
     if changed.returncode != 0:
@@ -609,6 +632,7 @@ def verified_reverse_patch(
     approved_deletions = deleted_source_paths(analytics, source_commit, documents_commit)
     metadata = {
         "schema_version": 2,
+        "artifact_id": timestamp,
         "created_at": utc_now(),
         "source_repository": source_id,
         "analytics_repository": analytics_id,
@@ -621,6 +645,9 @@ def verified_reverse_patch(
         "repositories_identical": source_tree == documents_tree,
         "patch": str(patch_path) if patch_path else None,
         "latest_patch": str(latest) if patch_path else None,
+        "metadata": str(archived_metadata_path),
+        "latest_metadata": str(metadata_path),
+        "patch_sha256": patch_sha256,
         "changed_path_count": len(changed_paths),
         "changed_paths": changed_paths,
         "approved_source_deletions": approved_deletions,
@@ -628,7 +655,15 @@ def verified_reverse_patch(
         "content_policy_verified": True,
         "verified": True,
     }
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    serialized = json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
+    if patch_path and patch_payload is not None:
+        with patch_path.open("xb") as handle:
+            handle.write(patch_payload)
+    with archived_metadata_path.open("x", encoding="utf-8") as handle:
+        handle.write(serialized)
+    if patch_path and patch_payload is not None:
+        atomic_write(latest, patch_payload)
+    atomic_write(metadata_path, serialized.encode("utf-8"))
     return metadata
 
 
@@ -779,6 +814,7 @@ def sync_command(args: argparse.Namespace) -> int:
             "analytics_pushed": not args.no_push,
             "local_entrypoint": str(entrypoint),
             "reverse_diff": metadata,
+            **reverse_diff_completion(metadata),
         }, ensure_ascii=False, indent=2))
         return 0
     finally:
@@ -808,8 +844,12 @@ def unavailable_reverse_diff(root: Path, analytics: Path, analytics_id: str) -> 
     analytics_tree = git(analytics, "rev-parse", "HEAD^{tree}").stdout.strip()
     source_role = workspace_role(root, "source")
     reason = "source-role-absent" if source_role.get("repository") else "source-role-disabled"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    archived_metadata_path = output_dir / f"reverse-diff-{timestamp}.json"
+    latest_metadata_path = output_dir / "reverse-diff-latest.json"
     metadata = {
         "schema_version": 2,
+        "artifact_id": timestamp,
         "created_at": utc_now(),
         "status": "unavailable",
         "reason": reason,
@@ -824,6 +864,9 @@ def unavailable_reverse_diff(root: Path, analytics: Path, analytics_id: str) -> 
         "repositories_identical": None,
         "patch": None,
         "latest_patch": None,
+        "metadata": str(archived_metadata_path),
+        "latest_metadata": str(latest_metadata_path),
+        "patch_sha256": None,
         "changed_path_count": None,
         "changed_paths": [],
         "approved_source_deletions": [],
@@ -831,11 +874,32 @@ def unavailable_reverse_diff(root: Path, analytics: Path, analytics_id: str) -> 
         "content_policy_verified": False,
         "verified": False,
     }
-    (output_dir / "reverse-diff-latest.json").write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    serialized = json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
+    with archived_metadata_path.open("x", encoding="utf-8") as handle:
+        handle.write(serialized)
+    atomic_write(latest_metadata_path, serialized.encode("utf-8"))
     return metadata
+
+
+def reverse_diff_completion(metadata: dict) -> dict:
+    identical = metadata.get("repositories_identical")
+    if identical is True:
+        return {
+            "source_analytics_state": "identical",
+            "next_action": None,
+            "forbidden_claims": [],
+        }
+    if metadata.get("source_commit") is None:
+        return {
+            "source_analytics_state": "source-unavailable",
+            "next_action": "Продолжать работу в analytics; не заявлять о совпадении с source",
+            "forbidden_claims": ["all-repositories-synchronized", "reverse-diff-verified"],
+        }
+    return {
+        "source_analytics_state": "reverse-diff-pending",
+        "next_action": "Передать проверенную обратную заплату на машину, где source является рабочим репозиторием",
+        "forbidden_claims": ["all-repositories-synchronized", "source-updated"],
+    }
 
 
 def sync_analytics_only_command(args: argparse.Namespace) -> int:
@@ -866,6 +930,7 @@ def sync_analytics_only_command(args: argparse.Namespace) -> int:
             "analytics_pushed": not args.no_push,
             "local_entrypoint": str(entrypoint),
             "reverse_diff": metadata,
+            **reverse_diff_completion(metadata),
         }, ensure_ascii=False, indent=2))
         return 0
     finally:

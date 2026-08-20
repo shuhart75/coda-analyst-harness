@@ -134,6 +134,19 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
 
             synchronized = run(sys.executable, "scripts/repository-exchange.py", "sync", cwd=harness, env=environment)
             self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
+            synchronized_payload = json.loads(synchronized.stdout)
+            self.assertEqual(synchronized_payload["source_analytics_state"], "reverse-diff-pending")
+            archived_patch = Path(synchronized_payload["reverse_diff"]["patch"])
+            archived_metadata = Path(synchronized_payload["reverse_diff"]["metadata"])
+            self.assertTrue(archived_patch.is_file())
+            self.assertTrue(archived_metadata.is_file())
+            self.assertEqual(run("git", "check-ignore", "reverse-diffs", cwd=harness).returncode, 0)
+            archived_patch_bytes = archived_patch.read_bytes()
+            archived_metadata_bytes = archived_metadata.read_bytes()
+            harness_pull = run("git", "pull", "--ff-only", cwd=harness)
+            self.assertEqual(harness_pull.returncode, 0, harness_pull.stdout + harness_pull.stderr)
+            self.assertEqual(archived_patch.read_bytes(), archived_patch_bytes)
+            self.assertEqual(archived_metadata.read_bytes(), archived_metadata_bytes)
             for relative in (
                 "context/analytics-only.md",
                 "context/remote-after-bootstrap.md",
@@ -317,6 +330,9 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
             )
             self.assertEqual(reduced_sync.returncode, 0, reduced_sync.stdout + reduced_sync.stderr)
             reduced_payload = json.loads(reduced_sync.stdout)
+            self.assertEqual(reduced_payload["status"], "analytics-synchronized-source-unavailable")
+            self.assertEqual(reduced_payload["source_analytics_state"], "source-unavailable")
+            self.assertIsNone(reduced_payload["repositories_identical"])
             self.assertEqual(reduced_payload["sync_mode"], "analytics-only")
             self.assertEqual(reduced_payload["code_update"]["reason"], "repository-absent")
             self.assertFalse(reduced_payload["analytics_exchange"]["reverse_diff"]["verified"])

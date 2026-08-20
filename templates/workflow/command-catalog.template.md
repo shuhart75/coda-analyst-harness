@@ -189,7 +189,8 @@ Treat these as equivalent user phrasings.
 
 | User command | Target mode | Required first action |
 |---|---|---|
-| `синкани репы` | текущий аналитический режим | Выполнить `workspace.py bootstrap`, проверить и точечно зафиксировать понятные изменения `analytics`, затем выполнить `workspace.py sync`: обновить доступный `code`; при наличии `source` объединить его с `analytics` и проверить обратную заплату, без `source` обновить и отправить только `analytics`. Отсутствующие `code` и `source` не восстанавливать. |
+| `синкани репы` | текущий аналитический режим | Выполнить `workspace.py bootstrap`, проверить и точечно зафиксировать понятные изменения `analytics`, затем выполнить `workspace.py sync`: обновить доступный `code`; при наличии `source` объединить его с `analytics`, проверить и сохранить обратную заплату, затем отправить только `analytics`; без `source` обновить и отправить только `analytics`. Отсутствующие `code` и `source` не восстанавливать. Корневую обвязку не изменять и не коммитить. |
+| результат `reverse-diff-pending` | текущий аналитический режим | Сообщить, что `analytics` обновлён, но равенство с `source` будет достигнуто только после применения сохранённой заплаты на машине с рабочим `source`. Не утверждать, что все репозитории идентичны. |
 | `обнови код` | текущий аналитический режим | Выполнить только `workspace.py update-code`, то есть защищённый `git pull --ff-only`; другие изменения кода запрещены. |
 | `новая фича` | `planning` | Switch mode, inspect source folder, run intake, do not scaffold yet. |
 | `занимаемся планированием` | `planning` | Switch mode, read baseline/current and current quarter planning. |

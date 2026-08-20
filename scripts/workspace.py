@@ -600,11 +600,28 @@ def sync_command(args: argparse.Namespace) -> int:
         exchange_result = json.loads(exchange.stdout)
     except json.JSONDecodeError:
         exchange_result = {"output": exchange.stdout.strip()}
+    source_analytics_state = exchange_result.get("source_analytics_state", "unknown")
+    status = {
+        "identical": "fully-synchronized",
+        "reverse-diff-pending": "analytics-synchronized-reverse-diff-pending",
+        "source-unavailable": "analytics-synchronized-source-unavailable",
+    }.get(source_analytics_state, "synchronized-state-unknown")
     print(json.dumps({
-        "status": "synchronized",
+        "status": status,
         "sync_mode": sync_mode,
         "code_update": code_result,
         "analytics_exchange": exchange_result,
+        "source_analytics_state": source_analytics_state,
+        "repositories_identical": (
+            exchange_result.get("reverse_diff", {}).get("repositories_identical")
+            if isinstance(exchange_result.get("reverse_diff"), dict)
+            else None
+        ),
+        "next_action": exchange_result.get("next_action"),
+        "forbidden_claims": exchange_result.get(
+            "forbidden_claims",
+            ["all-repositories-synchronized"],
+        ),
     }, ensure_ascii=False, indent=2))
     return 0
 
