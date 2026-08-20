@@ -1,6 +1,13 @@
 __pycache__/
 *.pyc
 .DS_Store
+.codex/
+.gigacode/
+.gigaide/
+.idea/
+GIGACODE.md
+*.iml
+*.orig
 /.workspace-state/
 /coda-analyst.code-workspace
 /documents/

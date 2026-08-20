@@ -5,6 +5,19 @@ from pathlib import Path
 
 
 ENTRYPOINT_MARKER = "<!-- analyst-harness-local-entrypoint:v1 -->"
+LOCAL_EXCLUDE_PATTERNS = (
+    "/AGENTS.md",
+    "/.codex/",
+    "/.gigacode/",
+    "/.gigaide/",
+    "/.idea/",
+    "/GIGACODE.md",
+    "/features/test-*.md",
+    "/test-*.md",
+    "/test-*.patch",
+    "*.iml",
+    "*.orig",
+)
 
 
 def is_local_entrypoint(path: Path) -> bool:
@@ -45,11 +58,14 @@ def exclude_local_entrypoint(project: Path) -> None:
         exclude = project / exclude
     exclude.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-    if "/AGENTS.md" not in existing.splitlines():
+    existing_lines = set(existing.splitlines())
+    missing = [pattern for pattern in LOCAL_EXCLUDE_PATTERNS if pattern not in existing_lines]
+    if missing:
         with exclude.open("a", encoding="utf-8") as handle:
             if existing and not existing.endswith("\n"):
                 handle.write("\n")
-            handle.write("\n# analyst-harness local LLM entry point\n/AGENTS.md\n")
+            handle.write("\n# analyst-harness local files and tool settings\n")
+            handle.write("\n".join(missing) + "\n")
 
 
 def write_local_entrypoint(project: Path, harness: Path, code: Path | None = None) -> Path:
@@ -96,4 +112,8 @@ def write_local_entrypoint(project: Path, harness: Path, code: Path | None = Non
     ignored = git(project, "check-ignore", "--quiet", "AGENTS.md")
     if ignored.returncode != 0:
         raise ValueError("Локальный AGENTS.md не исключён из Git")
+    for relative in (".codex/state", ".gigacode/settings.json", ".gigaide/settings", ".idea/modules.xml", "GIGACODE.md"):
+        ignored = git(project, "check-ignore", "--quiet", relative)
+        if ignored.returncode != 0:
+            raise ValueError(f"Локальный путь не исключён из Git: {relative}")
     return path

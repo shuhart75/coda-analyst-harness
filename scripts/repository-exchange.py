@@ -20,6 +20,31 @@ from workspace_entrypoint import (
 SOURCE_REMOTE = "analyst-source-local"
 BRANCH = "main"
 FORBIDDEN_CONTENT_PATHS = (".workflow", ".vscode", "AGENTS.md")
+ALLOWED_CONTENT_ROOTS = frozenset({
+    ".gitattributes",
+    ".github",
+    ".gitignore",
+    "LICENSE",
+    "README.md",
+    "assets",
+    "baseline",
+    "context",
+    "features",
+    "planning",
+    "releases",
+})
+FORBIDDEN_LOCAL_COMPONENTS = frozenset({
+    ".codex",
+    ".gigacode",
+    ".gigaide",
+    ".idea",
+    ".vscode",
+    ".workflow",
+    "__pycache__",
+})
+FORBIDDEN_LOCAL_NAMES = frozenset({".DS_Store", "GIGACODE.md", "Thumbs.db"})
+ALLOWED_FEATURES_ROOT_FILES = frozenset({".gitkeep", "README.md"})
+DELETION_APPROVALS_FILE = "exchange-deletion-approvals.json"
 
 
 def utc_now() -> str:
@@ -178,6 +203,177 @@ def require_source_content_only(source: Path, commit: str, repository_id: str) -
     embedded = [item for item in FORBIDDEN_CONTENT_PATHS if item in roots]
     if embedded:
         raise ValueError(f"{repository_id} в роли source содержит встроенную обвязку: {', '.join(embedded)}")
+
+
+def analytics_content_violations(
+    repository: Path,
+    commit: str,
+    *,
+    allow_legacy_harness: bool = False,
+) -> list[dict[str, str]]:
+    violations: list[dict[str, str]] = []
+    for path in tracked_paths(repository, commit):
+        parts = Path(path).parts
+        root = parts[0]
+        if allow_legacy_harness and forbidden_content_path(path):
+            continue
+        if root not in ALLOWED_CONTENT_ROOTS:
+            violations.append({
+                "path": path,
+                "reason": "корневой путь не входит в структуру аналитического репозитория",
+            })
+            continue
+        if any(part in FORBIDDEN_LOCAL_COMPONENTS for part in parts):
+            violations.append({
+                "path": path,
+                "reason": "локальные настройки инструмента не должны отслеживаться Git",
+            })
+            continue
+        if any(part in FORBIDDEN_LOCAL_NAMES or part.endswith((".iml", ".orig")) for part in parts):
+            violations.append({
+                "path": path,
+                "reason": "локальный или резервный файл не должен отслеживаться Git",
+            })
+            continue
+        if root == "features" and len(parts) == 2 and parts[1] not in ALLOWED_FEATURES_ROOT_FILES:
+            violations.append({
+                "path": path,
+                "reason": "в features разрешены только каталоги функциональностей",
+            })
+    return violations
+
+
+def require_source_content_policy(source: Path, commit: str, repository_id: str) -> None:
+    violations = analytics_content_violations(source, commit)
+    if violations:
+        raise ValueError(json.dumps({
+            "status": "blocked",
+            "reason": "source-content-policy",
+            "message": f"{repository_id} в роли source содержит недопустимые пути",
+            "violations": violations,
+            "allowed_next_action": "исправить состав upstream-репозитория source",
+        }, ensure_ascii=False))
+
+
+def deleted_source_paths(analytics: Path, source_commit: str, analytics_commit: str) -> list[str]:
+    merge_base = git(analytics, "merge-base", source_commit, analytics_commit)
+    if merge_base.returncode != 0 or not merge_base.stdout.strip():
+        raise ValueError("Не удалось определить общую историю ролей source и analytics")
+    result = subprocess.run(
+        (
+            "git", "-C", str(analytics), "diff", "--name-only", "--diff-filter=D", "-z",
+            "--no-renames", source_commit, analytics_commit, "--", ".",
+        ),
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError(
+            "Не удалось проверить удаления из роли source: "
+            f"{result.stderr.decode(errors='replace').strip()}"
+        )
+    candidates = [
+        item.decode("utf-8", errors="surrogateescape")
+        for item in result.stdout.split(b"\0")
+        if item
+    ]
+    base_commit = merge_base.stdout.strip()
+    return [
+        path
+        for path in candidates
+        if git(analytics, "cat-file", "-e", f"{base_commit}:{path}").returncode == 0
+    ]
+
+
+def deletion_approvals_path(root: Path) -> Path:
+    return root / ".workspace-state" / DELETION_APPROVALS_FILE
+
+
+def load_deletion_approvals(root: Path) -> dict[str, str]:
+    path = deletion_approvals_path(root)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Не удалось прочитать подтверждения удалений {path}: {exc}") from exc
+    if payload.get("schema_version") != 1 or not isinstance(payload.get("approvals"), list):
+        raise ValueError(f"Повреждён формат подтверждений удалений: {path}")
+    approvals: dict[str, str] = {}
+    for item in payload["approvals"]:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or not isinstance(item.get("source_blob"), str)
+        ):
+            raise ValueError(f"Повреждена запись подтверждения удаления: {path}")
+        approvals[item["path"]] = item["source_blob"]
+    return approvals
+
+
+def source_blob_oid(source: Path, source_commit: str, path: str) -> str:
+    result = git(source, "rev-parse", f"{source_commit}:{path}")
+    if result.returncode != 0:
+        raise ValueError(f"Путь отсутствует в роли source: {path}")
+    return result.stdout.strip()
+
+
+def unapproved_source_deletions(
+    root: Path,
+    source: Path,
+    analytics: Path,
+    source_commit: str,
+    analytics_commit: str,
+) -> list[str]:
+    approvals = load_deletion_approvals(root)
+    result = []
+    for path in deleted_source_paths(analytics, source_commit, analytics_commit):
+        if approvals.get(path) != source_blob_oid(source, source_commit, path):
+            result.append(path)
+    return result
+
+
+def require_analytics_content_policy(
+    root: Path,
+    source: Path,
+    analytics: Path,
+    source_commit: str,
+    analytics_commit: str,
+    *,
+    allow_legacy_harness: bool = False,
+) -> None:
+    violations = analytics_content_violations(
+        analytics,
+        analytics_commit,
+        allow_legacy_harness=allow_legacy_harness,
+    )
+    deletions = unapproved_source_deletions(
+        root,
+        source,
+        analytics,
+        source_commit,
+        analytics_commit,
+    )
+    if not violations and not deletions:
+        return
+    raise ValueError(json.dumps({
+        "status": "blocked",
+        "reason": "analytics-content-policy",
+        "message": "Аналитическое дерево содержит недопустимые пути или неподтверждённые удаления",
+        "violations": violations,
+        "unapproved_source_deletions": deletions,
+        "allowed_next_actions": [
+            "удалить локальные и тестовые файлы из analytics, фиксируя только точные пути",
+            "восстановить непреднамеренно удалённые файлы из source",
+            "после явного решения аналитика подтвердить намеренное удаление отдельного пути",
+        ],
+        "forbidden_actions": [
+            "git add -A",
+            "git add .",
+            "создание обратной заплаты",
+            "отправка недопустимого дерева",
+        ],
+    }, ensure_ascii=False))
 
 
 def update_ff(path: Path, name: str) -> None:
@@ -358,6 +554,7 @@ def verified_reverse_patch(
     configure_source_remote(analytics, source)
     source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
     documents_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+    require_analytics_content_policy(root, source, analytics, source_commit, documents_commit)
     source_tree = git(source, "rev-parse", f"{source_commit}^{{tree}}").stdout.strip()
     documents_tree = git(analytics, "rev-parse", f"{documents_commit}^{{tree}}").stdout.strip()
     output_dir = root / "reverse-diffs"
@@ -402,8 +599,13 @@ def verified_reverse_patch(
         finally:
             index_path.unlink(missing_ok=True)
 
+    changed = git(analytics, "diff", "--name-only", "-z", source_commit, documents_commit, "--", ".")
+    if changed.returncode != 0:
+        raise ValueError(f"Не удалось получить состав обратной заплаты: {changed.stderr.strip()}")
+    changed_paths = [item for item in changed.stdout.split("\0") if item]
+    approved_deletions = deleted_source_paths(analytics, source_commit, documents_commit)
     metadata = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": utc_now(),
         "source_repository": source_id,
         "analytics_repository": analytics_id,
@@ -416,6 +618,11 @@ def verified_reverse_patch(
         "repositories_identical": source_tree == documents_tree,
         "patch": str(patch_path) if patch_path else None,
         "latest_patch": str(latest) if patch_path else None,
+        "changed_path_count": len(changed_paths),
+        "changed_paths": changed_paths,
+        "approved_source_deletions": approved_deletions,
+        "tree_verified": True,
+        "content_policy_verified": True,
         "verified": True,
     }
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -475,6 +682,7 @@ def sync_command(args: argparse.Namespace) -> int:
         source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
         require_nfc_paths(source, source_commit, f"{source_id} (source)")
         require_source_content_only(source, source_commit, source_id)
+        require_source_content_policy(source, source_commit, source_id)
         unicode_aliases = prepare_unicode_aliases(documents, source, source_commit)
         if not unicode_aliases:
             require_clean(documents, f"{analytics_id} (analytics)")
@@ -482,16 +690,37 @@ def sync_command(args: argparse.Namespace) -> int:
         update_ff(documents, f"{analytics_id} (analytics)")
         verify_unicode_aliases(documents, unicode_aliases)
         configure_source_remote(documents, source)
+        analytics_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
+        require_analytics_content_policy(
+            root,
+            source,
+            documents,
+            source_commit,
+            analytics_commit,
+            allow_legacy_harness=True,
+        )
         merge_source(documents)
         documents_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
         require_nfc_paths(documents, documents_commit, f"{analytics_id} (analytics)")
         require_content_only(documents, analytics_id)
+        require_analytics_content_policy(root, source, documents, source_commit, documents_commit)
         code_role = json.loads((root / ".workspace-state/workspace.json").read_text(encoding="utf-8"))["roles"].get("code", {})
         code_path = Path(code_role["path"]).resolve() if code_role.get("path") else None
         entrypoint = write_local_entrypoint(documents, root, code_path)
         require_clean(documents, f"{analytics_id} (analytics)")
         metadata = verified_reverse_patch(root, source, documents, source_id, analytics_id)
         if not args.no_push:
+            require_clean(documents, f"{analytics_id} (analytics)")
+            current_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
+            if current_commit != metadata["analytics_commit"]:
+                raise ValueError("Роль analytics изменилась после проверки обратной заплаты; отправка запрещена")
+            require_analytics_content_policy(
+                root,
+                source,
+                documents,
+                source_commit,
+                current_commit,
+            )
             push_analytics(documents, analytics_id)
         print(json.dumps({
             "status": "synchronized",
@@ -517,8 +746,61 @@ def reverse_diff_command(args: argparse.Namespace) -> int:
         require_nfc_paths(source, source_commit, f"{source_id} (source)")
         require_nfc_paths(documents, documents_commit, f"{analytics_id} (analytics)")
         require_source_content_only(source, source_commit, source_id)
+        require_source_content_policy(source, source_commit, source_id)
+        configure_source_remote(documents, source)
+        require_analytics_content_policy(root, source, documents, source_commit, documents_commit)
         metadata = verified_reverse_patch(root, source, documents, source_id, analytics_id)
         print(json.dumps({"status": "created", "reverse_diff": metadata}, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        handle.close()
+
+
+def approve_deletion_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    handle = lock(root)
+    try:
+        source, documents, source_id, analytics_id = role_repositories(root)
+        require_clean(documents, f"{analytics_id} (analytics)")
+        require_branch(documents, f"{analytics_id} (analytics)")
+        path = args.path.strip().strip("/")
+        if not path or path != unicodedata.normalize("NFC", path):
+            raise ValueError("Подтверждаемый путь должен быть непустым и записан в Unicode NFC")
+        source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
+        analytics_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
+        configure_source_remote(documents, source)
+        if path not in deleted_source_paths(documents, source_commit, analytics_commit):
+            raise ValueError(f"Путь не является удалением относительно роли source: {path}")
+        blob = source_blob_oid(source, source_commit, path)
+        approvals_path = deletion_approvals_path(root)
+        approvals_path.parent.mkdir(parents=True, exist_ok=True)
+        approvals = load_deletion_approvals(root)
+        approvals[path] = blob
+        payload = {
+            "schema_version": 1,
+            "updated_at": utc_now(),
+            "approvals": [
+                {
+                    "path": approved_path,
+                    "source_blob": source_blob,
+                    "decision": "explicit-analyst-approval",
+                }
+                for approved_path, source_blob in sorted(approvals.items())
+            ],
+        }
+        approvals_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(json.dumps({
+            "status": "approved",
+            "source_repository": source_id,
+            "analytics_repository": analytics_id,
+            "path": path,
+            "source_blob": blob,
+            "approval_file": str(approvals_path),
+            "next_step": "повторить синхронизацию или создание обратной заплаты",
+        }, ensure_ascii=False, indent=2))
         return 0
     finally:
         handle.close()
@@ -531,6 +813,7 @@ def status_command(args: argparse.Namespace) -> int:
     trees: dict[str, str] = {}
     source_head = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
     source_tree = git(source, "rev-parse", f"{source_head}^{{tree}}").stdout.strip()
+    configure_source_remote(documents, source)
     source_roots = {path.split("/", 1)[0] for path in tracked_paths(source, source_head)}
     source_embedded = [item for item in FORBIDDEN_CONTENT_PATHS if item in source_roots]
     trees["source"] = source_tree
@@ -543,11 +826,22 @@ def status_command(args: argparse.Namespace) -> int:
         "worktree": None,
         "tree": source_tree,
         "embedded_harness_paths": source_embedded,
+        "content_policy_violations": analytics_content_violations(source, source_head),
+        "unapproved_source_deletions": [],
     })
     branch = git(documents, "symbolic-ref", "--quiet", "--short", "HEAD")
     head = git(documents, "rev-parse", "HEAD")
     dirty = git(documents, "status", "--porcelain=v1")
     tree = git(documents, "rev-parse", "HEAD^{tree}").stdout.strip()
+    analytics_commit = head.stdout.strip()
+    policy_violations = analytics_content_violations(documents, analytics_commit)
+    unapproved_deletions = unapproved_source_deletions(
+        root,
+        source,
+        documents,
+        source_head,
+        analytics_commit,
+    )
     trees["analytics"] = tree
     report.append({
         "role": "analytics",
@@ -558,9 +852,16 @@ def status_command(args: argparse.Namespace) -> int:
         "worktree": "clean" if not dirty.stdout else "dirty",
         "tree": tree,
         "embedded_harness_paths": embedded_harness_paths(documents),
+        "content_policy_violations": policy_violations,
+        "unapproved_source_deletions": unapproved_deletions,
     })
     identical = trees.get("source") == trees.get("analytics")
-    clean_content = not any(item["embedded_harness_paths"] for item in report)
+    clean_content = not any(
+        item["embedded_harness_paths"]
+        or item.get("content_policy_violations")
+        or item.get("unapproved_source_deletions")
+        for item in report
+    )
     print(json.dumps({"status": "ok" if clean_content else "invalid", "repositories_identical": identical, "repositories": report}, ensure_ascii=False, indent=2))
     return 0 if clean_content else 1
 
@@ -574,6 +875,13 @@ def parser() -> argparse.ArgumentParser:
     sync.set_defaults(handler=sync_command)
     reverse_diff = commands.add_parser("reverse-diff")
     reverse_diff.set_defaults(handler=reverse_diff_command)
+    approve_deletion = commands.add_parser("approve-deletion")
+    approve_deletion.add_argument(
+        "--path",
+        required=True,
+        help="Точный путь, удаление которого явно подтвердил аналитик",
+    )
+    approve_deletion.set_defaults(handler=approve_deletion_command)
     inspect_conflict = commands.add_parser("inspect-source-analytics-conflict")
     inspect_conflict.set_defaults(handler=inspect_conflict_command)
     status = commands.add_parser("status")

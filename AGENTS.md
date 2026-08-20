@@ -14,6 +14,7 @@ This repository defines a reusable workflow harness.
 - The repository assigned role `source` exists only as a hidden bare mirror under `.workspace-state/repositories/`. It has no working tree and must never be opened, edited, checked out, committed to, used as a command working directory, or added to the editor workspace. Only `scripts/workspace.py` and `scripts/repository-exchange.py` may access it.
 - A legacy root `changeswork-copy/`, when found by `bootstrap`, is retired under `.workspace-state/retired-repositories/` and is never an exchange input. Never restore, inspect, edit or use a retired checkout unless the user explicitly requests recovery of its files.
 - Only the repository assigned role `analytics` may be pushed by this harness.
+- In role `analytics`, never use `git add -A`, `git add .`, or another broad staging command. Stage, restore, remove and commit only exact reviewed paths. This rule also applies while resolving one merge conflict or repairing one Unicode path.
 
 ## Repository exchange commands
 
@@ -24,6 +25,7 @@ This repository defines a reusable workflow harness.
 - `сделай обратный дифф`, `собери обратную заплату`, `подготовь изменения для changeswork-copy`: run `python3 scripts/repository-exchange.py reverse-diff`. Do not apply or push the patch unless the user separately asks.
 - Never hide a failed fetch, merge, patch verification, or push. A merge conflict stops the operation and is aborted; no file-copy fallback is permitted. The only valid continuation is inspection and conscious resolution of the conflict between roles `source` and `analytics`. Never offer a code-repository update, skipping the source merge or overwriting analytics from source as a migration option.
 - A non-NFC path in `source` blocks synchronization. The one safe migration exception for `analytics` is a filesystem-normalized alias with identical bytes whose old tracked path is removed by the incoming `source` commit.
+- An `analytics-content-policy` failure blocks merge, reverse-patch creation and push. Remove only the exact reported local/tool artifacts. For each reported source deletion, ask the analyst whether to restore it or approve that exact deletion; run `repository-exchange.py approve-deletion --path <path>` only after an explicit approval. Never treat `verified=true` as content approval: schema 2 requires both `tree_verified=true` and `content_policy_verified=true`.
 
 ## Always read first
 
