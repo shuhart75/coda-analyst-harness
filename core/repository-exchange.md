@@ -20,25 +20,26 @@ The command `repository-exchange.py sync` performs one guarded transaction:
 
 1. Acquire the workspace lock so a second exchange cannot run concurrently.
 2. Require a valid `source` bare mirror and fetch `source/main` directly into it.
-3. Require a clean `analytics/main` worktree. The only exception is a verified filesystem-normalized alias of a non-NFC tracked path that is removed by the incoming source commit and whose bytes equal the indexed blob.
-4. Fast-forward `analytics/main` from its own origin.
-5. Reject any non-NFC path remaining in `source` or in the merged `analytics` tree.
-6. Reject local tool settings, files outside the registered analytical roots, direct files under `features/`, and any deletion of a path inherited from `source` that has not been explicitly approved by the analyst. Paths under `context/source-materials/` are opaque evidence and are not classified by filename as local tool settings.
-7. Fetch the local `source/main` commit into `analytics` through a dedicated local remote and merge it normally.
-8. Abort and stop on any conflict. Never overwrite the conflict with copied files.
-9. Repeat the content policy after merge and require the merged analytics tree to contain no tracked embedded harness. A clean legacy embedded harness is removed only through the incoming Git commit; it is never deleted by file-copy logic.
-10. Create a local ignored `AGENTS.md` entry point in role `analytics` and prove that the worktree remains clean. The same local exclude file covers `.codex`, `.gigacode`, `.gigaide`, `.idea`, `GIGACODE.md`, `*.iml` and `*.orig`.
-11. Compare the exact Git trees, create a binary-capable reverse patch, and prove in a temporary Git index that applying it to the recorded source commit reproduces the exact analytics tree.
-12. Recheck the exact commit, clean worktree and content policy immediately before push.
-13. Push only `analytics/main`, unless `--no-push` was explicitly requested. The verified reverse patch is not applied to `source` on this machine.
+3. Detect an already active analytics merge and stop without changing it. Otherwise require a clean `analytics/main` worktree. The only exception is a verified filesystem-normalized alias of a non-NFC tracked path that is removed by the incoming source commit and whose bytes equal the indexed blob.
+4. Fetch `analytics/origin/main`. Fast-forward when the local branch is behind, preserve it when it is ahead, or create a normal merge commit when both sides have conflict-free commits.
+5. If local and remote analytics changes conflict, abort only the merge started by the harness, return `analytics-origin-merge-conflict`, and offer `inspect-analytics-origin-conflict`. If a merge was already active before the command, return `analytics-origin-merge-in-progress` without aborting or changing it.
+6. Reject any non-NFC path remaining in `source` or in the merged `analytics` tree.
+7. Reject local tool settings, files outside the registered analytical roots, direct files under `features/`, and any deletion of a path inherited from `source` that has not been explicitly approved by the analyst. Paths under `context/source-materials/` are opaque evidence and are not classified by filename as local tool settings.
+8. Fetch the local `source/main` commit into `analytics` through a dedicated local remote and merge it normally.
+9. Abort and stop on any source conflict. Never overwrite the conflict with copied files.
+10. Repeat the content policy after merge and require the merged analytics tree to contain no tracked embedded harness. A clean legacy embedded harness is removed only through the incoming Git commit; it is never deleted by file-copy logic.
+11. Create a local ignored `AGENTS.md` entry point in role `analytics` and prove that the worktree remains clean. The same local exclude file covers `.codex`, `.gigacode`, `.gigaide`, `.idea`, `GIGACODE.md`, `*.iml` and `*.orig`.
+12. Compare the exact Git trees, create a binary-capable reverse patch, and prove in a temporary Git index that applying it to the recorded source commit reproduces the exact analytics tree.
+13. Recheck the exact commit, clean worktree and content policy immediately before push.
+14. Push only `analytics/main`, unless `--no-push` was explicitly requested. The verified reverse patch is not applied to `source` on this machine.
 
-A failed fetch, non-fast-forward local update, merge, verification or push leaves a visible error. The command must not suppress it or silently choose a side. A merge conflict has one continuation: inspect the conflicting `source` and `analytics` versions and request a concrete resolution. Updating `code`, skipping the source merge and overwriting analytics from source are not migration alternatives.
+A failed fetch, merge, verification or push leaves a visible error. The command must not suppress it or silently choose a side. A conflict with `analytics/origin/main` continues through `inspect-analytics-origin-conflict`; a conflict with `source` continues through `inspect-source-analytics-conflict`. In either case the LLM requests one concrete resolution at a time. Updating `code`, rebasing or resetting analytics, force pushing, skipping the source merge and overwriting analytics from source are not migration alternatives.
 
 ## Reduced workspace
 
 The natural-language synchronization command always runs `workspace.py bootstrap` before `workspace.py sync`, so local instructions, the code registry and the editor workspace reflect the repositories that actually exist.
 
-When `source` is absent, `workspace.py sync` selects `sync-analytics-only`. It requires a clean `analytics/main`, fast-forwards it from its own origin, applies the same Unicode, structure and content-policy checks, refreshes the local entry point and pushes only `analytics/main` unless `--no-push` was requested. It removes the stale `reverse-diff-latest.patch` and writes `reverse-diff-latest.json` with `status=unavailable`, `reason=source-role-absent` and `verified=false`. Historical timestamped patches remain historical artifacts and must not be presented as current.
+When `source` is absent, `workspace.py sync` selects `sync-analytics-only`. It requires a clean `analytics/main`, performs the same protected origin update or conflict workflow, applies the Unicode, structure and content-policy checks, refreshes the local entry point and pushes only `analytics/main` unless `--no-push` was requested. It removes the stale `reverse-diff-latest.patch` and writes `reverse-diff-latest.json` with `status=unavailable`, `reason=source-role-absent` and `verified=false`. Historical timestamped patches remain historical artifacts and must not be presented as current.
 
 When `code` is absent, the protected update returns `status=skipped` and no code command is run. The generated code registry has no repository entries, the editor workspace omits code and the local `AGENTS.md` explicitly prohibits code access. Full `source` to `analytics` exchange continues when `source` is present.
 
@@ -74,6 +75,7 @@ If `source` is absent, a new reverse patch cannot be built or verified. `reverse
 - no `reset --hard`, `clean`, force push or automatic branch switching;
 - no ignored `pull`, merge or push failures;
 - no automatic conflict resolution;
+- no rebase, reset, force push or silent selection of one analytics history when local `analytics/main` and `origin/main` diverge;
 - no reverse patch created from a dirty `documents` worktree;
 - no `git add -A`, `git add .` or broad staging while repairing exchange state;
 - no tracked local IDE/LLM settings or test artifacts outside the analytical structure;

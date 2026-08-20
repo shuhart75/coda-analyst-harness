@@ -337,6 +337,14 @@ class CodaWorkspaceTests(unittest.TestCase):
             (documents / relative).write_text("локальное изменение\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", relative).returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "analytics without source").returncode, 0)
+            remote_work = root / "documents-without-source-remote"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
+            self.configure_identity(remote_work)
+            remote_relative = "context/remote-without-source.md"
+            (remote_work / remote_relative).write_text("удалённое изменение\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", remote_relative).returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote without source").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
 
             bootstrap = run(
                 sys.executable,
@@ -369,6 +377,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertIn("source отсутствует", payload["report_message"])
             self.assertIn("all-repositories-synchronized", payload["forbidden_claims"])
             self.assertEqual(payload["sync_mode"], "analytics-only")
+            self.assertEqual(payload["analytics_origin_update"]["status"], "merged")
             self.assertIn(payload["code_update"]["status"], {"current", "updated"})
             self.assertEqual(payload["analytics_exchange"]["reverse_diff"]["reason"], "source-role-absent")
             self.assertFalse(payload["analytics_exchange"]["reverse_diff"]["verified"])
@@ -395,6 +404,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             remote_check = root / "documents-without-source-check"
             self.assertEqual(run("git", "clone", str(documents_remote), str(remote_check)).returncode, 0)
             self.assertTrue((remote_check / relative).is_file())
+            self.assertTrue((remote_check / remote_relative).is_file())
 
     def test_analytics_only_sync_does_not_invent_a_commit_for_dirty_analytics(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -710,6 +720,9 @@ class CodaWorkspaceTests(unittest.TestCase):
                 env=environment,
             )
             self.assertNotEqual(result.returncode, 0)
+            blocked_payload = json.loads(result.stdout)
+            self.assertEqual(blocked_payload["allowed_next_action"], "review-reported-error")
+            self.assertIsNone(blocked_payload["next_command"])
             self.assertIn("analytics-content-policy", result.stdout)
             for relative in files:
                 self.assertIn(relative, result.stdout)
@@ -857,6 +870,132 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(inspection["conflicts"][0]["kind"], "both-modified")
             self.assertEqual(inspection["conflicts"][0]["recommended_resolution"], "analyst-decision-required")
             self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
+
+    def test_sync_merges_diverged_analytics_origin_without_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            documents = workspace / "documents"
+            local_path = "context/local-analytics.md"
+            (documents / local_path).write_text("локальная работа\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", local_path).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "local analytics").returncode, 0)
+
+            remote_work = root / "documents-remote-work"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
+            self.configure_identity(remote_work)
+            remote_path = "context/remote-analytics.md"
+            (remote_work / remote_path).write_text("удалённая работа\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", remote_path).returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote analytics").returncode, 0)
+            remote_head = run("git", "-C", str(remote_work), "rev-parse", "HEAD").stdout.strip()
+            self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
+
+            synchronized = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
+            payload = json.loads(synchronized.stdout)
+            origin_update = payload["analytics_exchange"]["analytics_origin_update"]
+            self.assertEqual(origin_update["status"], "merged")
+            self.assertEqual(origin_update["remote"], remote_head)
+            self.assertTrue((documents / local_path).is_file())
+            self.assertTrue((documents / remote_path).is_file())
+            parents = run("git", "-C", str(documents), "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
+            self.assertEqual(len(parents), 3)
+            self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
+            self.assertFalse((remote_work / local_path).exists(), "--no-push must not update analytics origin")
+
+    def test_sync_aborts_and_inspects_diverged_analytics_origin_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            documents = workspace / "documents"
+            shared = "context/shared.txt"
+            (documents / shared).write_text("локальная версия\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", shared).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "local conflict").returncode, 0)
+            local_head = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
+
+            remote_work = root / "documents-conflict-work"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
+            self.configure_identity(remote_work)
+            (remote_work / shared).write_text("удалённая версия\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", shared).returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote conflict").returncode, 0)
+            remote_head = run("git", "-C", str(remote_work), "rev-parse", "HEAD").stdout.strip()
+            self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
+
+            blocked = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            blocked_payload = json.loads(blocked.stdout)
+            self.assertEqual(blocked_payload["allowed_next_action"], "inspect-analytics-origin-conflict")
+            self.assertIn("inspect-analytics-origin-conflict", blocked_payload["next_command"])
+            self.assertIn("analytics-origin-merge-conflict", blocked_payload["analytics_exchange"])
+            self.assertEqual((documents / shared).read_text(encoding="utf-8"), "локальная версия\n")
+            self.assertEqual(run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip(), local_head)
+            self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
+            self.assertFalse((documents / ".git/MERGE_HEAD").exists())
+
+            inspected = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "inspect-analytics-origin-conflict",
+                env=environment,
+            )
+            self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
+            inspection = json.loads(inspected.stdout)
+            self.assertFalse(inspection["existing_merge_in_progress"])
+            self.assertFalse(inspection["inspection_changed_repository"])
+            self.assertEqual(inspection["analytics"]["local_commit"], local_head)
+            self.assertEqual(inspection["analytics"]["remote_commit"], remote_head)
+            self.assertEqual(inspection["conflicts"][0]["path"], shared)
+            self.assertEqual(inspection["conflicts"][0]["kind"], "both-modified")
+            self.assertEqual(inspection["conflicts"][0]["recommended_resolution"], "analyst-decision-required")
+
+            merging = run("git", "-C", str(documents), "merge", "origin/main")
+            self.assertNotEqual(merging.returncode, 0)
+            self.assertTrue((documents / ".git/MERGE_HEAD").is_file())
+            already_merging = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertNotEqual(already_merging.returncode, 0)
+            merging_payload = json.loads(already_merging.stdout)
+            self.assertIn("analytics-origin-merge-in-progress", merging_payload["analytics_exchange"])
+            self.assertTrue((documents / ".git/MERGE_HEAD").is_file(), "harness must not abort an existing merge")
+            active_inspection = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "inspect-analytics-origin-conflict",
+                env=environment,
+            )
+            self.assertEqual(active_inspection.returncode, 0, active_inspection.stdout + active_inspection.stderr)
+            self.assertTrue(json.loads(active_inspection.stdout)["existing_merge_in_progress"])
+            self.assertEqual(run("git", "-C", str(documents), "merge", "--abort").returncode, 0)
 
     def test_bootstrap_retires_dirty_legacy_source_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

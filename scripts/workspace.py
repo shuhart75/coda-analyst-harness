@@ -573,27 +573,49 @@ def sync_command(args: argparse.Namespace) -> int:
     exchange = run(*command)
     if exchange.returncode != 0:
         exchange_error = exchange.stdout.strip() or exchange.stderr.strip()
-        conflict = "source-analytics-merge-conflict" in exchange_error
+        source_conflict = "source-analytics-merge-conflict" in exchange_error
+        analytics_origin_conflict = any(
+            reason in exchange_error
+            for reason in (
+                "analytics-origin-merge-conflict",
+                "analytics-origin-merge-in-progress",
+            )
+        )
+        if analytics_origin_conflict:
+            allowed_next_action = "inspect-analytics-origin-conflict"
+            next_command = "python3 scripts/workspace.py inspect-analytics-origin-conflict"
+            forbidden_alternatives = [
+                "git-reset",
+                "git-rebase",
+                "force-push",
+                "discard-local-history",
+                "discard-remote-history",
+                "git-add-all",
+            ]
+        elif source_conflict:
+            allowed_next_action = "inspect-source-analytics-conflict"
+            next_command = "python3 scripts/workspace.py inspect-source-analytics-conflict"
+            forbidden_alternatives = [
+                "repeat-code-update-as-fallback",
+                "skip-source-merge",
+                "overwrite-analytics-from-source",
+            ]
+        else:
+            allowed_next_action = "review-reported-error"
+            next_command = None
+            forbidden_alternatives = (
+                ["repeat-code-update-as-fallback", "skip-source-merge", "overwrite-analytics-from-source"]
+                if source_ready
+                else ["recreate-source-without-user-request", "claim-reverse-diff-verification"]
+            )
         print(json.dumps({
             "status": "blocked",
             "sync_mode": sync_mode,
             "code_update": code_result,
             "analytics_exchange": exchange_error,
-            "allowed_next_action": (
-                "inspect-source-analytics-conflict" if conflict else "inspect-analytics-exchange-error"
-            ),
-            "next_command": (
-                "python3 scripts/workspace.py inspect-source-analytics-conflict" if conflict else None
-            ),
-            "forbidden_alternatives": (
-                [
-                    "repeat-code-update-as-fallback",
-                    "skip-source-merge",
-                    "overwrite-analytics-from-source",
-                ]
-                if source_ready
-                else ["recreate-source-without-user-request", "claim-reverse-diff-verification"]
-            ),
+            "allowed_next_action": allowed_next_action,
+            "next_command": next_command,
+            "forbidden_alternatives": forbidden_alternatives,
         }, ensure_ascii=False, indent=2))
         return exchange.returncode
     try:
@@ -611,6 +633,7 @@ def sync_command(args: argparse.Namespace) -> int:
         "sync_mode": sync_mode,
         "code_update": code_result,
         "analytics_exchange": exchange_result,
+        "analytics_origin_update": exchange_result.get("analytics_origin_update"),
         "source_analytics_state": source_analytics_state,
         "repositories_identical": (
             exchange_result.get("reverse_diff", {}).get("repositories_identical")
@@ -642,6 +665,21 @@ def inspect_conflict_command(args: argparse.Namespace) -> int:
         "--root",
         str(root),
         "inspect-source-analytics-conflict",
+    )
+    output = inspected.stdout.strip() or inspected.stderr.strip()
+    if output:
+        print(output)
+    return inspected.returncode
+
+
+def inspect_analytics_origin_conflict_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    inspected = run(
+        sys.executable,
+        str(Path(__file__).with_name("repository-exchange.py")),
+        "--root",
+        str(root),
+        "inspect-analytics-origin-conflict",
     )
     output = inspected.stdout.strip() or inspected.stderr.strip()
     if output:
@@ -703,6 +741,8 @@ def parser() -> argparse.ArgumentParser:
     sync.set_defaults(handler=sync_command)
     inspect_conflict = commands.add_parser("inspect-source-analytics-conflict")
     inspect_conflict.set_defaults(handler=inspect_conflict_command)
+    inspect_analytics_origin = commands.add_parser("inspect-analytics-origin-conflict")
+    inspect_analytics_origin.set_defaults(handler=inspect_analytics_origin_conflict_command)
     return result
 
 

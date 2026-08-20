@@ -394,13 +394,116 @@ def require_analytics_content_policy(
     }, ensure_ascii=False))
 
 
-def update_ff(path: Path, name: str) -> None:
+def merge_head(path: Path) -> str | None:
+    result = git(path, "rev-parse", "--verify", "MERGE_HEAD")
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def require_no_active_analytics_merge(path: Path, name: str) -> None:
+    incoming_commit = merge_head(path)
+    if not incoming_commit:
+        return
+    conflicts = [
+        line.strip()
+        for line in git(path, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
+        if line.strip()
+    ]
+    raise ValueError(json.dumps({
+        "status": "blocked",
+        "reason": "analytics-origin-merge-in-progress",
+        "message": (
+            f"В {name} уже выполняется слияние. Обвязка не отменяет и не перезапускает его; "
+            "требуется осознанно разрешить текущие конфликты"
+        ),
+        "incoming_commit": incoming_commit,
+        "conflicting_paths": conflicts,
+        "allowed_next_action": "inspect-analytics-origin-conflict",
+        "forbidden_actions": [
+            "start-another-pull-or-merge",
+            "git-reset",
+            "git-rebase",
+            "force-push",
+            "git-add-all",
+        ],
+    }, ensure_ascii=False))
+
+
+def update_analytics_from_origin(path: Path, name: str) -> dict:
     fetched = git(path, "fetch", "origin", BRANCH)
     if fetched.returncode != 0:
         raise ValueError(f"{name}: fetch завершился ошибкой: {fetched.stderr.strip()}")
-    merged = git(path, "merge", "--ff-only", f"origin/{BRANCH}")
+    local_commit = git(path, "rev-parse", "HEAD").stdout.strip()
+    remote_commit = git(path, "rev-parse", f"origin/{BRANCH}").stdout.strip()
+    if not local_commit or not remote_commit:
+        raise ValueError(f"{name}: не удалось определить локальный или удалённый коммит")
+    if local_commit == remote_commit:
+        return {
+            "status": "current",
+            "before": local_commit,
+            "remote": remote_commit,
+            "after": local_commit,
+        }
+    local_is_ancestor = git(path, "merge-base", "--is-ancestor", local_commit, remote_commit).returncode == 0
+    remote_is_ancestor = git(path, "merge-base", "--is-ancestor", remote_commit, local_commit).returncode == 0
+    if local_is_ancestor:
+        merged = git(path, "merge", "--ff-only", f"origin/{BRANCH}")
+        if merged.returncode != 0:
+            raise ValueError(f"{name}: fast-forward завершился ошибкой: {merged.stderr.strip()}")
+        return {
+            "status": "fast-forwarded",
+            "before": local_commit,
+            "remote": remote_commit,
+            "after": remote_commit,
+        }
+    if remote_is_ancestor:
+        return {
+            "status": "local-ahead",
+            "before": local_commit,
+            "remote": remote_commit,
+            "after": local_commit,
+        }
+
+    merged = git(
+        path,
+        "-c", "user.name=Coda Analyst Harness",
+        "-c", "user.email=coda-analyst-harness@local.invalid",
+        "merge", "--no-ff", f"origin/{BRANCH}",
+        "-m", f"Merge origin/{BRANCH}",
+    )
     if merged.returncode != 0:
-        raise ValueError(f"{name}: локальную ветку нельзя обновить fast-forward: {merged.stderr.strip()}")
+        conflicts = [
+            line.strip()
+            for line in git(path, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
+            if line.strip()
+        ]
+        git(path, "merge", "--abort")
+        raise ValueError(json.dumps({
+            "status": "blocked",
+            "reason": "analytics-origin-merge-conflict",
+            "message": (
+                "Локальные и удалённые коммиты роли analytics нельзя объединить автоматически; "
+                "пробное слияние отменено без изменения рабочего дерева"
+            ),
+            "local_commit": local_commit,
+            "remote_commit": remote_commit,
+            "conflicting_paths": conflicts,
+            "allowed_next_action": "inspect-analytics-origin-conflict",
+            "forbidden_actions": [
+                "git-reset",
+                "git-rebase",
+                "force-push",
+                "discard-local-history",
+                "discard-remote-history",
+                "git-add-all",
+            ],
+        }, ensure_ascii=False))
+    after = git(path, "rev-parse", "HEAD").stdout.strip()
+    return {
+        "status": "merged",
+        "before": local_commit,
+        "remote": remote_commit,
+        "after": after,
+    }
 
 
 def update_source_mirror(path: Path, repository_id: str) -> None:
@@ -477,6 +580,121 @@ def conflict_stages(repository: Path, path: str) -> dict[int, str]:
         if len(fields) == 3:
             stages[int(fields[2])] = fields[1]
     return stages
+
+
+def analytics_origin_conflict_records(repository: Path) -> list[dict]:
+    paths = [
+        line.strip()
+        for line in git(repository, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
+        if line.strip()
+    ]
+    conflicts = []
+    for path in paths:
+        stages = conflict_stages(repository, path)
+        local_present = 2 in stages
+        remote_present = 3 in stages
+        if local_present and remote_present:
+            kind = "both-modified"
+        elif local_present:
+            kind = "remote-deleted-local-modified"
+        elif remote_present:
+            kind = "local-deleted-remote-modified"
+        else:
+            kind = "complex"
+        conflicts.append({
+            "path": path,
+            "kind": kind,
+            "base_blob": stages.get(1),
+            "local_analytics_blob": stages.get(2),
+            "remote_analytics_blob": stages.get(3),
+            "recommended_resolution": "analyst-decision-required",
+        })
+    return conflicts
+
+
+def inspect_analytics_origin_conflict_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    handle = lock(root)
+    try:
+        analytics, analytics_id = analytics_repository(root)
+        require_branch(analytics, f"{analytics_id} (analytics)")
+        local_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+        active_merge = merge_head(analytics)
+        if active_merge:
+            conflicts = analytics_origin_conflict_records(analytics)
+            print(json.dumps({
+                "status": "conflict-inspected",
+                "reason": "analytics-origin-merge-in-progress",
+                "analytics": {"repository": analytics_id, "local_commit": local_commit},
+                "incoming_commit": active_merge,
+                "existing_merge_in_progress": True,
+                "inspection_changed_repository": False,
+                "conflicts": conflicts,
+                "next_step": (
+                    "Для каждого пути запросить решение аналитика по одному; затем изменить только этот путь "
+                    "и выполнить git add -- <точный-путь>. После разрешения всех конфликтов запустить проверки, "
+                    "создать merge-коммит и повторить workspace.py sync."
+                ),
+                "forbidden_actions": ["git add -A", "git add .", "git reset", "git rebase", "force push"],
+            }, ensure_ascii=False, indent=2))
+            return 0
+
+        require_clean(analytics, f"{analytics_id} (analytics)")
+        remote_url_result = git(analytics, "remote", "get-url", "origin")
+        if remote_url_result.returncode != 0 or not remote_url_result.stdout.strip():
+            raise ValueError(f"{analytics_id}: не удалось определить удалённый адрес analytics")
+        remote_url = remote_url_result.stdout.strip()
+        with tempfile.TemporaryDirectory(prefix="coda-analyst-origin-conflict-") as temporary:
+            probe = Path(temporary) / "analytics"
+            cloned = run("git", "clone", "--quiet", "--no-hardlinks", str(analytics), str(probe))
+            if cloned.returncode != 0:
+                raise ValueError(f"Не удалось создать временную копию analytics: {cloned.stderr.strip()}")
+            added = git(probe, "remote", "add", "analytics-upstream", remote_url)
+            if added.returncode != 0:
+                raise ValueError(f"Не удалось подключить удалённый analytics: {added.stderr.strip()}")
+            fetched = git(probe, "fetch", "--quiet", "analytics-upstream", BRANCH)
+            if fetched.returncode != 0:
+                raise ValueError(f"Не удалось получить удалённый analytics: {fetched.stderr.strip()}")
+            remote_commit = git(probe, "rev-parse", "FETCH_HEAD").stdout.strip()
+            merged = git(probe, "merge", "--no-commit", "--no-ff", "FETCH_HEAD")
+            if merged.returncode == 0:
+                print(json.dumps({
+                    "status": "no-conflict",
+                    "reason": "analytics-origin-conflict-not-reproduced",
+                    "analytics": {
+                        "repository": analytics_id,
+                        "local_commit": local_commit,
+                        "remote_commit": remote_commit,
+                    },
+                    "existing_merge_in_progress": False,
+                    "inspection_changed_repository": False,
+                    "conflicts": [],
+                    "message": "Конфликт не воспроизводится; повтори workspace.py sync",
+                }, ensure_ascii=False, indent=2))
+                return 0
+            conflicts = analytics_origin_conflict_records(probe)
+
+        print(json.dumps({
+            "status": "conflict-inspected",
+            "reason": "analytics-origin-merge-conflict",
+            "analytics": {
+                "repository": analytics_id,
+                "local_commit": local_commit,
+                "remote_commit": remote_commit,
+            },
+            "existing_merge_in_progress": False,
+            "inspection_changed_repository": False,
+            "conflicts": conflicts,
+            "next_step": (
+                "Запросить решение аналитика для каждого пути по одному. После решений начать обычный merge "
+                "origin/main в analytics/main, применить решения только к точным путям, запустить проверки, "
+                "создать merge-коммит и повторить workspace.py sync."
+            ),
+            "forbidden_actions": ["git add -A", "git add .", "git reset", "git rebase", "force push"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        handle.close()
 
 
 def inspect_conflict_command(args: argparse.Namespace) -> int:
@@ -771,11 +989,12 @@ def sync_command(args: argparse.Namespace) -> int:
         require_nfc_paths(source, source_commit, f"{source_id} (source)")
         require_source_content_only(source, source_commit, source_id)
         require_source_content_policy(source, source_commit, source_id)
+        require_no_active_analytics_merge(documents, f"{analytics_id} (analytics)")
         unicode_aliases = prepare_unicode_aliases(documents, source, source_commit)
         if not unicode_aliases:
             require_clean(documents, f"{analytics_id} (analytics)")
         require_branch(documents, f"{analytics_id} (analytics)")
-        update_ff(documents, f"{analytics_id} (analytics)")
+        analytics_origin_update = update_analytics_from_origin(documents, f"{analytics_id} (analytics)")
         verify_unicode_aliases(documents, unicode_aliases)
         configure_source_remote(documents, source)
         analytics_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
@@ -813,6 +1032,7 @@ def sync_command(args: argparse.Namespace) -> int:
         print(json.dumps({
             "status": completion["status"],
             "analytics_pushed": not args.no_push,
+            "analytics_origin_update": analytics_origin_update,
             "local_entrypoint": str(entrypoint),
             "reverse_diff": metadata,
             **completion,
@@ -924,9 +1144,10 @@ def sync_analytics_only_command(args: argparse.Namespace) -> int:
     handle = lock(root)
     try:
         analytics, analytics_id = analytics_repository(root)
+        require_no_active_analytics_merge(analytics, f"{analytics_id} (analytics)")
         require_clean(analytics, f"{analytics_id} (analytics)")
         require_branch(analytics, f"{analytics_id} (analytics)")
-        update_ff(analytics, f"{analytics_id} (analytics)")
+        analytics_origin_update = update_analytics_from_origin(analytics, f"{analytics_id} (analytics)")
         analytics_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
         require_nfc_paths(analytics, analytics_commit, f"{analytics_id} (analytics)")
         require_standalone_analytics_policy(analytics, analytics_commit, analytics_id)
@@ -946,6 +1167,7 @@ def sync_analytics_only_command(args: argparse.Namespace) -> int:
             "status": completion["status"],
             "sync_mode": "analytics-only",
             "analytics_pushed": not args.no_push,
+            "analytics_origin_update": analytics_origin_update,
             "local_entrypoint": str(entrypoint),
             "reverse_diff": metadata,
             **completion,
@@ -1109,6 +1331,8 @@ def parser() -> argparse.ArgumentParser:
     approve_deletion.set_defaults(handler=approve_deletion_command)
     inspect_conflict = commands.add_parser("inspect-source-analytics-conflict")
     inspect_conflict.set_defaults(handler=inspect_conflict_command)
+    inspect_analytics_origin = commands.add_parser("inspect-analytics-origin-conflict")
+    inspect_analytics_origin.set_defaults(handler=inspect_analytics_origin_conflict_command)
     status = commands.add_parser("status")
     status.set_defaults(handler=status_command)
     return result
