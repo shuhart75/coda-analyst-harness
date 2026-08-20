@@ -468,6 +468,9 @@ def sync_command(args: argparse.Namespace) -> int:
             "allowed_next_action": (
                 "inspect-source-analytics-conflict" if conflict else "inspect-analytics-exchange-error"
             ),
+            "next_command": (
+                "python3 scripts/workspace.py inspect-source-analytics-conflict" if conflict else None
+            ),
             "forbidden_alternatives": [
                 "repeat-code-update-as-fallback",
                 "skip-source-merge",
@@ -485,6 +488,21 @@ def sync_command(args: argparse.Namespace) -> int:
         "analytics_exchange": exchange_result,
     }, ensure_ascii=False, indent=2))
     return 0
+
+
+def inspect_conflict_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    inspected = run(
+        sys.executable,
+        str(Path(__file__).with_name("repository-exchange.py")),
+        "--root",
+        str(root),
+        "inspect-source-analytics-conflict",
+    )
+    output = inspected.stdout.strip() or inspected.stderr.strip()
+    if output:
+        print(output)
+    return inspected.returncode
 
 
 def project_root_command(args: argparse.Namespace) -> int:
@@ -539,6 +557,8 @@ def parser() -> argparse.ArgumentParser:
     sync = commands.add_parser("sync")
     sync.add_argument("--no-push", action="store_true")
     sync.set_defaults(handler=sync_command)
+    inspect_conflict = commands.add_parser("inspect-source-analytics-conflict")
+    inspect_conflict.set_defaults(handler=inspect_conflict_command)
     return result
 
 

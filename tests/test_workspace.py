@@ -297,6 +297,22 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(status.stdout, "")
             self.assertFalse((documents / ".git/MERGE_HEAD").exists())
 
+            inspected = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "inspect-source-analytics-conflict",
+                env=environment,
+            )
+            self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
+            inspection = json.loads(inspected.stdout)
+            self.assertFalse(inspection["real_repositories_changed"])
+            self.assertEqual(inspection["conflicts"][0]["path"], "shared.txt")
+            self.assertEqual(inspection["conflicts"][0]["kind"], "both-modified")
+            self.assertEqual(inspection["conflicts"][0]["recommended_resolution"], "analyst-decision-required")
+            self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
+
     def test_bootstrap_retires_dirty_legacy_source_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -475,6 +491,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.configure_identity(documents_work)
             (documents_work / "features/registry").mkdir(parents=True)
             (documents_work / "features/registry/requirements.md").write_text("# Новые требования\n", encoding="utf-8")
+            (documents_work / ".workflow/active-mode.md").write_text("mode: execution-update\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents_work), "add", ".").returncode, 0)
             self.assertEqual(run("git", "-C", str(documents_work), "commit", "-m", "documents requirements").returncode, 0)
             self.assertEqual(run("git", "-C", str(documents_work), "push", "origin", "main").returncode, 0)
@@ -515,8 +532,36 @@ class CodaWorkspaceTests(unittest.TestCase):
                 "--no-push",
                 env=environment,
             )
-            self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
+            self.assertNotEqual(sync.returncode, 0)
+            self.assertIn(".workflow/active-mode.md", sync.stdout)
             analytics = workspace / "documents"
+            inspected = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "inspect-source-analytics-conflict",
+                env=environment,
+            )
+            self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
+            inspection = json.loads(inspected.stdout)
+            active_mode = next(item for item in inspection["conflicts"] if item["path"] == ".workflow/active-mode.md")
+            self.assertEqual(active_mode["kind"], "source-deleted-analytics-modified")
+            self.assertEqual(active_mode["recommended_resolution"], "accept-source-deletion")
+            self.assertEqual(run("git", "-C", str(analytics), "status", "--porcelain=v1").stdout, "")
+
+            self.assertEqual(run("git", "-C", str(analytics), "rm", ".workflow/active-mode.md").returncode, 0)
+            self.assertEqual(run("git", "-C", str(analytics), "commit", "-m", "remove legacy active mode").returncode, 0)
+            sync = run(
+                sys.executable,
+                str(ROOT / "scripts/repository-exchange.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
             self.assertTrue((analytics / "features/registry/requirements.md").is_file())
             self.assertTrue((analytics / "planning/team.md").is_file())
             self.assertFalse((analytics / ".workflow").exists())

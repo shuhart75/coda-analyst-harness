@@ -246,6 +246,108 @@ def merge_source(documents: Path) -> None:
         }, ensure_ascii=False))
 
 
+def forbidden_content_path(path: str) -> bool:
+    return any(path == root or path.startswith(f"{root}/") for root in FORBIDDEN_CONTENT_PATHS)
+
+
+def conflict_stages(repository: Path, path: str) -> dict[int, str]:
+    result = git(repository, "ls-files", "-u", "-z", "--", path)
+    if result.returncode != 0:
+        raise ValueError(f"Не удалось прочитать стадии конфликта {path}: {result.stderr.strip()}")
+    stages: dict[int, str] = {}
+    for item in result.stdout.split("\0"):
+        if not item or "\t" not in item:
+            continue
+        metadata, _ = item.split("\t", 1)
+        fields = metadata.split()
+        if len(fields) == 3:
+            stages[int(fields[2])] = fields[1]
+    return stages
+
+
+def inspect_conflict_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    handle = lock(root)
+    try:
+        source, documents, source_id, analytics_id = role_repositories(root)
+        require_clean(documents, f"{analytics_id} (analytics)")
+        require_branch(documents, f"{analytics_id} (analytics)")
+        source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
+        analytics_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
+        if not source_commit or not analytics_commit:
+            raise ValueError("Не удалось определить ревизии source и analytics")
+
+        with tempfile.TemporaryDirectory(prefix="coda-analyst-conflict-") as temporary:
+            probe = Path(temporary) / "analytics"
+            cloned = run("git", "clone", "--quiet", "--no-hardlinks", str(documents), str(probe))
+            if cloned.returncode != 0:
+                raise ValueError(f"Не удалось создать временную копию analytics: {cloned.stderr.strip()}")
+            added = git(probe, "remote", "add", SOURCE_REMOTE, str(source))
+            if added.returncode != 0:
+                raise ValueError(f"Не удалось подключить временный source: {added.stderr.strip()}")
+            fetched = git(probe, "fetch", "--quiet", SOURCE_REMOTE, source_commit)
+            if fetched.returncode != 0:
+                raise ValueError(f"Не удалось прочитать ревизию source: {fetched.stderr.strip()}")
+            merged = git(probe, "merge", "--no-commit", "--no-ff", "FETCH_HEAD")
+            if merged.returncode == 0:
+                print(json.dumps({
+                    "status": "no-conflict",
+                    "source_commit": source_commit,
+                    "analytics_commit": analytics_commit,
+                    "conflicts": [],
+                    "message": "Для текущих ревизий конфликт не воспроизводится; повтори синхронизацию",
+                }, ensure_ascii=False, indent=2))
+                return 0
+
+            paths = [
+                line.strip()
+                for line in git(probe, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
+                if line.strip()
+            ]
+            conflicts = []
+            for path in paths:
+                stages = conflict_stages(probe, path)
+                analytics_present = 2 in stages
+                source_present = 3 in stages
+                if analytics_present and source_present:
+                    kind = "both-modified"
+                elif analytics_present:
+                    kind = "source-deleted-analytics-modified"
+                elif source_present:
+                    kind = "analytics-deleted-source-modified"
+                else:
+                    kind = "complex"
+                legacy_deletion = kind == "source-deleted-analytics-modified" and forbidden_content_path(path)
+                conflicts.append({
+                    "path": path,
+                    "kind": kind,
+                    "base_blob": stages.get(1),
+                    "analytics_blob": stages.get(2),
+                    "source_blob": stages.get(3),
+                    "recommended_resolution": "accept-source-deletion" if legacy_deletion else "analyst-decision-required",
+                    "reason": (
+                        "Путь относится к устаревшей встроенной обвязке, запрещённой в роли analytics"
+                        if legacy_deletion else None
+                    ),
+                })
+
+        print(json.dumps({
+            "status": "conflict-inspected",
+            "source": {"repository": source_id, "commit": source_commit},
+            "analytics": {"repository": analytics_id, "commit": analytics_commit},
+            "real_repositories_changed": False,
+            "conflicts": conflicts,
+            "next_step": (
+                "Для каждого analyst-decision-required запросить решение аналитика. "
+                "Для accept-source-deletion удалить указанный устаревший служебный путь из analytics, "
+                "зафиксировать удаление и повторить workspace.py sync."
+            ),
+        }, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        handle.close()
+
+
 def verified_reverse_patch(
     root: Path,
     source: Path,
@@ -472,6 +574,8 @@ def parser() -> argparse.ArgumentParser:
     sync.set_defaults(handler=sync_command)
     reverse_diff = commands.add_parser("reverse-diff")
     reverse_diff.set_defaults(handler=reverse_diff_command)
+    inspect_conflict = commands.add_parser("inspect-source-analytics-conflict")
+    inspect_conflict.set_defaults(handler=inspect_conflict_command)
     status = commands.add_parser("status")
     status.set_defaults(handler=status_command)
     return result
