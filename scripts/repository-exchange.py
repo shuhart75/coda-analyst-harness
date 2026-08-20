@@ -809,12 +809,13 @@ def sync_command(args: argparse.Namespace) -> int:
                 current_commit,
             )
             push_analytics(documents, analytics_id)
+        completion = reverse_diff_completion(metadata)
         print(json.dumps({
-            "status": "synchronized",
+            "status": completion["status"],
             "analytics_pushed": not args.no_push,
             "local_entrypoint": str(entrypoint),
             "reverse_diff": metadata,
-            **reverse_diff_completion(metadata),
+            **completion,
         }, ensure_ascii=False, indent=2))
         return 0
     finally:
@@ -885,18 +886,34 @@ def reverse_diff_completion(metadata: dict) -> dict:
     identical = metadata.get("repositories_identical")
     if identical is True:
         return {
+            "status": "fully-synchronized",
             "source_analytics_state": "identical",
+            "all_repositories_synchronized": True,
+            "report_message": "Все доступные репозитории синхронизированы; деревья source и analytics идентичны.",
             "next_action": None,
             "forbidden_claims": [],
         }
     if metadata.get("source_commit") is None:
         return {
+            "status": "analytics-synchronized-source-unavailable",
             "source_analytics_state": "source-unavailable",
+            "all_repositories_synchronized": False,
+            "report_message": (
+                "Локальный этап обмена выполнен: analytics обновлён; source отсутствует, "
+                "поэтому равенство репозиториев не проверено."
+            ),
             "next_action": "Продолжать работу в analytics; не заявлять о совпадении с source",
             "forbidden_claims": ["all-repositories-synchronized", "reverse-diff-verified"],
         }
     return {
+        "status": "analytics-synchronized-reverse-diff-pending",
         "source_analytics_state": "reverse-diff-pending",
+        "all_repositories_synchronized": False,
+        "report_message": (
+            "Локальный этап обмена выполнен: analytics обновлён; source не изменён; "
+            "для достижения равенства требуется применить проверенную обратную заплату "
+            "на машине с рабочим source."
+        ),
         "next_action": "Передать проверенную обратную заплату на машину, где source является рабочим репозиторием",
         "forbidden_claims": ["all-repositories-synchronized", "source-updated"],
     }
@@ -924,13 +941,14 @@ def sync_analytics_only_command(args: argparse.Namespace) -> int:
             require_clean(analytics, f"{analytics_id} (analytics)")
             require_standalone_analytics_policy(analytics, current_commit, analytics_id)
             push_analytics(analytics, analytics_id)
+        completion = reverse_diff_completion(metadata)
         print(json.dumps({
-            "status": "synchronized",
+            "status": completion["status"],
             "sync_mode": "analytics-only",
             "analytics_pushed": not args.no_push,
             "local_entrypoint": str(entrypoint),
             "reverse_diff": metadata,
-            **reverse_diff_completion(metadata),
+            **completion,
         }, ensure_ascii=False, indent=2))
         return 0
     finally:

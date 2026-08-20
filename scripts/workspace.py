@@ -617,6 +617,14 @@ def sync_command(args: argparse.Namespace) -> int:
             if isinstance(exchange_result.get("reverse_diff"), dict)
             else None
         ),
+        "all_repositories_synchronized": exchange_result.get(
+            "all_repositories_synchronized",
+            False,
+        ),
+        "report_message": exchange_result.get(
+            "report_message",
+            "Состояние обмена не определено; полную синхронизацию подтверждать запрещено.",
+        ),
         "next_action": exchange_result.get("next_action"),
         "forbidden_claims": exchange_result.get(
             "forbidden_claims",
