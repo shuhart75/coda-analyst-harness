@@ -46,6 +46,7 @@ class CodaWorkspaceTests(unittest.TestCase):
                 "README.md": "# Source\n",
                 "planning/team.md": "# Команда\n",
                 "context/project-rules/README.md": "# Правила проекта\n",
+                "context/source-materials/legacy/snapshot/.codex": "historical marker\n",
                 "context/shared.txt": "base\n",
             },
         )
@@ -185,6 +186,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(metadata["schema_version"], 2)
             self.assertEqual(metadata["changed_path_count"], len(metadata["changed_paths"]))
             self.assertEqual(metadata["approved_source_deletions"], [])
+            self.assertTrue((documents / "context/source-materials/legacy/snapshot/.codex").is_file())
             self.assertFalse(metadata["repositories_identical"])
             applied = root / "applied-source"
             self.assertEqual(run("git", "clone", str(source_mirror), str(applied)).returncode, 0)

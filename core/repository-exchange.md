@@ -21,7 +21,7 @@ The command `repository-exchange.py sync` performs one guarded transaction:
 3. Require a clean `analytics/main` worktree. The only exception is a verified filesystem-normalized alias of a non-NFC tracked path that is removed by the incoming source commit and whose bytes equal the indexed blob.
 4. Fast-forward `analytics/main` from its own origin.
 5. Reject any non-NFC path remaining in `source` or in the merged `analytics` tree.
-6. Reject local tool settings, files outside the registered analytical roots, direct files under `features/`, and any deletion of a path inherited from `source` that has not been explicitly approved by the analyst.
+6. Reject local tool settings, files outside the registered analytical roots, direct files under `features/`, and any deletion of a path inherited from `source` that has not been explicitly approved by the analyst. Paths under `context/source-materials/` are opaque evidence and are not classified by filename as local tool settings.
 7. Fetch the local `source/main` commit into `analytics` through a dedicated local remote and merge it normally.
 8. Abort and stop on any conflict. Never overwrite the conflict with copied files.
 9. Repeat the content policy after merge and require the merged analytics tree to contain no tracked embedded harness. A clean legacy embedded harness is removed only through the incoming Git commit; it is never deleted by file-copy logic.

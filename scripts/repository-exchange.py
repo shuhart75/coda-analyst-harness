@@ -44,6 +44,7 @@ FORBIDDEN_LOCAL_COMPONENTS = frozenset({
 })
 FORBIDDEN_LOCAL_NAMES = frozenset({".DS_Store", "GIGACODE.md", "Thumbs.db"})
 ALLOWED_FEATURES_ROOT_FILES = frozenset({".gitkeep", "README.md"})
+OPAQUE_CONTENT_PREFIXES = ("context/source-materials/",)
 DELETION_APPROVALS_FILE = "exchange-deletion-approvals.json"
 
 
@@ -222,6 +223,8 @@ def analytics_content_violations(
                 "path": path,
                 "reason": "корневой путь не входит в структуру аналитического репозитория",
             })
+            continue
+        if any(path.startswith(prefix) for prefix in OPAQUE_CONTENT_PREFIXES):
             continue
         if any(part in FORBIDDEN_LOCAL_COMPONENTS for part in parts):
             violations.append({
