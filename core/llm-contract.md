@@ -14,16 +14,17 @@ Before changing artifacts, read:
 6. `core/context-policy.md`
 7. `core/research-policy.md`
 8. `core/run-loop.md`
-9. `.workspace-state/run-state/session-brief.md` when present
-10. `.workspace-state/active-mode.md`
-11. `modes/<active-mode>.md`
-12. `PROJECT_ROOT/README.md`
-13. `PROJECT_ROOT/planning/team.md` before planning resources or regenerating actual-progress
-14. relevant `PROJECT_ROOT/context/project-rules/*.md`
-15. relevant templates for the current action
-16. `PROJECT_ROOT/baseline/current/` for the canonical deployed state when it exists
-17. relevant feature/slice source artifacts under `PROJECT_ROOT`
-18. relevant `PROJECT_ROOT/releases/` artifacts when finalizing a delivered change
+9. `core/collaboration.md` when multi-user mode is configured or feature work is requested
+10. `.workspace-state/run-state/session-brief.md` when present
+11. `.workspace-state/active-mode.md`
+12. `modes/<active-mode>.md`
+13. `PROJECT_ROOT/README.md`
+14. `PROJECT_ROOT/planning/team.md` before planning resources or regenerating actual-progress
+15. relevant `PROJECT_ROOT/context/project-rules/*.md`
+16. relevant templates for the current action
+17. `PROJECT_ROOT/baseline/current/` for the canonical deployed state when it exists
+18. relevant feature/slice source artifacts under `PROJECT_ROOT`
+19. relevant `PROJECT_ROOT/releases/` artifacts when finalizing a delivered change
 
 If the user points to a folder with current-system docs/screenshots/change requests, inspect that folder first and keep source references in the produced artifacts.
 
@@ -101,6 +102,7 @@ If the user asks for work outside the active mode, either switch mode explicitly
 - `implementation task` is an execution tracking unit. It should match Jira naming where possible and includes estimate, dates, executor, status and progress.
 - `requirement pack` is grouped by feature and, when useful, by slice and then FE/BE.
 - `feature delivery package` lives under `features/<feature>/handoffs/<package-id>/` and is the preferred shared unit for development and testing. The immutable input contains root requirements and slices; developers return their technical decomposition inside the same package.
+- In configured multi-user mode, ordinary analytical edits live in `feature/<feature>/<analyst>` and packages may be created only from an up-to-date `analytics/main` after the feature branch has been accepted by a human merge request. A feature branch never participates directly in source exchange or reverse-patch generation.
 - `development task card` is created and confirmed by developers under `returns/development-tasks/`. It describes one future Jira task and one contour, is self-contained, and may have an estimate or Jira key, but neither is required.
 - Each development task card must be created from the package template, keep every required section populated, and retain the full `Короткие команды разработчика` block after every edit.
 - Receiver-side context is disclosed progressively: active `handoff.json`, compact request and manifest, one relevant contour of packaged requirements, that contour's local SDD, matched code, then nearby tests. Do not load all of `coda` or both contours without a recorded cross-contour dependency.

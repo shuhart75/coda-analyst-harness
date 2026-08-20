@@ -1017,6 +1017,181 @@ def inspect_analytics_origin_conflict_command(args: argparse.Namespace) -> int:
         handle.close()
 
 
+def current_branch(repository: Path) -> str:
+    result = git(repository, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if result.returncode != 0 or not result.stdout.strip():
+        raise ValueError("Репозиторий analytics находится вне именованной ветки")
+    return result.stdout.strip()
+
+
+def protect_active_feature_merge(
+    root: Path,
+    analytics: Path,
+    analytics_id: str,
+    branch: str,
+) -> None:
+    incoming_commit = merge_head(analytics)
+    if not incoming_commit:
+        return
+    local_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+    conflicts = analytics_origin_conflict_records(analytics)
+    snapshot = matching_snapshot(
+        root, "feature-main-merge", local_commit, incoming_commit
+    ) or create_analytics_snapshot(
+        root,
+        analytics,
+        analytics_id,
+        "feature-main-merge",
+        incoming_commit,
+        f"origin/{BRANCH}",
+    )
+    snapshot = archive_snapshot_conflicts(root, snapshot, analytics, conflicts)
+    raise ValueError(json.dumps({
+        "status": "blocked",
+        "reason": "feature-main-merge-in-progress",
+        "branch": branch,
+        "incoming_commit": incoming_commit,
+        "conflicting_paths": [item["path"] for item in conflicts],
+        "protective_snapshot": snapshot_summary(root, snapshot),
+        "allowed_next_action": "разрешить каждый конфликтующий путь по отдельному решению аналитика",
+        "forbidden_actions": ["git add -A", "git add .", "git reset", "git rebase", "force push"],
+    }, ensure_ascii=False))
+
+
+def update_feature_branch_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    handle = lock(root)
+    try:
+        analytics, analytics_id = analytics_repository(root)
+        branch = current_branch(analytics)
+        if not branch.startswith("feature/"):
+            raise ValueError("Обновление рабочей ветки разрешено только для ветки feature/<feature>/<analyst>")
+        protect_active_feature_merge(root, analytics, analytics_id, branch)
+        require_clean(analytics, f"{analytics_id} (analytics)")
+        fetched = git(analytics, "fetch", "origin", BRANCH)
+        if fetched.returncode != 0:
+            raise ValueError(f"Не удалось получить origin/{BRANCH}: {fetched.stderr.strip()}")
+        local_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+        incoming_commit = git(analytics, "rev-parse", f"origin/{BRANCH}").stdout.strip()
+        if git(analytics, "merge-base", "--is-ancestor", incoming_commit, local_commit).returncode == 0:
+            print(json.dumps({
+                "status": "current",
+                "branch": branch,
+                "before": local_commit,
+                "incoming": incoming_commit,
+                "after": local_commit,
+                "protective_snapshot": None,
+            }, ensure_ascii=False, indent=2))
+            return 0
+
+        operation = (
+            "feature-main-fast-forward"
+            if git(analytics, "merge-base", "--is-ancestor", local_commit, incoming_commit).returncode == 0
+            else "feature-main-merge"
+        )
+        snapshot = create_analytics_snapshot(
+            root,
+            analytics,
+            analytics_id,
+            operation,
+            incoming_commit,
+            f"origin/{BRANCH}",
+        )
+        if operation == "feature-main-fast-forward":
+            merged = git(analytics, "merge", "--ff-only", f"origin/{BRANCH}")
+        else:
+            merged = git(
+                analytics,
+                "-c", "user.name=Coda Analyst Harness",
+                "-c", "user.email=coda-analyst-harness@local.invalid",
+                "merge", "--no-ff", f"origin/{BRANCH}",
+                "-m", f"Merge origin/{BRANCH} into {branch}",
+            )
+        if merged.returncode != 0:
+            conflicts = analytics_origin_conflict_records(analytics)
+            snapshot = archive_snapshot_conflicts(root, snapshot, analytics, conflicts)
+            aborted = git(analytics, "merge", "--abort")
+            if aborted.returncode != 0:
+                raise ValueError(
+                    f"Конфликт сохранён в снимке {snapshot['snapshot_id']}, "
+                    f"но слияние рабочей ветки не удалось отменить: {aborted.stderr.strip()}"
+                )
+            raise ValueError(json.dumps({
+                "status": "blocked",
+                "reason": "feature-main-merge-conflict",
+                "branch": branch,
+                "conflicting_paths": [item["path"] for item in conflicts],
+                "protective_snapshot": snapshot_summary(root, snapshot),
+                "allowed_next_action": "запросить у аналитика решение по одному пути",
+                "forbidden_actions": ["git add -A", "git add .", "git reset", "git rebase", "force push"],
+            }, ensure_ascii=False))
+        after = git(analytics, "rev-parse", "HEAD").stdout.strip()
+        snapshot = finalize_analytics_snapshot(root, analytics, snapshot, after)
+        require_clean(analytics, f"{analytics_id} (analytics)")
+        print(json.dumps({
+            "status": "fast-forwarded" if operation.endswith("fast-forward") else "merged",
+            "branch": branch,
+            "before": local_commit,
+            "incoming": incoming_commit,
+            "after": after,
+            "protective_snapshot": snapshot_summary(root, snapshot),
+        }, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        handle.close()
+
+
+def fast_forward_analytics_main_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    handle = lock(root)
+    try:
+        analytics, analytics_id = analytics_repository(root)
+        require_branch(analytics, f"{analytics_id} (analytics)")
+        require_no_active_analytics_merge(root, analytics, analytics_id)
+        require_clean(analytics, f"{analytics_id} (analytics)")
+        fetched = git(analytics, "fetch", "origin", BRANCH)
+        if fetched.returncode != 0:
+            raise ValueError(f"Не удалось получить origin/{BRANCH}: {fetched.stderr.strip()}")
+        local_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+        incoming_commit = git(analytics, "rev-parse", f"origin/{BRANCH}").stdout.strip()
+        if local_commit == incoming_commit:
+            print(json.dumps({
+                "status": "current",
+                "before": local_commit,
+                "incoming": incoming_commit,
+                "after": local_commit,
+                "protective_snapshot": None,
+            }, ensure_ascii=False, indent=2))
+            return 0
+        if git(analytics, "merge-base", "--is-ancestor", local_commit, incoming_commit).returncode != 0:
+            raise ValueError(
+                "Локальная main не является предком origin/main; быстрое обновление запрещено. "
+                "Сохрани отдельную линию в рабочей ветке через миграцию"
+            )
+        snapshot = create_analytics_snapshot(
+            root,
+            analytics,
+            analytics_id,
+            "analytics-main-fast-forward",
+            incoming_commit,
+            f"origin/{BRANCH}",
+        )
+        merged = git(analytics, "merge", "--ff-only", f"origin/{BRANCH}")
+        if merged.returncode != 0:
+            raise ValueError(f"Быстрое обновление main завершилось ошибкой: {merged.stderr.strip()}")
+        snapshot = finalize_analytics_snapshot(root, analytics, snapshot, incoming_commit)
+        print(json.dumps({
+            "status": "fast-forwarded",
+            "before": local_commit,
+            "incoming": incoming_commit,
+            "after": incoming_commit,
+            "protective_snapshot": snapshot_summary(root, snapshot),
+        }, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        handle.close()
+
+
 def inspect_conflict_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     handle = lock(root)
@@ -1788,6 +1963,10 @@ def parser() -> argparse.ArgumentParser:
     inspect_conflict.set_defaults(handler=inspect_conflict_command)
     inspect_analytics_origin = commands.add_parser("inspect-analytics-origin-conflict")
     inspect_analytics_origin.set_defaults(handler=inspect_analytics_origin_conflict_command)
+    update_feature = commands.add_parser("update-feature-branch")
+    update_feature.set_defaults(handler=update_feature_branch_command)
+    fast_forward_main = commands.add_parser("fast-forward-analytics-main")
+    fast_forward_main.set_defaults(handler=fast_forward_analytics_main_command)
     snapshots = commands.add_parser("list-analytics-snapshots")
     snapshots.set_defaults(handler=list_analytics_snapshots_command)
     inspect_snapshot = commands.add_parser("inspect-analytics-snapshot")

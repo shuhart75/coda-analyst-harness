@@ -616,6 +616,35 @@ class HarnessTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("approved plan was modified", result.stdout)
 
+    def test_multi_user_command_synonyms_and_migration_are_documented(self) -> None:
+        documents = [
+            ROOT / "AGENTS.md",
+            ROOT / "README.md",
+            ROOT / "core/collaboration.md",
+            ROOT / "templates/workflow/command-catalog.template.md",
+            ROOT / "templates/workflow/command-cheatsheet.template.md",
+        ]
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in documents)
+        for phrase in (
+            "пишем требования по фиче",
+            "работаем с фичой",
+            "беру фичу",
+            "сохрани работу",
+            "закоммить изменения",
+            "обнови мою ветку",
+            "синкани репы",
+            "отправь требования в разработку",
+            "передай разрабам",
+            "Миграция существующей установки",
+        ):
+            self.assertIn(phrase, combined)
+        collaboration = (ROOT / "core/collaboration.md").read_text(encoding="utf-8")
+        self.assertIn("пакет для разработки создаётся только из актуальной `main`", collaboration)
+        self.assertIn("автоматического коммита и отправки нет", collaboration)
+        catalog = (ROOT / "templates/workflow/command-catalog.template.md").read_text(encoding="utf-8")
+        self.assertIn("активная рабочая ветка блокирует команду до обновления даже `code`", catalog)
+        self.assertIn("сначала доказать принятие рабочей ветки", catalog)
+
 
 if __name__ == "__main__":
     unittest.main()

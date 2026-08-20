@@ -1171,6 +1171,423 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertTrue((documents / path).is_file())
             self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
 
+    def test_multi_user_feature_workflow_preserves_main_and_finishes_after_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            documents = workspace / "documents"
+            feature = "registry"
+            requirements = f"features/{feature}/requirements.md"
+            (documents / requirements).parent.mkdir(parents=True)
+            (documents / requirements).write_text("# Требования\n\nИсходная версия.\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "add registry feature").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
+            main_before = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
+
+            migrated = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "migrate",
+                "--analyst",
+                "ivanov",
+                env=environment,
+            )
+            self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
+            self.assertEqual(json.loads(migrated.stdout)["status"], "migrated-clean")
+
+            started = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "start",
+                "--feature",
+                feature,
+                env=environment,
+            )
+            self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+            branch = json.loads(started.stdout)["branch"]
+            self.assertEqual(branch, "feature/registry/ivanov")
+            self.assertEqual(run("git", "-C", str(documents), "branch", "--show-current").stdout.strip(), branch)
+
+            blocked_sync = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                env=environment,
+            )
+            self.assertEqual(blocked_sync.returncode, 2)
+            blocked_payload = json.loads(blocked_sync.stdout)
+            self.assertEqual(blocked_payload["reason"], "analytics-main-required-for-repository-sync")
+            self.assertEqual(blocked_payload["code_update"]["status"], "not-started")
+
+            forbidden_handoff = run(
+                sys.executable,
+                str(ROOT / "scripts/handoffctl.py"),
+                "init-feature",
+                str(documents),
+                feature,
+                "registry-delivery",
+                env=environment,
+            )
+            self.assertNotEqual(forbidden_handoff.returncode, 0)
+            self.assertIn("незавершённой рабочей ветке", forbidden_handoff.stdout)
+
+            (documents / requirements).write_text("# Требования\n\nРабочая версия аналитика.\n", encoding="utf-8")
+            unexpected = documents / "context/unexpected.md"
+            unexpected.write_text("непроверенный файл\n", encoding="utf-8")
+            incomplete_save = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "save",
+                "--message",
+                "incomplete save",
+                "--path",
+                requirements,
+                env=environment,
+            )
+            self.assertNotEqual(incomplete_save.returncode, 0)
+            self.assertIn("exact-path-set-mismatch", incomplete_save.stdout)
+            self.assertEqual(run("git", "-C", str(documents), "diff", "--cached", "--name-only").stdout, "")
+            unexpected.unlink()
+            saved = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "save",
+                "--message",
+                "docs: update registry requirements",
+                "--path",
+                requirements,
+                env=environment,
+            )
+            self.assertEqual(saved.returncode, 0, saved.stdout + saved.stderr)
+            self.assertTrue(json.loads(saved.stdout)["pushed"])
+            self.assertEqual(
+                run("git", "--git-dir", str(documents_remote), "rev-parse", "main").stdout.strip(),
+                main_before,
+            )
+
+            remote_work = root / "documents-collaborator"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
+            self.configure_identity(remote_work)
+            colleague_path = "context/colleague.md"
+            (remote_work / colleague_path).write_text("изменение коллеги\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", colleague_path).returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "colleague update").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
+
+            updated = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "update",
+                env=environment,
+            )
+            self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
+            update_payload = json.loads(updated.stdout)
+            self.assertEqual(update_payload["update"]["status"], "merged")
+            self.assertEqual(update_payload["update"]["protective_snapshot"]["status"], "completed")
+            self.assertTrue((documents / colleague_path).is_file())
+
+            submitted = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "submit",
+                env=environment,
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stdout + submitted.stderr)
+            self.assertFalse(json.loads(submitted.stdout)["package_created"])
+
+            self.assertEqual(run("git", "-C", str(remote_work), "fetch", "origin", branch).returncode, 0)
+            self.assertEqual(
+                run("git", "-C", str(remote_work), "merge", "--no-ff", f"origin/{branch}", "-m", "accept registry").returncode,
+                0,
+            )
+            self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
+
+            finished = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "finish",
+                env=environment,
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            self.assertEqual(json.loads(finished.stdout)["current_branch"], "main")
+            self.assertEqual(run("git", "-C", str(documents), "branch", "--show-current").stdout.strip(), "main")
+            self.assertEqual((documents / requirements).read_text(encoding="utf-8"), "# Требования\n\nРабочая версия аналитика.\n")
+
+            delivery = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "require-main-for-delivery",
+                "--feature",
+                feature,
+                env=environment,
+            )
+            self.assertEqual(delivery.returncode, 0, delivery.stdout + delivery.stderr)
+            self.assertTrue(json.loads(delivery.stdout)["delivery_allowed"])
+
+            stale_guard_path = "context/after-delivery-check.md"
+            (remote_work / stale_guard_path).write_text("новое изменение main\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", stale_guard_path).returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "advance main").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
+            stale_handoff = run(
+                sys.executable,
+                str(ROOT / "scripts/handoffctl.py"),
+                "init-feature",
+                str(documents),
+                feature,
+                "registry-delivery",
+                env=environment,
+            )
+            self.assertNotEqual(stale_handoff.returncode, 0)
+            self.assertIn("не совпадает с актуальной origin/main", stale_handoff.stdout)
+            self.assertFalse((documents / f"features/{feature}/handoffs/registry-delivery").exists())
+
+            repository_sync = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertEqual(repository_sync.returncode, 0, repository_sync.stdout + repository_sync.stderr)
+            self.assertEqual(json.loads(repository_sync.stdout)["sync_mode"], "source-analytics")
+
+    def test_multi_user_migration_requires_feature_and_preserves_dirty_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, _, environment = self.prepare_workspace(root)
+            documents = workspace / "documents"
+            feature = "registry"
+            requirements = f"features/{feature}/requirements.md"
+            (documents / requirements).parent.mkdir(parents=True)
+            (documents / requirements).write_text("# Требования\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "add feature").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
+            (documents / requirements).write_text("# Требования\n\nНесохранённая работа.\n", encoding="utf-8")
+            local_head = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
+
+            needs_feature = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "migrate",
+                "--analyst",
+                "ivanov",
+                env=environment,
+            )
+            self.assertEqual(needs_feature.returncode, 2)
+            self.assertEqual(json.loads(needs_feature.stdout)["status"], "feature-required")
+            self.assertEqual(run("git", "-C", str(documents), "branch", "--show-current").stdout.strip(), "main")
+            self.assertEqual(run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip(), local_head)
+            self.assertFalse((workspace / ".workspace-state/collaboration.json").exists())
+
+            migrated = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "migrate",
+                "--analyst",
+                "ivanov",
+                "--feature",
+                feature,
+                env=environment,
+            )
+            self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
+            payload = json.loads(migrated.stdout)
+            self.assertEqual(payload["status"], "migrated-work-preserved")
+            self.assertFalse(payload["automatic_commit_created"])
+            self.assertFalse(payload["automatic_push_performed"])
+            self.assertEqual(run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip(), local_head)
+            self.assertEqual(run("git", "-C", str(documents), "branch", "--show-current").stdout.strip(), "feature/registry/ivanov")
+            self.assertEqual((documents / requirements).read_text(encoding="utf-8"), "# Требования\n\nНесохранённая работа.\n")
+            self.assertIn(requirements, run("git", "-C", str(documents), "status", "--short").stdout)
+
+    def test_multi_user_migration_preserves_diverged_main_in_feature_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            documents = workspace / "documents"
+            feature = "registry"
+            requirements = f"features/{feature}/requirements.md"
+            (documents / requirements).parent.mkdir(parents=True)
+            (documents / requirements).write_text("# Требования\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "local feature").returncode, 0)
+            local_head = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
+
+            remote_work = root / "documents-migration-remote"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
+            self.configure_identity(remote_work)
+            remote_path = "context/remote-during-migration.md"
+            (remote_work / remote_path).write_text("изменение коллеги\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", remote_path).returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote migration update").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
+
+            migrated = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "migrate",
+                "--analyst",
+                "ivanov",
+                "--feature",
+                feature,
+                env=environment,
+            )
+            self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
+            payload = json.loads(migrated.stdout)
+            self.assertEqual(payload["main_relation"], "diverged")
+            self.assertEqual(run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip(), local_head)
+            self.assertEqual(run("git", "-C", str(documents), "rev-parse", "main").stdout.strip(), local_head)
+
+            updated = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "update",
+                env=environment,
+            )
+            self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
+            update_payload = json.loads(updated.stdout)["update"]
+            self.assertEqual(update_payload["status"], "merged")
+            self.assertTrue(Path(update_payload["protective_snapshot"]["metadata"]).is_file())
+            self.assertTrue((documents / requirements).is_file())
+            self.assertTrue((documents / remote_path).is_file())
+            self.assertEqual(run("git", "-C", str(documents), "rev-parse", "main").stdout.strip(), local_head)
+
+    def test_multi_user_migration_never_overrides_active_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            documents = workspace / "documents"
+            shared = "context/shared.txt"
+            (documents / shared).write_text("локальная версия\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", shared).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "local conflict").returncode, 0)
+
+            remote_work = root / "documents-active-merge"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
+            self.configure_identity(remote_work)
+            (remote_work / shared).write_text("удалённая версия\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", shared).returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote conflict").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "fetch", "origin", "main").returncode, 0)
+            self.assertNotEqual(run("git", "-C", str(documents), "merge", "origin/main").returncode, 0)
+            merge_head = documents / ".git/MERGE_HEAD"
+            self.assertTrue(merge_head.is_file())
+
+            migrated = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "migrate",
+                "--analyst",
+                "ivanov",
+                "--feature",
+                "registry",
+                env=environment,
+            )
+            self.assertNotEqual(migrated.returncode, 0)
+            self.assertIn("уже выполняется слияние", migrated.stdout)
+            self.assertTrue(merge_head.is_file())
+            self.assertFalse((workspace / ".workspace-state/collaboration.json").exists())
+            self.assertEqual(run("git", "-C", str(documents), "merge", "--abort").returncode, 0)
+
+    def test_feature_branch_update_archives_conflict_and_restores_clean_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            documents = workspace / "documents"
+            feature = "registry"
+            requirements = f"features/{feature}/requirements.md"
+            (documents / requirements).parent.mkdir(parents=True)
+            (documents / requirements).write_text("# Требования\n\nОбщая версия.\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "add feature").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
+            migrate = run(
+                sys.executable, str(ROOT / "scripts/collaboration.py"), "--root", str(workspace),
+                "migrate", "--analyst", "ivanov", env=environment,
+            )
+            self.assertEqual(migrate.returncode, 0, migrate.stdout + migrate.stderr)
+            start = run(
+                sys.executable, str(ROOT / "scripts/collaboration.py"), "--root", str(workspace),
+                "start", "--feature", feature, env=environment,
+            )
+            self.assertEqual(start.returncode, 0, start.stdout + start.stderr)
+            (documents / requirements).write_text("# Требования\n\nЛокальная версия.\n", encoding="utf-8")
+            save = run(
+                sys.executable, str(ROOT / "scripts/collaboration.py"), "--root", str(workspace),
+                "save", "--message", "local requirements", "--path", requirements, env=environment,
+            )
+            self.assertEqual(save.returncode, 0, save.stdout + save.stderr)
+            local_head = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
+
+            remote_work = root / "documents-feature-conflict"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
+            self.configure_identity(remote_work)
+            (remote_work / requirements).write_text("# Требования\n\nВерсия коллеги.\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", requirements).returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote requirements").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
+
+            update = run(
+                sys.executable, str(ROOT / "scripts/collaboration.py"), "--root", str(workspace),
+                "update", env=environment,
+            )
+            self.assertNotEqual(update.returncode, 0)
+            self.assertIn("feature-main-merge-conflict", update.stdout)
+            self.assertEqual(run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip(), local_head)
+            self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
+            self.assertEqual((documents / requirements).read_text(encoding="utf-8"), "# Требования\n\nЛокальная версия.\n")
+            snapshots = sorted((workspace / ".workspace-state/analytics-snapshots").glob("*/snapshot.json"))
+            conflict_snapshots = [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in snapshots
+                if json.loads(path.read_text(encoding="utf-8")).get("status") == "conflict"
+            ]
+            self.assertTrue(conflict_snapshots)
+            conflict = conflict_snapshots[-1]["conflicts"][0]
+            self.assertEqual(conflict["path"], requirements)
+            snapshot_root = next(path.parent for path in snapshots if path.parent.name == conflict_snapshots[-1]["snapshot_id"])
+            self.assertEqual(
+                (snapshot_root / conflict["saved_versions"]["local"]["file"]).read_text(encoding="utf-8"),
+                "# Требования\n\nЛокальная версия.\n",
+            )
+            self.assertEqual(
+                (snapshot_root / conflict["saved_versions"]["incoming"]["file"]).read_text(encoding="utf-8"),
+                "# Требования\n\nВерсия коллеги.\n",
+            )
+
     def test_bootstrap_retires_dirty_legacy_source_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

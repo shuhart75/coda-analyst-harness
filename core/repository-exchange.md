@@ -64,6 +64,14 @@ When `code` is absent, the protected update returns `status=skipped` and no code
 
 Scripts never invent a semantic commit from a dirty `analytics` tree. The LLM reviews intentional changes, runs applicable checks, stages only exact paths and commits them before retrying synchronization. Ambiguous changes require one analyst decision at a time. Broad staging remains prohibited.
 
+## Feature branches
+
+When multi-user work is configured, full repository synchronization is accepted only with `analytics/main` checked out. A feature branch blocks the operation before the protected code pull or any source fetch. Full synchronization must never merge `source` into a feature branch.
+
+`repository-exchange.py update-feature-branch` is a separate operation. It fetches only `analytics/origin/main`, fast-forwards or merges that commit into the current `feature/<feature>/<analyst>` branch, creates protective snapshots and leaves a clean worktree after success or a harness-aborted conflict. It does not access `source`, update `code`, create a reverse patch or push; `collaboration.py update` pushes only the feature branch after this operation succeeds.
+
+`repository-exchange.py fast-forward-analytics-main` updates only a clean local `main` that is an ancestor of `origin/main`. It creates a protective snapshot and refuses divergence. Migration and completion use this narrow operation instead of rewriting `main`.
+
 Successful local synchronization means that incoming changes were merged, the result was verified and `analytics` was pushed. A non-empty reverse patch leaves `source_analytics_state=reverse-diff-pending` because role `source` is fetch-only on this machine. The result uses `source_analytics_state=identical` only when the fetched source tree already equals the analytics tree. The verified patch is transferred separately and applied on a machine where `source` is a writable working repository.
 
 ## Reverse patch

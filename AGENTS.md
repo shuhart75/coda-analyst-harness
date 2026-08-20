@@ -19,7 +19,8 @@ This repository defines a reusable workflow harness.
 
 ## Repository exchange commands
 
-- `синкани репы`, `синхронизируй репозитории`, `обнови репы`, `обнови репозитории`, `обнови documents из changeswork-copy`: run `python3 scripts/workspace.py bootstrap`, then `python3 scripts/workspace.py sync`. If `analytics` has intentional uncommitted work, review it, run applicable checks, stage only exact paths and commit it before `sync`; ask one question when the meaning is uncertain. The command first performs the protected `code` pull when that role exists. It then fetches `analytics/origin/main`, fast-forwards when possible, preserves local-ahead history, and creates a normal merge commit for conflict-free divergence. With `source` present, it next merges `source` into `analytics`, verifies and archives the reverse patch, and pushes only `analytics/main`. Without `source`, it records reverse-patch verification as unavailable and still updates and pushes `analytics`. Without `code`, it skips all code access. Neither missing optional role is an error.
+- `синкани репы`, `синхронизируй репозитории`, `обнови репы`, `обнови репозитории`, `обнови documents из changeswork-copy`: run `python3 scripts/workspace.py bootstrap`, then `python3 scripts/workspace.py sync`. In single-user mode, if `analytics` has intentional uncommitted work, review it, run applicable checks, stage only exact paths and commit it before `sync`; ask one question when the meaning is uncertain. In configured multi-user mode, never commit dirty `main`: preserve that work through `collaboration.py migrate` into a feature branch first. The command performs the protected `code` pull when that role exists. It then fetches `analytics/origin/main`, fast-forwards when possible, preserves local-ahead history, and creates a normal merge commit for conflict-free divergence. With `source` present, it next merges `source` into `analytics`, verifies and archives the reverse patch, and pushes only `analytics/main`. Without `source`, it records reverse-patch verification as unavailable and still updates and pushes `analytics`. Without `code`, it skips all code access. Neither missing optional role is an error.
+- Full repository exchange is allowed only while `analytics/main` is checked out. When a `feature/<feature>/<analyst>` branch is active, `синкани репы` must stop before updating even `code`; it is never a synonym for updating that branch.
 - Report `source` and `analytics` as identical only when the newly fetched source tree already equals the analytics tree. A non-empty verified patch means `source_analytics_state=reverse-diff-pending` even after `analytics` was pushed; do not present this as complete synchronization.
 - After `workspace.py sync`, start the user-facing result with the exact value of `report_message`. Do not prepend or append a broader success claim. The phrase `all repositories synchronized` and its Russian equivalents are allowed only when `all_repositories_synchronized=true`; when it is false, explicitly retain the limitation from `report_message`.
 - `синкани без отправки`, `обнови локально без push`: run `python3 scripts/workspace.py bootstrap`, then `python3 scripts/workspace.py sync --no-push`; available repositories are updated under the same reduced-workspace rules, while analytics is not pushed.
@@ -50,12 +51,22 @@ When working in this workspace, read in this order:
 8. `core/research-policy.md`
 9. `core/code-inspection.md`
 10. `core/run-loop.md`
-11. `.workspace-state/run-state/session-brief.md` when present
-12. `.workspace-state/active-mode.md`
-13. `modes/<active-mode>.md`
-14. `PROJECT_ROOT/README.md`
-15. `PROJECT_ROOT/planning/team.md` before planning resources or regenerating actual-progress
-16. relevant files under `PROJECT_ROOT/context/project-rules/`
+11. `core/collaboration.md` when `.workspace-state/collaboration.json` exists or the user asks to start, save, update, submit or migrate feature work
+12. `.workspace-state/run-state/session-brief.md` when present
+13. `.workspace-state/active-mode.md`
+14. `modes/<active-mode>.md`
+15. `PROJECT_ROOT/README.md`
+16. `PROJECT_ROOT/planning/team.md` before planning resources or regenerating actual-progress
+17. relevant files under `PROJECT_ROOT/context/project-rules/`
+
+## Multi-user feature work
+
+- The canonical start command is `начинаю работу над фичей <feature>`. Treat `пишем требования по фиче <feature>`, `работаем с фичой <feature>`, `беру фичу <feature> в работу`, `берём фичу <feature> в работу` and close grammatical variants as exact synonyms. Resolve an existing feature slug; ask one question only if the feature is ambiguous. Run `scripts/collaboration.py start --feature <slug>` before editing.
+- While feature work is active, `сохрани`, `сохрани работу`, `зафиксируй`, `зафиксируй изменения`, `закоммить`, `закоммить изменения` and `сделай коммит` mean: inspect all changes, run applicable checks, ask about any uncertain path, then call `collaboration.py save` with every exact changed path and a semantic commit message. The command pushes only the feature branch. Never invent a commit from ambiguous changes.
+- While feature work is active, bare `обнови`, `синкани`, `подтяни изменения`, `обнови мою ветку`, `синкани мою ветку` and `обнови рабочую ветку` mean `collaboration.py update`: merge current `origin/main` into the active feature branch with protective snapshots and push that branch. Exact phrases containing `репы`, `репозитории`, `code` or `coda` retain their registered repository meanings and must not be reinterpreted.
+- `требования готовы к объединению`, `отправь требования на проверку`, `подготовь требования к слиянию` and `отправь ветку на слияние` mean: complete requirement checks, save exact changes, update the branch, repeat checks, then run `collaboration.py submit`. This sends the branch for a human merge request and never creates a developer package.
+- `сформируй пакет для разработки`, `отправь требования в разработку`, `передай требования разработчикам`, `передай разрабам`, `отдай требования разрабам`, `отправь разрабам`, `отдаём в разработку` and `передаём в разработку` are exact delivery synonyms. In multi-user mode, first finish a remotely accepted branch with `collaboration.py finish`, then require `collaboration.py require-main-for-delivery --feature <slug>`. If the branch is not yet in `origin/main`, stop without slices or package creation. After the guard passes, execute the existing end-to-end package preparation directly to `sent`; there is still no `ready` state.
+- `включи совместную работу`, `включи многопользовательский режим`, `мигрируй на веточную работу` and `переведи documents на работу через ветки` mean the migration procedure in `core/collaboration.md`. Ask for a short analyst id once. If local work exists, ask for exactly one feature before calling `collaboration.py migrate`; never guess its ownership.
 
 ## Primary workflow rule
 

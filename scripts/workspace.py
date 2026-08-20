@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +39,22 @@ WORKSPACE_STATE_NAME = "workspace.json"
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+@contextmanager
+def workspace_operation_lock(root: Path):
+    path = root / ".workspace-state/workspace-operation.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        handle.close()
+        raise ValueError("Другая операция уже изменяет рабочую область") from exc
+    try:
+        yield
+    finally:
+        handle.close()
 
 
 def root_path(explicit: str | None) -> Path:
@@ -550,8 +568,29 @@ def update_code_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def sync_command(args: argparse.Namespace) -> int:
+def _sync_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
+    analytics_id = str(load_roles(root)["analytics"])
+    analytics = root / analytics_id
+    branch = run("git", "-C", str(analytics), "symbolic-ref", "--quiet", "--short", "HEAD")
+    current = branch.stdout.strip() if branch.returncode == 0 else None
+    if current != "main":
+        print(json.dumps({
+            "status": "blocked",
+            "reason": "analytics-main-required-for-repository-sync",
+            "current_branch": current,
+            "code_update": {"status": "not-started"},
+            "allowed_next_action": (
+                "python3 scripts/collaboration.py update"
+                if current and current.startswith("feature/")
+                else "перейти в осознанно выбранную ветку без потери текущей работы"
+            ),
+            "message": (
+                "Полный обмен репозиториев выполняется только из analytics/main. "
+                "Код, source и analytics не изменены."
+            ),
+        }, ensure_ascii=False, indent=2))
+        return 2
     code_result = update_code(root)
     source_id = load_roles(root)["source"]
     source_path = source_mirror_path(root, source_id) if source_id else None
@@ -655,6 +694,12 @@ def sync_command(args: argparse.Namespace) -> int:
         ),
     }, ensure_ascii=False, indent=2))
     return 0
+
+
+def sync_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    with workspace_operation_lock(root):
+        return _sync_command(args)
 
 
 def inspect_conflict_command(args: argparse.Namespace) -> int:

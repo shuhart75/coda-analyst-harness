@@ -117,6 +117,10 @@ def write_local_entrypoint(
         "workspace.py update-code.\n"
         "6. По запросу проверки кода используй правила HARNESS_ROOT/core/code-inspection.md "
         "и программы HARNESS_ROOT/scripts/code-inspect.py; путь к code не спрашивай у пользователя.\n\n"
+        "7. Перед работой над функциональностью проверь HARNESS_ROOT/.workspace-state/collaboration.json. "
+        "Если включён многопользовательский режим, выполняй начало, сохранение, обновление и завершение "
+        "рабочей ветки только через HARNESS_ROOT/scripts/collaboration.py. Полный обмен репозиториев "
+        "не подменяет обновление рабочей ветки.\n\n"
         "Не добавляй этот файл в Git и не заменяй им основной договор обвязки.\n",
         encoding="utf-8",
     )
