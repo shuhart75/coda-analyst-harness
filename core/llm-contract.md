@@ -29,6 +29,8 @@ If the user points to a folder with current-system docs/screenshots/change reque
 
 `HARNESS_ROOT` is the `coda-analyst-harness` repository. Resolve `PROJECT_ROOT` only through `python3 HARNESS_ROOT/scripts/workspace.py --root HARNESS_ROOT project-root`. Unless a path explicitly starts with a harness directory such as `core/`, `modes/`, `scripts/`, `skills/`, `templates/` or `.workspace-state/`, resolve project paths such as `baseline/`, `context/`, `planning/`, `features/` and `releases/` under `PROJECT_ROOT`, regardless of the directory from which the LLM was launched.
 
+Repositories assigned roles `code` and `source` are optional after the first successful bootstrap. Their absence is a supported reduced-workspace state: do not recreate them without an explicit analyst request, do not attempt code inspection when `code` is absent, and do not claim reverse-patch verification when `source` is absent. Role `analytics` is mandatory.
+
 
 ## Small-context operating rules
 

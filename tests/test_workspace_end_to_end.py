@@ -253,6 +253,78 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
             self.assertEqual(run("git", "status", "--porcelain=v1", cwd=harness / "coda").stdout, "")
             self.assertEqual(run("git", "status", "--porcelain=v1", cwd=harness).stdout, harness_status_before)
 
+            self.assertEqual(
+                run(
+                    "git", "add", "--", "features/from-root", "features/from-analytics", cwd=analytics
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                run("git", "commit", "-m", "analytical work before reduced workspace", cwd=analytics).returncode,
+                0,
+            )
+            shutil.rmtree(harness / "coda")
+            shutil.rmtree(harness / ".workspace-state/repositories/changeswork-copy.git")
+
+            reduced_bootstrap = run(
+                sys.executable,
+                "../scripts/workspace.py",
+                "--root",
+                "..",
+                "bootstrap",
+                cwd=analytics,
+                env=environment,
+            )
+            self.assertEqual(
+                reduced_bootstrap.returncode,
+                0,
+                reduced_bootstrap.stdout + reduced_bootstrap.stderr,
+            )
+            reduced_state = json.loads((harness / ".workspace-state/workspace.json").read_text(encoding="utf-8"))
+            self.assertEqual(reduced_state["status"], "degraded")
+            self.assertEqual(reduced_state["roles"]["code"]["availability"], "absent")
+            self.assertEqual(reduced_state["roles"]["source"]["availability"], "absent")
+            self.assertFalse((harness / "coda").exists())
+            self.assertFalse((harness / ".workspace-state/repositories/changeswork-copy.git").exists())
+            reduced_entrypoint = (analytics / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("Репозиторий роли code локально отсутствует", reduced_entrypoint)
+            reduced_doctor = run(
+                sys.executable,
+                "../scripts/code-inspect.py",
+                "doctor",
+                ".",
+                cwd=analytics,
+                env=environment,
+            )
+            self.assertEqual(reduced_doctor.returncode, 0, reduced_doctor.stdout + reduced_doctor.stderr)
+            self.assertEqual(json.loads(reduced_doctor.stdout)["repositories"], [])
+
+            reduced_relative = "context/reduced-workspace.md"
+            (analytics / reduced_relative).write_text("работа только в аналитическом репозитории\n", encoding="utf-8")
+            self.assertEqual(run("git", "add", "--", reduced_relative, cwd=analytics).returncode, 0)
+            self.assertEqual(
+                run("git", "commit", "-m", "work without source and code", cwd=analytics).returncode,
+                0,
+            )
+            reduced_sync = run(
+                sys.executable,
+                "../scripts/workspace.py",
+                "--root",
+                "..",
+                "sync",
+                cwd=analytics,
+                env=environment,
+            )
+            self.assertEqual(reduced_sync.returncode, 0, reduced_sync.stdout + reduced_sync.stderr)
+            reduced_payload = json.loads(reduced_sync.stdout)
+            self.assertEqual(reduced_payload["sync_mode"], "analytics-only")
+            self.assertEqual(reduced_payload["code_update"]["reason"], "repository-absent")
+            self.assertFalse(reduced_payload["analytics_exchange"]["reverse_diff"]["verified"])
+            reduced_remote_check = root / "documents-reduced-check"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(reduced_remote_check)).returncode, 0)
+            self.assertTrue((reduced_remote_check / reduced_relative).is_file())
+            self.assertEqual(run("git", "status", "--porcelain=v1", cwd=harness).stdout, harness_status_before)
+
 
 if __name__ == "__main__":
     unittest.main()

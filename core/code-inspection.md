@@ -36,6 +36,8 @@ The harness must not store analyst-machine absolute paths in committed project f
 
 `python3 scripts/workspace.py bootstrap` creates the repositories and `coda-analyst.code-workspace`. Do not use `code-inspect.py setup` to replace the root `AGENTS.md`; the root contract belongs to this harness.
 
+After the first successful bootstrap the analyst may remove the local repository assigned role `code`. The next bootstrap records it as absent, removes it from `.workspace-state/code-repos.json` and from the editor workspace, and updates the local `AGENTS.md`. In this state code inspection is unavailable but all analytical work continues. Do not ask for a path, search for another clone or recreate the repository without an explicit analyst instruction.
+
 ## Read-only contract
 
 During analyst planning and requirements work, `coda` is strictly read-only. The generated code registry contains an empty write allowlist. A conversational user request does not extend it.

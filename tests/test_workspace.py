@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -84,12 +85,17 @@ class CodaWorkspaceTests(unittest.TestCase):
             workspace, source_work, documents_remote, environment = self.prepare_workspace(root)
             state = json.loads((workspace / ".workspace-state/workspace.json").read_text(encoding="utf-8"))
             self.assertEqual(set(state["repositories"]), {"documents", "coda", "changeswork-copy"})
-            self.assertEqual(state["schema_version"], 3)
+            self.assertEqual(state["schema_version"], 4)
+            self.assertEqual(state["status"], "ready")
             self.assertEqual(
                 {role: item["repository"] for role, item in state["roles"].items()},
                 {"analytics": "documents", "code": "coda", "source": "changeswork-copy"},
             )
             self.assertEqual(state["repositories"]["changeswork-copy"]["storage"], "bare-mirror")
+            self.assertEqual(
+                {role: item["availability"] for role, item in state["roles"].items()},
+                {"analytics": "ready", "code": "ready", "source": "ready"},
+            )
             self.assertEqual(state["write_policy"]["code"]["allowed_paths"], [])
             self.assertEqual(
                 state["write_policy"]["code"]["allowed_operations"],
@@ -287,6 +293,339 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertNotEqual(blocked.returncode, 0)
             self.assertIn("локальные изменения", blocked.stdout)
+
+    def test_removed_source_stays_absent_and_sync_updates_code_and_pushes_analytics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            source_mirror = workspace / ".workspace-state/repositories/changeswork-copy.git"
+            shutil.rmtree(source_mirror)
+            documents = workspace / "documents"
+            relative = "context/analytics-without-source.md"
+            (documents / relative).write_text("локальное изменение\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", relative).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "analytics without source").returncode, 0)
+
+            bootstrap = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "bootstrap",
+                env=environment,
+            )
+            self.assertEqual(bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr)
+            self.assertFalse(source_mirror.exists())
+            state = json.loads((workspace / ".workspace-state/workspace.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["roles"]["source"]["availability"], "absent")
+            self.assertEqual(state["roles"]["code"]["availability"], "ready")
+
+            synchronized = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                env=environment,
+            )
+            self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
+            payload = json.loads(synchronized.stdout)
+            self.assertEqual(payload["sync_mode"], "analytics-only")
+            self.assertIn(payload["code_update"]["status"], {"current", "updated"})
+            self.assertEqual(payload["analytics_exchange"]["reverse_diff"]["reason"], "source-role-absent")
+            self.assertFalse(payload["analytics_exchange"]["reverse_diff"]["verified"])
+            self.assertFalse((workspace / "reverse-diffs/reverse-diff-latest.patch").exists())
+            self.assertIn(
+                f"CODE_ROOT = {workspace / 'coda'}",
+                (documents / "AGENTS.md").read_text(encoding="utf-8"),
+            )
+
+            reverse_diff = run(
+                sys.executable,
+                str(ROOT / "scripts/repository-exchange.py"),
+                "--root",
+                str(workspace),
+                "reverse-diff",
+                env=environment,
+            )
+            self.assertNotEqual(reverse_diff.returncode, 0)
+            self.assertIn("Репозиторий роли source отсутствует", reverse_diff.stdout)
+
+            remote_check = root / "documents-without-source-check"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(remote_check)).returncode, 0)
+            self.assertTrue((remote_check / relative).is_file())
+
+    def test_analytics_only_sync_does_not_invent_a_commit_for_dirty_analytics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, _, environment = self.prepare_workspace(root)
+            shutil.rmtree(workspace / ".workspace-state/repositories/changeswork-copy.git")
+            bootstrap = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "bootstrap",
+                env=environment,
+            )
+            self.assertEqual(bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr)
+            documents = workspace / "documents"
+            dirty_path = documents / "context/not-reviewed.md"
+            dirty_path.write_text("непроверенное изменение\n", encoding="utf-8")
+            head_before = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
+
+            synchronized = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                "--no-push",
+                env=environment,
+            )
+            self.assertNotEqual(synchronized.returncode, 0)
+            payload = json.loads(synchronized.stdout)
+            self.assertEqual(payload["sync_mode"], "analytics-only")
+            self.assertIn("незакоммиченные изменения", payload["analytics_exchange"])
+            self.assertEqual(run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip(), head_before)
+            self.assertTrue(dirty_path.is_file())
+
+    def test_removed_code_stays_absent_and_full_source_exchange_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, source_work, _, environment = self.prepare_workspace(root)
+            shutil.rmtree(workspace / "coda")
+            documents = workspace / "documents"
+            analytics_relative = "context/analytics-without-code.md"
+            (documents / analytics_relative).write_text("аналитическое изменение\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", analytics_relative).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "analytics without code").returncode, 0)
+            source_relative = "context/source-without-code.md"
+            (source_work / source_relative).write_text("изменение источника\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(source_work), "add", "--", source_relative).returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "source without code").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
+
+            bootstrap = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "bootstrap",
+                env=environment,
+            )
+            self.assertEqual(bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr)
+            self.assertFalse((workspace / "coda").exists())
+            state = json.loads((workspace / ".workspace-state/workspace.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["roles"]["code"]["availability"], "absent")
+            self.assertEqual(state["roles"]["source"]["availability"], "ready")
+            registry = json.loads((workspace / ".workspace-state/code-repos.json").read_text(encoding="utf-8"))
+            self.assertEqual(registry["repositories"], [])
+
+            synchronized = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                env=environment,
+            )
+            self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
+            payload = json.loads(synchronized.stdout)
+            self.assertEqual(payload["sync_mode"], "source-analytics")
+            self.assertEqual(payload["code_update"]["status"], "skipped")
+            self.assertEqual(payload["code_update"]["reason"], "repository-absent")
+            self.assertTrue(payload["analytics_exchange"]["reverse_diff"]["verified"])
+            self.assertTrue((documents / source_relative).is_file())
+            self.assertTrue((documents / analytics_relative).is_file())
+            entrypoint = (documents / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("Репозиторий роли code локально отсутствует", entrypoint)
+            self.assertNotIn("CODE_ROOT =", entrypoint)
+            editor = json.loads((workspace / "coda-analyst.code-workspace").read_text(encoding="utf-8"))
+            self.assertNotIn("code-read-only", {item["name"] for item in editor["folders"]})
+            code_doctor = run(
+                sys.executable,
+                str(ROOT / "scripts/code-inspect.py"),
+                "doctor",
+                str(documents),
+                env=environment,
+            )
+            self.assertEqual(code_doctor.returncode, 0, code_doctor.stdout + code_doctor.stderr)
+            self.assertEqual(json.loads(code_doctor.stdout)["repositories"], [])
+
+    def test_removed_source_and_code_stay_absent_while_analytics_syncs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            shutil.rmtree(workspace / "coda")
+            shutil.rmtree(workspace / ".workspace-state/repositories/changeswork-copy.git")
+            documents = workspace / "documents"
+            relative = "context/analytics-only-workspace.md"
+            (documents / relative).write_text("изменение без дополнительных ролей\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", relative).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "analytics only workspace").returncode, 0)
+
+            bootstrap = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "bootstrap",
+                env=environment,
+            )
+            self.assertEqual(bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr)
+            self.assertFalse((workspace / "coda").exists())
+            self.assertFalse((workspace / ".workspace-state/repositories/changeswork-copy.git").exists())
+            state = json.loads((workspace / ".workspace-state/workspace.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "degraded")
+            self.assertEqual(state["roles"]["code"]["availability"], "absent")
+            self.assertEqual(state["roles"]["source"]["availability"], "absent")
+
+            synchronized = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                env=environment,
+            )
+            self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
+            payload = json.loads(synchronized.stdout)
+            self.assertEqual(payload["sync_mode"], "analytics-only")
+            self.assertEqual(payload["code_update"]["status"], "skipped")
+            entrypoint = (documents / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("Репозиторий роли code локально отсутствует", entrypoint)
+            registry = json.loads((workspace / ".workspace-state/code-repos.json").read_text(encoding="utf-8"))
+            self.assertEqual(registry["repositories"], [])
+            editor = json.loads((workspace / "coda-analyst.code-workspace").read_text(encoding="utf-8"))
+            self.assertNotIn("code-read-only", {item["name"] for item in editor["folders"]})
+            status = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "status",
+                env=environment,
+            )
+            self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+            self.assertEqual(json.loads(status.stdout)["status"], "degraded")
+            remote_check = root / "documents-analytics-only-check"
+            self.assertEqual(run("git", "clone", str(documents_remote), str(remote_check)).returncode, 0)
+            self.assertTrue((remote_check / relative).is_file())
+
+    def test_schema_3_state_migrates_without_recreating_removed_optional_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, _, environment = self.prepare_workspace(root)
+            state_path = workspace / ".workspace-state/workspace.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["schema_version"] = 3
+            state.pop("status", None)
+            for item in state["roles"].values():
+                item.pop("availability", None)
+            for item in state["repositories"].values():
+                item.pop("availability", None)
+            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            shutil.rmtree(workspace / "coda")
+            shutil.rmtree(workspace / ".workspace-state/repositories/changeswork-copy.git")
+
+            bootstrap = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "bootstrap",
+                env=environment,
+            )
+            self.assertEqual(bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr)
+            migrated = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(migrated["schema_version"], 4)
+            self.assertEqual(migrated["status"], "degraded")
+            self.assertEqual(migrated["roles"]["analytics"]["availability"], "ready")
+            self.assertEqual(migrated["roles"]["code"]["availability"], "absent")
+            self.assertEqual(migrated["roles"]["source"]["availability"], "absent")
+            self.assertFalse((workspace / "coda").exists())
+            self.assertFalse((workspace / ".workspace-state/repositories/changeswork-copy.git").exists())
+
+    def test_existing_invalid_optional_role_paths_block_reduced_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, _, environment = self.prepare_workspace(root)
+            code = workspace / "coda"
+            shutil.rmtree(code)
+            code.mkdir()
+
+            status = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "status",
+                env=environment,
+            )
+            self.assertNotEqual(status.returncode, 0)
+            payload = json.loads(status.stdout)
+            self.assertEqual(payload["status"], "invalid")
+            code_item = next(item for item in payload["repositories"] if item["role"] == "code")
+            self.assertEqual(code_item["state"], "invalid")
+
+            update = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "update-code",
+                env=environment,
+            )
+            self.assertNotEqual(update.returncode, 0)
+            self.assertIn("не является отдельным Git-репозиторием", update.stdout)
+
+            shutil.rmtree(code)
+            source = workspace / ".workspace-state/repositories/changeswork-copy.git"
+            shutil.rmtree(source)
+            source.mkdir()
+            synchronized = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                env=environment,
+            )
+            self.assertNotEqual(synchronized.returncode, 0)
+            self.assertIn("не является bare-репозиторием", synchronized.stdout)
+
+    def test_removed_analytics_role_is_never_recloned_automatically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, _, environment = self.prepare_workspace(root)
+            shutil.rmtree(workspace / "documents")
+
+            status = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "status",
+                env=environment,
+            )
+            self.assertNotEqual(status.returncode, 0)
+            payload = json.loads(status.stdout)
+            self.assertEqual(payload["status"], "incomplete")
+            analytics_item = next(item for item in payload["repositories"] if item["role"] == "analytics")
+            self.assertEqual(analytics_item["state"], "missing")
+
+            bootstrap = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "bootstrap",
+                env=environment,
+            )
+            self.assertNotEqual(bootstrap.returncode, 0)
+            self.assertIn("автоматическое повторное клонирование запрещено", bootstrap.stdout)
+            self.assertFalse((workspace / "documents").exists())
 
     def test_sync_blocks_committed_local_settings_and_test_artifacts_from_documents_origin(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

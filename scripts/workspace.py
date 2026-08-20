@@ -32,6 +32,7 @@ DEFAULT_ROLES = {
 ROLE_CONFIG_NAME = "repository-roles.json"
 PROJECT_PATHS = ("baseline", "context", "features", "planning", "releases")
 CODE_PUSH_DISABLED = "DISABLED_BY_CODA_ANALYST_HARNESS"
+WORKSPACE_STATE_NAME = "workspace.json"
 
 
 def utc_now() -> str:
@@ -51,6 +52,30 @@ def repository_urls() -> dict[str, str]:
 
 def role_config_path(root: Path) -> Path:
     return root / ".workspace-state" / ROLE_CONFIG_NAME
+
+
+def workspace_state_path(root: Path) -> Path:
+    return root / ".workspace-state" / WORKSPACE_STATE_NAME
+
+
+def load_previous_workspace_state(root: Path) -> dict | None:
+    path = workspace_state_path(root)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Не удалось прочитать состояние рабочей области {path}: {exc}") from exc
+    if not isinstance(payload.get("roles"), dict):
+        raise ValueError(f"Повреждено состояние рабочей области: {path}")
+    return payload
+
+
+def role_was_prepared(previous: dict | None, role: str, repository_id: str | None) -> bool:
+    if previous is None or repository_id is None:
+        return False
+    item = previous.get("roles", {}).get(role, {})
+    return isinstance(item, dict) and item.get("repository") == repository_id
 
 
 def validate_roles(roles: dict[str, str | None]) -> dict[str, str | None]:
@@ -303,43 +328,87 @@ def bootstrap_command(args: argparse.Namespace) -> int:
     require_clean_harness_boundary(root)
     urls = repository_urls()
     roles = load_roles(root)
+    previous = load_previous_workspace_state(root)
     ensure_local_state()
     repositories: dict[str, Path] = {}
+    availability: dict[str, str] = {}
     analytics_id = str(roles["analytics"])
+    analytics_path = root / analytics_id
+    if role_was_prepared(previous, "analytics", analytics_id) and not analytics_path.exists():
+        raise ValueError(
+            f"Репозиторий роли analytics ({analytics_id}) удалён; "
+            "автоматическое повторное клонирование запрещено во избежание потери локальных данных"
+        )
     repositories[analytics_id] = clone_or_validate(root, analytics_id, urls[analytics_id])
+    availability["analytics"] = "ready"
     enable_push(repositories[analytics_id], analytics_id, urls[analytics_id])
     code_id = roles["code"]
     if code_id:
-        repositories[code_id] = clone_code_once(root, code_id, urls[code_id])
+        code_path = root / code_id
+        if role_was_prepared(previous, "code", code_id) and not code_path.exists():
+            availability["code"] = "absent"
+        else:
+            repositories[code_id] = clone_code_once(root, code_id, urls[code_id])
+            availability["code"] = "ready"
+    else:
+        availability["code"] = "disabled"
     source_id = roles["source"]
     retired_source = None
     if source_id:
-        repositories[source_id] = clone_or_validate_source_mirror(root, source_id, urls[source_id])
-        retired_source = retire_source_worktree(root, source_id, urls[source_id])
+        source_path = source_mirror_path(root, source_id)
+        if role_was_prepared(previous, "source", source_id) and not source_path.exists():
+            availability["source"] = "absent"
+        else:
+            repositories[source_id] = clone_or_validate_source_mirror(root, source_id, urls[source_id])
+            availability["source"] = "ready"
+            retired_source = retire_source_worktree(root, source_id, urls[source_id])
+    else:
+        availability["source"] = "disabled"
     analytics = repositories[analytics_id]
-    code = repositories[code_id] if code_id else None
+    code = repositories.get(code_id) if code_id else None
     legacy_harness = embedded_harness_paths(analytics)
-    entrypoint = None if legacy_harness else write_local_entrypoint(analytics, root, code)
-    code_registry = write_code_registry(root, analytics, analytics_id, code, code_id, urls)
+    entrypoint = (
+        None
+        if legacy_harness
+        else write_local_entrypoint(analytics, root, code, availability["code"])
+    )
+    code_registry = write_code_registry(
+        root,
+        analytics,
+        analytics_id,
+        code,
+        code_id if availability["code"] == "ready" else None,
+        urls,
+    )
     workspace = write_workspace(root, analytics, code)
     state_dir = root / ".workspace-state"
     state_dir.mkdir(parents=True, exist_ok=True)
+    degraded = any(availability[role] == "absent" for role in ("code", "source"))
+    expected_paths = {
+        "analytics": root / analytics_id,
+        "code": root / code_id if code_id else None,
+        "source": source_mirror_path(root, source_id) if source_id else None,
+    }
     state = {
-        "schema_version": 3,
+        "schema_version": 4,
+        "status": "degraded" if degraded else "ready",
         "prepared_at": utc_now(),
         "workspace_root": str(root),
         "repositories": {
-            name: {
-                "path": str(repositories[name]),
-                "remote_url": urls[name],
-                "storage": "bare-mirror" if name == source_id else "worktree",
+            repository_id: {
+                "path": str(expected_paths[role]),
+                "remote_url": urls[repository_id],
+                "storage": "bare-mirror" if role == "source" else "worktree",
+                "availability": availability[role],
             }
-            for name in repositories
+            for role, repository_id in roles.items()
+            if repository_id is not None
         },
         "roles": {
             role: {
                 "repository": repository_id,
-                "path": str(repositories[repository_id]) if repository_id else None,
+                "path": str(expected_paths[role]) if repository_id else None,
+                "availability": availability[role],
             }
             for role, repository_id in roles.items()
         },
@@ -349,7 +418,16 @@ def bootstrap_command(args: argparse.Namespace) -> int:
         "migration": {
             "required": bool(legacy_harness),
             "embedded_harness_paths": legacy_harness,
-            "next_command": "workspace.py sync" if legacy_harness else None,
+            "next_command": (
+                "workspace.py sync"
+                if legacy_harness and availability["source"] == "ready"
+                else None
+            ),
+            "blocked_reason": (
+                "source-role-absent"
+                if legacy_harness and availability["source"] != "ready"
+                else None
+            ),
         },
         "write_policy": {
             "analytics": "read-write-push-allowed",
@@ -357,20 +435,21 @@ def bootstrap_command(args: argparse.Namespace) -> int:
                 "access": "read-only",
                 "allowed_paths": [],
                 "allowed_operations": ["initial-clone", "git-pull-ff-only-via-workspace"],
-            } if code_id else {"access": "disabled", "allowed_paths": []},
-            "source": "bare-mirror-fetch-only" if source_id else "disabled",
+            } if availability["code"] == "ready" else {"access": "disabled", "allowed_paths": []},
+            "source": "bare-mirror-fetch-only" if availability["source"] == "ready" else "disabled",
         },
         "retired_legacy_source": str(retired_source) if retired_source else None,
     }
-    state_path = state_dir / "workspace.json"
+    state_path = workspace_state_path(root)
     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"status": "ready", "workspace": str(workspace), **state}, ensure_ascii=False, indent=2))
+    print(json.dumps({"workspace": str(workspace), **state}, ensure_ascii=False, indent=2))
     return 0
 
 
 def status_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     roles = load_roles(root)
+    previous = load_previous_workspace_state(root)
     urls = repository_urls()
     misplaced = misplaced_project_paths(root)
     status = "invalid" if misplaced else "ready"
@@ -381,9 +460,19 @@ def status_command(args: argparse.Namespace) -> int:
             continue
         path = source_mirror_path(root, name) if role == "source" else root / name
         valid = is_bare_repository(path) if role == "source" else git_root(path) == path
-        state = "ready" if valid else "missing"
-        if state != "ready":
-            status = "incomplete"
+        if valid:
+            state = "ready"
+        elif path.exists():
+            state = "invalid"
+            status = "invalid"
+        elif role != "analytics" and role_was_prepared(previous, role, name):
+            state = "absent"
+            if status == "ready":
+                status = "degraded"
+        else:
+            state = "missing"
+            if status != "invalid":
+                status = "incomplete"
         items.append({
             "role": role,
             "repository": name,
@@ -398,16 +487,32 @@ def status_command(args: argparse.Namespace) -> int:
         "misplaced_project_paths": misplaced,
         "repositories": items,
     }, ensure_ascii=False, indent=2))
-    return 0 if status == "ready" else 1
+    return 0 if status in {"ready", "degraded"} else 1
 
 
 def update_code(root: Path) -> dict:
     code_id = load_roles(root)["code"]
     if not code_id:
-        raise ValueError("Роль code отключена")
+        return {
+            "status": "skipped",
+            "role": "code",
+            "repository": None,
+            "reason": "role-disabled",
+            "operation": "none",
+        }
     code = root / code_id
+    if not code.exists():
+        return {
+            "status": "skipped",
+            "role": "code",
+            "repository": code_id,
+            "reason": "repository-absent",
+            "operation": "none",
+        }
     if git_root(code) != code:
-        raise ValueError(f"Репозиторий роли code ({code_id}) не развёрнут; сначала выполни bootstrap")
+        raise ValueError(
+            f"Путь роли code ({code_id}) существует, но не является отдельным Git-репозиторием: {code}"
+        )
     require_push_disabled(code, code_id)
     validate_origin(code, code_id, repository_urls()[code_id])
     dirty = run("git", "-C", str(code), "status", "--porcelain=v1")
@@ -448,12 +553,20 @@ def update_code_command(args: argparse.Namespace) -> int:
 def sync_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     code_result = update_code(root)
+    source_id = load_roles(root)["source"]
+    source_path = source_mirror_path(root, source_id) if source_id else None
+    if source_path and source_path.exists() and not is_bare_repository(source_path):
+        raise ValueError(
+            f"Путь роли source ({source_id}) существует, но не является bare-репозиторием: {source_path}"
+        )
+    source_ready = bool(source_path and source_path.exists())
+    sync_mode = "source-analytics" if source_ready else "analytics-only"
     command = [
         sys.executable,
         str(Path(__file__).with_name("repository-exchange.py")),
         "--root",
         str(root),
-        "sync",
+        "sync" if source_ready else "sync-analytics-only",
     ]
     if args.no_push:
         command.append("--no-push")
@@ -463,6 +576,7 @@ def sync_command(args: argparse.Namespace) -> int:
         conflict = "source-analytics-merge-conflict" in exchange_error
         print(json.dumps({
             "status": "blocked",
+            "sync_mode": sync_mode,
             "code_update": code_result,
             "analytics_exchange": exchange_error,
             "allowed_next_action": (
@@ -471,11 +585,15 @@ def sync_command(args: argparse.Namespace) -> int:
             "next_command": (
                 "python3 scripts/workspace.py inspect-source-analytics-conflict" if conflict else None
             ),
-            "forbidden_alternatives": [
-                "repeat-code-update-as-fallback",
-                "skip-source-merge",
-                "overwrite-analytics-from-source",
-            ],
+            "forbidden_alternatives": (
+                [
+                    "repeat-code-update-as-fallback",
+                    "skip-source-merge",
+                    "overwrite-analytics-from-source",
+                ]
+                if source_ready
+                else ["recreate-source-without-user-request", "claim-reverse-diff-verification"]
+            ),
         }, ensure_ascii=False, indent=2))
         return exchange.returncode
     try:
@@ -484,6 +602,7 @@ def sync_command(args: argparse.Namespace) -> int:
         exchange_result = {"output": exchange.stdout.strip()}
     print(json.dumps({
         "status": "synchronized",
+        "sync_mode": sync_mode,
         "code_update": code_result,
         "analytics_exchange": exchange_result,
     }, ensure_ascii=False, indent=2))

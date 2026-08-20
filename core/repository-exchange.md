@@ -12,6 +12,8 @@ This policy governs the one-way integration path from role `source` to role `ana
 
 The repositories are independent under the `coda-analyst-harness` root. Roles `analytics` and `code` use normal clones. Role `source` is stored only at `.workspace-state/repositories/<repository-id>.git` as a bare mirror, is excluded from the editor workspace, and has no files that an LLM can edit. They are not submodules and must not be copied into one another. Default roles are used without questions; reassignment is allowed only by an explicit analyst command.
 
+The first bootstrap prepares all configured roles. After that, the analyst may remove the local `code` repository, the hidden `source` mirror, or both. `bootstrap` records these optional roles as `absent` and does not recreate them. Role `analytics` is mandatory and is never automatically recloned after removal.
+
 ## Synchronization transaction
 
 The command `repository-exchange.py sync` performs one guarded transaction:
@@ -32,6 +34,16 @@ The command `repository-exchange.py sync` performs one guarded transaction:
 
 A failed fetch, non-fast-forward local update, merge, verification or push leaves a visible error. The command must not suppress it or silently choose a side. A merge conflict has one continuation: inspect the conflicting `source` and `analytics` versions and request a concrete resolution. Updating `code`, skipping the source merge and overwriting analytics from source are not migration alternatives.
 
+## Reduced workspace
+
+The natural-language synchronization command always runs `workspace.py bootstrap` before `workspace.py sync`, so local instructions, the code registry and the editor workspace reflect the repositories that actually exist.
+
+When `source` is absent, `workspace.py sync` selects `sync-analytics-only`. It requires a clean `analytics/main`, fast-forwards it from its own origin, applies the same Unicode, structure and content-policy checks, refreshes the local entry point and pushes only `analytics/main` unless `--no-push` was requested. It removes the stale `reverse-diff-latest.patch` and writes `reverse-diff-latest.json` with `status=unavailable`, `reason=source-role-absent` and `verified=false`. Historical timestamped patches remain historical artifacts and must not be presented as current.
+
+When `code` is absent, the protected update returns `status=skipped` and no code command is run. The generated code registry has no repository entries, the editor workspace omits code and the local `AGENTS.md` explicitly prohibits code access. Full `source` to `analytics` exchange continues when `source` is present.
+
+Scripts never invent a semantic commit from a dirty `analytics` tree. The LLM reviews intentional changes, runs applicable checks, stages only exact paths and commits them before retrying synchronization. Ambiguous changes require one analyst decision at a time. Broad staging remains prohibited.
+
 ## Reverse patch
 
 `repository-exchange.py reverse-diff` does not update or merge repositories. It compares the current bare source commit with the clean and policy-compliant `documents` commit and writes:
@@ -43,6 +55,8 @@ A failed fetch, non-fast-forward local update, merge, verification or push leave
 The patch is intended for the maintainers of `changeswork-copy`. Normal analyst work does not apply, commit or push it. Metadata schema 2 sets `verified=true` only when both exact-tree reproduction (`tree_verified`) and repository-content policy (`content_policy_verified`) pass. This does not mean that draft requirements are approved. When both trees are identical, stale `reverse-diff-latest.patch` is removed and the metadata records that no patch is required.
 
 Every deletion of a path inherited from `source` is blocked by default. After the analyst explicitly confirms one exact deletion, register it with `repository-exchange.py approve-deletion --path <path>`. The local approval is bound to the current source blob and becomes invalid if that source file changes. Never run this command merely to make synchronization pass.
+
+If `source` is absent, a new reverse patch cannot be built or verified. `reverse-diff` reports this as unavailable and must not recreate `source` implicitly.
 
 ## Prohibited shortcuts
 

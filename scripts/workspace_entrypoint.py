@@ -68,7 +68,12 @@ def exclude_local_entrypoint(project: Path) -> None:
             handle.write("\n".join(missing) + "\n")
 
 
-def write_local_entrypoint(project: Path, harness: Path, code: Path | None = None) -> Path:
+def write_local_entrypoint(
+    project: Path,
+    harness: Path,
+    code: Path | None = None,
+    code_availability: str | None = None,
+) -> Path:
     path = project / "AGENTS.md"
     if path.exists() and not is_local_entrypoint(path):
         raise ValueError(
@@ -79,12 +84,18 @@ def write_local_entrypoint(project: Path, harness: Path, code: Path | None = Non
     project_root = project.resolve()
     harness_root = harness.resolve()
     code_root = code.resolve() if code else None
-    code_role = (
-        f"- `CODE_ROOT = {code_root}` выполняет роль code и доступен строго только для чтения; "
-        "список разрешённых путей записи пуст, отдельно разрешён только защищённый git pull через workspace.py.\n"
-        if code_root
-        else "- Роль code отключена.\n"
-    )
+    if code_root:
+        code_role = (
+            f"- `CODE_ROOT = {code_root}` выполняет роль code и доступен строго только для чтения; "
+            "список разрешённых путей записи пуст, отдельно разрешён только защищённый git pull через workspace.py.\n"
+        )
+    elif code_availability == "absent":
+        code_role = (
+            "- Репозиторий роли code локально отсутствует. Не пытайся обращаться к коду и не восстанавливай "
+            "репозиторий без явной команды аналитика.\n"
+        )
+    else:
+        code_role = "- Роль code отключена настройкой рабочей области; обращение к коду недоступно.\n"
     path.write_text(
         "# Локальная точка входа аналитической обвязки\n\n"
         f"{ENTRYPOINT_MARKER}\n\n"

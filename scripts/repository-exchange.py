@@ -642,23 +642,73 @@ def push_analytics(analytics: Path, analytics_id: str) -> None:
         )
 
 
-def role_repositories(root: Path) -> tuple[Path, Path, str, str]:
+def workspace_roles(root: Path) -> dict:
     state_path = root / ".workspace-state/workspace.json"
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Не удалось прочитать роли рабочей области {state_path}: {exc}") from exc
     roles = state.get("roles", {})
-    source_role = roles.get("source", {})
-    analytics_role = roles.get("analytics", {})
+    if not isinstance(roles, dict):
+        raise ValueError(f"Повреждены роли рабочей области: {state_path}")
+    return roles
+
+
+def workspace_role(root: Path, role: str) -> dict:
+    item = workspace_roles(root).get(role, {})
+    if not isinstance(item, dict):
+        raise ValueError(f"Повреждена роль {role} в состоянии рабочей области")
+    return item
+
+
+def analytics_repository(root: Path) -> tuple[Path, str]:
+    analytics_role = workspace_role(root, "analytics")
+    analytics_id = analytics_role.get("repository")
+    analytics_path = analytics_role.get("path")
+    if not analytics_id or not analytics_path:
+        raise ValueError("Роль analytics не настроена")
+    analytics = Path(analytics_path).resolve()
+    require_worktree_repository(analytics, f"{analytics_id} (analytics)")
+    return analytics, analytics_id
+
+
+def available_code_repository(root: Path) -> tuple[Path | None, str]:
+    code_role = workspace_role(root, "code")
+    if not code_role.get("repository"):
+        return None, "disabled"
+    if code_role.get("availability") == "disabled":
+        return None, "disabled"
+    code_path = code_role.get("path")
+    if not code_path:
+        return None, "absent"
+    candidate = Path(code_path).resolve()
+    if not candidate.exists():
+        return None, "absent"
+    result = git(candidate, "rev-parse", "--show-toplevel")
+    if result.returncode != 0 or Path(result.stdout.strip()).resolve() != candidate:
+        raise ValueError(
+            f"Путь роли code существует, но не является отдельным Git-репозиторием: {candidate}"
+        )
+    return candidate, "ready"
+
+
+def role_repositories(root: Path) -> tuple[Path, Path, str, str]:
+    source_role = workspace_role(root, "source")
+    analytics_role = workspace_role(root, "analytics")
     source_id = source_role.get("repository")
     analytics_id = analytics_role.get("repository")
     if not source_id:
         raise ValueError("Роль source отключена; обмен репозиториями недоступен")
+    if source_role.get("availability") == "absent":
+        raise ValueError("Репозиторий роли source отсутствует; обмен репозиториями недоступен")
     if not analytics_id:
         raise ValueError("Роль analytics не настроена")
-    source = Path(source_role.get("path", "")).resolve()
-    analytics = Path(analytics_role.get("path", "")).resolve()
+    source_path = source_role.get("path")
+    analytics_path = analytics_role.get("path")
+    if not source_path or not analytics_path:
+        raise ValueError("В состоянии рабочей области отсутствуют пути source или analytics")
+    source = Path(source_path).resolve()
+    analytics = Path(analytics_path).resolve()
     require_source_mirror(source, source_id)
     require_worktree_repository(analytics, f"{analytics_id} (analytics)")
     return source, analytics, source_id, analytics_id
@@ -707,9 +757,8 @@ def sync_command(args: argparse.Namespace) -> int:
         require_nfc_paths(documents, documents_commit, f"{analytics_id} (analytics)")
         require_content_only(documents, analytics_id)
         require_analytics_content_policy(root, source, documents, source_commit, documents_commit)
-        code_role = json.loads((root / ".workspace-state/workspace.json").read_text(encoding="utf-8"))["roles"].get("code", {})
-        code_path = Path(code_role["path"]).resolve() if code_role.get("path") else None
-        entrypoint = write_local_entrypoint(documents, root, code_path)
+        code_path, code_availability = available_code_repository(root)
+        entrypoint = write_local_entrypoint(documents, root, code_path, code_availability)
         require_clean(documents, f"{analytics_id} (analytics)")
         metadata = verified_reverse_patch(root, source, documents, source_id, analytics_id)
         if not args.no_push:
@@ -727,6 +776,93 @@ def sync_command(args: argparse.Namespace) -> int:
             push_analytics(documents, analytics_id)
         print(json.dumps({
             "status": "synchronized",
+            "analytics_pushed": not args.no_push,
+            "local_entrypoint": str(entrypoint),
+            "reverse_diff": metadata,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        handle.close()
+
+
+def require_standalone_analytics_policy(analytics: Path, analytics_commit: str, analytics_id: str) -> None:
+    violations = analytics_content_violations(analytics, analytics_commit)
+    if violations:
+        raise ValueError(json.dumps({
+            "status": "blocked",
+            "reason": "analytics-content-policy",
+            "message": "Аналитическое дерево содержит недопустимые пути",
+            "violations": violations,
+            "unapproved_source_deletions": [],
+            "allowed_next_action": "исправить точные пути в роли analytics",
+            "forbidden_actions": ["git add -A", "git add .", "отправка недопустимого дерева"],
+        }, ensure_ascii=False))
+    require_content_only(analytics, analytics_id)
+
+
+def unavailable_reverse_diff(root: Path, analytics: Path, analytics_id: str) -> dict:
+    output_dir = root / "reverse-diffs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "reverse-diff-latest.patch").unlink(missing_ok=True)
+    analytics_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+    analytics_tree = git(analytics, "rev-parse", "HEAD^{tree}").stdout.strip()
+    source_role = workspace_role(root, "source")
+    reason = "source-role-absent" if source_role.get("repository") else "source-role-disabled"
+    metadata = {
+        "schema_version": 2,
+        "created_at": utc_now(),
+        "status": "unavailable",
+        "reason": reason,
+        "source_repository": source_role.get("repository"),
+        "analytics_repository": analytics_id,
+        "source_commit": None,
+        "analytics_commit": analytics_commit,
+        "documents_commit": analytics_commit,
+        "source_tree": None,
+        "analytics_tree": analytics_tree,
+        "documents_tree": analytics_tree,
+        "repositories_identical": None,
+        "patch": None,
+        "latest_patch": None,
+        "changed_path_count": None,
+        "changed_paths": [],
+        "approved_source_deletions": [],
+        "tree_verified": False,
+        "content_policy_verified": False,
+        "verified": False,
+    }
+    (output_dir / "reverse-diff-latest.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return metadata
+
+
+def sync_analytics_only_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    handle = lock(root)
+    try:
+        analytics, analytics_id = analytics_repository(root)
+        require_clean(analytics, f"{analytics_id} (analytics)")
+        require_branch(analytics, f"{analytics_id} (analytics)")
+        update_ff(analytics, f"{analytics_id} (analytics)")
+        analytics_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+        require_nfc_paths(analytics, analytics_commit, f"{analytics_id} (analytics)")
+        require_standalone_analytics_policy(analytics, analytics_commit, analytics_id)
+        code_path, code_availability = available_code_repository(root)
+        entrypoint = write_local_entrypoint(analytics, root, code_path, code_availability)
+        require_clean(analytics, f"{analytics_id} (analytics)")
+        metadata = unavailable_reverse_diff(root, analytics, analytics_id)
+        if not args.no_push:
+            current_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+            if current_commit != metadata["analytics_commit"]:
+                raise ValueError("Роль analytics изменилась после проверки; отправка запрещена")
+            require_clean(analytics, f"{analytics_id} (analytics)")
+            require_standalone_analytics_policy(analytics, current_commit, analytics_id)
+            push_analytics(analytics, analytics_id)
+        print(json.dumps({
+            "status": "synchronized",
+            "sync_mode": "analytics-only",
             "analytics_pushed": not args.no_push,
             "local_entrypoint": str(entrypoint),
             "reverse_diff": metadata,
@@ -876,6 +1012,9 @@ def parser() -> argparse.ArgumentParser:
     sync = commands.add_parser("sync")
     sync.add_argument("--no-push", action="store_true", help="Не отправлять итоговую ветку роли analytics")
     sync.set_defaults(handler=sync_command)
+    analytics_only = commands.add_parser("sync-analytics-only")
+    analytics_only.add_argument("--no-push", action="store_true", help="Не отправлять итоговую ветку роли analytics")
+    analytics_only.set_defaults(handler=sync_analytics_only_command)
     reverse_diff = commands.add_parser("reverse-diff")
     reverse_diff.set_defaults(handler=reverse_diff_command)
     approve_deletion = commands.add_parser("approve-deletion")
