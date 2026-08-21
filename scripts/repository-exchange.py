@@ -1355,6 +1355,23 @@ def verified_reverse_patch(
     if changed.returncode != 0:
         raise ValueError(f"Не удалось получить состав обратной заплаты: {changed.stderr.strip()}")
     changed_paths = [item for item in changed.stdout.split("\0") if item]
+    revisions = git(
+        analytics,
+        "rev-list", "--reverse", "--topo-order", f"{source_commit}..{documents_commit}",
+    )
+    if revisions.returncode != 0:
+        raise ValueError(f"Не удалось получить состав коммитов обратной заплаты: {revisions.stderr.strip()}")
+    included_analytics_commits = []
+    for commit in [item for item in revisions.stdout.splitlines() if item]:
+        subject = git(analytics, "show", "-s", "--format=%s", commit)
+        if subject.returncode != 0:
+            raise ValueError(f"Не удалось прочитать коммит {commit}: {subject.stderr.strip()}")
+        included_analytics_commits.append({"commit": commit, "subject": subject.stdout.strip()})
+    included_features = sorted({
+        parts[1]
+        for path in changed_paths
+        if len(parts := PurePosixPath(path).parts) >= 2 and parts[0] == "features"
+    })
     approved_deletions = deleted_source_paths(analytics, source_commit, documents_commit)
     metadata = {
         "schema_version": 2,
@@ -1362,6 +1379,8 @@ def verified_reverse_patch(
         "created_at": utc_now(),
         "source_repository": source_id,
         "analytics_repository": analytics_id,
+        "source_branch": BRANCH,
+        "analytics_branch": BRANCH,
         "source_commit": source_commit,
         "analytics_commit": documents_commit,
         "documents_commit": documents_commit,
@@ -1376,6 +1395,8 @@ def verified_reverse_patch(
         "patch_sha256": patch_sha256,
         "changed_path_count": len(changed_paths),
         "changed_paths": changed_paths,
+        "included_features": included_features,
+        "included_analytics_commits": included_analytics_commits,
         "approved_source_deletions": approved_deletions,
         "tree_verified": True,
         "content_policy_verified": True,
@@ -1585,6 +1606,8 @@ def unavailable_reverse_diff(root: Path, analytics: Path, analytics_id: str) -> 
         "reason": reason,
         "source_repository": source_role.get("repository"),
         "analytics_repository": analytics_id,
+        "source_branch": BRANCH,
+        "analytics_branch": BRANCH,
         "source_commit": None,
         "analytics_commit": analytics_commit,
         "documents_commit": analytics_commit,
@@ -1599,6 +1622,8 @@ def unavailable_reverse_diff(root: Path, analytics: Path, analytics_id: str) -> 
         "patch_sha256": None,
         "changed_path_count": None,
         "changed_paths": [],
+        "included_features": [],
+        "included_analytics_commits": [],
         "approved_source_deletions": [],
         "tree_verified": False,
         "content_policy_verified": False,
