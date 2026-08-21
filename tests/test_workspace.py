@@ -124,7 +124,10 @@ class CodaWorkspaceTests(unittest.TestCase):
             documents = workspace / "documents"
             entrypoint = documents / "AGENTS.md"
             self.assertTrue(entrypoint.is_file())
-            self.assertIn("analyst-harness-local-entrypoint:v1", entrypoint.read_text(encoding="utf-8"))
+            entrypoint_text = entrypoint.read_text(encoding="utf-8")
+            self.assertIn("analyst-harness-local-entrypoint:v1", entrypoint_text)
+            self.assertIn("submit только отправляет ветку", entrypoint_text)
+            self.assertIn("запрос на слияние принят", entrypoint_text)
             self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
             self.assertEqual(run("git", "-C", str(documents), "check-ignore", "AGENTS.md").returncode, 0)
             for local_path in (
@@ -1352,7 +1355,12 @@ class CodaWorkspaceTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(submitted.returncode, 0, submitted.stdout + submitted.stderr)
-            self.assertFalse(json.loads(submitted.stdout)["package_created"])
+            submit_payload = json.loads(submitted.stdout)
+            self.assertFalse(submit_payload["package_created"])
+            self.assertFalse(submit_payload["merge_request_created"])
+            self.assertIsNone(submit_payload["merge_request_create_url"])
+            self.assertIn("Запрос на слияние обвязкой не создан", submit_payload["message"])
+            self.assertIn("создать запрос", submit_payload["next_action"])
 
             self.assertEqual(run("git", "-C", str(remote_work), "fetch", "origin", branch).returncode, 0)
             self.assertEqual(

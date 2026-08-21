@@ -15,6 +15,9 @@ from pathlib import Path, PurePosixPath
 BRANCH = "main"
 STATE_FILE = "collaboration.json"
 SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
+MERGE_REQUEST_CREATE_URL_PATTERN = re.compile(
+    r"https?://[^\s<>'\"]+/pull-requests\?create[^\s<>'\"]*"
+)
 
 
 def utc_now() -> str:
@@ -47,6 +50,11 @@ def run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]
 
 def git(repository: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return run("git", "-C", str(repository), *args)
+
+
+def merge_request_create_url(result: subprocess.CompletedProcess[str]) -> str | None:
+    match = MERGE_REQUEST_CREATE_URL_PATTERN.search(f"{result.stdout}\n{result.stderr}")
+    return match.group(0).rstrip(".,;:)]}") if match else None
 
 
 def state_path(root: Path) -> Path:
@@ -458,6 +466,7 @@ def submit_command(args: argparse.Namespace) -> int:
     pushed = git(analytics, "push", "--set-upstream", "origin", f"HEAD:{work['branch']}")
     if pushed.returncode != 0:
         raise ValueError(f"Не удалось отправить рабочую ветку: {pushed.stderr.strip()}")
+    create_url = merge_request_create_url(pushed)
     work["status"] = "awaiting-merge"
     work["submitted_at"] = utc_now()
     work["submitted_commit"] = local
@@ -468,7 +477,16 @@ def submit_command(args: argparse.Namespace) -> int:
         "feature": work["feature"],
         "branch": work["branch"],
         "commit": local,
-        "message": "Рабочая ветка отправлена; требуется принять её в documents/main через запрос на слияние",
+        "message": (
+            "Рабочая ветка отправлена. Запрос на слияние обвязкой не создан; "
+            "человеку нужно создать и принять его в documents/main."
+        ),
+        "merge_request_created": False,
+        "merge_request_create_url": create_url,
+        "next_action": (
+            "Открыть форму создания запроса на слияние, создать запрос и принять его; "
+            "после этого сообщить LLM: запрос на слияние принят."
+        ),
         "package_created": False,
     }, ensure_ascii=False, indent=2))
     return 0

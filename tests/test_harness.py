@@ -633,6 +633,9 @@ class HarnessTests(unittest.TestCase):
             "сохрани работу",
             "закоммить изменения",
             "обнови мою ветку",
+            "вливаем в основную ветку",
+            "запрос на слияние принят",
+            "ветка влита в main",
             "синкани репы",
             "отправь требования в разработку",
             "передай разрабам",
@@ -648,6 +651,8 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("сначала доказать принятие рабочей ветки", catalog)
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("Communicate with the analyst in Russian", agents)
+        self.assertIn("does not create a merge request", agents)
+        self.assertIn("merge-request creation form", agents)
 
 
 if __name__ == "__main__":

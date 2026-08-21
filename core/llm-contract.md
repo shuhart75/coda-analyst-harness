@@ -64,6 +64,8 @@ When the user uses a command from that catalog or a near-equivalent phrase:
 
 For a command that starts work on an existing feature, absence of `.workspace-state/collaboration.json` means one-time migration is required. Run bootstrap and collaboration status, request the analyst id, migrate safely, and create the feature branch before reading or editing its requirements. Do not reinterpret the missing file as single-user mode.
 
+`collaboration.py submit` pushes a feature branch but does not create or accept a merge request. Start the user-facing result with its exact `message`. A returned `merge_request_create_url` is a link to the creation form, not evidence that a request exists. After the user reports that the request was accepted, run `collaboration.py finish` and prove that the submitted commit is contained in `origin/main`.
+
 If the command references impacted requirements, prototypes, or rollback of a known decision, consult:
 - `features/*/domain-impact.md`;
 - `PROJECT_ROOT/planning/consistency-backlog.md`;
