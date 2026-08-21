@@ -568,7 +568,7 @@ def update_code_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _sync_command(args: argparse.Namespace) -> int:
+def _sync_command(args: argparse.Namespace, collaboration_finish: dict | None = None) -> int:
     root = root_path(args.root)
     analytics_id = str(load_roles(root)["analytics"])
     analytics = root / analytics_id
@@ -579,6 +579,7 @@ def _sync_command(args: argparse.Namespace) -> int:
             "status": "blocked",
             "reason": "analytics-main-required-for-repository-sync",
             "current_branch": current,
+            "collaboration_finish": collaboration_finish,
             "code_update": {"status": "not-started"},
             "allowed_next_action": (
                 "python3 scripts/collaboration.py update"
@@ -650,6 +651,7 @@ def _sync_command(args: argparse.Namespace) -> int:
         print(json.dumps({
             "status": "blocked",
             "sync_mode": sync_mode,
+            "collaboration_finish": collaboration_finish,
             "code_update": code_result,
             "analytics_exchange": exchange_error,
             "allowed_next_action": allowed_next_action,
@@ -670,6 +672,7 @@ def _sync_command(args: argparse.Namespace) -> int:
     print(json.dumps({
         "status": status,
         "sync_mode": sync_mode,
+        "collaboration_finish": collaboration_finish,
         "code_update": code_result,
         "analytics_exchange": exchange_result,
         "analytics_origin_update": exchange_result.get("analytics_origin_update"),
@@ -696,10 +699,66 @@ def _sync_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def finish_accepted_feature_before_sync(root: Path) -> tuple[dict | None, dict | None]:
+    analytics_id = str(load_roles(root)["analytics"])
+    analytics = root / analytics_id
+    branch = run("git", "-C", str(analytics), "symbolic-ref", "--quiet", "--short", "HEAD")
+    current = branch.stdout.strip() if branch.returncode == 0 else None
+    if not current or not current.startswith("feature/"):
+        return None, None
+    collaboration_path = root / ".workspace-state/collaboration.json"
+    if not collaboration_path.is_file():
+        return None, None
+    try:
+        state = json.loads(collaboration_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Не удалось прочитать состояние совместной работы: {exc}") from exc
+    work = state.get("active_work")
+    if (
+        not isinstance(work, dict)
+        or work.get("branch") != current
+        or work.get("status") != "awaiting-merge"
+    ):
+        return None, None
+    finished = run(
+        sys.executable,
+        str(Path(__file__).with_name("collaboration.py")),
+        "--root",
+        str(root),
+        "finish",
+    )
+    output = finished.stdout.strip() or finished.stderr.strip()
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        payload = {"status": "error", "output": output}
+    if finished.returncode == 0:
+        return payload, None
+    if finished.returncode == 2:
+        return None, {
+            "status": "blocked",
+            "reason": "submitted-feature-not-contained-in-origin-main",
+            "current_branch": current,
+            "collaboration_finish": payload,
+            "code_update": {"status": "not-started"},
+            "source_update": {"status": "not-started"},
+            "message": (
+                "origin/main ещё не содержит отправленный коммит рабочей ветки. "
+                "Полный обмен не начат; code и source не обновлялись."
+            ),
+            "allowed_next_action": "создать или принять запрос на слияние, затем повторить синкани репы",
+        }
+    raise ValueError(f"Не удалось завершить принятую рабочую ветку перед обменом: {output}")
+
+
 def sync_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
+    collaboration_finish, blocked = finish_accepted_feature_before_sync(root)
+    if blocked is not None:
+        print(json.dumps(blocked, ensure_ascii=False, indent=2))
+        return 2
     with workspace_operation_lock(root):
-        return _sync_command(args)
+        return _sync_command(args, collaboration_finish)
 
 
 def inspect_conflict_command(args: argparse.Namespace) -> int:

@@ -1362,6 +1362,24 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertIn("Запрос на слияние обвязкой не создан", submit_payload["message"])
             self.assertIn("создать запрос", submit_payload["next_action"])
 
+            awaiting_sync = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                env=environment,
+            )
+            self.assertEqual(awaiting_sync.returncode, 2)
+            awaiting_payload = json.loads(awaiting_sync.stdout)
+            self.assertEqual(
+                awaiting_payload["reason"],
+                "submitted-feature-not-contained-in-origin-main",
+            )
+            self.assertEqual(awaiting_payload["code_update"]["status"], "not-started")
+            self.assertEqual(awaiting_payload["source_update"]["status"], "not-started")
+            self.assertEqual(run("git", "-C", str(documents), "branch", "--show-current").stdout.strip(), branch)
+
             self.assertEqual(run("git", "-C", str(remote_work), "fetch", "origin", branch).returncode, 0)
             self.assertEqual(
                 run("git", "-C", str(remote_work), "merge", "--no-ff", f"origin/{branch}", "-m", "accept registry").returncode,
@@ -1369,16 +1387,19 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
 
-            finished = run(
+            synchronized = run(
                 sys.executable,
-                str(ROOT / "scripts/collaboration.py"),
+                str(ROOT / "scripts/workspace.py"),
                 "--root",
                 str(workspace),
-                "finish",
+                "sync",
+                "--no-push",
                 env=environment,
             )
-            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
-            self.assertEqual(json.loads(finished.stdout)["current_branch"], "main")
+            self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
+            sync_payload = json.loads(synchronized.stdout)
+            self.assertEqual(sync_payload["collaboration_finish"]["status"], "feature-work-finished")
+            self.assertEqual(sync_payload["collaboration_finish"]["current_branch"], "main")
             self.assertEqual(run("git", "-C", str(documents), "branch", "--show-current").stdout.strip(), "main")
             self.assertEqual((documents / requirements).read_text(encoding="utf-8"), "# Требования\n\nРабочая версия аналитика.\n")
 

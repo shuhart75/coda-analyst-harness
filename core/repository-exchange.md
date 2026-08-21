@@ -66,7 +66,7 @@ Scripts never invent a semantic commit from a dirty `analytics` tree. The LLM re
 
 ## Feature branches
 
-When multi-user work is configured, full repository synchronization is accepted only with `analytics/main` checked out. A feature branch blocks the operation before the protected code pull or any source fetch. Full synchronization must never merge `source` into a feature branch.
+When multi-user work is configured, full repository synchronization itself runs only with `analytics/main` checked out. `workspace.py sync` may first finish a checked-out `awaiting-merge` feature branch: `collaboration.py finish` fetches `origin/main`, proves that it contains the submitted commit, switches to `main` and fast-forwards it. Only then may the same command start code and source updates. If containment is not proven, or feature work has another status, the operation stops before the protected code pull or any source update. Full synchronization must never merge `source` into a feature branch.
 
 `repository-exchange.py update-feature-branch` is a separate operation. It fetches only `analytics/origin/main`, fast-forwards or merges that commit into the current `feature/<feature>/<analyst>` branch, creates protective snapshots and leaves a clean worktree after success or a harness-aborted conflict. It does not access `source`, update `code`, create a reverse patch or push; `collaboration.py update` pushes only the feature branch after this operation succeeds.
 
