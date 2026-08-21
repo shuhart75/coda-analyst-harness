@@ -736,6 +736,16 @@ def require_collaboration_main_for_handoff(project: Path, feature: str) -> None:
     state_root = Path(os.environ.get("CODA_ANALYST_STATE_ROOT", harness / ".workspace-state")).resolve()
     state_path = state_root / "collaboration.json"
     if not state_path.is_file():
+        workspace_path = state_root / "workspace.json"
+        if workspace_path.is_file():
+            workspace = load(workspace_path)
+            analytics = workspace.get("roles", {}).get("analytics", {})
+            analytics_path = analytics.get("path") if isinstance(analytics, dict) else None
+            if analytics_path and Path(analytics_path).resolve() == project:
+                raise ValueError(
+                    "Совместная работа ещё не настроена. Это незавершённая одноразовая миграция; "
+                    "до неё пакет и производные материалы создавать нельзя"
+                )
         return
     state = load(state_path)
     if state.get("schema_version") != 1 or state.get("mode") != "multi-user-branches":

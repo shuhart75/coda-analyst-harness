@@ -629,6 +629,7 @@ class HarnessTests(unittest.TestCase):
             "пишем требования по фиче",
             "работаем с фичой",
             "беру фичу",
+            "начинаем работы над требованиями по",
             "сохрани работу",
             "закоммить изменения",
             "обнови мою ветку",
@@ -641,9 +642,12 @@ class HarnessTests(unittest.TestCase):
         collaboration = (ROOT / "core/collaboration.md").read_text(encoding="utf-8")
         self.assertIn("пакет для разработки создаётся только из актуальной `main`", collaboration)
         self.assertIn("автоматического коммита и отправки нет", collaboration)
+        self.assertIn("не однопользовательский режим", collaboration)
         catalog = (ROOT / "templates/workflow/command-catalog.template.md").read_text(encoding="utf-8")
         self.assertIn("активная рабочая ветка блокирует команду до обновления даже `code`", catalog)
         self.assertIn("сначала доказать принятие рабочей ветки", catalog)
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("Communicate with the analyst in Russian", agents)
 
 
 if __name__ == "__main__":

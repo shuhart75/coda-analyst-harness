@@ -1185,6 +1185,45 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
             main_before = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
 
+            initial_status = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "status",
+                env=environment,
+            )
+            self.assertEqual(initial_status.returncode, 0, initial_status.stdout + initial_status.stderr)
+            initial_payload = json.loads(initial_status.stdout)
+            self.assertEqual(initial_payload["status"], "migration-required")
+            self.assertFalse(initial_payload["feature_work_allowed"])
+
+            premature_delivery = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "require-main-for-delivery",
+                "--feature",
+                feature,
+                env=environment,
+            )
+            self.assertEqual(premature_delivery.returncode, 2)
+            self.assertEqual(json.loads(premature_delivery.stdout)["reason"], "collaboration-migration-required")
+
+            premature_handoff = run(
+                sys.executable,
+                str(ROOT / "scripts/handoffctl.py"),
+                "init-feature",
+                str(documents),
+                feature,
+                "registry-delivery",
+                env=environment,
+            )
+            self.assertNotEqual(premature_handoff.returncode, 0)
+            self.assertIn("одноразовая миграция", premature_handoff.stdout)
+            self.assertFalse((documents / f"features/{feature}/handoffs/registry-delivery").exists())
+
             migrated = run(
                 sys.executable,
                 str(ROOT / "scripts/collaboration.py"),
@@ -1855,7 +1894,10 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertTrue((analytics / "planning/team.md").is_file())
             self.assertFalse((analytics / ".workflow").exists())
             self.assertFalse((analytics / ".vscode").exists())
-            self.assertIn("analyst-harness-local-entrypoint:v1", (analytics / "AGENTS.md").read_text(encoding="utf-8"))
+            local_agents = (analytics / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("analyst-harness-local-entrypoint:v1", local_agents)
+            self.assertIn("Отвечай аналитику по-русски", local_agents)
+            self.assertIn("а не однопользовательский режим", local_agents)
             self.assertEqual(run("git", "-C", str(analytics), "status", "--porcelain=v1").stdout, "")
 
     def test_project_paths_in_harness_root_are_rejected(self) -> None:

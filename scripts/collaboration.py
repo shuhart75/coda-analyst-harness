@@ -80,7 +80,8 @@ def load_state(root: Path, *, required: bool = True) -> dict | None:
     if not path.is_file():
         if required:
             raise ValueError(
-                "Многопользовательский режим не настроен; сначала выполни миграцию совместной работы"
+                "Совместная работа ещё не настроена. Это незавершённая одноразовая миграция, "
+                "а не разрешение работать в analytics/main; сначала выполни migrate"
             )
         return None
     try:
@@ -530,11 +531,15 @@ def require_main_for_delivery_command(args: argparse.Namespace) -> int:
     state = load_state(root, required=False)
     if state is None:
         print(json.dumps({
-            "status": "single-user-mode",
-            "delivery_allowed": True,
-            "message": "Многопользовательский режим не настроен; применяются прежние правила передачи",
+            "status": "blocked",
+            "reason": "collaboration-migration-required",
+            "delivery_allowed": False,
+            "message": (
+                "Совместная работа ещё не настроена. Сначала выполни одноразовую миграцию; "
+                "пакет и производные материалы создавать нельзя."
+            ),
         }, ensure_ascii=False, indent=2))
-        return 0
+        return 2
     if state.get("active_work"):
         raise ValueError(
             f"Есть незавершённая рабочая ветка {state['active_work']['branch']}; "
@@ -563,12 +568,15 @@ def status_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     analytics, analytics_id = analytics_repository(root)
     state = load_state(root, required=False)
+    configured = state is not None
     print(json.dumps({
-        "status": "configured" if state else "not-configured",
+        "status": "configured" if configured else "migration-required",
         "analytics_repository": analytics_id,
         "current_branch": current_branch(analytics),
         "dirty_paths": sorted(changed_paths(analytics)),
         "collaboration": state,
+        "feature_work_allowed": configured,
+        "required_next_action": None if configured else "запросить идентификатор аналитика и выполнить migrate",
     }, ensure_ascii=False, indent=2))
     return 0
 

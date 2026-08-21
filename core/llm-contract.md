@@ -2,6 +2,10 @@
 
 This contract is CLI-neutral. It applies to Codex CLI, Claude Code, Qwen CLI, VSCodium agents, and other LLM assistants working in a project scaffolded with this harness.
 
+## Analyst communication
+
+Communicate with the analyst in Russian. This includes intermediate updates, questions, choices, status summaries and final answers. Preserve English only where it is part of exact code, a path, an identifier, a fixed product name or a necessary special term. Switch the conversation language only when the analyst explicitly requests it. A generic editor language rule does not represent a project decision to use English.
+
 ## Session bootstrap
 
 Before changing artifacts, read:
@@ -57,6 +61,8 @@ When the user uses a command from that catalog or a near-equivalent phrase:
 - read the target mode file before editing;
 - execute the implied workflow, not just the literal words;
 - preserve the user's concrete names, dates, task ids and paths.
+
+For a command that starts work on an existing feature, absence of `.workspace-state/collaboration.json` means one-time migration is required. Run bootstrap and collaboration status, request the analyst id, migrate safely, and create the feature branch before reading or editing its requirements. Do not reinterpret the missing file as single-user mode.
 
 If the command references impacted requirements, prototypes, or rollback of a known decision, consult:
 - `features/*/domain-impact.md`;
