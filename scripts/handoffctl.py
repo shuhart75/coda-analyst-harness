@@ -840,7 +840,7 @@ def add_feature_revision(root: Path, manifest: dict[str, Any], args: argparse.Na
         if not isinstance(offer, dict) or offer.get("state") != "preparation-authorized":
             raise ValueError(
                 "Подготовка редакции функциональности не разрешена; "
-                "после явной команды аналитика выполни requirementsctl.py begin-preparation"
+                "после команды передачи проведи и подтверди аудит через requirementsctl.py"
             )
     name = revision_name(revision)
     revision_root = root / "revisions" / name

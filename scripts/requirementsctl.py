@@ -15,9 +15,12 @@ OFFER_STATES = {
     "pending-offer",
     "awaiting-decision",
     "declined-until-explicit-command",
+    "audit-required",
+    "awaiting-audit-confirmation",
     "preparation-authorized",
 }
 CHANGE_ORIGINS = {"not-recorded", "analyst", "developer-result"}
+AUDIT_STATES = {"not-requested", "required", "blocked", "awaiting-confirmation", "confirmed"}
 
 
 def now() -> str:
@@ -67,7 +70,7 @@ def requirements_hash(feature_root: Path, required: bool = True) -> str | None:
 
 def initial_state(feature_root: Path, feature: str) -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "feature": feature,
         "updated_at": now(),
         "requirements_sha256": requirements_hash(feature_root, required=False),
@@ -81,26 +84,42 @@ def initial_state(feature_root: Path, feature: str) -> dict[str, Any]:
             "offered_at": None,
             "reason": "Новая редакция создаётся только по явной команде аналитика",
         },
+        "delivery_audit": empty_audit(),
         "last_published": None,
     }
 
 
+def empty_audit(state: str = "not-requested") -> dict[str, Any]:
+    return {
+        "state": state,
+        "requirements_sha256": None,
+        "audited_at": None,
+        "confirmed_at": None,
+        "finding_count": 0,
+        "blocking_finding_count": 0,
+        "summary": None,
+    }
+
+
 def migrate_state(payload: dict[str, Any], feature: str) -> dict[str, Any]:
-    if payload.get("schema_version") != 1:
+    version = payload.get("schema_version")
+    if version == 3:
+        return payload
+    if version not in {1, 2}:
         return payload
     last_change = payload.get("last_change", {})
     origin = last_change.get("origin")
     if origin == "developer-receipt":
         origin = "developer-result"
     migrated = {
-        "schema_version": 2,
+        "schema_version": 3,
         "feature": feature,
         "updated_at": payload.get("updated_at") or now(),
         "requirements_sha256": payload.get("requirements_sha256"),
         "last_change": {
             "origin": origin if origin in CHANGE_ORIGINS else "not-recorded",
             "recorded_at": last_change.get("recorded_at"),
-            "return_id": last_change.get("receipt_path"),
+            "return_id": last_change.get("return_id") or last_change.get("receipt_path"),
         },
         "revision_offer": payload.get("revision_offer") or {
             "state": "not-needed",
@@ -108,12 +127,20 @@ def migrate_state(payload: dict[str, Any], feature: str) -> dict[str, Any]:
             "reason": "Состояние перенесено на новый формат обмена",
         },
         "last_published": payload.get("last_published"),
+        "delivery_audit": empty_audit(),
     }
+    if migrated["revision_offer"].get("state") == "preparation-authorized":
+        migrated["revision_offer"] = {
+            "state": "audit-required",
+            "offered_at": None,
+            "reason": "После обновления обвязки перед публикацией требуется подтверждённый аудит",
+        }
+        migrated["delivery_audit"] = empty_audit("required")
     return migrated
 
 
 def validate_state(payload: dict[str, Any], feature: str) -> None:
-    if payload.get("schema_version") != 2 or payload.get("feature") != feature:
+    if payload.get("schema_version") != 3 or payload.get("feature") != feature:
         raise ValueError("Некорректная схема или функциональность в состоянии требований")
     if not isinstance(payload.get("updated_at"), str):
         raise ValueError("В состоянии требований отсутствует дата обновления")
@@ -133,6 +160,22 @@ def validate_state(payload: dict[str, Any], feature: str) -> None:
         raise ValueError("Некорректная дата предложения редакции")
     if not isinstance(offer.get("reason"), str):
         raise ValueError("В состоянии требований отсутствует причина решения по редакции")
+    audit = payload.get("delivery_audit")
+    if not isinstance(audit, dict) or audit.get("state") not in AUDIT_STATES:
+        raise ValueError("Некорректное состояние аудита требований")
+    for key in ("requirements_sha256", "audited_at", "confirmed_at", "summary"):
+        if audit.get(key) is not None and not isinstance(audit.get(key), str):
+            raise ValueError("Некорректные сведения об аудите требований")
+    for key in ("finding_count", "blocking_finding_count"):
+        if not isinstance(audit.get(key), int) or audit.get(key) < 0:
+            raise ValueError("Некорректное количество замечаний аудита")
+    if audit["blocking_finding_count"] > audit["finding_count"]:
+        raise ValueError("Количество блокирующих замечаний превышает общее количество")
+    if audit["state"] in {"blocked", "awaiting-confirmation", "confirmed"}:
+        if not audit.get("requirements_sha256") or not audit.get("audited_at") or not audit.get("summary"):
+            raise ValueError("Завершённый аудит не содержит обязательных сведений")
+    if audit["state"] == "confirmed" and not audit.get("confirmed_at"):
+        raise ValueError("Подтверждённый аудит не содержит даты подтверждения")
     published = payload.get("last_published")
     if published is not None:
         if not isinstance(published, dict):
@@ -152,7 +195,7 @@ def load_or_create(feature_root: Path, state_path: Path, feature: str) -> dict[s
         return payload
     payload = migrate_state(load_json(state_path), feature)
     validate_state(payload, feature)
-    if load_json(state_path).get("schema_version") != 2:
+    if load_json(state_path).get("schema_version") != 3:
         save_json(state_path, payload)
     return payload
 
@@ -166,6 +209,8 @@ def action_for(payload: dict[str, Any]) -> str:
         "pending-offer": "offer-new-revision-once",
         "awaiting-decision": "await-analyst-decision-without-repeating-offer",
         "declined-until-explicit-command": "wait-explicit-preparation-command",
+        "audit-required": "audit-requirements-before-publication",
+        "awaiting-audit-confirmation": "show-audit-and-request-analyst-confirmation",
         "preparation-authorized": "validate-and-publish-requirements",
         "not-needed": "continue-root-requirements",
     }[payload["revision_offer"]["state"]]
@@ -190,7 +235,6 @@ def record_change_command(args: argparse.Namespace) -> int:
         if offer["state"] not in {
             "awaiting-decision",
             "declined-until-explicit-command",
-            "preparation-authorized",
         }:
             offer.update({
                 "state": "pending-offer",
@@ -203,8 +247,9 @@ def record_change_command(args: argparse.Namespace) -> int:
             "offered_at": None,
             "reason": "Первая редакция создаётся только по явной команде аналитика",
         })
-    elif offer["state"] == "not-needed":
+    else:
         offer.update({
+            "state": "not-needed",
             "offered_at": None,
             "reason": "Изменение по результату разработки не создаёт новую редакцию",
         })
@@ -216,6 +261,7 @@ def record_change_command(args: argparse.Namespace) -> int:
             "recorded_at": now(),
             "return_id": args.return_id,
         },
+        "delivery_audit": empty_audit(),
     })
     save_json(state_path, payload)
     output(payload, action_for(payload))
@@ -254,8 +300,72 @@ def begin_preparation_command(args: argparse.Namespace) -> int:
     payload = load_or_create(feature_root, state_path, args.feature)
     payload["requirements_sha256"] = requirements_hash(feature_root)
     payload["revision_offer"].update({
+        "state": "audit-required",
+        "reason": "Аналитик поручил передачу; до публикации требуется аудит и его подтверждение",
+    })
+    payload["delivery_audit"] = empty_audit("required")
+    payload["updated_at"] = now()
+    save_json(state_path, payload)
+    output(payload, "audit-requirements-before-publication")
+    return 0
+
+
+def record_audit_command(args: argparse.Namespace) -> int:
+    _, feature_root, state_path = feature_paths(args.project, args.feature)
+    payload = load_or_create(feature_root, state_path, args.feature)
+    if payload["revision_offer"]["state"] != "audit-required":
+        raise ValueError("Аудит не был начат явной командой передачи требований")
+    if args.finding_count < 0 or args.blocking_finding_count < 0:
+        raise ValueError("Количество замечаний не может быть отрицательным")
+    if args.blocking_finding_count > args.finding_count:
+        raise ValueError("Количество блокирующих замечаний превышает общее количество")
+    if not args.summary.strip():
+        raise ValueError("Итог аудита не может быть пустым")
+    checksum = requirements_hash(feature_root)
+    blocked = args.blocking_finding_count > 0
+    payload["delivery_audit"] = {
+        "state": "blocked" if blocked else "awaiting-confirmation",
+        "requirements_sha256": checksum,
+        "audited_at": now(),
+        "confirmed_at": None,
+        "finding_count": args.finding_count,
+        "blocking_finding_count": args.blocking_finding_count,
+        "summary": args.summary.strip(),
+    }
+    if blocked:
+        payload["revision_offer"].update({
+            "state": "audit-required",
+            "reason": "Аудит выявил блокирующие замечания; публикация запрещена",
+        })
+        next_action = "resolve-blocking-audit-findings"
+    else:
+        payload["revision_offer"].update({
+            "state": "awaiting-audit-confirmation",
+            "reason": "Аудит завершён; требуется явное подтверждение аналитика",
+        })
+        next_action = "show-audit-and-request-analyst-confirmation"
+    payload["updated_at"] = now()
+    save_json(state_path, payload)
+    output(payload, next_action)
+    return 0
+
+
+def confirm_audit_command(args: argparse.Namespace) -> int:
+    _, feature_root, state_path = feature_paths(args.project, args.feature)
+    payload = load_or_create(feature_root, state_path, args.feature)
+    audit = payload["delivery_audit"]
+    if payload["revision_offer"]["state"] != "awaiting-audit-confirmation":
+        raise ValueError("Нет завершённого аудита, ожидающего подтверждения аналитика")
+    if audit["state"] != "awaiting-confirmation" or audit["blocking_finding_count"]:
+        raise ValueError("Аудит с блокирующими замечаниями нельзя подтвердить")
+    current_hash = requirements_hash(feature_root)
+    if audit["requirements_sha256"] != current_hash:
+        raise ValueError("Требования изменились после аудита; выполните аудит заново")
+    audit.update({"state": "confirmed", "confirmed_at": now()})
+    payload["requirements_sha256"] = current_hash
+    payload["revision_offer"].update({
         "state": "preparation-authorized",
-        "reason": "Аналитик явно поручил передать требования в разработку",
+        "reason": "Аналитик подтвердил аудит и отправку неизменившихся требований",
     })
     payload["updated_at"] = now()
     save_json(state_path, payload)
@@ -267,7 +377,11 @@ def mark_published_command(args: argparse.Namespace) -> int:
     _, feature_root, state_path = feature_paths(args.project, args.feature)
     payload = load_or_create(feature_root, state_path, args.feature)
     if payload["revision_offer"]["state"] != "preparation-authorized":
-        raise ValueError("Передача требований не была явно разрешена аналитиком")
+        raise ValueError("Передача требований не подтверждена аналитиком после аудита")
+    audit = payload["delivery_audit"]
+    current_hash = requirements_hash(feature_root)
+    if audit.get("state") != "confirmed" or audit.get("requirements_sha256") != current_hash:
+        raise ValueError("Нет подтверждённого аудита текущей редакции требований")
     manifest_path = Path(args.manifest).expanduser().resolve()
     manifest = load_json(manifest_path)
     if manifest.get("feature") != args.feature or manifest.get("active_revision") != args.revision:
@@ -278,7 +392,6 @@ def mark_published_command(args: argparse.Namespace) -> int:
     ]
     if len(entries) != 1 or entries[0].get("state") != "sent":
         raise ValueError("Опубликованная редакция не найдена в манифесте")
-    current_hash = requirements_hash(feature_root)
     if entries[0].get("sha256") != current_hash:
         raise ValueError("Передана не текущая редакция корневых требований")
     payload.update({
@@ -337,6 +450,17 @@ def parser() -> argparse.ArgumentParser:
     begin.add_argument("project")
     begin.add_argument("feature")
     begin.set_defaults(handler=begin_preparation_command)
+    audit = commands.add_parser("record-audit")
+    audit.add_argument("project")
+    audit.add_argument("feature")
+    audit.add_argument("--finding-count", type=int, required=True)
+    audit.add_argument("--blocking-finding-count", type=int, required=True)
+    audit.add_argument("--summary", required=True)
+    audit.set_defaults(handler=record_audit_command)
+    confirm = commands.add_parser("confirm-audit")
+    confirm.add_argument("project")
+    confirm.add_argument("feature")
+    confirm.set_defaults(handler=confirm_audit_command)
     published = commands.add_parser("mark-published")
     published.add_argument("project")
     published.add_argument("feature")

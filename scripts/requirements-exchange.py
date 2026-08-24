@@ -205,6 +205,40 @@ def run_requirement_guards(project: Path, feature: str) -> None:
             raise ValueError(f"{label} требований не пройдена: {details}")
 
 
+def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> None:
+    state_path = project / "features" / feature / "requirements-state.json"
+    if not state_path.is_file():
+        raise ValueError(
+            "Публикация запрещена: сначала начни подготовку, проведи аудит требований "
+            "и получи явное подтверждение аналитика"
+        )
+    state = load_json(state_path)
+    audit = state.get("delivery_audit")
+    offer = state.get("revision_offer")
+    if (
+        state.get("schema_version") != 3
+        or state.get("feature") != feature
+        or not isinstance(audit, dict)
+        or not isinstance(offer, dict)
+    ):
+        raise ValueError("Публикация запрещена: состояние требований не содержит актуального аудита")
+    current_hash = sha256(requirements)
+    if (
+        offer.get("state") != "preparation-authorized"
+        or audit.get("state") != "confirmed"
+        or not isinstance(audit.get("audited_at"), str)
+        or not isinstance(audit.get("confirmed_at"), str)
+        or not isinstance(audit.get("summary"), str)
+        or not audit["summary"].strip()
+        or not isinstance(audit.get("finding_count"), int)
+        or audit.get("blocking_finding_count") != 0
+        or audit.get("requirements_sha256") != current_hash
+    ):
+        raise ValueError(
+            "Публикация запрещена: аудит текущей редакции требований не подтверждён аналитиком"
+        )
+
+
 def requested_returns_contract() -> dict[str, Any]:
     return {
         "tasks": {
@@ -539,6 +573,7 @@ def prepare_command(args: argparse.Namespace) -> int:
     requirements = feature_root / "requirements.md"
     if not requirements.is_file():
         raise ValueError(f"Требования не найдены: {requirements}")
+    require_confirmed_audit(project, args.feature, requirements)
     requirements_text = requirements.read_text(encoding="utf-8")
     errors = validate_requirements_text(requirements_text)
     if errors:

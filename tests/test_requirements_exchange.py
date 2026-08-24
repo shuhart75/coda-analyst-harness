@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "requirements-exchange.py"
+STATE_SCRIPT = ROOT / "scripts" / "requirementsctl.py"
 
 
 def run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -133,6 +134,27 @@ class RequirementsExchangeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return json.loads(result.stdout)
 
+    def authorize(self, project: Path, feature: str = "demo") -> None:
+        commands = (
+            ("begin-preparation", str(project), feature),
+            (
+                "record-audit", str(project), feature,
+                "--finding-count", "0",
+                "--blocking-finding-count", "0",
+                "--summary", "Проверки пройдены",
+            ),
+            ("confirm-audit", str(project), feature),
+        )
+        for arguments in commands:
+            result = run(sys.executable, str(STATE_SCRIPT), *arguments)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def prepare(self, project: Path, *extra: str, env: dict[str, str] | None = None) -> dict:
+        self.authorize(project)
+        return self.command(
+            "prepare", str(project), "demo", "--analyst", "ivan", *extra, env=env
+        )
+
     def git(self, repository: Path, *args: str) -> str:
         result = run("git", "-C", str(repository), *args)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -167,7 +189,7 @@ class RequirementsExchangeTests(unittest.TestCase):
     def test_missing_code_uses_analytics_and_creates_no_slices(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project, _ = self.prepare_project(Path(temp))
-            result = self.command("prepare", str(project), "demo", "--analyst", "ivan")
+            result = self.prepare(project)
             self.assertEqual(result["destination_role"], "analytics")
             exchange = project / "requirements-exchange"
             self.assertEqual(Path(result["exchange_root"]), exchange)
@@ -179,15 +201,81 @@ class RequirementsExchangeTests(unittest.TestCase):
             self.assertFalse((exchange / "demo/revisions/001/returns").exists())
             self.assertFalse((project / "features/demo/slices").exists())
 
+    def test_prepare_without_confirmed_audit_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _ = self.prepare_project(Path(temp))
+            result = run(
+                sys.executable,
+                str(SCRIPT),
+                "prepare",
+                str(project),
+                "demo",
+                "--analyst",
+                "ivan",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("аудит", result.stdout.lower())
+            self.assertFalse((project / "requirements-exchange").exists())
+
+    def test_prepare_after_unconfirmed_audit_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _ = self.prepare_project(Path(temp))
+            begin = run(sys.executable, str(STATE_SCRIPT), "begin-preparation", str(project), "demo")
+            self.assertEqual(begin.returncode, 0, begin.stdout + begin.stderr)
+            audit = run(
+                sys.executable,
+                str(STATE_SCRIPT),
+                "record-audit",
+                str(project),
+                "demo",
+                "--finding-count",
+                "0",
+                "--blocking-finding-count",
+                "0",
+                "--summary",
+                "Замечаний нет",
+            )
+            self.assertEqual(audit.returncode, 0, audit.stdout + audit.stderr)
+            result = run(
+                sys.executable, str(SCRIPT), "prepare", str(project), "demo", "--analyst", "ivan"
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("не подтверждён", result.stdout)
+
+    def test_prepare_after_requirements_change_invalidates_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, feature = self.prepare_project(Path(temp))
+            self.authorize(project)
+            with (feature / "requirements.md").open("a", encoding="utf-8") as handle:
+                handle.write("\nИзменение после подтверждения.\n")
+            result = run(
+                sys.executable, str(SCRIPT), "prepare", str(project), "demo", "--analyst", "ivan"
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("не подтверждён", result.stdout)
+            self.assertFalse((project / "requirements-exchange").exists())
+
+    def test_prepare_with_damaged_audit_state_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, feature = self.prepare_project(Path(temp))
+            self.authorize(project)
+            state_path = feature / "requirements-state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["delivery_audit"]["summary"] = ""
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            result = run(
+                sys.executable, str(SCRIPT), "prepare", str(project), "demo", "--analyst", "ivan"
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((project / "requirements-exchange").exists())
+
     def test_missing_code_exchange_does_not_create_it(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             project, _ = self.prepare_project(root)
             code = root / "coda"
             code.mkdir()
-            result = self.command(
-                "prepare", str(project), "demo", "--analyst", "ivan", "--code-root", str(code)
-            )
+            result = self.prepare(project, "--code-root", str(code))
             self.assertEqual(result["destination_role"], "analytics")
             self.assertFalse((code / "requirements-exchange").exists())
 
@@ -200,10 +288,7 @@ class RequirementsExchangeTests(unittest.TestCase):
             before_status = self.git(code, "status", "--porcelain=v1")
             environment = os.environ.copy()
             environment["CODA_ANALYST_STATE_ROOT"] = str(root / "state")
-            result = self.command(
-                "prepare", str(project), "demo", "--analyst", "ivan", "--code-root", str(code),
-                env=environment,
-            )
+            result = self.prepare(project, "--code-root", str(code), env=environment)
             self.assertEqual(result["destination_role"], "code")
             self.assertEqual(result["repository_path"], "requirements-exchange/demo")
             self.assertEqual(
@@ -230,9 +315,7 @@ class RequirementsExchangeTests(unittest.TestCase):
             hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
             hook.chmod(0o755)
             before_head = self.git(code, "rev-parse", "HEAD")
-            result = self.command(
-                "prepare", str(project), "demo", "--analyst", "ivan", "--code-root", str(code)
-            )
+            result = self.prepare(project, "--code-root", str(code))
             self.assertEqual(result["destination_role"], "analytics")
             self.assertIn("отклонила отправку", result["selection_reason"])
             self.assertTrue((project / "requirements-exchange/demo/revisions/001/requirements.md").is_file())
@@ -244,9 +327,7 @@ class RequirementsExchangeTests(unittest.TestCase):
             root = Path(temp)
             project, _ = self.prepare_project(root)
             remote, code = self.prepare_code_repository(root, with_exchange=False)
-            result = self.command(
-                "prepare", str(project), "demo", "--analyst", "ivan", "--code-root", str(code)
-            )
+            result = self.prepare(project, "--code-root", str(code))
             self.assertEqual(result["destination_role"], "analytics")
             inspect = root / "inspect"
             clone = run("git", "clone", "--quiet", str(remote), str(inspect))
@@ -269,6 +350,8 @@ class RequirementsExchangeTests(unittest.TestCase):
             self.git(seed, "add", "--", "requirements-exchange/demo/manifest.json")
             self.git(seed, "commit", "-m", "Corrupt exchange")
             self.git(seed, "push", "origin", "main")
+
+            self.authorize(project)
 
             result = run(
                 sys.executable,
@@ -303,14 +386,14 @@ class RequirementsExchangeTests(unittest.TestCase):
     def test_new_revision_preserves_previous_input(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project, feature = self.prepare_project(Path(temp))
-            first = self.command("prepare", str(project), "demo", "--analyst", "ivan")
+            first = self.prepare(project)
             first_path = Path(first["requirements"])
             first_bytes = first_path.read_bytes()
             (feature / "requirements.md").write_text(
                 requirements("Система должна показать обновлённый результат."),
                 encoding="utf-8",
             )
-            second = self.command("prepare", str(project), "demo", "--analyst", "ivan")
+            second = self.prepare(project)
             self.assertEqual(second["revision"], 2)
             self.assertEqual(first_path.read_bytes(), first_bytes)
             manifest = json.loads(Path(second["manifest"]).read_text(encoding="utf-8"))
@@ -320,7 +403,7 @@ class RequirementsExchangeTests(unittest.TestCase):
     def test_scan_filters_by_owner_and_records_processing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project, _ = self.prepare_project(Path(temp))
-            prepared = self.command("prepare", str(project), "demo", "--analyst", "ivan")
+            prepared = self.prepare(project)
             returns = Path(prepared["requirements"]).parent / "returns"
             returns.mkdir()
             (returns / "tasks.md").write_text("# Задачи разработки\n", encoding="utf-8")

@@ -52,7 +52,10 @@ A failed check does not advance the run. Repeated failure reaches the configured
 - Every root change records `analyst` or `developer-result` origin in `requirements-state.json`.
 - A `developer-result` change never triggers or offers a revision.
 - After an analyst change to previously transmitted requirements, the LLM offers a new revision at most once. A refusal suppresses further offers until an explicit preparation command.
-- Explicit preparation validates the root, copies only `requirements.md`, updates `manifest.json` and records the actual destination.
+- Explicit preparation first audits every quality direction defined in `core/requirements-profile.md` and asks semantic questions one at a time.
+- The LLM shows the completed audit report to the analyst. Publication is forbidden until the analyst explicitly confirms both that report and transfer.
+- Audit confirmation is bound to the exact `requirements.md` checksum. Any later change invalidates it and requires a new audit.
+- After confirmation, preparation copies only `requirements.md`, updates `manifest.json` and records the actual destination. No exchange revision exists while audit confirmation is pending.
 
 ## Technical Decomposition Invariants
 
