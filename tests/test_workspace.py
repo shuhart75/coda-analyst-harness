@@ -1836,6 +1836,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertEqual(bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr)
             analytics = workspace / "documents"
+            self.configure_identity(analytics)
             (analytics / old_name).rename(analytics / new_name)
             exclude = analytics / ".git/info/exclude"
             with exclude.open("a", encoding="utf-8") as handle:
@@ -1938,6 +1939,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertNotEqual(sync.returncode, 0)
             self.assertIn(".workflow/active-mode.md", sync.stdout)
             analytics = workspace / "documents"
+            self.configure_identity(analytics)
             inspected = run(
                 sys.executable,
                 str(ROOT / "scripts/workspace.py"),

@@ -125,6 +125,7 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
             self.assertEqual(run("git", "-C", str(documents_work), "push", "origin", "main").returncode, 0)
 
             analytics = harness / "documents"
+            self.git_identity(analytics)
             (analytics / old_name).rename(analytics / new_name)
             with (analytics / ".git/info/exclude").open("a", encoding="utf-8") as handle:
                 handle.write(f"/{new_name}\n")

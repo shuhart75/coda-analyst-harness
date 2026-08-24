@@ -964,7 +964,12 @@ def inspect_analytics_origin_conflict_command(args: argparse.Namespace) -> int:
             if fetched.returncode != 0:
                 raise ValueError(f"Не удалось получить удалённый analytics: {fetched.stderr.strip()}")
             remote_commit = git(probe, "rev-parse", "FETCH_HEAD").stdout.strip()
-            merged = git(probe, "merge", "--no-commit", "--no-ff", "FETCH_HEAD")
+            merged = git(
+                probe,
+                "-c", "user.name=Coda Analyst Harness",
+                "-c", "user.email=coda-analyst-harness@local.invalid",
+                "merge", "--no-commit", "--no-ff", "FETCH_HEAD",
+            )
             if merged.returncode == 0:
                 print(json.dumps({
                     "status": "no-conflict",
@@ -1215,7 +1220,12 @@ def inspect_conflict_command(args: argparse.Namespace) -> int:
             fetched = git(probe, "fetch", "--quiet", SOURCE_REMOTE, source_commit)
             if fetched.returncode != 0:
                 raise ValueError(f"Не удалось прочитать ревизию source: {fetched.stderr.strip()}")
-            merged = git(probe, "merge", "--no-commit", "--no-ff", "FETCH_HEAD")
+            merged = git(
+                probe,
+                "-c", "user.name=Coda Analyst Harness",
+                "-c", "user.email=coda-analyst-harness@local.invalid",
+                "merge", "--no-commit", "--no-ff", "FETCH_HEAD",
+            )
             if merged.returncode == 0:
                 print(json.dumps({
                     "status": "no-conflict",

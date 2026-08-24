@@ -67,7 +67,7 @@ Code inspection is a targeted research action, not a repository audit.
 6. Inspect the second contour in a separate pass only when a concrete dependency is found.
 7. Stop when the question has sufficient evidence; do not broaden the search without a new question.
 
-The public user does not need to provide paths. `code-inspect.py locate` returns a capped list of repository-relative matches and the exact inspected commit.
+The public user does not need to provide paths. `code-inspect.py locate` searches only files tracked by the inspected Git commit and returns a capped list of repository-relative matches and the exact inspected commit. It does not require a separate content-search utility.
 
 ## Automatic triggers
 

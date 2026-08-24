@@ -324,23 +324,25 @@ def locate_command(args: argparse.Namespace) -> int:
         raise ValueError("Рабочее дерево роли code изменено; поиск заблокирован до вмешательства владельца кода")
     search_root = Path(snapshot["contour_root"])
     command = [
-        "rg",
-        "--files-with-matches",
-        "--hidden",
-        "--glob",
-        "!.git/**",
-        "--max-filesize",
-        "2M",
+        "git",
+        "-C",
+        str(repository),
+        "grep",
+        "-l",
+        "-I",
+        "--full-name",
+        "-E" if args.regex else "-F",
+        "-e",
+        args.query,
+        "--",
+        search_root.relative_to(repository).as_posix(),
     ]
-    if not args.regex:
-        command.append("--fixed-strings")
-    command.extend(["--", args.query, str(search_root)])
     result = subprocess.run(command, text=True, capture_output=True, check=False)
     if result.returncode not in {0, 1}:
         raise ValueError(result.stderr.strip() or "Ошибка поиска по коду")
     matches = []
     for line in result.stdout.splitlines():
-        path = Path(line).resolve()
+        path = (repository / line).resolve()
         try:
             matches.append(path.relative_to(repository).as_posix())
         except ValueError:
