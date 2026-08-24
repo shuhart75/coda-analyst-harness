@@ -1301,6 +1301,19 @@ def verified_reverse_patch(
     require_analytics_content_policy(root, source, analytics, source_commit, documents_commit)
     source_tree = git(source, "rev-parse", f"{source_commit}^{{tree}}").stdout.strip()
     documents_tree = git(analytics, "rev-parse", f"{documents_commit}^{{tree}}").stdout.strip()
+
+    diff_check = git(
+        analytics,
+        "diff", "--check", source_commit, documents_commit, "--", ".",
+    )
+    if diff_check.returncode != 0:
+        detail = diff_check.stdout.strip() or diff_check.stderr.strip()
+        raise ValueError(
+            "Обратная заплата содержит ошибки пробельного оформления; "
+            "исправь их в роли analytics и повтори синхронизацию:\n"
+            f"{detail}"
+        )
+
     output_dir = root / "reverse-diffs"
     output_dir.mkdir(parents=True, exist_ok=True)
     latest = output_dir / "reverse-diff-latest.patch"
@@ -1337,7 +1350,12 @@ def verified_reverse_patch(
                     f"Не удалось подготовить временный индекс роли source: "
                     f"{read_tree.stderr.strip()}"
                 )
-            checked = git(source, "apply", "--cached", "--check", str(verification_patch), env=environment)
+            checked = git(
+                source,
+                "apply", "--cached", "--check", "--binary", "--whitespace=error-all",
+                str(verification_patch),
+                env=environment,
+            )
             if checked.returncode != 0:
                 raise ValueError(
                     f"Обратная заплата не применима к текущему состоянию роли source: "
@@ -1398,6 +1416,7 @@ def verified_reverse_patch(
         "included_features": included_features,
         "included_analytics_commits": included_analytics_commits,
         "approved_source_deletions": approved_deletions,
+        "diff_check_verified": True,
         "tree_verified": True,
         "content_policy_verified": True,
         "verified": True,
@@ -1625,6 +1644,7 @@ def unavailable_reverse_diff(root: Path, analytics: Path, analytics_id: str) -> 
         "included_features": [],
         "included_analytics_commits": [],
         "approved_source_deletions": [],
+        "diff_check_verified": False,
         "tree_verified": False,
         "content_policy_verified": False,
         "verified": False,

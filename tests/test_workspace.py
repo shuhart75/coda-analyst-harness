@@ -203,6 +203,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertTrue(metadata["verified"])
             self.assertTrue(metadata["tree_verified"])
             self.assertTrue(metadata["content_policy_verified"])
+            self.assertTrue(metadata["diff_check_verified"])
             self.assertEqual(metadata["schema_version"], 2)
             self.assertEqual(metadata["patch_sha256"], hashlib.sha256(patch.read_bytes()).hexdigest())
             archived_patch = Path(metadata["patch"])
@@ -804,6 +805,46 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertTrue(metadata["verified"])
             self.assertEqual(metadata["changed_paths"], ["context/shared.txt"])
             self.assertEqual(metadata["approved_source_deletions"], ["context/shared.txt"])
+
+    def test_sync_rejects_whitespace_errors_before_push_or_artifact_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            documents = workspace / "documents"
+            remote_before = run(
+                "git", "-C", str(documents_remote), "rev-parse", "refs/heads/main",
+            ).stdout.strip()
+            relative = "features/example/requirements.md"
+            target = documents / relative
+            target.parent.mkdir(parents=True)
+            target.write_text("# Требования\n\n| Поле | Значение |\n|---|---| \n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", relative).returncode, 0)
+            self.assertEqual(
+                run("git", "-C", str(documents), "commit", "-m", "add invalid requirements").returncode,
+                0,
+            )
+
+            result = run(
+                sys.executable,
+                str(ROOT / "scripts/workspace.py"),
+                "--root",
+                str(workspace),
+                "sync",
+                env=environment,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ошибки пробельного оформления", result.stdout)
+            self.assertIn("trailing whitespace", result.stdout)
+            output = workspace / "reverse-diffs"
+            self.assertFalse((output / "reverse-diff-latest.patch").exists())
+            self.assertFalse((output / "reverse-diff-latest.json").exists())
+            self.assertEqual(list(output.glob("reverse-diff-*.patch")), [])
+            self.assertEqual(list(output.glob("reverse-diff-*.json")), [])
+            self.assertEqual(
+                run("git", "-C", str(documents_remote), "rev-parse", "refs/heads/main").stdout.strip(),
+                remote_before,
+            )
 
     def test_sync_blocks_invalid_paths_introduced_by_source_before_merge(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
