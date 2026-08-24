@@ -97,10 +97,17 @@ class CodaWorkspaceTests(unittest.TestCase):
                 {role: item["availability"] for role, item in state["roles"].items()},
                 {"analytics": "ready", "code": "ready", "source": "ready"},
             )
-            self.assertEqual(state["write_policy"]["code"]["allowed_paths"], [])
+            self.assertEqual(
+                state["write_policy"]["code"]["allowed_paths"],
+                ["requirements-exchange/**"],
+            )
             self.assertEqual(
                 state["write_policy"]["code"]["allowed_operations"],
-                ["initial-clone", "git-pull-ff-only-via-workspace"],
+                [
+                    "initial-clone",
+                    "git-pull-ff-only-via-workspace",
+                    "requirements-exchange-publish-via-isolated-clone",
+                ],
             )
             self.assertTrue((workspace / "coda-analyst.code-workspace").is_file())
             workspace_config = json.loads(
@@ -119,7 +126,10 @@ class CodaWorkspaceTests(unittest.TestCase):
                 self.assertEqual(push_url.stdout.strip(), "DISABLED_BY_CODA_ANALYST_HARNESS")
             registry = json.loads((workspace / ".workspace-state/code-repos.json").read_text(encoding="utf-8"))
             self.assertEqual(registry["schema_version"], 3)
-            self.assertEqual(registry["repositories"][0]["write_policy"]["allowed_paths"], [])
+            self.assertEqual(
+                registry["repositories"][0]["write_policy"]["allowed_paths"],
+                ["requirements-exchange/**"],
+            )
 
             documents = workspace / "documents"
             entrypoint = documents / "AGENTS.md"

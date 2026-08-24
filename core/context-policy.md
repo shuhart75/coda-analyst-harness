@@ -15,17 +15,17 @@ Repository markdown artifacts remain the source of truth:
 - `baseline/current/`
 - `planning/intake/`
 - `features/<feature>/requirements.md`
-- `features/<feature>/slices/*`
 - `features/<feature>/planning/*`
 - `features/<feature>/domain-impact.md`
 - `features/<feature>/prototype.html` and prototype notes
+- `requirements-exchange/<feature>/manifest.json` and immutable input revisions
 - `releases/*`
 
 Context summaries, checkpoints, `.research/` files and external memory tools are accelerators. They are not authoritative unless a decision is promoted back into the source-of-truth artifacts.
 
 ## Context Artifacts
 
-Use these lightweight artifacts when a feature, slice, planning track, prototype or execution update becomes too large for one pass:
+Use these lightweight artifacts when a feature, planning track, prototype or execution update becomes too large for one pass:
 
 - `features/<feature>/context-summary.md`
 - `features/<feature>/artifact-map.md`
@@ -34,7 +34,6 @@ Use these lightweight artifacts when a feature, slice, planning track, prototype
 - `features/<feature>/planning/risk-register.md`
 - `features/<feature>/planning/story-map.md`
 - `features/<feature>/execution-context.md`
-- `features/<feature>/slices/<slice>/context-summary.md`
 - `.workspace-state/run-state/current.md`
 - local code-inspection state under the user state directory, created by `scripts/code-inspect.py`
 
@@ -46,11 +45,9 @@ The assistant should automatically build or refresh context when:
 
 - starting a new feature intake;
 - creating or substantially updating feature requirements;
-- decomposing root requirements into slices;
-- creating or updating detailed slice requirements;
 - resolving current implementation facts needed by planning or requirements;
-- creating or updating root or slice prototypes;
-- preparing a slice for development;
+- creating or updating a feature prototype;
+- preparing an exchange revision for development;
 - preparing implementation plans or QA checks;
 - updating actual progress;
 - finalizing a release or promoting baseline;
@@ -64,7 +61,7 @@ Before and after long-running work, update `.workspace-state/run-state/current.m
 
 - active mode;
 - objective;
-- feature and slice, if any;
+- feature, if any;
 - source materials already inspected;
 - current source-of-truth files;
 - decisions made;

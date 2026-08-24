@@ -46,7 +46,7 @@ The planning mode starts with feature intake when the user brings a candidate ne
 - A feature is the finished user or system outcome planned for the quarter.
 - A feature has at most four planning stories: one each for `AN`, `BE`, `FE`, and `QA`.
 - A missing role means no story for that role.
-- Functional decomposition belongs to requirements and slices, not additional planning stories.
+- Functional detail belongs to the root requirements, not additional planning stories.
 
 ## Estimation rules
 
@@ -114,7 +114,7 @@ When a planning boundary, dependency or estimate materially depends on current i
 When the user says `новая фича` or otherwise points to an external folder and says this is a new feature:
 
 - do not scaffold `features/<slug>/` yet;
-- do not create slices yet;
+- do not create detailed requirements or exchange revisions yet;
 - inspect the source materials first;
 - compare them against `baseline/current/`, existing `features/*`, and legacy/source-materials planning where relevant;
 - separate existing coverage from the true new delta;
@@ -132,7 +132,7 @@ For `новая фича`, `занимаемся планированием`, `�
 - use targeted code inspection when `baseline/current/` and source materials are insufficient to classify current-system coverage;
 - keep planning assumptions in `features/<feature>/planning/assumptions.md` or a clearly named section of `planning-context.md`;
 - keep planning risks in `features/<feature>/planning/risk-register.md` or a clearly named section of `planning-context.md`;
-- map `source -> delta -> planning story -> slice` in `features/<feature>/planning/story-map.md` when the feature is large enough that the relationship is not obvious;
+- map `source -> delta -> planning story -> root requirement area` in `features/<feature>/planning/story-map.md` when the feature is large enough that the relationship is not obvious;
 - update the run checkpoint before and after long planning passes.
 
 Do not ask the user to request these context operations explicitly. Ask only when scope, quarter boundary, estimate basis or current-vs-new classification requires a human decision.

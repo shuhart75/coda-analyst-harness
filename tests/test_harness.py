@@ -264,15 +264,13 @@ class HarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             project = self.scaffold(Path(temp))
             contract = ROOT / "core/developer-handoff.md"
-            receipt = ROOT / "templates/handoff/developer-receipt.template.json"
-            manifest = ROOT / "templates/handoff/developer-manifest.template.json"
             self.assertTrue(contract.exists())
-            self.assertTrue(receipt.exists())
-            self.assertTrue(manifest.exists())
-            self.assertIn("delivered-with-deviations", contract.read_text(encoding="utf-8"))
-            self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["schema_version"], 4)
-            self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["delivery_policy"]["input"], "immutable-comparison-point")
-            self.assertTrue((ROOT / "scripts/handoffctl.py").exists())
+            text = contract.read_text(encoding="utf-8")
+            self.assertIn("returns/tasks.md", text)
+            self.assertIn("returns/tasks/<task-id>.md", text)
+            self.assertIn("returns/summary.md", text)
+            self.assertTrue((ROOT / "scripts/requirements-exchange.py").exists())
+            self.assertTrue((ROOT / "templates/exchange/AGENTS.template.md").exists())
             self.assertFalse((project / ".workflow").exists())
 
     def test_scaffold_contains_feature_delivery_contract(self) -> None:
@@ -310,7 +308,7 @@ class HarnessTests(unittest.TestCase):
             code = next(item for item in registry["repositories"] if item["id"] == "code")
             self.assertEqual(code["repository_id"], "coda")
             self.assertEqual(code["access"], "read-only")
-            self.assertEqual(code["write_policy"]["allowed_paths"], [])
+            self.assertEqual(code["write_policy"]["allowed_paths"], ["requirements-exchange/**"])
             self.assertFalse(code["write_policy"]["user_prompt_can_override"])
             self.assertEqual(code["location"]["relative_to_analytical"], "../coda")
             self.assertEqual(code["contours"]["backend"]["path"], "backend")
@@ -318,16 +316,16 @@ class HarnessTests(unittest.TestCase):
             self.assertTrue((ROOT / "scripts/code-inspect.py").is_file())
             self.assertTrue((ROOT / "templates/research/code-evidence.template.yaml").is_file())
             contract = (ROOT / "core/developer-handoff.md").read_text(encoding="utf-8")
-            self.assertIn("returns/decomposition-snapshots/", contract)
-            self.assertIn("returns/implementation-results/", contract)
-            self.assertIn("returns/test-results/", contract)
+            self.assertIn("returns/tasks.md", contract)
+            self.assertIn("returns/tasks/<task-id>.md", contract)
+            self.assertIn("returns/summary.md", contract)
             commands = (ROOT / "templates/workflow/command-cheatsheet.template.md").read_text(encoding="utf-8")
             self.assertIn("сформируй пакет для разработки", commands)
             self.assertIn("передаём в разработку", commands)
             self.assertIn("отдаём требования разработчикам", commands)
-            self.assertIn("подготовь пакет функциональности для технической декомпозиции", commands)
-            self.assertIn("декомпозиция подтверждена разработкой", commands)
-            self.assertIn("возьми срез <id> в тестирование", commands)
+            self.assertIn("проверь результаты разработки", commands)
+            self.assertIn("уже содержит согласованную разработчиками декомпозицию", commands)
+            self.assertIn("не создаёт срезы", commands)
             self.assertNotIn("features/<feature>/tasks/", commands)
 
     def test_scaffold_contains_requirements_profile(self) -> None:
@@ -336,11 +334,11 @@ class HarnessTests(unittest.TestCase):
             self.assertTrue((ROOT / "core/requirements-profile.md").exists())
             self.assertTrue((ROOT / "scripts/validate-requirements-profile.py").exists())
             readable = (ROOT / "templates/requirements/feature-requirements.readable.template.md").read_text(encoding="utf-8")
-            detailed = (ROOT / "templates/requirements/feature-requirements.template.md").read_text(encoding="utf-8")
-            for text in (readable, detailed):
-                self.assertIn("ISO/IEC/IEEE 29148:2018", text)
-                self.assertIn("## Нефункциональные требования", text)
-                self.assertIn("## Трассировка", text)
+            self.assertIn("Формат: **последовательный человекочитаемый**", readable)
+            self.assertIn("## Нефункциональные требования", readable)
+            self.assertIn("## Сводная трассировка", readable)
+            self.assertNotIn("ISO/IEC/IEEE 29148:2018", readable)
+            self.assertNotIn("Порядок срезов", readable)
 
     def test_requirements_profile_validator_checks_opted_in_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -348,36 +346,38 @@ class HarnessTests(unittest.TestCase):
             requirements = project / "features/demo/requirements.md"
             requirements.parent.mkdir(parents=True)
             sections = [
-                "Назначение и границы",
-                "Текущее состояние",
-                "Участники и внешние системы",
-                "Термины и данные",
+                "Кратко о функциональности",
+                "Цель и ожидаемый результат",
+                "Границы",
+                "Текущее и требуемое состояние",
+                "Участники, внешние системы и данные",
+                "Общие правила",
+                "Ошибки и пограничные случаи",
                 "Нефункциональные требования",
                 "Доработки затронутых функциональностей",
-                "Зависимости и предположения",
-                "Критерии завершённости",
+                "Подчистка устаревшего поведения",
                 "Открытые вопросы",
             ]
             body = "\n\n".join(f"## {title}\n\nЗаполнено." for title in sections)
             requirements.write_text(
                 "# Требования\n\n"
                 "Статус: **черновик**\n"
-                "Редакция: `1`\n"
-                "Профиль требований: **АС КОДА / ISO/IEC/IEEE 29148:2018**\n\n"
+                "Редакция: \u00601\u0060\n"
+                "Формат: **последовательный человекочитаемый**\n"
+                "Функциональность: \u0060demo\u0060\n\n"
                 f"{body}\n\n"
-                "## Функциональные требования\n\n"
-                "| Идентификатор | Нормативное требование | Обоснование | Источник | Приоритет | Проверка |\n"
-                "|---|---|---|---|---|---|\n"
-                "| REQ-DEMO-001 | Система должна сохранить результат. | Цель | Решение | обязательный | TEST-DEMO-001 |\n\n"
-                "## Сценарии\n\n"
-                "| Идентификатор | Начальные условия | Действие | Результат | Ошибки | Требования |\n"
-                "|---|---|---|---|---|---|\n"
-                "| SCN-DEMO-001 | Есть данные | Сохранение | Данные сохранены | Ошибка показана | REQ-DEMO-001 |\n\n"
-                "## Трассировка\n\n"
-                "| Идентификатор | Источник | Срез | Задача | Проверка | Пакет | Квитанция |\n"
-                "|---|---|---|---|---|---|---|\n"
-                "| REQ-DEMO-001 | Решение | core | не сформирована | TEST-DEMO-001 | не сформирована | не получена |\n"
-                "| SCN-DEMO-001 | Решение | core | не сформирована | TEST-DEMO-001 | не сформирована | не получена |\n",
+                "## Работа с результатом\n\n"
+                "**REQ-DEMO-001. Сохранение результата**\n\n"
+                "Система должна сохранить результат.\n\n"
+                "**AC-DEMO-001. Успешное сохранение**\n\n"
+                "- Дано: есть данные.\n"
+                "- Когда: выполняется сохранение.\n"
+                "- Тогда: результат сохранён.\n"
+                "- Требования: \u0060REQ-DEMO-001\u0060.\n\n"
+                "## Сводная трассировка\n\n"
+                "| Требование | Источник | Пример | Задача | Результат |\n"
+                "|---|---|---|---|---|\n"
+                "| REQ-DEMO-001 | Решение | AC-DEMO-001 | задача не получена | результат не получен |\n",
                 encoding="utf-8",
             )
             tool = ROOT / "scripts/validate-requirements-profile.py"
@@ -386,7 +386,7 @@ class HarnessTests(unittest.TestCase):
             requirements.write_text(requirements.read_text(encoding="utf-8").replace("Система должна сохранить", "Система может сохранить"), encoding="utf-8")
             result = run(sys.executable, str(tool), str(project), "--feature", "demo")
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("явную нормативную форму", result.stdout)
+            self.assertIn("нормативная форма", result.stdout)
 
     def test_handoff_validator_accepts_per_item_package(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -656,13 +656,13 @@ class HarnessTests(unittest.TestCase):
         ):
             self.assertIn(phrase, combined)
         collaboration = (ROOT / "core/collaboration.md").read_text(encoding="utf-8")
-        self.assertIn("пакет для разработки создаётся только из актуальной `main`", collaboration)
+        self.assertIn("require-main-for-delivery", collaboration)
         self.assertIn("автоматического коммита и отправки нет", collaboration)
         self.assertIn("не однопользовательский режим", collaboration)
         self.assertIn("автоматически закрывает рабочую сессию", collaboration)
         catalog = (ROOT / "templates/workflow/command-catalog.template.md").read_text(encoding="utf-8")
-        self.assertIn("доказанное включение коммита в `origin/main` закрывает рабочую сессию", catalog)
-        self.assertIn("сначала доказать принятие рабочей ветки", catalog)
+        self.assertIn("Заверши принятую рабочую ветку", catalog)
+        self.assertIn("requirements-exchange.py prepare", catalog)
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("Communicate with the analyst in Russian", agents)
         self.assertIn("does not create a merge request", agents)

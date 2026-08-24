@@ -40,7 +40,7 @@ After the first successful bootstrap the analyst may remove the local repository
 
 ## Read-only contract
 
-During analyst planning and requirements work, `coda` is strictly read-only. The generated code registry contains an empty write allowlist. A conversational user request does not extend it.
+During analyst planning and requirements research, role `code` is strictly read-only. The only path exception is `requirements-exchange/**`, and it is usable only by the explicit protected transfer operation from `requirements-exchange.py` when the root catalog was created in advance by developers. A conversational user request does not extend it.
 
 Before inspection:
 
@@ -51,7 +51,7 @@ Before inspection:
 
 After inspection, compare branch, commit, repository configuration and worktree entries with the initial snapshot. Any change blocks completion until it is handled by the code-repository owner. The analyst LLM must not repair, reset or clean it.
 
-Do not fetch, pull, switch branches, build, generate, format, install dependencies, run migrations, edit code or execute commands that may create files during inspection. Protected `git pull --ff-only` is a separate registered workspace operation performed only through `workspace.py update-code` before a new inspection snapshot. The writable-path allowlist remains empty.
+Do not fetch, pull, switch branches, build, generate, format, install dependencies, run migrations, edit code or execute commands that may create files during inspection. Protected `git pull --ff-only` is a separate registered workspace operation performed only through `workspace.py update-code` before a new inspection snapshot. Transfer through `requirements-exchange.py` is also separate from inspection and must not leave changes outside its registered path.
 
 This is a workflow guard, not an operating-system sandbox. Use a client-provided read-only mount for the `coda` root when available, but still perform the before/after verification.
 
@@ -94,10 +94,10 @@ When code findings affect requirements, use `features/<feature>/.research/code-e
 - relative paths, symbols and short observations without copying source code;
 - related requirement identifiers and transfer destination.
 
-Code evidence is auxiliary and commit-bound. During ordinary requirements work, transfer accepted requirement findings only into the root `requirements.md`; record deferred cross-feature propagation in the consistency backlog when necessary. Transfer findings into derived slice packs and `domain-impact.md` only during an explicitly authorized package-preparation pass. Do not update `baseline/current/` from code research outside the existing release-finalization rules.
+Code evidence is auxiliary and commit-bound. During ordinary requirements work, transfer accepted requirement findings only into the root `requirements.md`; record deferred cross-feature propagation in the consistency backlog when necessary. Explicit developer transfer copies that root document and never creates another requirements representation. Do not update `baseline/current/` from code research outside the existing release-finalization rules.
 
 ## Two-stage reconciliation
 
 Analyst-side inspection improves requirements against a recorded local code revision. It does not replace developer-side reconciliation.
 
-Before implementation, the receiving SDD repeats a targeted comparison against its current branch because the code may be newer, differently configured or already changed. Developer findings and actual delivery are returned through the existing decomposition and receipt lifecycle.
+Before implementation, the receiving SDD repeats a targeted comparison against its current branch because the code may be newer, differently configured or already changed. Developer findings and actual delivery are returned through `returns/tasks.md`, per-task results and the final summary of the active exchange revision.

@@ -1,3 +1,3 @@
 Switch to delivery-prototype mode.
-Read the active mode files, slice requirements, and project design-system overrides.
-Build or update a single-file React + MUI prototype for handoff and implementation alignment.
+Read the active mode files, root feature requirements, confirmed root prototype, prototype notes, and project design-system overrides.
+Build or update the feature-level single-file React + MUI delivery prototype for implementation alignment.

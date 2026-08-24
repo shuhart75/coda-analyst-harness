@@ -87,7 +87,8 @@ def write_local_entrypoint(
     if code_root:
         code_role = (
             f"- `CODE_ROOT = {code_root}` выполняет роль code и доступен строго только для чтения; "
-            "список разрешённых путей записи пуст, отдельно разрешён только защищённый git pull через workspace.py.\n"
+            "отдельно разрешены защищённый git pull через workspace.py и изолированная публикация только в "
+            "заранее созданный каталог requirements-exchange через requirements-exchange.py.\n"
         )
     elif code_availability == "absent":
         code_role = (
@@ -117,7 +118,10 @@ def write_local_entrypoint(
         "5. Не создавай проектные каталоги в HARNESS_ROOT и ничего не изменяй в репозитории роли code: "
         "файлы, индекс, ветку, HEAD, настройки и создаваемые программами материалы. "
         "Обычная команда пользователя не отменяет запрет; отдельная команда обновления кода разрешает только "
-        "workspace.py update-code.\n"
+        "workspace.py update-code. Единственное дополнительное исключение — requirements-exchange.py prepare: "
+        "она работает через временную копию, может отправить только заранее созданный разработчиками корневой "
+        "requirements-exchange/** и обязана оставить обычный клон code неизменным; при отсутствии каталога, "
+        "чтения или права отправки использует PROJECT_ROOT/requirements-exchange/.\n"
         "6. По запросу проверки кода используй правила HARNESS_ROOT/core/code-inspection.md "
         "и программы HARNESS_ROOT/scripts/code-inspect.py; путь к code не спрашивай у пользователя.\n\n"
         "7. Перед работой над функциональностью выполни bootstrap и проверь совместную работу через "

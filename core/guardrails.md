@@ -13,8 +13,8 @@
 ## Mode-sensitive edits
 
 - Planning mode owns planning stories, estimates, and quarter/commander gantt baselines.
-- Requirements mode owns the root requirements document. It may create or refresh slices, detailed requirement packs and their references only during an explicitly authorized package-preparation pass.
+- Requirements mode owns the root requirements document and explicit immutable exchange revisions. It never creates slices or contour-specific requirement packs.
 - Scope-prototype mode owns feature-level demo prototypes.
-- Delivery-prototype mode owns slice-level handoff prototypes.
+- Delivery-prototype mode owns feature-level handoff prototypes.
 - Execution-update mode owns implementation tasks, story actualization mapping, and actual-progress gantt.
 - Release-finalization mode owns release packages, baseline promotion, canonical baseline docs, and deployment-final deltas.

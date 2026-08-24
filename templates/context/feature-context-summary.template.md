@@ -17,15 +17,15 @@ Source of truth: `features/<feature-slug>/requirements.md`
 |---|---|
 | Root requirements | `features/<feature-slug>/requirements.md` |
 | Feature card | `features/<feature-slug>/feature.md` |
-| Slices | `features/<feature-slug>/slices/` |
 | Prototype | `features/<feature-slug>/prototype.html` |
 | Domain impact | `features/<feature-slug>/domain-impact.md` |
+| Exchange state | `features/<feature-slug>/requirements-state.json` |
 
-## Slice Map
+## Functional Areas
 
-| Slice | Purpose | Status | Key files |
+| Area | Purpose | Status | Related REQ-* |
 |---|---|---|---|
-| `<slice-slug>` |  |  | `slices/<slice-slug>/` |
+| `<area>` |  |  | `REQ-*` |
 
 ## Decisions
 

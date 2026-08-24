@@ -2,8 +2,8 @@
 
 Run kind: `qa`
 
-Inputs: slice requirements, acceptance criteria, confirmed development cards, registered implementation receipts, prototype, tested code revisions.
+Inputs: active feature requirements, acceptance criteria, agreed developer tasks, per-task results, prototype and tested code revisions.
 
-Writes: test plan, coverage matrix, executable/manual checks, classified gaps, slice test receipt in the shared feature package.
+Writes: test plan, coverage matrix, executable/manual checks and classified gaps in the developer-owned process; factual coverage is reflected in the active revision's `returns/summary.md`.
 
-Rules: the slice is the primary QA unit; development cards and implementation receipts are supporting context. Every check traces to a requirement; failures are classified as requirement gap, implementation defect, test defect, data/environment issue, or accepted limitation. Testing never rewrites card or implementation states.
+Rules: every check traces directly to `REQ-*`; returned tasks and results are supporting context. Failures are classified as requirement gap, implementation defect, test defect, data/environment issue, or accepted limitation. Testing never rewrites immutable input requirements.

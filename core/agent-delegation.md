@@ -13,7 +13,7 @@ Delegate only if all conditions hold:
 ## What to delegate
 
 Good delegation targets:
-- one feature or one slice worth of read-only analysis;
+- one feature or one bounded functional area worth of read-only analysis;
 - one isolated code/document patch with a disjoint write scope;
 - one verification or data-extraction task that can run in parallel.
 

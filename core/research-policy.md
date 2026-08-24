@@ -12,17 +12,15 @@ Research results are auxiliary. Accepted findings must be transferred into the r
 
 Run research internally when:
 
-- decomposing a large feature into slices;
-- preparing detailed requirements for slices;
-- checking slice completeness;
-- preparing a slice for development;
+- preparing or checking a large feature requirements document;
+- checking completeness and consistency before an exchange revision;
 - building an implementation plan;
 - preparing QA checks and negative scenarios;
 - updating requirements from source materials that touch several areas;
 - establishing current implementation facts needed for planning or requirements;
 - validating that prototypes still match requirements.
 
-The user should not need to call `исследуй срез` or similar internal commands.
+The user should not need to call a separate research command for these internal operations.
 
 ## Research Output
 
@@ -30,12 +28,6 @@ For feature-level research, use:
 
 ```text
 features/<feature>/.research/
-```
-
-For slice-level research, use:
-
-```text
-features/<feature>/slices/<slice>/.research/
 ```
 
 Expected files:
@@ -67,7 +59,7 @@ Use only the files needed for the current action. Do not create empty research f
 
 ## Completeness Checklist
 
-For requirements and slice readiness, check:
+For requirements readiness, check:
 
 - purpose and user outcome;
 - scope boundaries and out-of-scope items;
@@ -98,7 +90,7 @@ After research:
 
 - Do not create `change.md` as a parallel source of truth.
 - Do not merge research directly into `baseline/current/` outside release finalization.
-- Do not let `.research/` replace feature requirements or slice packs.
+- Do not let `.research/` replace feature requirements.
 - Do not continue silently if research finds a business decision, contradiction or prototype mismatch.
 - Do not treat the current implementation as the owner of business intent. Separate code facts from inferences and ask the analyst when a semantic choice remains.
 - Do not copy source fragments into the documents repository. Record only the commit, relative path, symbol and short observation.

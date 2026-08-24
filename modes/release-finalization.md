@@ -37,7 +37,7 @@ Before promoting a release into `baseline/current/`:
 - block promotion if there are unresolved `domain-wide` items that affect released scope;
 - either propagate or explicitly defer cross-feature items;
 - write rollback notes for decisions that supersede or revert previous released decisions.
-- check auxiliary `.research/`, handoff, implementation-plan and test-plan artifacts for findings that were accepted but not transferred into final requirements, release notes or baseline;
+- check auxiliary `.research/`, exchange returns, implementation-plan and test-plan artifacts for findings that were accepted but not transferred into final requirements, release notes or baseline;
 - update context summaries or mark them obsolete after baseline promotion when they would otherwise point at pre-release state.
 
 ## Forbidden without mode switch

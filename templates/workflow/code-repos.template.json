@@ -19,10 +19,13 @@
       "access": "read-only",
       "write_policy": {
         "mode": "operations-only",
-        "allowed_paths": [],
+        "allowed_paths": [
+          "requirements-exchange/**"
+        ],
         "allowed_operations": [
           "initial-clone",
-          "git-pull-ff-only-via-workspace"
+          "git-pull-ff-only-via-workspace",
+          "requirements-exchange-publish-via-isolated-clone"
         ],
         "user_prompt_can_override": false
       },

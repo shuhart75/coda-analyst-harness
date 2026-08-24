@@ -53,9 +53,8 @@ When such capabilities exist, use them as optional accelerators, not as the only
 
 - `features/*/context-summary.md` stores the small-window feature context.
 - `features/*/artifact-map.md` distinguishes authored, derived and auxiliary artifacts.
-- `features/*/slices/*/context-summary.md` stores the small-window slice context.
-- `features/*/slices/*/.research/` stores auxiliary research, not source-of-truth requirements.
-- `features/*/slices/*/implementation-handoff.md` and `execution/implementation-plan.md` are development aids and must reference requirements.
-- `features/*/slices/*/testing/test-plan.md` is a QA aid and should include coverage back to requirements.
+- `features/*/.research/` stores auxiliary research, not source-of-truth requirements.
+- `requirements-exchange/*/revisions/*/requirements.md` stores immutable transmitted input; it is never an authoring location.
+- `requirements-exchange/*/revisions/*/returns/` stores developer-owned decomposition and factual results with direct `REQ-*` coverage.
 - `.workspace-state/run-state/current.md` may be used as a resumable checkpoint for long-running work.
 - `.workspace-state/runs/*/run.json` stores executable loop state and verification evidence.

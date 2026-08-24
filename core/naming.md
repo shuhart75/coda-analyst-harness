@@ -6,7 +6,7 @@ Use English slugs for paths.
 
 Examples:
 - `features/deployments/`
-- `features/deployments/slices/form-editing/`
+- `requirements-exchange/deployments/revisions/001/`
 - `releases/2026-Q2/rscon-2438/`
 
 Human-readable Russian names live inside markdown files.
@@ -17,9 +17,9 @@ Human-readable Russian names live inside markdown files.
 - feature references: `references.md`
 - feature domain delta: `domain-impact.md`
 - planning stories: `STORY-<FEATURE>-NNN.md`
-- slice root: `slice.md`
-- FE requirements: `frontend.md`
-- BE requirements: `backend.md`
+- feature requirements: `requirements.md`
+- exchange manifest: `manifest.json`
+- returned task list: `returns/tasks.md`
 - execution registry: `tasks.md`
 - detailed task note: `<JIRA>.md`
 - prototypes: `prototype.html`, `notes.md`

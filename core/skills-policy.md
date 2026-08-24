@@ -11,13 +11,13 @@ Use a skill only when it adds repeatable domain value or enforces a stable workf
 - `planning-analyst` — HLE decomposition, planning stories, estimates, gantt semantics.
 - `requirements-analyst` — business/system requirements from baseline and source materials.
 - `scope-prototyper` — planning-stage clickable prototype with fake data.
-- `delivery-prototyper` — slice-level MUI handoff prototype.
+- `delivery-prototyper` — feature-level MUI handoff prototype.
 - `execution-tracker` — implementation task updates and actual-progress mapping.
 - `release-promoter` — final requirements, baseline promotion, release package assembly.
 - `domain-curator` — baseline/current/domain maintenance and DDD normalization.
-- `context-curator` — small-window feature/slice/planning summaries, artifact maps and checkpoints.
+- `context-curator` — small-window feature/planning summaries, artifact maps and checkpoints.
 - `research-analyst` — bounded role-based research over requirements, prototypes, source materials or code.
-- `qa-analyst` — slice-level checks, negative scenarios and coverage matrices.
+- `qa-analyst` — requirement-level checks, negative scenarios and coverage matrices.
 
 The harness ships CLI-neutral skill contracts under `skills/`. Native agent platforms may wrap these contracts, but their mode, inputs, write scope, and validation rules remain canonical.
 

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build or update the common feature-level live prototype that is used for scope discussion, customer alignment, and the future derivation of slice handoff prototypes.
+Build or update the common feature-level live prototype that is used for scope discussion, customer alignment, and the future derivation of the development handoff prototype.
 
 ## Main inputs
 
@@ -42,6 +42,6 @@ Build or update the common feature-level live prototype that is used for scope d
 
 ## Forbidden without mode switch
 
-- editing `features/*/slices/*/delivery-prototype/*`
-- generating slice-level handoff prototypes before the user confirms the common feature prototype is finished
+- editing `features/*/delivery-prototype/*`
+- generating a development handoff prototype before the user confirms the common feature prototype is finished
 - treating the first generated draft as frozen without explicit user confirmation

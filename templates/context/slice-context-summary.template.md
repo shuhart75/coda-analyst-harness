@@ -1,4 +1,6 @@
-# Slice Context Summary — <slice-slug>
+# Устаревший шаблон контекста среза
+
+Новая обвязка не создаёт срезы. Файл сохранён только для чтения ранее созданных материалов; для новой работы используй `feature-context-summary.template.md`.
 
 Status: draft
 Updated: <YYYY-MM-DD>

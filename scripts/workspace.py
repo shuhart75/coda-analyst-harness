@@ -307,8 +307,12 @@ def write_code_registry(
             "access": "read-only",
             "write_policy": {
                 "mode": "operations-only",
-                "allowed_paths": [],
-                "allowed_operations": ["initial-clone", "git-pull-ff-only-via-workspace"],
+                "allowed_paths": ["requirements-exchange/**"],
+                "allowed_operations": [
+                    "initial-clone",
+                    "git-pull-ff-only-via-workspace",
+                    "requirements-exchange-publish-via-isolated-clone",
+                ],
                 "user_prompt_can_override": False,
             },
             "location": {
@@ -451,8 +455,12 @@ def bootstrap_command(args: argparse.Namespace) -> int:
             "analytics": "read-write-push-allowed",
             "code": {
                 "access": "read-only",
-                "allowed_paths": [],
-                "allowed_operations": ["initial-clone", "git-pull-ff-only-via-workspace"],
+                "allowed_paths": ["requirements-exchange/**"],
+                "allowed_operations": [
+                    "initial-clone",
+                    "git-pull-ff-only-via-workspace",
+                    "requirements-exchange-publish-via-isolated-clone",
+                ],
             } if availability["code"] == "ready" else {"access": "disabled", "allowed_paths": []},
             "source": "bare-mirror-fetch-only" if availability["source"] == "ready" else "disabled",
         },

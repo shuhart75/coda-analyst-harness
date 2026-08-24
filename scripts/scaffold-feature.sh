@@ -30,7 +30,7 @@ install_file() {
   cp "$source" "$target"
 }
 
-mkdir -p "$FEATURE_DIR/planning/stories" "$FEATURE_DIR/planning/scope-prototype" "$FEATURE_DIR/slices"
+mkdir -p "$FEATURE_DIR/planning/stories" "$FEATURE_DIR/planning/scope-prototype"
 install_file "$ROOT_DIR/templates/planning/feature.template.md" "$FEATURE_DIR/feature.md"
 install_file "$ROOT_DIR/templates/planning/estimates.template.md" "$FEATURE_DIR/planning/estimates.md"
 install_file "$ROOT_DIR/templates/planning/actualization.template.md" "$FEATURE_DIR/planning/actualization.md"

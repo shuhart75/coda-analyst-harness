@@ -18,7 +18,7 @@ Baseline target: `baseline/current/domain/`
 - `rolled-back-after-release` — решение отменяется отдельным rollback/change после релиза.
 
 ## Consistency levels
-- `local` — влияет только на текущую feature/slice.
+- `local` — влияет только на текущую функциональность.
 - `cross-feature` — влияет на соседние feature requirements.
 - `domain-wide` — влияет на baseline/current/domain, shared API, lifecycle, roles or business rules.
 
@@ -42,7 +42,7 @@ Baseline target: `baseline/current/domain/`
 
 | Path | Impact | Sync status |
 |---|---|---|
-| `features/<feature>/slices/<slice>/requirements/backend.md` | <what must change> | open |
+| `features/<feature>/requirements.md` | <what must change> | open |
 
 ## Affected baseline artifacts
 
@@ -60,7 +60,7 @@ Baseline target: `baseline/current/domain/`
 ### Delivery prototypes
 | Path | Impact | Sync status |
 |---|---|---|
-| `features/<feature>/slices/<slice>/delivery-prototype/prototype.html` | <what might be outdated> | defer-ok |
+| `features/<feature>/delivery-prototype/prototype.html` | <what might be outdated> | defer-ok |
 
 ## Prototype sync status values
 - `must-update-now` — prototype is an active handoff/scope artifact and must be updated.

@@ -15,13 +15,13 @@ The intake step exists to prevent premature scaffolding.
 - compare it against existing `features/*`;
 - compare it against legacy planning and source materials when relevant;
 - separate existing coverage from the true new delta;
-- propose feature slug, slices, planning scope and affected artifacts;
+- propose feature slug, process boundaries, planning scope and affected artifacts;
 - list baseline gaps and workflow gaps before feature creation.
 
 ## What the LLM must not do during intake
 
 - do not scaffold `features/<slug>/` yet;
-- do not create slices yet;
+- do not create slices or contour-specific requirement packs;
 - do not write requirement packs yet;
 - do not rewrite baseline/current yet unless the user explicitly asks for a baseline readiness pass.
 

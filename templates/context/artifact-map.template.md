@@ -15,20 +15,16 @@ Updated: <YYYY-MM-DD>
 
 | Artifact | Derived From | Refresh Trigger |
 |---|---|---|
-| `slices/*/slice.md` | Root requirements | Slice scope changes |
-| `slices/*/requirements/frontend.md` | Root requirements + prototype | UI behavior changes |
-| `slices/*/requirements/backend.md` | Root requirements | API/data/integration changes |
-| `slices/*/delivery-prototype/*` | Confirmed root prototype + requirements | Prototype handoff changes |
+| `requirements-exchange/<feature>/revisions/<NNN>/requirements.md` | Root requirements | Explicit developer transfer only |
+| `delivery-prototype/*` | Confirmed root prototype + requirements | Explicit delivery-prototype update |
 
 ## Auxiliary Artifacts
 
 | Artifact | Purpose | Source Of Truth? |
 |---|---|---|
 | `context-summary.md` | Small-window feature context | No |
-| `slices/*/context-summary.md` | Small-window slice context | No |
 | `.research/*` | Temporary or auditable research | No |
-| `implementation-handoff.md` | Development handoff | No, unless referenced by execution |
-| `testing/test-plan.md` | QA draft/check plan | No, unless accepted by QA process |
+| `execution-context.md` | Current execution context | No, unless accepted into execution artifacts |
 
 ## Obsolete Or Deferred
 

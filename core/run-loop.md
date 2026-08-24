@@ -19,7 +19,7 @@ A failed check does not advance the run. Repeated failure reaches the configured
 ## Run Kinds
 
 - `planning`: intake, delta, role stories, estimates, dependencies, capacity schedule, review, approval.
-- `requirements`: root requirements, cross-feature impact and tail cleanup; slices and detailed packs only during explicit package preparation.
+- `requirements`: root requirements, cross-feature impact, tail cleanup and explicit exchange revisions.
 - `implementation`: code research, implementation plan, one small change, deterministic checks, review.
 - `qa`: coverage, test design, execution, failure classification, routing gaps to their owner.
 
@@ -40,7 +40,7 @@ A failed check does not advance the run. Repeated failure reaches the configured
 
 - Cross-feature work caused by the current feature is part of the initiating feature scope and HLE.
 - Current requirements contain a dedicated `Доработки затронутых функциональностей` section.
-- Every impact row is covered by root requirements during authoring and by slices and checks when a package is explicitly prepared, or is marked `not applicable` with a reason.
+- Every impact row is covered by root requirements and acceptance examples, or is marked `not applicable` with a reason.
 - Local stale tails block completion. Cross-mode propagation may be deferred only through a concrete consistency backlog record.
 - When requirements depend on current implementation, analyst research is bounded to one registered `coda` contour, records the exact commit, and verifies that the code worktree is unchanged.
 - Analyst code evidence improves the input but never replaces developer-side reconciliation against the implementation branch used for delivery.
@@ -48,32 +48,31 @@ A failed check does not advance the run. Repeated failure reaches the configured
 ## Requirement Preparation Invariants
 
 - Ordinary requirement authoring changes only `features/<feature>/requirements.md` as the requirements artifact. The state file and bounded code-research evidence are control and auxiliary records, not a decomposition of the requirements.
-- Slices, contour packs, task candidates and handoff revisions are not created or refreshed until the analyst explicitly requests or accepts package preparation.
-- Every root change records `analyst` or `developer-receipt` origin in `requirements-state.json`.
-- A developer-receipt change never triggers a revision or slice regeneration.
+- Slices, contour packs and preliminary task candidates are never created by the requirements process. An exchange revision is created only after the analyst explicitly requests or accepts transfer.
+- Every root change records `analyst` or `developer-result` origin in `requirements-state.json`.
+- A `developer-result` change never triggers or offers a revision.
 - After an analyst change to previously transmitted requirements, the LLM offers a new revision at most once. A refusal suppresses further offers until an explicit preparation command.
-- Explicit preparation validates the root first, then derives slices once, publishes one immutable revision and records the resulting hashes.
+- Explicit preparation validates the root, copies only `requirements.md`, updates `manifest.json` and records the actual destination.
 
 ## Technical Decomposition Invariants
 
-- Analysts transmit one immutable feature requirements package with slices; developers define the future Jira decomposition after targeted code research.
-- Each active development card has one contour and one independently implementable technical result.
-- Each card is self-contained and is the primary input for the implementation plan. Links provide traceability rather than missing instructions.
-- Estimate and Jira key are optional developer metadata. Their absence never blocks decomposition confirmation or implementation.
+- Analysts transmit one immutable feature requirements document plus a manifest; developers define the future Jira decomposition in their own process.
+- `returns/tasks.md` appears only after developers have agreed the decomposition. The analytical workflow has no proposal or confirmation state for it.
+- Each task has one independently implementable technical result and direct links to `REQ-*`.
+- Estimate and Jira key are optional developer metadata.
 - Target size is 1-3 days for one executor. Maximum size is 5 days for backend and 10 days for frontend; an explicitly estimated excess requires a reason.
-- Confirmation creates a background snapshot for the analyst and immediately permits development without analyst approval.
-- The analyst decides separately whether to materialize returned cards into actual-progress. Approved planning baselines remain immutable.
-- Slices remain the primary QA units and use development cards and implementation receipts as supporting context.
+- Publication of `tasks.md` is a background result for the analyst and never gates development.
+- The analyst decides separately how to use returned tasks in actual-progress. Approved planning baselines remain immutable.
 
 ## Developer Handoff Invariants
 
-These invariants apply only to the receiving developer SDD in its own code workspace after it accepts a package. They do not authorize the analyst harness or analyst LLM to change the repository assigned role `code`.
+These invariants apply to the receiving developer SDD in its own code workspace. The analyst harness may use only the protected `requirements-exchange/**` transfer operation defined in `core/developer-handoff.md`; it may never change product code.
 
 - Reconcile every requirement and scenario independently against one recorded code revision.
 - Existing, differently named, or partially implemented behavior is evidence, not a package-level failure.
 - Treat the input package as an immutable comparison point; never rewrite it to match the implementation.
 - Let the developer-side workflow choose the technical approach, order, design artifacts and commit split.
 - Continue all independent work and complete implementation, verification and commits that are feasible in the code repository.
-- Report every input item, remaining work and any additional delivery in the receipt without hiding scope differences.
-- Return baseline and requirement feedback in receipts; analyst review may happen later and never gates development or testing.
-- The canonical states and receipt contract are defined in `core/developer-handoff.md`.
+- Report every input item, remaining work and any additional delivery in the per-task result and final summary without hiding scope differences.
+- Return baseline and requirement feedback in the same revision's `returns/`; analyst review may happen later and never gates development or testing.
+- The canonical return contract is defined in `core/developer-handoff.md`.

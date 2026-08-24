@@ -15,20 +15,20 @@
 - `baseline`
 - `quarter`
 - `feature`
-- `slice`
+- `exchange revision`
 - `release`
 
 ## Main artifact types
 
 - `baseline snapshot`
 - `planning story`
-- `requirement pack`
+- `feature requirements document`
 - `scope prototype`
 - `delivery prototype`
-- `feature delivery package`
-- `development card`
-- `implementation receipt`
-- `slice test receipt`
+- `exchange manifest`
+- `agreed developer task list`
+- `developer task result`
+- `developer summary`
 - `implementation task`
 - `release package`
 - `domain impact note`

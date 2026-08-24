@@ -58,7 +58,7 @@ def repository_entry(registry: dict, repository_id: str) -> dict:
             }
             if (
                 not isinstance(policy, dict)
-                or policy.get("allowed_paths") != []
+                or policy.get("allowed_paths") not in ([], ["requirements-exchange/**"])
                 or policy.get("user_prompt_can_override") is not False
             ):
                 raise ValueError(f"Для {repository_id} задана небезопасная политика записи")
