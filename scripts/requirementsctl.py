@@ -111,6 +111,16 @@ def migrate_state(payload: dict[str, Any], feature: str) -> dict[str, Any]:
     origin = last_change.get("origin")
     if origin == "developer-receipt":
         origin = "developer-result"
+    published = payload.get("last_published")
+    if isinstance(published, dict) and not isinstance(published.get("manifest_path"), str):
+        package_id = published.get("package_id")
+        if isinstance(package_id, str) and package_id:
+            published = {
+                **published,
+                "manifest_path": f"features/{feature}/handoffs/{package_id}/handoff.json",
+                "destination_role": "analytics",
+                "legacy_format": "feature-handoff",
+            }
     migrated = {
         "schema_version": 3,
         "feature": feature,
@@ -126,7 +136,7 @@ def migrate_state(payload: dict[str, Any], feature: str) -> dict[str, Any]:
             "offered_at": None,
             "reason": "Состояние перенесено на новый формат обмена",
         },
-        "last_published": payload.get("last_published"),
+        "last_published": published,
         "delivery_audit": empty_audit(),
     }
     if migrated["revision_offer"].get("state") == "preparation-authorized":

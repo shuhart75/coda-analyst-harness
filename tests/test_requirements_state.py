@@ -127,6 +127,27 @@ class RequirementsStateTests(unittest.TestCase):
             self.assertEqual(migrated["state"]["revision_offer"]["state"], "audit-required")
             self.assertEqual(migrated["state"]["delivery_audit"]["state"], "required")
 
+    def test_legacy_handoff_publication_is_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, feature = self.project(Path(temp))
+            state_path = feature / "requirements-state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["schema_version"] = 1
+            state["last_published"] = {
+                "package_id": "demo-delivery",
+                "revision": 1,
+                "requirements_sha256": state["requirements_sha256"],
+                "published_at": "2026-08-15T15:33:23+00:00",
+            }
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            migrated = self.command(SCRIPT, "status", str(project), "demo")
+            published = migrated["state"]["last_published"]
+            self.assertEqual(published["legacy_format"], "feature-handoff")
+            self.assertEqual(
+                published["manifest_path"],
+                "features/demo/handoffs/demo-delivery/handoff.json",
+            )
+
     def test_audit_confirmation_is_required_and_bound_to_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project, feature = self.project(Path(temp))
