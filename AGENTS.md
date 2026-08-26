@@ -170,7 +170,10 @@ Context summaries, checkpoints and research files are internal harness operation
 - Read SberTrek first as the primary source. Use Jira only to fill missing fields and merge history. A conflicting populated Jira field never silently replaces SberTrek.
 - Treat epic and release as independent grouping dimensions. Never infer that an epic equals an analytical feature without an explicit mapping.
 - Apply the handoff rule only to tracker types explicitly configured as development work items; this may include a tracker Story. An explicit excluded or completed status takes precedence. Otherwise infer development completion only from history proving the latest handoff from a mapped developer to a mapped non-developer.
-- Starting from known task keys, inspect the other tasks in each discovered epic as bounded candidates. Analyze their title and description; propose directly evidenced matches and ask about ambiguous matches. Report releases missing from actual-progress as proposals only.
+- Starting from known task keys, record one analytical `seed_evidence` source per seed, then inspect the other tasks in each discovered epic as bounded candidates. A text-search hit is not a seed. Analyze candidate title and description; propose directly evidenced matches and ask about ambiguous matches. Report releases missing from actual-progress as proposals only.
+- Run the exact `config-status -> begin -> reconcile` protocol from `core/tracker-reading.md`. Ask every returned configuration or participant question one at a time. Never continue after a guard error, mark a collection capability complete without calling it, or reconcile a default/empty configuration.
+- Direct-read every declared counterpart key and record whether it was found. Preserve provider timestamps exactly. A search result alone does not prove complete history, epic, release or counterpart collection.
+- Present counts and limitations directly from `trackerctl` output and `report.md`; never recount discrepancies manually. A non-empty `limitations` list must be visible to the analyst.
 - The read command may write only ignored runtime artifacts under `.workspace-state/tracker-runs/`. It must not change trackers, `PROJECT_ROOT`, requirements, plans, actual-progress or Git state.
 
 ## Repository exchange policy

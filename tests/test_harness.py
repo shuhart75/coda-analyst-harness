@@ -367,6 +367,10 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("Трекеры задач: только чтение", commands)
             self.assertTrue((ROOT / "core/tracker-reading.md").exists())
             self.assertTrue((ROOT / "scripts/trackerctl.py").exists())
+            tracker_contract = (ROOT / "core/tracker-reading.md").read_text(encoding="utf-8")
+            self.assertIn("config-status", tracker_contract)
+            self.assertIn("collection.not_found_keys", tracker_contract)
+            self.assertIn("пересчитывать или пересказывать", tracker_contract)
 
     def test_requirements_profile_validator_checks_opted_in_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
