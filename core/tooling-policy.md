@@ -7,6 +7,9 @@ Prefer the simplest tool that preserves auditability.
 - Use markdown as the source of truth for planning, requirements, execution mapping and release notes.
 - Use generated PlantUML only for gantt rendering, not for storing semantic mapping.
 - Keep raw evidence in `context/source-materials/`.
+- Keep transient MCP task-tracker snapshots under ignored
+  `.workspace-state/tracker-runs/`; do not copy them into project source materials
+  during the read-only tracker phase.
 
 ## Validation discipline
 

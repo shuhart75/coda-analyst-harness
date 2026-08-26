@@ -363,6 +363,10 @@ class HarnessTests(unittest.TestCase):
             commands = (ROOT / "templates/workflow/command-catalog.template.md").read_text(encoding="utf-8")
             self.assertIn("проверь формулировки требований", commands)
             self.assertIn("validate-requirements-wording.py", commands)
+            self.assertIn("сверь SberTrek и Jira", commands)
+            self.assertIn("Трекеры задач: только чтение", commands)
+            self.assertTrue((ROOT / "core/tracker-reading.md").exists())
+            self.assertTrue((ROOT / "scripts/trackerctl.py").exists())
 
     def test_requirements_profile_validator_checks_opted_in_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

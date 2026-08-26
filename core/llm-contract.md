@@ -209,6 +209,16 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - Analyst code inspection improves the requirement input but does not replace the receiving SDD's comparison against its current code before decomposition and implementation.
 - Only the user-owner may mark requirements as approved. Record the approver and date, and create a new revision for later semantic changes.
 
+## Read-only task tracker rules
+
+- Follow `core/tracker-reading.md` for every MCP-backed task lookup or comparison.
+- Resolve SberTrek and Jira by available capabilities, not by a persisted MCP server name.
+- SberTrek is primary. Jira only fills absent fields, adds non-duplicate history events and exposes conflicts.
+- Epic and release are independent task groupings. Neither grouping automatically defines an analytical feature.
+- Development completion by reassignment requires explicit participant-role mapping and history proving the latest developer-to-non-developer handoff. Explicit excluded or completed statuses override this inference. Apply it to configured development work-item types, which may include a tracker Story.
+- Expand known tasks through their epics as bounded candidates, analyze title and description, and surface ambiguous membership to the analyst. Missing releases are proposals for later actual-progress application, not read-time writes.
+- Tracker reading writes only ignored `.workspace-state/tracker-runs/` evidence and never changes a tracker, analytical artifact, repository branch or Git index.
+
 ## Fast consistency sweep for requirement edits
 
 When a requirement change replaces one variant with another, remove stale tails in the same turn instead of leaving conflicting old wording behind.

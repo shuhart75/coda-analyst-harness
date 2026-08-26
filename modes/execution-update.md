@@ -34,6 +34,14 @@ Track real work after planning.
 
 When a returned developer task is materialized into real work, keep `returns/tasks.md` as the factual source. The analyst may use or replace optional developer estimates and may link Jira keys, but does not edit the returned decomposition or block development.
 
+## Read-only tracker evidence
+
+Reading SberTrek and Jira follows `core/tracker-reading.md` and does not itself
+switch mode or authorize changes to execution artifacts. SberTrek is primary; Jira
+fills only missing values and contributes history. The read report groups the same
+tasks independently by epic and by release. Applying selected facts to
+actual-progress is a separate, not-yet-authorized operation.
+
 ## Actual-progress scheduling rules
 
 - Do not hand-edit generated actual-progress PlantUML for task dates. Update execution markdown, then regenerate the gantt.
