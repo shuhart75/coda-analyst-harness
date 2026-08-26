@@ -343,6 +343,7 @@ class HarnessTests(unittest.TestCase):
             active = (ROOT / "templates/requirements/feature-requirements.template.md").read_text(encoding="utf-8")
             legacy = (ROOT / "templates/requirements/feature-requirements.readable.template.md").read_text(encoding="utf-8")
             self.assertIn("Формат: **компактная спецификация функциональности**", active)
+            self.assertNotIn("Статус:", active)
             self.assertIn("### REQ-<FEATURE>-001", active)
             self.assertIn("#### Сценарий:", active)
             self.assertIn("**Когда**", active)
@@ -370,7 +371,6 @@ class HarnessTests(unittest.TestCase):
             requirements.parent.mkdir(parents=True)
             requirements.write_text(
                 "# Требования\n\n"
-                "Статус: **черновик**\n"
                 "Редакция: `1`\n"
                 "Формат: **компактная спецификация функциональности**\n"
                 "Функциональность: `demo`\n\n"

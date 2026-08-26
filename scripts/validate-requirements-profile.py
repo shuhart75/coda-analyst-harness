@@ -97,16 +97,18 @@ def validate(path: Path) -> list[str]:
 
     metadata = {
         prefix: metadata_value(text, prefix)
-        for prefix in ("Редакция:", "Статус:", "Функциональность:")
+        for prefix in ("Редакция:", "Функциональность:")
     }
     for prefix, value in metadata.items():
         if not value:
             errors.append(f"отсутствуют метаданные: {prefix}")
     if "<" in metadata.get("Редакция:", ""):
         errors.append("номер редакции должен быть заполнен")
-    status = metadata.get("Статус:", "").strip("*` ").lower()
-    if status not in {"черновик", "утверждён"}:
-        errors.append("статус должен быть равен черновик или утверждён")
+    if re.search(r"^Статус:\s*", text, re.MULTILINE):
+        errors.append(
+            "компактный requirements.md не должен содержать Статус: "
+            "состояния хранятся в requirements-state.json и manifest.json"
+        )
 
     definitions = requirement_bodies(text)
     identifiers = [identifier for identifier, _ in definitions]

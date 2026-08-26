@@ -112,7 +112,7 @@ If the user asks for work outside the active mode, either switch mode explicitly
 - `implementation task` is an execution tracking unit. It should match Jira naming where possible and includes estimate, dates, executor, status and progress.
 - The sole authored requirement source is `features/<feature>/requirements.md`.
 - An exchange revision lives under `requirements-exchange/<feature>/revisions/<NNN>/`. Its input contains only immutable `requirements.md`; `manifest.json` at feature level selects the active revision and requests returns.
-- In configured multi-user mode, ordinary analytical edits live in `feature/<feature>/<analyst>` and packages may be created only from an up-to-date `analytics/main` after the feature branch has been accepted by a human merge request. A feature branch never participates directly in source exchange or reverse-patch generation.
+- In configured multi-user mode, ordinary analytical edits live in `feature/<feature>/<analyst>`; later cycles use the next free `-2`, `-3` suffix instead of deleting or overwriting historical branches. Packages may be created only from an up-to-date `analytics/main` after the feature branch has been accepted by a human merge request. A feature branch never participates directly in source exchange or reverse-patch generation.
 - `returns/tasks.md` is the already agreed developer decomposition. The analytical workflow does not own or confirm the agreement process.
 - Receiver-side context is disclosed progressively: feature `manifest.json`, active `requirements.md`, the selected contour's local SDD, matched code, then nearby tests. Do not load all of `coda` or both contours without a recorded dependency.
 - Analyst-side code inspection is progressive and strictly read-only. Resolve role `code` through `.workspace-state/code-repos.json`, snapshot it with `code-inspect.py begin`, inspect one contour and bounded matches, then prove that files, index, branch, `HEAD` and repository configuration are unchanged with `code-inspect.py verify`. The only write-path exception is the isolated `requirements-exchange.py prepare` publication described below; no user wording extends it.
@@ -186,6 +186,7 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - Write requirements by the harness template in `templates/requirements/`, not freeform.
 - Start from `features/<feature>/requirements.md` as the primary feature-level requirement page and only place where feature requirements are authored from scratch.
 - Use `templates/requirements/feature-requirements.template.md` for new or consciously migrated documents. Existing older documents remain readable history, but the live root must use the compact profile before its next exchange revision.
+- Do not add a `Статус` field to compact `requirements.md`. Read authoring and audit state from `requirements-state.json`, and the immutable delivery revision state from its exchange `manifest.json`.
 - Requirement diagrams must be PlantUML; do not introduce Mermaid blocks.
 - During ordinary requirement work, edit only the root `requirements.md`. Do not create exchange revisions after each change.
 - After changing the root document, record the change origin in `features/<feature>/requirements-state.json` through `scripts/requirementsctl.py record-change`.

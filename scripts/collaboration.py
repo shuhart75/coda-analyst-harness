@@ -206,6 +206,30 @@ def feature_branch(feature: str, analyst: str) -> str:
     return f"feature/{validate_slug(feature, 'Идентификатор функциональности')}/{validate_slug(analyst, 'Идентификатор аналитика')}"
 
 
+def next_feature_branch(repository: Path, feature: str, analyst: str) -> str:
+    base = feature_branch(feature, analyst)
+    for number in range(1, 1000):
+        candidate = base if number == 1 else f"{base}-{number}"
+        local_exists = git(
+            repository,
+            "show-ref",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{candidate}",
+        ).returncode == 0
+        remote_exists = git(
+            repository,
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "origin",
+            candidate,
+        ).returncode == 0
+        if not local_exists and not remote_exists:
+            return candidate
+    raise ValueError(f"Не удалось подобрать имя новой рабочей ветки для {feature}")
+
+
 def require_feature(repository: Path, feature: str) -> None:
     if not (repository / "features" / feature).is_dir():
         raise ValueError(f"Функциональность не найдена в analytics: features/{feature}")
@@ -333,11 +357,7 @@ def start_command(args: argparse.Namespace) -> int:
     feature = validate_slug(args.feature, "Идентификатор функциональности")
     require_feature(analytics, feature)
     remote = fetch_main(analytics)
-    target = feature_branch(feature, state["analyst_id"])
-    if git(analytics, "show-ref", "--verify", "--quiet", f"refs/heads/{target}").returncode == 0:
-        raise ValueError(f"Локальная рабочая ветка уже существует: {target}")
-    if git(analytics, "ls-remote", "--exit-code", "--heads", "origin", target).returncode == 0:
-        raise ValueError(f"Удалённая рабочая ветка уже существует: {target}")
+    target = next_feature_branch(analytics, feature, state["analyst_id"])
     switched = git(analytics, "switch", "--no-track", "-c", target, remote)
     if switched.returncode != 0:
         raise ValueError(f"Не удалось создать рабочую ветку {target}: {switched.stderr.strip()}")

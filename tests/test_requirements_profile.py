@@ -32,6 +32,15 @@ class RequirementsProfileTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Компактный профиль проверен: 1", result.stdout)
 
+    def test_duplicate_document_status_is_rejected(self) -> None:
+        text = requirements().replace(
+            "Редакция: `1`",
+            "Статус: **черновик**\nРедакция: `1`",
+        )
+        result = self.validate(text)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("не должен содержать Статус", result.stdout)
+
     def test_process_chapters_inside_requirements_are_accepted(self) -> None:
         text = requirements().replace(
             "### REQ-DEMO-001. Сохранение результата",

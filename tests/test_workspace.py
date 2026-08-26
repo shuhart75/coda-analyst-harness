@@ -1497,6 +1497,22 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(repository_sync.returncode, 0, repository_sync.stdout + repository_sync.stderr)
             self.assertEqual(json.loads(repository_sync.stdout)["sync_mode"], "source-analytics")
 
+            restarted = run(
+                sys.executable,
+                str(ROOT / "scripts/collaboration.py"),
+                "--root",
+                str(workspace),
+                "start",
+                "--feature",
+                feature,
+                env=environment,
+            )
+            self.assertEqual(restarted.returncode, 0, restarted.stdout + restarted.stderr)
+            self.assertEqual(
+                json.loads(restarted.stdout)["branch"],
+                "feature/registry/ivanov-2",
+            )
+
     def test_multi_user_migration_requires_feature_and_preserves_dirty_work(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
