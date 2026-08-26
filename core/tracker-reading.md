@@ -20,7 +20,8 @@ SberTrek является основным трекером. Jira использ
 
 Код возврата `3` и `must_stop: true` означают безусловную остановку. Единственное
 разрешённое следующее действие указано как `allowed_next_action: ask-user`: ответ
-LLM содержит только один текст из `next_question`. До сохранения ответа запрещены
+LLM дословно выводит `response_contract.text` и ничего больше: без вступления,
+пояснений, примеров и предлагаемых ответов. До сохранения ответа запрещены
 MCP-вызовы, поиск задач в аналитических файлах, создание списка внутренних задач,
 делегирование и предметная сводка. Команда сохранения ответа возвращает код `0` и
 следующий статус; если в нём снова `must_stop: true`, LLM задаёт только новый
@@ -61,7 +62,7 @@ LLM не зашивает имя MCP-сервера и не просит пол�
 - проекты SberTrek;
 - соответствующие проекты Jira, пока Jira используется;
 - способ однозначного сопоставления ключей, если синхронизация не сохраняет связь;
-- явные конечные и исключающие статусы, специфичные для команды;
+- явные конечные и исключающие статусы отдельно для SberTrek и Jira;
 - типы объектов трекера, являющиеся единицами разработки;
 - соответствие учётных записей обоих трекеров единому участнику и его роли.
 
@@ -85,8 +86,12 @@ python3 scripts/trackerctl.py set-projects --provider sbertrek RSCON
 python3 scripts/trackerctl.py set-jira-mode enabled
 python3 scripts/trackerctl.py set-projects --provider jira RSCON
 python3 scripts/trackerctl.py set-issue-types story task
-python3 scripts/trackerctl.py set-statuses --kind completed done resolved
-python3 scripts/trackerctl.py set-statuses --kind excluded cancelled deleted
+python3 scripts/trackerctl.py set-statuses --provider sbertrek --kind completed "Решен" "Выполнен"
+python3 scripts/trackerctl.py set-statuses --provider sbertrek --kind excluded "Отменен"
+python3 scripts/trackerctl.py set-statuses --provider jira --kind completed Done Resolved
+python3 scripts/trackerctl.py set-statuses --provider jira --kind excluded Cancelled
+# Если для провайдера нет таких статусов:
+python3 scripts/trackerctl.py set-statuses --provider jira --kind excluded --none
 python3 scripts/trackerctl.py complete-config
 ```
 
@@ -330,8 +335,10 @@ planning story не получает такой статус непосредс�
    обе группировки, дообогащённые поля, конфликты и неизвестные состояния.
 
 LLM не должна объявлять сверку завершённой после кода `3` от `config-status`, ошибки
-`begin`, валидации снимка или `reconcile`. Без успешного `reconcile` с тем же
-`run_id` запрещено сообщать любые предметные факты из трекеров. Числа в финальном
+`begin`, валидации снимка или `reconcile`. Любой ненулевой код либо
+`final_response_allowed: false` запрещает итог даже после фактического чтения MCP.
+Без успешного `reconcile` с `workflow_complete: true` для того же `run_id`
+запрещено сообщать любые предметные факты из трекеров. Числа в финальном
 сообщении копируются из `counts`; запрещено
 пересчитывать или пересказывать их по памяти. Если `limitations` непустой, фраза
 «ограничений полноты нет» запрещена.

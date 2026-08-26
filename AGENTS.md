@@ -10,10 +10,10 @@ This repository defines a reusable workflow harness.
 ## Mandatory tracker stop gate
 
 - Before any tracker MCP discovery, search, issue read, history read or delegation, run `python3 scripts/trackerctl.py config-status` as a standalone command. Do not pipe or filter it through `head`, `tail`, `grep`, `jq` or another command: the exit code is part of the guard contract.
-- Exit code `3` with `must_stop: true` permits exactly one next action: ask the analyst the single returned `next_question`. The reply must contain only that question. Do not call MCP tools, search analytical files for tasks, create a task list, delegate work or present tracker facts until the answer is saved and the gate becomes ready.
+- Exit code `3` with `must_stop: true` permits exactly one next action: ask the analyst the single returned `next_question`. Emit the exact `response_contract.text` and nothing else: no preface, explanation, examples, suggested answers or summary. Do not call MCP tools, search analytical files for tasks, create a task list, delegate work or present tracker facts until the answer is saved and the gate becomes ready.
 - Commands that save one configuration answer return exit code `0` and another status payload. When that payload still has `must_stop: true`, ask only its `next_question`; do not bypass it with discovery or reading.
 - Tracker MCP calls may start only after a ready status and successful `trackerctl.py begin` returning a `run_id`. The main agent performs all tracker reads itself; subagent delegation is forbidden for this workflow.
-- A tracker summary is allowed only after `trackerctl.py reconcile` returns `status: tracker-read-reconciled` for that `run_id`. Without it, report no task facts or manually assembled counts.
+- A tracker summary is allowed only after `trackerctl.py reconcile` returns `status: tracker-read-reconciled`, `workflow_complete: true` and `final_response_allowed: true` for that `run_id`. Any nonzero exit or `final_response_allowed: false` forbids a user-facing summary even when MCP data has already been read; perform only `allowed_next_action` and retry the guard.
 
 ## First launch and workspace ownership
 

@@ -383,10 +383,12 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("for that same `run_id`", llm_contract)
             agent_rules = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
             self.assertIn("Mandatory tracker stop gate", agent_rules)
-            self.assertIn("The reply must contain only that question", agent_rules)
+            self.assertIn("Emit the exact `response_contract.text` and nothing else", agent_rules)
             self.assertIn("subagent delegation is forbidden", agent_rules)
+            self.assertIn("final_response_allowed: false", agent_rules)
             readme = (ROOT / "README.md").read_text(encoding="utf-8")
             self.assertIn("код `3` и `must_stop: true` запрещают любые MCP-вызовы", readme)
+            self.assertIn("настраиваются отдельно для SberTrek и Jira", readme)
 
     def test_requirements_profile_validator_checks_opted_in_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

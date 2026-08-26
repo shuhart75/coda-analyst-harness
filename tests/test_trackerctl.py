@@ -56,8 +56,10 @@ class TrackerCtlTests(unittest.TestCase):
                 "qa-j": {"canonical_id": "Q1", "role": "tester"},
             },
         }
-        config["status_rules"]["completed"] = ["Выполнена"]
-        config["status_rules"]["excluded"] = ["Отменена", "Удалена"]
+        config["status_rules"]["sbertrek"]["completed"] = ["Выполнена"]
+        config["status_rules"]["sbertrek"]["excluded"] = ["Отменена", "Удалена"]
+        config["status_rules"]["jira"]["completed"] = ["Done"]
+        config["status_rules"]["jira"]["excluded"] = ["Cancelled"]
         self.write_json(path, config)
         return path
 
@@ -245,6 +247,9 @@ class TrackerCtlTests(unittest.TestCase):
                 started["run_id"],
             )
             output = json.loads(result.stdout)
+            self.assertTrue(output["workflow_complete"])
+            self.assertTrue(output["final_response_allowed"])
+            self.assertEqual(output["run_id"], started["run_id"])
             reconciled = json.loads(Path(output["result"]).read_text(encoding="utf-8"))
             issues = {issue["key"]: issue for issue in reconciled["issues"]}
 
@@ -464,9 +469,16 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertTrue(status["must_stop"])
             self.assertEqual(status["allowed_next_action"], "ask-user")
             self.assertEqual(status["next_question"], "Какие проекты SberTrek входят в область чтения?")
+            self.assertEqual(status["response_contract"]["text"], status["next_question"])
+            self.assertTrue(status["response_contract"]["additional_text_forbidden"])
+            self.assertTrue(status["response_contract"]["examples_forbidden"])
 
             blocked = self.run_tool(state, "begin", expected=2)
             self.assertIn("Первичная настройка трекеров не завершена", blocked.stderr)
+            blocked_payload = json.loads(blocked.stdout)
+            self.assertFalse(blocked_payload["workflow_complete"])
+            self.assertFalse(blocked_payload["final_response_allowed"])
+            self.assertEqual(blocked_payload["allowed_next_action"], "run-config-status")
             self.assertFalse((state / "tracker-runs").exists())
 
     def test_empty_legacy_config_is_migrated_back_to_unconfigured_state(self) -> None:
@@ -491,11 +503,45 @@ class TrackerCtlTests(unittest.TestCase):
             status = json.loads(self.run_tool(state, "config-status", expected=3).stdout)
             migrated = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertIn("development_issue_types", status["gaps"])
-            self.assertIn("status_rules.excluded", status["gaps"])
+            self.assertIn("status_rules.sbertrek.excluded", status["gaps"])
             self.assertEqual(migrated["development_issue_types"], [])
-            self.assertEqual(migrated["status_rules"]["excluded"], [])
+            self.assertEqual(migrated["schema_version"], 2)
+            self.assertIsNone(migrated["status_rules"]["sbertrek"]["excluded"])
+            self.assertIsNone(migrated["status_rules"]["jira"]["completed"])
             self.assertIsNone(migrated["jira_enabled"])
             self.assertFalse(migrated["setup_complete"])
+
+    def test_completed_v1_config_reopens_provider_specific_status_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            state.mkdir()
+            legacy = {
+                "schema_version": 1,
+                "primary_provider": "sbertrek",
+                "setup_complete": True,
+                "jira_enabled": True,
+                "projects": {"sbertrek": ["RSCON"], "jira": ["RSCON"]},
+                "issue_pairs": {},
+                "development_issue_types": ["story"],
+                "participants": {"sbertrek": {}, "jira": {}},
+                "status_rules": {
+                    "completed": ["Решен", "Done"],
+                    "excluded": ["Отменен", "Cancelled"],
+                },
+            }
+            config_path = state / "tracker-config.json"
+            self.write_json(config_path, legacy)
+
+            status = json.loads(self.run_tool(state, "config-status", expected=3).stdout)
+            migrated = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(status["gaps"][0], "status_rules.sbertrek.completed")
+            self.assertEqual(
+                status["next_question"],
+                "Какие статусы SberTrek однозначно означают завершение разработки?",
+            )
+            self.assertFalse(migrated["setup_complete"])
+            self.assertIsNone(migrated["status_rules"]["sbertrek"]["completed"])
+            self.assertIsNone(migrated["status_rules"]["jira"]["completed"])
 
     def test_configuration_commands_prepare_templates_without_project_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -513,8 +559,10 @@ class TrackerCtlTests(unittest.TestCase):
             self.run_tool(state, "set-jira-mode", "enabled")
             self.run_tool(state, "set-projects", "--provider", "jira", "JIRA")
             self.run_tool(state, "set-issue-types", "story", "task")
-            self.run_tool(state, "set-statuses", "--kind", "completed", "done", "resolved")
-            self.run_tool(state, "set-statuses", "--kind", "excluded", "cancelled", "deleted")
+            self.run_tool(state, "set-statuses", "--provider", "sbertrek", "--kind", "completed", "done", "resolved")
+            self.run_tool(state, "set-statuses", "--provider", "sbertrek", "--kind", "excluded", "cancelled", "deleted")
+            self.run_tool(state, "set-statuses", "--provider", "jira", "--kind", "completed", "done", "resolved")
+            self.run_tool(state, "set-statuses", "--provider", "jira", "--kind", "excluded", "cancelled", "deleted")
             completed = json.loads(self.run_tool(state, "complete-config").stdout)
             self.assertFalse(completed["must_stop"])
             self.assertEqual(completed["allowed_next_action"], "begin")
@@ -522,6 +570,7 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertEqual(ready["status"], "tracker-config-ready")
             self.assertFalse(ready["must_stop"])
             self.assertEqual(ready["allowed_next_action"], "begin")
+            self.assertIsNone(ready["response_contract"])
 
             started = json.loads(self.run_tool(state, "begin").stdout)
             sber = json.loads(Path(started["sbertrek_input"]).read_text(encoding="utf-8"))
@@ -529,6 +578,8 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertEqual(sber["collection"]["history"]["state"], "pending")
             self.assertEqual(sber["collection"]["counterpart_lookup"]["state"], "not-applicable")
             self.assertEqual(jira["collection"]["counterpart_lookup"]["state"], "pending")
+            self.assertFalse(started["workflow_complete"])
+            self.assertFalse(started["final_response_allowed"])
             self.assertFalse(started["project_changed"])
             self.assertFalse(started["tracker_changed"])
 
@@ -539,8 +590,8 @@ class TrackerCtlTests(unittest.TestCase):
             self.run_tool(state, "set-projects", "--provider", "sbertrek", "SBER")
             self.run_tool(state, "set-jira-mode", "disabled")
             self.run_tool(state, "set-issue-types", "story")
-            self.run_tool(state, "set-statuses", "--kind", "completed", "done")
-            self.run_tool(state, "set-statuses", "--kind", "excluded", "cancelled")
+            self.run_tool(state, "set-statuses", "--provider", "sbertrek", "--kind", "completed", "done")
+            self.run_tool(state, "set-statuses", "--provider", "sbertrek", "--kind", "excluded", "--none")
             self.run_tool(state, "complete-config")
 
             started = json.loads(self.run_tool(state, "begin").stdout)
@@ -565,6 +616,14 @@ class TrackerCtlTests(unittest.TestCase):
                 expected=2,
             )
             self.assertIn("complete, unavailable или not-applicable", result.stderr)
+            blocked = json.loads(result.stdout)
+            self.assertFalse(blocked["workflow_complete"])
+            self.assertFalse(blocked["final_response_allowed"])
+            self.assertEqual(
+                blocked["allowed_next_action"],
+                "repair-run-input-and-retry-reconcile",
+            )
+            self.assertEqual(blocked["required_success_status"], "tracker-read-reconciled")
 
     def test_text_search_result_cannot_be_promoted_to_seed_without_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -660,6 +719,13 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertIn("provider=sbertrek", result.stderr)
             self.assertIn("account_id=qa-s", result.stderr)
             self.assertIn("set-participant", result.stderr)
+            blocked = json.loads(result.stdout)
+            self.assertEqual(blocked["allowed_next_action"], "ask-user")
+            self.assertIn("qa-s", blocked["next_question"])
+            self.assertEqual(
+                blocked["response_contract"]["text"],
+                blocked["next_question"],
+            )
 
 
 if __name__ == "__main__":

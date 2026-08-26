@@ -13,6 +13,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
 CONFIG_INCOMPLETE_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
 ROLES = {"developer", "tester", "analyst", "other"}
@@ -35,7 +36,7 @@ RELEVANCE_VALUES = {
 }
 RUN_ID_PATTERN = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$")
 DEFAULT_CONFIG = {
-    "schema_version": SCHEMA_VERSION,
+    "schema_version": CONFIG_SCHEMA_VERSION,
     "primary_provider": "sbertrek",
     "setup_complete": False,
     "jira_enabled": None,
@@ -44,8 +45,8 @@ DEFAULT_CONFIG = {
     "development_issue_types": [],
     "participants": {"sbertrek": {}, "jira": {}},
     "status_rules": {
-        "completed": [],
-        "excluded": [],
+        provider: {"completed": None, "excluded": None}
+        for provider in PROVIDERS
     },
 }
 MERGED_FIELDS = (
@@ -135,15 +136,17 @@ def comparable_field(field: str, value: Any, provider: str, config: dict) -> Any
     return value
 
 
-def normalized_statuses(config: dict, name: str) -> set[str]:
-    values = config.get("status_rules", {}).get(name, [])
+def normalized_statuses(config: dict, provider: str, name: str) -> set[str]:
+    values = config.get("status_rules", {}).get(provider, {}).get(name)
+    if values is None:
+        return set()
     if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
-        raise ValueError(f"status_rules.{name} должен быть списком строк")
+        raise ValueError(f"status_rules.{provider}.{name} должен быть списком строк")
     return {value.strip().casefold() for value in values if value.strip()}
 
 
 def validate_config(payload: Any) -> dict:
-    if not isinstance(payload, dict) or payload.get("schema_version") != SCHEMA_VERSION:
+    if not isinstance(payload, dict) or payload.get("schema_version") != CONFIG_SCHEMA_VERSION:
         raise ValueError("Неподдерживаемая схема tracker-config.json")
     if payload.get("primary_provider") != "sbertrek":
         raise ValueError("Основным трекером должен оставаться sbertrek")
@@ -179,8 +182,22 @@ def validate_config(payload: Any) -> dict:
             previous = canonical_roles.setdefault(canonical_id, participant["role"])
             if previous != participant["role"]:
                 raise ValueError(f"Противоречащие роли участника {canonical_id}")
-    normalized_statuses(payload, "completed")
-    normalized_statuses(payload, "excluded")
+    status_rules = payload.get("status_rules", {})
+    if not isinstance(status_rules, dict):
+        raise ValueError("status_rules должен быть объектом")
+    for provider in PROVIDERS:
+        provider_rules = status_rules.get(provider)
+        if not isinstance(provider_rules, dict):
+            raise ValueError(f"status_rules.{provider} должен быть объектом")
+        for name in ("completed", "excluded"):
+            values = provider_rules.get(name)
+            if values is not None and (
+                not isinstance(values, list)
+                or not all(isinstance(value, str) and value.strip() for value in values)
+            ):
+                raise ValueError(
+                    f"status_rules.{provider}.{name} должен быть списком непустых строк или null"
+                )
     return payload
 
 
@@ -194,10 +211,13 @@ def base_config_gaps(config: dict, require_confirmation: bool = True) -> list[st
         gaps.append("projects.jira")
     if not config.get("development_issue_types"):
         gaps.append("development_issue_types")
-    if not config.get("status_rules", {}).get("completed"):
-        gaps.append("status_rules.completed")
-    if not config.get("status_rules", {}).get("excluded"):
-        gaps.append("status_rules.excluded")
+    status_rules = config.get("status_rules", {})
+    for provider in PROVIDERS:
+        if provider == "jira" and not config.get("jira_enabled"):
+            continue
+        for name in ("completed", "excluded"):
+            if status_rules.get(provider, {}).get(name) is None:
+                gaps.append(f"status_rules.{provider}.{name}")
     if require_confirmation and not config.get("setup_complete", False):
         gaps.append("setup_complete")
     return gaps
@@ -390,9 +410,12 @@ def role_of(value: Any, providers: list[str], config: dict) -> str:
 def development_state(issue: dict, config: dict) -> dict:
     status = str(issue.get("status") or "").strip()
     normalized = status.casefold()
-    if normalized in normalized_statuses(config, "excluded"):
+    status_provider = issue.get("field_sources", {}).get("status")
+    if status_provider not in PROVIDERS:
+        status_provider = "sbertrek"
+    if normalized in normalized_statuses(config, status_provider, "excluded"):
         return {"state": "excluded", "reason": f"явный статус {status}"}
-    if normalized in normalized_statuses(config, "completed"):
+    if normalized in normalized_statuses(config, status_provider, "completed"):
         return {"state": "completed-by-status", "reason": f"явный статус {status}"}
     development_types = {
         str(value).strip().casefold()
@@ -478,9 +501,12 @@ def participant_values(issue: dict) -> list[dict]:
 
 def first_unknown_participant(snapshots: list[tuple[str, dict]], config: dict) -> dict | None:
     configured_types = development_types(config)
-    terminal_statuses = normalized_statuses(config, "completed") | normalized_statuses(config, "excluded")
     unknown: dict[tuple[str, str], dict] = {}
     for provider, snapshot in snapshots:
+        terminal_statuses = (
+            normalized_statuses(config, provider, "completed")
+            | normalized_statuses(config, provider, "excluded")
+        )
         mapping = config.get("participants", {}).get(provider, {})
         for issue in snapshot.get("issues", []):
             if str(issue.get("issue_type") or "").strip().casefold() not in configured_types:
@@ -806,25 +832,38 @@ def init_config(force: bool) -> int:
 
 
 def migrate_legacy_config(config: Any) -> tuple[Any, bool]:
-    if not isinstance(config, dict) or "setup_complete" in config:
+    if not isinstance(config, dict) or config.get("schema_version") != 1:
         return config, False
-    migrated = dict(config)
-    migrated["setup_complete"] = False
-    projects = migrated.get("projects", {})
-    migrated["jira_enabled"] = True if isinstance(projects, dict) and projects.get("jira") else None
+    projects = config.get("projects", {})
     looks_like_empty_v1 = (
         projects == {"sbertrek": [], "jira": []}
-        and migrated.get("issue_pairs") == {}
-        and migrated.get("development_issue_types") == ["development-task"]
-        and migrated.get("participants") == {"sbertrek": {}, "jira": {}}
-        and migrated.get("status_rules") == {
+        and config.get("issue_pairs") == {}
+        and config.get("development_issue_types") == ["development-task"]
+        and config.get("participants") == {"sbertrek": {}, "jira": {}}
+        and config.get("status_rules") == {
             "completed": [],
             "excluded": ["Отменена", "Удалена"],
         }
     )
-    if looks_like_empty_v1:
-        migrated["development_issue_types"] = []
-        migrated["status_rules"] = {"completed": [], "excluded": []}
+    jira_enabled = config.get("jira_enabled")
+    if jira_enabled not in {True, False}:
+        jira_enabled = True if isinstance(projects, dict) and projects.get("jira") else None
+    migrated = {
+        "schema_version": CONFIG_SCHEMA_VERSION,
+        "primary_provider": "sbertrek",
+        "setup_complete": False,
+        "jira_enabled": jira_enabled,
+        "projects": projects if isinstance(projects, dict) else {"sbertrek": [], "jira": []},
+        "issue_pairs": config.get("issue_pairs", {}),
+        "development_issue_types": (
+            [] if looks_like_empty_v1 else config.get("development_issue_types", [])
+        ),
+        "participants": config.get("participants", {"sbertrek": {}, "jira": {}}),
+        "status_rules": {
+            provider: {"completed": None, "excluded": None}
+            for provider in PROVIDERS
+        },
+    }
     return migrated, True
 
 
@@ -843,18 +882,31 @@ def config_status_payload(config: dict) -> dict:
         "jira_enabled": "Jira доступна для дополнительного чтения на этой рабочей области?",
         "projects.jira": "Какие проекты Jira соответствуют выбранным проектам SberTrek?",
         "development_issue_types": "Какие типы объектов трекера являются единицами разработки?",
-        "status_rules.completed": "Какие статусы однозначно означают завершение?",
-        "status_rules.excluded": "Какие статусы исключают задачу из выполнения?",
+        "status_rules.sbertrek.completed": "Какие статусы SberTrek однозначно означают завершение разработки?",
+        "status_rules.sbertrek.excluded": "Какие статусы SberTrek исключают задачу из выполнения?",
+        "status_rules.jira.completed": "Какие статусы Jira однозначно означают завершение разработки?",
+        "status_rules.jira.excluded": "Какие статусы Jira исключают задачу из выполнения?",
         "setup_complete": "Подтверждаете сохранённую базовую настройку трекеров?",
     }
     must_stop = bool(gaps)
+    next_question = questions.get(gaps[0]) if gaps else None
     return {
         "status": "tracker-config-ready" if not gaps else "tracker-config-incomplete",
         "path": str(config_path()),
         "gaps": gaps,
-        "next_question": questions.get(gaps[0]) if gaps else None,
+        "next_question": next_question,
         "must_stop": must_stop,
         "allowed_next_action": "ask-user" if must_stop else "begin",
+        "response_contract": (
+            {
+                "type": "exact-single-question",
+                "text": next_question,
+                "additional_text_forbidden": True,
+                "examples_forbidden": True,
+            }
+            if must_stop
+            else None
+        ),
     }
 
 
@@ -897,7 +949,13 @@ def set_issue_types_command(args: argparse.Namespace) -> int:
 
 def set_statuses_command(args: argparse.Namespace) -> int:
     config = load_config()
-    config["status_rules"][args.kind] = list(dict.fromkeys(args.statuses))
+    if args.none and args.statuses:
+        raise ValueError("--none нельзя использовать одновременно со списком статусов")
+    if not args.none and not args.statuses:
+        raise ValueError("Укажи статусы либо используй --none")
+    config["status_rules"][args.provider][args.kind] = (
+        [] if args.none else list(dict.fromkeys(args.statuses))
+    )
     config["setup_complete"] = False
     save_json(config_path(), config)
     print_config_status(config)
@@ -950,6 +1008,14 @@ def begin_command(_: argparse.Namespace) -> int:
         "sbertrek_input": str(sber_path),
         "jira_input": str(jira_path) if jira_path else None,
         "input_state": "templates-created; replace pending collection states with complete or unavailable",
+        "workflow_complete": False,
+        "final_response_allowed": False,
+        "allowed_next_action": "collect-and-write-snapshots",
+        "required_completion": {
+            "command": f"trackerctl.py reconcile --run-id {run_id}",
+            "status": "tracker-read-reconciled",
+            "run_id": run_id,
+        },
         "project_changed": False,
         "tracker_changed": False,
     }, ensure_ascii=False, indent=2))
@@ -998,6 +1064,9 @@ def reconcile_command(args: argparse.Namespace) -> int:
         "limitations": result["limitations"],
         "result": str(result_path),
         "report": str(report_path),
+        "workflow_complete": True,
+        "final_response_allowed": True,
+        "allowed_next_action": "present-report",
         "project_changed": False,
         "tracker_changed": False,
     }, ensure_ascii=False, indent=2))
@@ -1023,8 +1092,10 @@ def build_parser() -> argparse.ArgumentParser:
     set_issue_types.add_argument("issue_types", nargs="+")
     set_issue_types.set_defaults(handler=set_issue_types_command)
     set_statuses = subparsers.add_parser("set-statuses")
+    set_statuses.add_argument("--provider", choices=PROVIDERS, required=True)
     set_statuses.add_argument("--kind", choices=("completed", "excluded"), required=True)
-    set_statuses.add_argument("statuses", nargs="+")
+    set_statuses.add_argument("--none", action="store_true")
+    set_statuses.add_argument("statuses", nargs="*")
     set_statuses.set_defaults(handler=set_statuses_command)
     set_participant = subparsers.add_parser("set-participant")
     set_participant.add_argument("--provider", choices=PROVIDERS, required=True)
@@ -1050,6 +1121,46 @@ def main() -> int:
     try:
         return args.handler(args)
     except ValueError as exc:
+        if args.command in {"begin", "reconcile"}:
+            run_id = getattr(args, "run_id", None)
+            allowed_next_action = (
+                "run-config-status" if args.command == "begin" else "repair-run-input-and-retry-reconcile"
+            )
+            next_question = None
+            participant_match = re.search(
+                r"provider=([^,]+), account_id=([^,]+), name=(.+?)\. Задай аналитику",
+                str(exc),
+            )
+            if participant_match:
+                allowed_next_action = "ask-user"
+                provider, account_id, name = participant_match.groups()
+                next_question = (
+                    f"Какой canonical_id и какая роль соответствуют участнику {name} "
+                    f"({provider}, account_id={account_id})?"
+                )
+            payload = {
+                "status": "tracker-read-blocked",
+                "run_id": run_id,
+                "error": str(exc),
+                "must_stop": True,
+                "workflow_complete": False,
+                "final_response_allowed": False,
+                "allowed_next_action": allowed_next_action,
+                "required_success_status": "tracker-read-reconciled",
+                "final_response_contract": (
+                    "Do not present tracker facts, counts or a summary. Complete the allowed next action "
+                    "and retry the guarded command."
+                ),
+            }
+            if next_question:
+                payload["next_question"] = next_question
+                payload["response_contract"] = {
+                    "type": "exact-single-question",
+                    "text": next_question,
+                    "additional_text_forbidden": True,
+                    "examples_forbidden": True,
+                }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
