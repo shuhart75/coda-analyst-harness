@@ -375,6 +375,11 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("status: tracker-read-reconciled", tracker_contract)
             self.assertIn("snapshot-metadata", tracker_contract)
             self.assertIn("snapshot-issue", tracker_contract)
+            self.assertIn("snapshot-not-found", tracker_contract)
+            self.assertIn("--team-id B1", tracker_contract)
+            self.assertIn("Один `team_id` может иметь не более одного account id", tracker_contract)
+            self.assertIn("доказательством вызова", tracker_contract)
+            self.assertIn("взаимно однозначно", tracker_contract)
             self.assertIn("run-status", tracker_contract)
             self.assertIn("Прочитанные напрямую данные MCP не являются отчётом", tracker_contract)
             self.assertIn("collection.not_found_keys", tracker_contract)
@@ -394,6 +399,8 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("код `3` и `must_stop: true` запрещают любые MCP-вызовы", readme)
             self.assertIn("настраиваются отдельно для SberTrek и Jira", readme)
             self.assertIn("После каждого MCP-ответа", readme)
+            self.assertIn("незакрытый seed", readme)
+            self.assertIn("Старые свободные маппинги участников очищаются", readme)
 
     def test_requirements_profile_validator_checks_opted_in_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -36,6 +36,14 @@ class TrackerCtlTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def restrict_to_issues(self, snapshot: dict, issues: list[dict]) -> None:
+        snapshot["issues"] = issues
+        seed_keys = [issue["key"] for issue in issues if issue.get("discovery") == "seed"]
+        snapshot["scope"]["seed_keys"] = seed_keys
+        snapshot["scope"]["seed_evidence"] = [
+            item for item in snapshot["scope"]["seed_evidence"] if item["key"] in seed_keys
+        ]
+
     def prepare_config(self, state: Path) -> Path:
         initialized = self.run_tool(state, "init-config")
         path = Path(json.loads(initialized.stdout)["path"])
@@ -47,13 +55,13 @@ class TrackerCtlTests(unittest.TestCase):
         config["development_issue_types"] = ["development-task", "Story"]
         config["participants"] = {
             "sbertrek": {
-                "dev-s": {"canonical_id": "B1", "role": "developer"},
-                "qa-s": {"canonical_id": "Q1", "role": "tester"},
-                "unknown": {"canonical_id": "U1", "role": "other"},
+                "dev-s": {"team_id": "BE1"},
+                "qa-s": {"team_id": "QA1"},
+                "unknown": {"team_id": "OTHER1"},
             },
             "jira": {
-                "dev-j": {"canonical_id": "B1", "role": "developer"},
-                "qa-j": {"canonical_id": "Q1", "role": "tester"},
+                "dev-j": {"team_id": "BE1"},
+                "qa-j": {"team_id": "QA1"},
             },
         }
         config["status_rules"]["sbertrek"]["completed"] = ["Выполнена"]
@@ -65,21 +73,24 @@ class TrackerCtlTests(unittest.TestCase):
 
     def collection(self, provider: str) -> dict:
         return {
-            "history": {"state": "complete", "reason": None},
-            "epic_links": {"state": "complete", "reason": None},
-            "release_links": {"state": "complete", "reason": None},
+            "history": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:history"]},
+            "epic_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:issue-fields"]},
+            "release_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:issue-fields"]},
             "counterpart_lookup": {
                 "state": "not-applicable" if provider == "sbertrek" else "complete",
                 "reason": None,
+                "failure_kind": None,
+                "evidence": [] if provider == "sbertrek" else ["mcp:direct-read"],
             },
-            "epic_neighbors": {"state": "complete", "reason": None},
+            "epic_neighbors": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:epic-search"]},
             "not_found_keys": [],
+            "not_found_evidence": [],
             "expanded_epic_keys": ["EPIC-1"],
         }
 
     def snapshots(self) -> tuple[dict, dict]:
         sber = {
-            "schema_version": 1,
+            "schema_version": 2,
             "provider": "sbertrek",
             "captured_at": "2026-08-26T10:00:00+00:00",
             "scope": {
@@ -169,7 +180,7 @@ class TrackerCtlTests(unittest.TestCase):
             ],
         }
         jira = {
-            "schema_version": 1,
+            "schema_version": 2,
             "provider": "jira",
             "captured_at": "2026-08-26T10:00:00+00:00",
             "scope": {
@@ -320,7 +331,7 @@ class TrackerCtlTests(unittest.TestCase):
             config["development_issue_types"] = ["development-task"]
             self.write_json(config_path, config)
             sber, _ = self.snapshots()
-            sber["issues"] = [sber["issues"][2]]
+            self.restrict_to_issues(sber, [sber["issues"][2]])
             sber_path = root / "sber.json"
             self.write_json(sber_path, sber)
 
@@ -349,7 +360,7 @@ class TrackerCtlTests(unittest.TestCase):
             sber, _ = self.snapshots()
             story = sber["issues"][2]
             story["status"] = "Выполнена"
-            sber["issues"] = [story]
+            self.restrict_to_issues(sber, [story])
             sber_path = root / "sber.json"
             self.write_json(sber_path, sber)
 
@@ -384,7 +395,7 @@ class TrackerCtlTests(unittest.TestCase):
                     "to": {"id": "dev-s"},
                 },
             ]
-            sber["issues"] = [issue]
+            self.restrict_to_issues(sber, [issue])
             sber_path = root / "sber.json"
             self.write_json(sber_path, sber)
 
@@ -416,13 +427,13 @@ class TrackerCtlTests(unittest.TestCase):
             )
             self.assertIn("должно иметь корректный at", result.stderr)
 
-    def test_invalid_participant_role_is_rejected(self) -> None:
+    def test_invalid_participant_team_id_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state = root / "state"
             config_path = self.prepare_config(state)
             config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["participants"]["sbertrek"]["dev-s"]["role"] = "backend"
+            config["participants"]["sbertrek"]["dev-s"]["team_id"] = "backend"
             self.write_json(config_path, config)
             sber, _ = self.snapshots()
             sber_path = root / "sber.json"
@@ -435,15 +446,15 @@ class TrackerCtlTests(unittest.TestCase):
                 str(sber_path),
                 expected=2,
             )
-            self.assertIn("Неизвестная роль", result.stderr)
+            self.assertIn("Командный идентификатор", result.stderr)
 
-    def test_conflicting_roles_for_one_participant_are_rejected(self) -> None:
+    def test_one_team_id_cannot_map_two_accounts_in_same_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state = root / "state"
             config_path = self.prepare_config(state)
             config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["participants"]["jira"]["dev-j"]["role"] = "tester"
+            config["participants"]["jira"]["another-dev"] = {"team_id": "BE1"}
             self.write_json(config_path, config)
             sber, _ = self.snapshots()
             sber_path = root / "sber.json"
@@ -456,7 +467,7 @@ class TrackerCtlTests(unittest.TestCase):
                 str(sber_path),
                 expected=2,
             )
-            self.assertIn("Противоречащие роли", result.stderr)
+            self.assertIn("назначен нескольким аккаунтам jira", result.stderr)
 
     def test_begin_blocks_default_config_until_interactive_setup_is_complete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -505,7 +516,7 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertIn("development_issue_types", status["gaps"])
             self.assertIn("status_rules.sbertrek.excluded", status["gaps"])
             self.assertEqual(migrated["development_issue_types"], [])
-            self.assertEqual(migrated["schema_version"], 2)
+            self.assertEqual(migrated["schema_version"], 3)
             self.assertIsNone(migrated["status_rules"]["sbertrek"]["excluded"])
             self.assertIsNone(migrated["status_rules"]["jira"]["completed"])
             self.assertIsNone(migrated["jira_enabled"])
@@ -657,6 +668,7 @@ class TrackerCtlTests(unittest.TestCase):
                     "--provider", "sbertrek",
                     "--capability", capability,
                     "--state", "complete",
+                    "--evidence", f"mcp:{capability}",
                 )
 
             self.run_tool(
@@ -690,6 +702,7 @@ class TrackerCtlTests(unittest.TestCase):
                     "--provider", "jira",
                     "--capability", capability,
                     "--state", "complete",
+                    "--evidence", f"mcp:{capability}",
                 )
 
             progress = json.loads(
@@ -800,12 +813,14 @@ class TrackerCtlTests(unittest.TestCase):
             sber, _ = self.snapshots()
             issue = sber["issues"][3]
             issue["assignee"] = None
-            sber["issues"] = [issue]
+            self.restrict_to_issues(sber, [issue])
             sber["scope"]["expected_epic_keys"] = []
             sber["scope"]["expected_release_keys"] = []
             sber["collection"]["epic_links"] = {
                 "state": "unavailable",
                 "reason": "MCP не возвращает поле эпика",
+                "failure_kind": "capability-absent",
+                "evidence": ["mcp:schema-inspection"],
             }
             sber["collection"]["expanded_epic_keys"] = []
             sber_path = root / "sber.json"
@@ -826,29 +841,242 @@ class TrackerCtlTests(unittest.TestCase):
             config_path = self.prepare_config(state)
             config = json.loads(config_path.read_text(encoding="utf-8"))
             del config["participants"]["sbertrek"]["qa-s"]
+            del config["participants"]["sbertrek"]["dev-s"]
+            config["jira_enabled"] = False
             self.write_json(config_path, config)
             sber, _ = self.snapshots()
-            sber["issues"] = [sber["issues"][0]]
-            sber_path = root / "sber.json"
+            self.restrict_to_issues(sber, [sber["issues"][0]])
+            started = json.loads(self.run_tool(state, "begin").stdout)
+            run_id = started["run_id"]
+            sber_path = Path(started["sbertrek_input"])
             self.write_json(sber_path, sber)
 
             result = self.run_tool(
                 state,
                 "reconcile",
-                "--sbertrek",
-                str(sber_path),
+                "--run-id",
+                run_id,
                 expected=2,
             )
             self.assertIn("provider=sbertrek", result.stderr)
-            self.assertIn("account_id=qa-s", result.stderr)
+            self.assertIn("account_id=dev-s", result.stderr)
             self.assertIn("set-participant", result.stderr)
             blocked = json.loads(result.stdout)
             self.assertEqual(blocked["allowed_next_action"], "ask-user")
-            self.assertIn("qa-s", blocked["next_question"])
+            self.assertNotIn("next_command", blocked)
+            self.assertIn("dev-s", blocked["next_question"])
             self.assertEqual(
                 blocked["response_contract"]["text"],
                 blocked["next_question"],
             )
+            first_saved = json.loads(self.run_tool(
+                state,
+                "set-participant",
+                "--run-id", run_id,
+                "--provider", "sbertrek",
+                "--account-id", "dev-s",
+                "--team-id", "B1",
+            ).stdout)
+            self.assertEqual(first_saved["team_id"], "BE1")
+            self.assertEqual(first_saved["derived_role"], "developer")
+            self.assertEqual(first_saved["allowed_next_action"], "ask-user")
+            self.assertIn("qa-s", first_saved["next_question"])
+
+            second_saved = json.loads(self.run_tool(
+                state,
+                "set-participant",
+                "--run-id", run_id,
+                "--provider", "sbertrek",
+                "--account-id", "qa-s",
+                "--team-id", "QA1",
+            ).stdout)
+            self.assertEqual(second_saved["allowed_next_action"], "reconcile")
+            reconciled = json.loads(
+                self.run_tool(state, "reconcile", "--run-id", run_id).stdout
+            )
+            self.assertTrue(reconciled["final_response_allowed"])
+
+    def test_run_status_rejects_unresolved_seed_instead_of_empty_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            config_path = self.prepare_config(state)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["jira_enabled"] = False
+            self.write_json(config_path, config)
+            started = json.loads(self.run_tool(state, "begin").stdout)
+            run_id = started["run_id"]
+            self.run_tool(
+                state,
+                "snapshot-metadata",
+                "--run-id", run_id,
+                "--provider", "sbertrek",
+                "--captured-at", "2026-08-26T10:00:00+03:00",
+                "--query", "key = SBER-404",
+                "--seed-evidence", "SBER-404=features/demo/actual-progress.md",
+            )
+            for capability in ("history", "epic_links", "release_links", "epic_neighbors"):
+                self.run_tool(
+                    state,
+                    "snapshot-collection",
+                    "--run-id", run_id,
+                    "--provider", "sbertrek",
+                    "--capability", capability,
+                    "--state", "complete",
+                    "--evidence", f"mcp:{capability}",
+                )
+
+            status = json.loads(
+                self.run_tool(state, "run-status", "--run-id", run_id).stdout
+            )
+            self.assertEqual(status["status"], "tracker-run-incomplete")
+            self.assertIn("не прочитаны", status["snapshots"][0]["validation_error"])
+            blocked = self.run_tool(
+                state, "reconcile", "--run-id", run_id, expected=2
+            )
+            self.assertIn("SBER-404", blocked.stderr)
+
+    def test_not_found_requires_direct_read_evidence_and_resolves_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            config_path = self.prepare_config(state)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["jira_enabled"] = False
+            self.write_json(config_path, config)
+            started = json.loads(self.run_tool(state, "begin").stdout)
+            run_id = started["run_id"]
+            self.run_tool(
+                state,
+                "snapshot-metadata",
+                "--run-id", run_id,
+                "--provider", "sbertrek",
+                "--captured-at", "2026-08-26T10:00:00+03:00",
+                "--query", "key = SBER-404",
+                "--seed-evidence", "SBER-404=features/demo/actual-progress.md",
+            )
+            self.run_tool(
+                state,
+                "snapshot-not-found",
+                "--run-id", run_id,
+                "--provider", "sbertrek",
+                "--key", "SBER-404",
+                "--evidence", "mcp:issue.getByKey:404",
+            )
+            snapshot = json.loads(Path(started["sbertrek_input"]).read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["collection"]["not_found_keys"], ["SBER-404"])
+            self.assertEqual(
+                snapshot["collection"]["not_found_evidence"][0]["evidence"],
+                "mcp:issue.getByKey:404",
+            )
+
+    def test_collection_claim_requires_call_evidence_and_cannot_mean_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            self.prepare_config(state)
+            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
+            missing = self.run_tool(
+                state,
+                "snapshot-collection",
+                "--run-id", run_id,
+                "--provider", "jira",
+                "--capability", "history",
+                "--state", "complete",
+                expected=2,
+            )
+            self.assertIn("--evidence", missing.stderr)
+            skipped = self.run_tool(
+                state,
+                "snapshot-collection",
+                "--run-id", run_id,
+                "--provider", "jira",
+                "--capability", "history",
+                "--state", "unavailable",
+                "--failure-kind", "capability-absent",
+                "--reason", "Jira MCP не вызван",
+                "--evidence", "none",
+                expected=2,
+            )
+            self.assertIn("Пропущенный MCP-вызов", skipped.stderr)
+
+    def test_proactive_participant_mapping_without_pending_question_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            self.prepare_config(state)
+            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
+            result = self.run_tool(
+                state,
+                "set-participant",
+                "--run-id", run_id,
+                "--provider", "jira",
+                "--account-id", "invented",
+                "--team-id", "FE2",
+                expected=2,
+            )
+            self.assertIn("нет ожидающего вопроса", result.stderr)
+
+    def test_duplicate_counterpart_claims_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, jira = self.snapshots()
+            jira["issues"][1]["counterpart_key"] = "SBER-1"
+            sber_path = root / "sber.json"
+            jira_path = root / "jira.json"
+            self.write_json(sber_path, sber)
+            self.write_json(jira_path, jira)
+            result = self.run_tool(
+                state,
+                "reconcile",
+                "--sbertrek", str(sber_path),
+                "--jira", str(jira_path),
+                expected=2,
+            )
+            self.assertIn("несколько Jira-counterpart", result.stderr)
+
+    def test_counterpart_lookup_cannot_be_unavailable_after_counterpart_was_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, jira = self.snapshots()
+            jira["collection"]["counterpart_lookup"] = {
+                "state": "unavailable",
+                "reason": "Direct lookup returned a provider error",
+                "failure_kind": "call-failed",
+                "evidence": ["mcp:get-issue:error"],
+            }
+            sber_path = root / "sber.json"
+            jira_path = root / "jira.json"
+            self.write_json(sber_path, sber)
+            self.write_json(jira_path, jira)
+            result = self.run_tool(
+                state,
+                "reconcile",
+                "--sbertrek", str(sber_path),
+                "--jira", str(jira_path),
+                expected=2,
+            )
+            self.assertIn("нельзя объявить unavailable", result.stderr)
+
+    def test_version_two_config_discards_unguarded_participant_mappings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            path = self.prepare_config(state)
+            config = json.loads(path.read_text(encoding="utf-8"))
+            config["schema_version"] = 2
+            config["participants"] = {
+                "sbertrek": {"one": {"canonical_id": "FE2", "role": "developer"}},
+                "jira": {
+                    "two": {"canonical_id": "FE2", "role": "developer"},
+                    "three": {"canonical_id": "FE2", "role": "developer"},
+                },
+            }
+            self.write_json(path, config)
+            status = json.loads(self.run_tool(state, "config-status").stdout)
+            migrated = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "tracker-config-ready")
+            self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(migrated["participants"], {"sbertrek": {}, "jira": {}})
 
 
 if __name__ == "__main__":

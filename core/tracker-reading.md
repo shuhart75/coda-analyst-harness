@@ -64,7 +64,7 @@ LLM не зашивает имя MCP-сервера и не просит пол�
 - способ однозначного сопоставления ключей, если синхронизация не сохраняет связь;
 - явные конечные и исключающие статусы отдельно для SberTrek и Jira;
 - типы объектов трекера, являющиеся единицами разработки;
-- соответствие учётных записей обоих трекеров единому участнику и его роли.
+- соответствие учётных записей обоих трекеров командному идентификатору участника.
 
 Пустая настройка не является допустимым режимом чтения. Порядок обязателен:
 
@@ -95,34 +95,43 @@ python3 scripts/trackerctl.py set-statuses --provider jira --kind excluded --non
 python3 scripts/trackerctl.py complete-config
 ```
 
-Маппинг участника содержит отдельные account id SberTrek и Jira и одну роль:
-`developer`, `tester`, `analyst` или `other`. Роль не выводится из имени, статуса,
-эпика либо факта назначения. LLM запрашивает роль только для встреченного в текущей
-выборке неизвестного участника, по одному участнику за вопрос. До ответа account id
-остаётся `unknown`.
+Маппинг участника содержит отдельные account id SberTrek и Jira и один `team_id`
+из `PROJECT_ROOT/planning/team.md`. Допустимы полные формы `AN1`, `BE2`, `FE1`,
+`QA1` и короткие синонимы `A1`, `B2`, `F1`, `Q1`; CLI нормализует их к полной
+форме. Роль выводится только из префикса: `AN` — аналитик, `BE` и `FE` —
+разработчик, `QA` — тестировщик. Имя, статус, эпик и факт назначения не являются
+основанием ни для идентификатора, ни для роли. `OTHER1`/`O1` используется только
+после прямого ответа аналитика для участника вне этих четырёх ролей.
 
-Обе учётные записи связываются через единый `canonical_id`. Для участника из
-`PROJECT_ROOT/planning/team.md` используется его устойчивая дорожка, например `B1`
-или `Q1`. Одинаковый `canonical_id` не может иметь разные роли в двух трекерах.
+Один `team_id` может иметь не более одного account id каждого провайдера. Один и
+тот же участник может иметь по одной учётной записи SberTrek и Jira. Произвольные
+групповые обозначения вроде `FE2` для нескольких людей запрещены.
 
 После чтения снимков `reconcile` проверяет участников настроенных типов разработки.
-При неизвестной учётной записи он блокируется и сообщает ровно одного участника.
-LLM задаёт аналитику один вопрос, сохраняет ответ и повторяет `reconcile`:
+Для всех участников настроенных типов единиц разработки, включая задачи в конечном
+или исключённом статусе, `reconcile` проверяет маппинг. При неизвестной учётной
+записи он блокируется и сообщает ровно одного участника.
+LLM задаёт аналитику один вопрос и сохраняет ответ только для ожидающего участника
+и текущего `run_id`. Команда либо возвращает следующий точный вопрос, либо разрешает
+повторить `reconcile`. Так последовательно классифицируются все, а не только первый:
 
 ```bash
 python3 scripts/trackerctl.py set-participant \
-  --provider sbertrek --account-id 123 --canonical-id B1 --role developer
+  --run-id <run-id> --provider sbertrek --account-id 123 --team-id B1
 ```
 
-Молча назначать роль запрещено.
+Вызывать `set-participant` заранее, назначать роль вручную или отвечать за аналитика
+запрещено. После обновления схемы старые свободные маппинги удаляются и собираются
+повторно через этот барьер.
 
 ## Нормализованный снимок
 
-Каждый провайдер преобразуется в JSON схемы 1:
+Каждый провайдер преобразуется в JSON схемы 2. Снимок схемы 1 из незавершённого
+старого запуска не продолжается после обновления: LLM выполняет новый `begin`.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "provider": "sbertrek",
   "captured_at": "2026-08-26T00:00:00+00:00",
   "scope": {
@@ -136,12 +145,13 @@ python3 scripts/trackerctl.py set-participant \
     "expected_release_keys": []
   },
   "collection": {
-    "history": {"state": "complete", "reason": null},
-    "epic_links": {"state": "complete", "reason": null},
-    "release_links": {"state": "complete", "reason": null},
-    "counterpart_lookup": {"state": "not-applicable", "reason": null},
-    "epic_neighbors": {"state": "complete", "reason": null},
+    "history": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:history:PROJECT-1"]},
+    "epic_links": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:issue-read:PROJECT-1"]},
+    "release_links": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:issue-read:PROJECT-1"]},
+    "counterpart_lookup": {"state": "not-applicable", "reason": null, "failure_kind": null, "evidence": []},
+    "epic_neighbors": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:epic-search:EPIC-1"]},
     "not_found_keys": [],
+    "not_found_evidence": [],
     "expanded_epic_keys": ["EPIC-1"]
   },
   "issues": [
@@ -174,10 +184,10 @@ python3 scripts/trackerctl.py set-participant \
 `begin` сам создаёт оба шаблона с состояниями `pending`. LLM заменяет каждое такое
 состояние на:
 
-- `complete`, если соответствующая возможность действительно вызвана для всей
-  ограниченной выборки;
-- `unavailable` с непустой причиной, если MCP не предоставляет возможность или
-  вызов завершился ошибкой;
+- `complete` с непустым `evidence`, если соответствующая возможность действительно
+  вызвана для всей ограниченной выборки;
+- `unavailable` с `failure_kind`, непустой причиной и `evidence` фактической попытки,
+  если MCP не предоставляет возможность, запретил доступ или вызов завершился ошибкой;
 - `not-applicable` только для `counterpart_lookup` снимка SberTrek.
 
 ### Штатная запись результатов MCP
@@ -189,8 +199,9 @@ LLM не редактирует большой JSON-снимок вручную 
 ```bash
 python3 scripts/trackerctl.py snapshot-metadata --run-id <run-id> --provider sbertrek --captured-at <timestamp> --query <query> --seed-evidence KEY=SOURCE
 python3 scripts/trackerctl.py snapshot-issue --run-id <run-id> --provider sbertrek --key <key> --summary <summary> --issue-type <type> --status <status> --discovery <kind> --updated-at <timestamp>
+python3 scripts/trackerctl.py snapshot-not-found --run-id <run-id> --provider sbertrek --key <key> --evidence <mcp-call>
 python3 scripts/trackerctl.py snapshot-history --run-id <run-id> --provider sbertrek --key <key> --at <timestamp> --field assignee --from-id <id> --to-id <id>
-python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability history --state complete
+python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability history --state complete --evidence <mcp-call>
 python3 scripts/trackerctl.py run-status --run-id <run-id>
 python3 scripts/trackerctl.py reconcile --run-id <run-id>
 ```
@@ -199,7 +210,9 @@ python3 scripts/trackerctl.py reconcile --run-id <run-id>
 классификацию релевантности отдельными флагами из `--help`. Команда идемпотентно
 обновляет задачу по ключу и сохраняет уже записанную историю. `snapshot-collection`
 получает `complete` только после реального вызова соответствующей возможности MCP;
-при недоступности используется `unavailable --reason <причина>`. Перед
+при недоступности используется `unavailable --failure-kind <kind> --reason
+<причина> --evidence <mcp-call>`. Фраза «MCP не вызван» означает пропуск и не
+является недоступностью. Перед
 `reconcile` обязательный `run-status` должен вернуть `tracker-run-ready`.
 
 Прочитанные напрямую данные MCP не являются отчётом. Если LLM не записала их этими
@@ -214,6 +227,10 @@ python3 scripts/trackerctl.py reconcile --run-id <run-id>
 
 `scope.seed_keys` берётся из уже известных реальных задач аналитической фичи.
 Каждый ключ обязан иметь запись `seed_evidence` с путём аналитического источника.
+Каждый seed в снимке своего провайдера обязан быть либо записан через
+`snapshot-issue`, либо после прямого чтения записан через `snapshot-not-found` с
+доказательством вызова. Иначе `run-status` показывает ошибку, а пустой отчёт
+запрещён.
 Результат текстового поиска без такого источника не может стать `seed`: он получает
 `discovery: feature-search-candidate` и классификацию релевантности.
 Эпики и релизы, уже известные из actual-progress, записываются в
@@ -232,7 +249,7 @@ python3 scripts/trackerctl.py reconcile --run-id <run-id>
 
 ## Сопоставление задач
 
-SberTrek-задача связывается с Jira только однозначно, в порядке:
+SberTrek-задача связывается с Jira только взаимно однозначно, в порядке:
 
 1. явная пара из `tracker-config.json`;
 2. `counterpart_key` из SberTrek;
@@ -240,10 +257,16 @@ SberTrek-задача связывается с Jira только однозна
 4. полностью совпадающий ключ.
 
 Совпадение названия, исполнителя, эпика или релиза недостаточно.
+Одна Jira-задача не может быть counterpart нескольких SberTrek-задач, и наоборот.
+Противоречие между конфигурацией и любым из снимков блокирует сверку. Модель не
+назначает одну «похожую» SberTrek-задачу парой для нескольких Jira-задач.
 
 Каждый явный `counterpart_key` из SberTrek обязательно читается в Jira прямым
 запросом по ключу, даже если общий Jira-поиск его не вернул. При полном обходе
-отсутствующий ключ записывается в `collection.not_found_keys`. Результат различает:
+отсутствующий ключ записывается командой `snapshot-not-found`; она одновременно
+заполняет `collection.not_found_keys` и `not_found_evidence`. Если в Jira уже
+записаны прямые counterpart-связи, `counterpart_lookup=unavailable` противоречит
+снимку и блокируется. Результат различает:
 
 - `jira-pair-not-found` — прямой запрос выполнен, Jira подтвердила отсутствие;
 - `jira-pair-not-read` — прямой запрос недоступен или не завершён;
@@ -352,10 +375,12 @@ planning story не получает такой статус непосредс�
 4. выполнить `trackerctl.py begin` и получить `run_id` и заполненные шаблоны;
 5. прочитать ограниченную выборку главным агентом сначала из SberTrek, затем из Jira, включая
    историю, связи, прямые counterpart-ключи и соседей найденных эпиков;
-6. сохранить нормализованные входы только по возвращённым путям под
-   `.workspace-state/tracker-runs/<run-id>/input/`;
+6. сразу записать каждый ответ через `snapshot-*`, каждый not-found через
+   `snapshot-not-found`, а каждое состояние коллекции вместе с доказательством
+   вызова; затем получить готовый `run-status`;
 7. выполнить `trackerctl.py reconcile --run-id <run-id>`; при неизвестном участнике
-   задать один вопрос, сохранить роль и повторить команду;
+   дословно задать возвращённый вопрос, сохранить только `team_id`, задать следующий
+   возвращённый вопрос и продолжать, пока очередь не разрешит повторить `reconcile`;
 8. показать без ручного пересчёта сводку из `counts`, `limitations` и `report.md`,
    обе группировки, дообогащённые поля, конфликты и неизвестные состояния.
 

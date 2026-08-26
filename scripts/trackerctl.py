@@ -12,11 +12,23 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
-CONFIG_SCHEMA_VERSION = 2
+SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION = 3
 CONFIG_INCOMPLETE_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
-ROLES = {"developer", "tester", "analyst", "other"}
+TEAM_ID_PATTERN = re.compile(r"^(AN|A|BE|B|FE|F|QA|Q|OTHER|O)([1-9][0-9]*)$", re.IGNORECASE)
+TEAM_PREFIXES = {
+    "AN": ("AN", "analyst"),
+    "A": ("AN", "analyst"),
+    "BE": ("BE", "developer"),
+    "B": ("BE", "developer"),
+    "FE": ("FE", "developer"),
+    "F": ("FE", "developer"),
+    "QA": ("QA", "tester"),
+    "Q": ("QA", "tester"),
+    "OTHER": ("OTHER", "other"),
+    "O": ("OTHER", "other"),
+}
 COLLECTION_CAPABILITIES = (
     "history",
     "epic_links",
@@ -25,6 +37,11 @@ COLLECTION_CAPABILITIES = (
     "epic_neighbors",
 )
 COLLECTION_STATES = {"complete", "unavailable", "not-applicable"}
+COLLECTION_FAILURE_KINDS = {"capability-absent", "call-failed", "permission-denied"}
+SKIPPED_COLLECTION_REASON = re.compile(
+    r"(?:не\s+(?:вызван|вызывал|выполн|провер|прочитан|запрош)|not\s+(?:called|attempted|read)|skipped)",
+    re.IGNORECASE,
+)
 DISCOVERY_VALUES = {"seed", "counterpart", "epic-neighbor", "feature-search-candidate"}
 CANDIDATE_DISCOVERY_VALUES = {"epic-neighbor", "feature-search-candidate"}
 RELEVANCE_VALUES = {
@@ -125,7 +142,26 @@ def canonical_participant(value: Any, provider: str, config: dict) -> Any:
     if not isinstance(value, dict) or not isinstance(value.get("id"), str):
         return value
     participant = config.get("participants", {}).get(provider, {}).get(value["id"], {})
-    return participant.get("canonical_id") or value["id"]
+    return participant.get("team_id") or value["id"]
+
+
+def normalized_team_id(value: str) -> str:
+    match = TEAM_ID_PATTERN.fullmatch(value.strip())
+    if not match:
+        raise ValueError(
+            "Командный идентификатор должен иметь вид AN1/A1, BE2/B2, FE1/F1, "
+            "QA1/Q1 или OTHER1/O1"
+        )
+    prefix, number = match.groups()
+    canonical_prefix, _ = TEAM_PREFIXES[prefix.upper()]
+    return f"{canonical_prefix}{number}"
+
+
+def role_for_team_id(value: str) -> str:
+    normalized = normalized_team_id(value)
+    match = TEAM_ID_PATTERN.fullmatch(normalized)
+    assert match is not None
+    return TEAM_PREFIXES[match.group(1).upper()][1]
 
 
 def comparable_field(field: str, value: Any, provider: str, config: dict) -> Any:
@@ -166,22 +202,28 @@ def validate_config(payload: Any) -> dict:
     if not isinstance(issue_types, list) or not all(isinstance(value, str) for value in issue_types):
         raise ValueError("development_issue_types должен быть списком строк")
     participants = payload.get("participants", {})
-    canonical_roles: dict[str, str] = {}
+    team_roles: dict[str, str] = {}
     for provider in PROVIDERS:
         mapping = participants.get(provider, {}) if isinstance(participants, dict) else None
         if not isinstance(mapping, dict):
             raise ValueError(f"participants.{provider} должен быть объектом")
+        provider_accounts: dict[str, str] = {}
         for account, participant in mapping.items():
             if not isinstance(account, str) or not isinstance(participant, dict):
                 raise ValueError(f"Некорректный участник participants.{provider}")
-            canonical_id = participant.get("canonical_id")
-            if not isinstance(canonical_id, str) or not canonical_id.strip():
-                raise ValueError(f"Не задан canonical_id participants.{provider}.{account}")
-            if participant.get("role") not in ROLES:
-                raise ValueError(f"Неизвестная роль participants.{provider}.{account}")
-            previous = canonical_roles.setdefault(canonical_id, participant["role"])
-            if previous != participant["role"]:
-                raise ValueError(f"Противоречащие роли участника {canonical_id}")
+            team_id = participant.get("team_id")
+            if not isinstance(team_id, str) or normalized_team_id(team_id) != team_id:
+                raise ValueError(f"Не задан нормализованный team_id participants.{provider}.{account}")
+            derived_role = role_for_team_id(team_id)
+            previous_account = provider_accounts.setdefault(team_id, account)
+            if previous_account != account:
+                raise ValueError(
+                    f"team_id {team_id} назначен нескольким аккаунтам {provider}: "
+                    f"{previous_account}, {account}"
+                )
+            previous = team_roles.setdefault(team_id, derived_role)
+            if previous != derived_role:
+                raise ValueError(f"Противоречащая роль командного идентификатора {team_id}")
     status_rules = payload.get("status_rules", {})
     if not isinstance(status_rules, dict):
         raise ValueError("status_rules должен быть объектом")
@@ -238,9 +280,11 @@ def collection_template(provider: str) -> dict:
         capability: {
             "state": "not-applicable" if capability == "counterpart_lookup" and provider == "sbertrek" else "pending",
             "reason": None,
+            "failure_kind": None,
+            "evidence": [],
         }
         for capability in COLLECTION_CAPABILITIES
-    } | {"not_found_keys": [], "expanded_epic_keys": []}
+    } | {"not_found_keys": [], "not_found_evidence": [], "expanded_epic_keys": []}
 
 
 def snapshot_template(provider: str, config: dict) -> dict:
@@ -279,6 +323,22 @@ def validate_collection(payload: Any, provider: str) -> dict:
             )
         if item["state"] == "unavailable" and not str(item.get("reason") or "").strip():
             raise ValueError(f"collection.{capability}={item['state']} требует reason")
+        evidence = item.get("evidence", [])
+        if item["state"] != "not-applicable":
+            validate_string_list(evidence, f"collection.{capability}.evidence снимка {provider}")
+            if not evidence:
+                raise ValueError(
+                    f"collection.{capability}={item['state']} снимка {provider} требует доказательство MCP-вызова"
+                )
+        failure_kind = item.get("failure_kind")
+        if item["state"] == "unavailable" and failure_kind not in COLLECTION_FAILURE_KINDS:
+            raise ValueError(
+                f"collection.{capability}=unavailable снимка {provider} требует failure_kind"
+            )
+        if item["state"] != "unavailable" and failure_kind is not None:
+            raise ValueError(
+                f"collection.{capability} снимка {provider} не должна содержать failure_kind"
+            )
         if capability in {"history", "epic_links", "release_links", "epic_neighbors"} and item["state"] == "not-applicable":
             raise ValueError(f"collection.{capability} не может быть not-applicable для {provider}")
     counterpart_state = payload["counterpart_lookup"]["state"]
@@ -287,6 +347,25 @@ def validate_collection(payload: Any, provider: str) -> dict:
     if provider == "jira" and counterpart_state == "not-applicable":
         raise ValueError("collection.counterpart_lookup для jira не может быть not-applicable")
     validate_string_list(payload.get("not_found_keys", []), f"collection.not_found_keys снимка {provider}")
+    not_found_evidence = payload.get("not_found_evidence", [])
+    if not isinstance(not_found_evidence, list) or not all(
+        isinstance(item, dict)
+        and isinstance(item.get("key"), str)
+        and item["key"].strip()
+        and isinstance(item.get("evidence"), str)
+        and item["evidence"].strip()
+        for item in not_found_evidence
+    ):
+        raise ValueError(
+            f"collection.not_found_evidence снимка {provider} должен содержать key и evidence"
+        )
+    evidence_keys = {item["key"] for item in not_found_evidence}
+    missing_not_found_evidence = sorted(set(payload.get("not_found_keys", [])) - evidence_keys)
+    if missing_not_found_evidence:
+        raise ValueError(
+            f"Отсутствующие ключи снимка {provider} не имеют доказательства прямого чтения: "
+            + ", ".join(missing_not_found_evidence)
+        )
     validate_string_list(payload.get("expanded_epic_keys", []), f"collection.expanded_epic_keys снимка {provider}")
     return payload
 
@@ -353,6 +432,19 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
                 raise ValueError(f"Событие history задачи {issue['key']} должно иметь field")
             if timestamp_value(event.get("at")) is None:
                 raise ValueError(f"Событие history задачи {issue['key']} должно иметь корректный at")
+    not_found = set(payload["collection"].get("not_found_keys", []))
+    both_found_and_missing = sorted(seen & not_found)
+    if both_found_and_missing:
+        raise ValueError(
+            f"Ключи снимка {provider} одновременно найдены и отмечены отсутствующими: "
+            + ", ".join(both_found_and_missing)
+        )
+    unresolved_seeds = sorted(set(scope["seed_keys"]) - seen - not_found)
+    if unresolved_seeds:
+        raise ValueError(
+            f"Seed-ключи снимка {provider} не прочитаны и не отмечены not-found: "
+            + ", ".join(unresolved_seeds)
+        )
     if payload["collection"]["epic_neighbors"]["state"] == "complete":
         discovered_epics = issue_group_keys(issues, "epic")
         expanded_epics = set(payload["collection"].get("expanded_epic_keys", []))
@@ -397,8 +489,9 @@ def role_of(value: Any, providers: list[str], config: dict) -> str:
     if not isinstance(account, str) or not account:
         return "unknown"
     roles = {
-        config.get("participants", {}).get(provider, {}).get(account, {}).get("role")
+        role_for_team_id(config.get("participants", {}).get(provider, {}).get(account, {}).get("team_id"))
         for provider in providers
+        if config.get("participants", {}).get(provider, {}).get(account, {}).get("team_id")
     }
     roles.discard(None)
     if len(roles) != 1:
@@ -503,15 +596,9 @@ def first_unknown_participant(snapshots: list[tuple[str, dict]], config: dict) -
     configured_types = development_types(config)
     unknown: dict[tuple[str, str], dict] = {}
     for provider, snapshot in snapshots:
-        terminal_statuses = (
-            normalized_statuses(config, provider, "completed")
-            | normalized_statuses(config, provider, "excluded")
-        )
         mapping = config.get("participants", {}).get(provider, {})
         for issue in snapshot.get("issues", []):
             if str(issue.get("issue_type") or "").strip().casefold() not in configured_types:
-                continue
-            if str(issue.get("status") or "").strip().casefold() in terminal_statuses:
                 continue
             for value in participant_values(issue):
                 account = value.get("id")
@@ -522,6 +609,37 @@ def first_unknown_participant(snapshots: list[tuple[str, dict]], config: dict) -
                         "name": value.get("name"),
                     }
     return unknown[sorted(unknown)[0]] if unknown else None
+
+
+def participant_question(participant: dict) -> str:
+    return (
+        "Какой командный идентификатор из planning/team.md соответствует участнику "
+        f"{participant.get('name') or 'имя не указано'} "
+        f"({participant['provider']}, account_id={participant['account_id']})?"
+    )
+
+
+def pending_participant_path(run_id: str) -> Path:
+    return run_root(run_id) / "pending-participant.json"
+
+
+def save_pending_participant(run_id: str, participant: dict) -> dict:
+    pending = {
+        "run_id": run_id,
+        "provider": participant["provider"],
+        "account_id": participant["account_id"],
+        "name": participant.get("name"),
+        "next_question": participant_question(participant),
+    }
+    save_json(pending_participant_path(run_id), pending)
+    return pending
+
+
+def run_snapshots(run_id: str) -> list[tuple[str, dict]]:
+    snapshots = [("sbertrek", load_run_snapshot(run_id, "sbertrek")[1])]
+    if (run_root(run_id) / "input" / "jira.json").is_file():
+        snapshots.append(("jira", load_run_snapshot(run_id, "jira")[1]))
+    return snapshots
 
 
 def issue_group_keys(issues: list[dict], field: str) -> set[str]:
@@ -567,11 +685,55 @@ def collection_limitations(provider: str, snapshot: dict) -> list[str]:
     return limitations
 
 
+def validate_counterpart_uniqueness(
+    sber_snapshot: dict,
+    jira_snapshot: dict | None,
+    config: dict,
+) -> None:
+    claims_by_sber: dict[str, set[str]] = {}
+    claims_by_jira: dict[str, set[str]] = {}
+
+    def add_claim(sber_key: str, jira_key: str, source: str) -> None:
+        if not sber_key or not jira_key:
+            return
+        claims_by_sber.setdefault(sber_key, set()).add(jira_key)
+        claims_by_jira.setdefault(jira_key, set()).add(sber_key)
+        if len(claims_by_sber[sber_key]) > 1:
+            raise ValueError(
+                f"SberTrek-задача {sber_key} имеет несколько Jira-counterpart: "
+                f"{', '.join(sorted(claims_by_sber[sber_key]))}; источник {source}"
+            )
+        if len(claims_by_jira[jira_key]) > 1:
+            raise ValueError(
+                f"Jira-задача {jira_key} имеет несколько SberTrek-counterpart: "
+                f"{', '.join(sorted(claims_by_jira[jira_key]))}; источник {source}"
+            )
+
+    for sber_key, jira_key in config.get("issue_pairs", {}).items():
+        add_claim(sber_key, jira_key, "tracker-config.json")
+    for issue in sber_snapshot["issues"]:
+        counterpart = issue.get("counterpart_key")
+        if isinstance(counterpart, str) and counterpart:
+            add_claim(issue["key"], counterpart, f"SberTrek {issue['key']}")
+    for issue in (jira_snapshot or {}).get("issues", []):
+        counterpart = issue.get("counterpart_key")
+        if isinstance(counterpart, str) and counterpart:
+            add_claim(counterpart, issue["key"], f"Jira {issue['key']}")
+
+
 def validate_counterpart_lookup(sber_snapshot: dict, jira_snapshot: dict | None, config: dict) -> None:
     if jira_snapshot is None:
         return
     collection = jira_snapshot["collection"]
-    if collection["counterpart_lookup"]["state"] != "complete":
+    counterpart_state = collection["counterpart_lookup"]["state"]
+    if counterpart_state == "unavailable" and any(
+        issue.get("counterpart_key") for issue in jira_snapshot["issues"]
+    ):
+        raise ValueError(
+            "Jira-снимок содержит прямые counterpart-связи, поэтому counterpart_lookup "
+            "нельзя объявить unavailable"
+        )
+    if counterpart_state != "complete":
         return
     jira_keys = {issue["key"] for issue in jira_snapshot["issues"]}
     not_found = set(collection.get("not_found_keys", []))
@@ -832,8 +994,14 @@ def init_config(force: bool) -> int:
 
 
 def migrate_legacy_config(config: Any) -> tuple[Any, bool]:
-    if not isinstance(config, dict) or config.get("schema_version") != 1:
+    if not isinstance(config, dict) or config.get("schema_version") not in {1, 2}:
         return config, False
+    if config.get("schema_version") == 2:
+        migrated = dict(config)
+        migrated["schema_version"] = CONFIG_SCHEMA_VERSION
+        # Version 2 allowed guessed many-to-one mappings. Recollect them through guarded runs.
+        migrated["participants"] = {"sbertrek": {}, "jira": {}}
+        return migrated, True
     projects = config.get("projects", {})
     looks_like_empty_v1 = (
         projects == {"sbertrek": [], "jira": []}
@@ -858,7 +1026,8 @@ def migrate_legacy_config(config: Any) -> tuple[Any, bool]:
         "development_issue_types": (
             [] if looks_like_empty_v1 else config.get("development_issue_types", [])
         ),
-        "participants": config.get("participants", {"sbertrek": {}, "jira": {}}),
+        # Legacy participant entries used free-form ids and roles; recollect them safely.
+        "participants": {"sbertrek": {}, "jira": {}},
         "status_rules": {
             provider: {"completed": None, "excluded": None}
             for provider in PROVIDERS
@@ -964,19 +1133,56 @@ def set_statuses_command(args: argparse.Namespace) -> int:
 
 def set_participant_command(args: argparse.Namespace) -> int:
     config = load_config()
-    config["participants"][args.provider][args.account_id] = {
-        "canonical_id": args.canonical_id,
-        "role": args.role,
-    }
+    pending_path = pending_participant_path(args.run_id)
+    if not pending_path.is_file():
+        raise ValueError(
+            f"Для run_id={args.run_id} нет ожидающего вопроса об участнике; "
+            "сначала выполни reconcile"
+        )
+    pending = load_json(pending_path)
+    expected = (pending.get("provider"), pending.get("account_id"))
+    actual = (args.provider, args.account_id)
+    if actual != expected:
+        raise ValueError(
+            "Разрешено сохранить только участника из текущего ожидающего вопроса: "
+            f"provider={expected[0]}, account_id={expected[1]}"
+        )
+    team_id = normalized_team_id(args.team_id)
+    config["participants"][args.provider][args.account_id] = {"team_id": team_id}
     validate_config(config)
     save_json(config_path(), config)
-    print(json.dumps({
+    pending_path.unlink()
+    next_unknown = first_unknown_participant(run_snapshots(args.run_id), config)
+    payload = {
         "status": "tracker-participant-saved",
+        "run_id": args.run_id,
         "provider": args.provider,
         "account_id": args.account_id,
-        "canonical_id": args.canonical_id,
-        "role": args.role,
-    }, ensure_ascii=False, indent=2))
+        "team_id": team_id,
+        "derived_role": role_for_team_id(team_id),
+        "workflow_complete": False,
+        "final_response_allowed": False,
+    }
+    if next_unknown:
+        pending = save_pending_participant(args.run_id, next_unknown)
+        payload.update({
+            "must_stop": True,
+            "allowed_next_action": "ask-user",
+            "next_question": pending["next_question"],
+            "response_contract": {
+                "type": "exact-single-question",
+                "text": pending["next_question"],
+                "additional_text_forbidden": True,
+                "examples_forbidden": True,
+            },
+        })
+    else:
+        payload.update({
+            "must_stop": False,
+            "allowed_next_action": "reconcile",
+            "next_command": f"trackerctl.py reconcile --run-id {args.run_id}",
+        })
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1144,19 +1350,58 @@ def snapshot_history_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def snapshot_not_found_command(args: argparse.Namespace) -> int:
+    path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    if any(issue.get("key") == args.key for issue in snapshot["issues"]):
+        raise ValueError(f"Задача {args.key} уже записана как найденная")
+    if args.key not in snapshot["collection"]["not_found_keys"]:
+        snapshot["collection"]["not_found_keys"].append(args.key)
+    evidence = {"key": args.key, "evidence": args.evidence}
+    existing = next(
+        (
+            item
+            for item in snapshot["collection"]["not_found_evidence"]
+            if item.get("key") == args.key
+        ),
+        None,
+    )
+    if existing:
+        snapshot["collection"]["not_found_evidence"].remove(existing)
+    snapshot["collection"]["not_found_evidence"].append(evidence)
+    save_json(path, snapshot)
+    print(json.dumps({
+        "status": "tracker-snapshot-not-found-saved",
+        "run_id": args.run_id,
+        "provider": args.provider,
+        "key": args.key,
+        "final_response_allowed": False,
+        "allowed_next_action": "continue-collection",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def snapshot_collection_command(args: argparse.Namespace) -> int:
     if args.state == "unavailable" and not str(args.reason or "").strip():
         raise ValueError("state=unavailable требует --reason")
+    if args.state == "unavailable" and SKIPPED_COLLECTION_REASON.search(args.reason):
+        raise ValueError(
+            "Пропущенный MCP-вызов нельзя обозначать как unavailable; выполни вызов или зафиксируй его ошибку"
+        )
     if args.provider == "sbertrek" and args.capability == "counterpart_lookup":
         raise ValueError("counterpart_lookup для SberTrek уже имеет state=not-applicable")
+    if not args.evidence:
+        raise ValueError("complete/unavailable требует хотя бы одно --evidence реального MCP-вызова")
+    if args.state == "unavailable" and not args.failure_kind:
+        raise ValueError("state=unavailable требует --failure-kind")
+    if args.state == "complete" and args.failure_kind:
+        raise ValueError("state=complete нельзя сочетать с --failure-kind")
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
     snapshot["collection"][args.capability] = {
         "state": args.state,
         "reason": args.reason if args.state == "unavailable" else None,
+        "failure_kind": args.failure_kind if args.state == "unavailable" else None,
+        "evidence": list(dict.fromkeys(args.evidence)),
     }
-    for key in args.not_found_key:
-        if key not in snapshot["collection"]["not_found_keys"]:
-            snapshot["collection"]["not_found_keys"].append(key)
     for key in args.expanded_epic_key:
         if key not in snapshot["collection"]["expanded_epic_keys"]:
             snapshot["collection"]["expanded_epic_keys"].append(key)
@@ -1256,6 +1501,7 @@ def begin_command(_: argparse.Namespace) -> int:
             "snapshot-metadata",
             "snapshot-issue",
             "snapshot-history",
+            "snapshot-not-found",
             "snapshot-collection",
             "run-status",
         ],
@@ -1295,18 +1541,28 @@ def reconcile_command(args: argparse.Namespace) -> int:
     validate_snapshot_scope(sber, "sbertrek", config)
     if jira:
         validate_snapshot_scope(jira, "jira", config)
+    validate_counterpart_uniqueness(sber, jira, config)
     validate_counterpart_lookup(sber, jira, config)
     unknown = first_unknown_participant(
         [("sbertrek", sber)] + ([("jira", jira)] if jira else []),
         config,
     )
     if unknown:
+        if not args.run_id:
+            raise ValueError(
+                "Неизвестных участников можно уточнять только для запуска с --run-id"
+            )
+        save_pending_participant(args.run_id, unknown)
         raise ValueError(
-            "Не настроена роль участника: "
+            "Не задан team_id участника: "
             f"provider={unknown['provider']}, account_id={unknown['account_id']}, "
             f"name={unknown.get('name') or 'не указано'}. "
-            "Задай аналитику один вопрос и сохрани ответ командой set-participant."
+            "Задай аналитику один вопрос и сохрани ответ командой "
+            f"set-participant --run-id {args.run_id} --provider {unknown['provider']} "
+            f"--account-id {unknown['account_id']} --team-id <ID>."
         )
+    if args.run_id:
+        pending_participant_path(args.run_id).unlink(missing_ok=True)
     result = reconcile(sber, jira, config)
     run_id = args.run_id or new_run_id()
     output_root = run_root(run_id)
@@ -1357,10 +1613,10 @@ def build_parser() -> argparse.ArgumentParser:
     set_statuses.add_argument("statuses", nargs="*")
     set_statuses.set_defaults(handler=set_statuses_command)
     set_participant = subparsers.add_parser("set-participant")
+    set_participant.add_argument("--run-id", required=True)
     set_participant.add_argument("--provider", choices=PROVIDERS, required=True)
     set_participant.add_argument("--account-id", required=True)
-    set_participant.add_argument("--canonical-id", required=True)
-    set_participant.add_argument("--role", choices=sorted(ROLES), required=True)
+    set_participant.add_argument("--team-id", required=True)
     set_participant.set_defaults(handler=set_participant_command)
     snapshot_metadata = subparsers.add_parser("snapshot-metadata")
     snapshot_metadata.add_argument("--run-id", required=True)
@@ -1405,13 +1661,20 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_history.add_argument("--to-name")
     snapshot_history.add_argument("--to-value")
     snapshot_history.set_defaults(handler=snapshot_history_command)
+    snapshot_not_found = subparsers.add_parser("snapshot-not-found")
+    snapshot_not_found.add_argument("--run-id", required=True)
+    snapshot_not_found.add_argument("--provider", choices=PROVIDERS, required=True)
+    snapshot_not_found.add_argument("--key", required=True)
+    snapshot_not_found.add_argument("--evidence", required=True)
+    snapshot_not_found.set_defaults(handler=snapshot_not_found_command)
     snapshot_collection = subparsers.add_parser("snapshot-collection")
     snapshot_collection.add_argument("--run-id", required=True)
     snapshot_collection.add_argument("--provider", choices=PROVIDERS, required=True)
     snapshot_collection.add_argument("--capability", choices=COLLECTION_CAPABILITIES, required=True)
     snapshot_collection.add_argument("--state", choices=("complete", "unavailable"), required=True)
     snapshot_collection.add_argument("--reason")
-    snapshot_collection.add_argument("--not-found-key", action="append", default=[])
+    snapshot_collection.add_argument("--failure-kind", choices=sorted(COLLECTION_FAILURE_KINDS))
+    snapshot_collection.add_argument("--evidence", action="append", default=[])
     snapshot_collection.add_argument("--expanded-epic-key", action="append", default=[])
     snapshot_collection.set_defaults(handler=snapshot_collection_command)
     run_status = subparsers.add_parser("run-status")
@@ -1448,10 +1711,14 @@ def main() -> int:
             if participant_match:
                 allowed_next_action = "ask-user"
                 provider, account_id, name = participant_match.groups()
-                next_question = (
-                    f"Какой canonical_id и какая роль соответствуют участнику {name} "
-                    f"({provider}, account_id={account_id})?"
-                )
+                if run_id and pending_participant_path(run_id).is_file():
+                    next_question = load_json(pending_participant_path(run_id)).get("next_question")
+                if not next_question:
+                    next_question = participant_question({
+                        "provider": provider,
+                        "account_id": account_id,
+                        "name": name,
+                    })
             payload = {
                 "status": "tracker-read-blocked",
                 "run_id": run_id,
@@ -1466,7 +1733,7 @@ def main() -> int:
                     "and retry the guarded command."
                 ),
             }
-            if args.command == "reconcile" and run_id:
+            if args.command == "reconcile" and run_id and not next_question:
                 payload["next_command"] = f"trackerctl.py run-status --run-id {run_id}"
             if next_question:
                 payload["next_question"] = next_question
