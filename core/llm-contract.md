@@ -217,7 +217,10 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - Epic and release are independent task groupings. Neither grouping automatically defines an analytical feature.
 - Development completion by reassignment requires explicit participant-role mapping and history proving the latest developer-to-non-developer handoff. Explicit excluded or completed statuses override this inference. Apply it to configured development work-item types, which may include a tracker Story.
 - Expand known tasks through their epics as bounded candidates, analyze title and description, and surface ambiguous membership to the analyst. Missing releases are proposals for later actual-progress application, not read-time writes.
-- Treat `trackerctl config-status`, `begin` and `reconcile` as mandatory fail-closed gates. Do not proceed with an incomplete configuration, a pending collection capability, an unread direct counterpart or an unknown participant role.
+- Treat `trackerctl config-status`, `begin` and `reconcile` as mandatory fail-closed gates. Run `config-status` as a standalone command without `head`, `tail`, `grep`, `jq` or another pipeline that can hide its exit code.
+- On exit code `3` with `must_stop: true`, perform only `allowed_next_action: ask-user`: return exactly the single `next_question`. Do not call tracker MCP tools, search for task facts, create a task list, delegate work or present a tracker summary.
+- Start tracker MCP calls only after a ready configuration and successful `begin` returning a `run_id`. Do not delegate tracker reading. Present task facts only after `reconcile` returns `tracker-read-reconciled` for that same `run_id`.
+- Do not proceed with an incomplete configuration, a pending collection capability, an unread direct counterpart or an unknown participant role.
 - Copy tracker timestamps without changing their timezone. Report deterministic `counts` and `limitations` from trackerctl instead of manually reconstructing totals.
 - Tracker reading writes only ignored `.workspace-state/tracker-runs/` evidence and never changes a tracker, analytical artifact, repository branch or Git index.
 

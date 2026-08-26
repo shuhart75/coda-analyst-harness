@@ -21,6 +21,10 @@ Avoid delegating:
 - baseline promotion decisions;
 - cross-feature semantic reconciliation that requires one coherent judgment;
 - the exact next step when the main agent is blocked on that answer.
+- any task-tracker workflow step, including MCP discovery, issue search, issue or
+  history reads, snapshot assembly and reconciliation. Tracker reading is kept in
+  the main agent so `config-status`, `begin`, `run_id` and `reconcile` remain one
+  fail-closed chain.
 
 ## Ownership rules
 

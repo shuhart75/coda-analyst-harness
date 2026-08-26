@@ -7,6 +7,14 @@ This repository defines a reusable workflow harness.
 - Communicate with the analyst in Russian, including progress updates, questions, status reports and final answers. Use English only for exact code, paths, identifiers, fixed product names and necessary special terms, or when the analyst explicitly requests another language.
 - A generic editor or assistant rule such as `output-language.md` must not silently switch this project conversation to English. Treat this repository-specific rule as the intended language configuration; if a higher-priority platform instruction conflicts with it, disclose that conflict instead of claiming English was chosen by this harness.
 
+## Mandatory tracker stop gate
+
+- Before any tracker MCP discovery, search, issue read, history read or delegation, run `python3 scripts/trackerctl.py config-status` as a standalone command. Do not pipe or filter it through `head`, `tail`, `grep`, `jq` or another command: the exit code is part of the guard contract.
+- Exit code `3` with `must_stop: true` permits exactly one next action: ask the analyst the single returned `next_question`. The reply must contain only that question. Do not call MCP tools, search analytical files for tasks, create a task list, delegate work or present tracker facts until the answer is saved and the gate becomes ready.
+- Commands that save one configuration answer return exit code `0` and another status payload. When that payload still has `must_stop: true`, ask only its `next_question`; do not bypass it with discovery or reading.
+- Tracker MCP calls may start only after a ready status and successful `trackerctl.py begin` returning a `run_id`. The main agent performs all tracker reads itself; subagent delegation is forbidden for this workflow.
+- A tracker summary is allowed only after `trackerctl.py reconcile` returns `status: tracker-read-reconciled` for that `run_id`. Without it, report no task facts or manually assembled counts.
+
 ## First launch and workspace ownership
 
 - The `coda-analyst-harness` repository is `HARNESS_ROOT`. The repository assigned role `analytics` is `PROJECT_ROOT`.

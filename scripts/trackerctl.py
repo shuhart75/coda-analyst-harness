@@ -13,6 +13,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
+CONFIG_INCOMPLETE_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
 ROLES = {"developer", "tester", "analyst", "other"}
 COLLECTION_CAPABILITIES = (
@@ -835,8 +836,7 @@ def load_config() -> dict:
     return validated
 
 
-def config_status_command(_: argparse.Namespace) -> int:
-    config = load_config()
+def config_status_payload(config: dict) -> dict:
     gaps = base_config_gaps(config)
     questions = {
         "projects.sbertrek": "Какие проекты SberTrek входят в область чтения?",
@@ -847,13 +847,25 @@ def config_status_command(_: argparse.Namespace) -> int:
         "status_rules.excluded": "Какие статусы исключают задачу из выполнения?",
         "setup_complete": "Подтверждаете сохранённую базовую настройку трекеров?",
     }
-    print(json.dumps({
+    must_stop = bool(gaps)
+    return {
         "status": "tracker-config-ready" if not gaps else "tracker-config-incomplete",
         "path": str(config_path()),
         "gaps": gaps,
         "next_question": questions.get(gaps[0]) if gaps else None,
-    }, ensure_ascii=False, indent=2))
-    return 0
+        "must_stop": must_stop,
+        "allowed_next_action": "ask-user" if must_stop else "begin",
+    }
+
+
+def print_config_status(config: dict) -> None:
+    print(json.dumps(config_status_payload(config), ensure_ascii=False, indent=2))
+
+
+def config_status_command(_: argparse.Namespace) -> int:
+    config = load_config()
+    print_config_status(config)
+    return CONFIG_INCOMPLETE_EXIT if base_config_gaps(config) else 0
 
 
 def set_projects_command(args: argparse.Namespace) -> int:
@@ -861,7 +873,8 @@ def set_projects_command(args: argparse.Namespace) -> int:
     config["projects"][args.provider] = list(dict.fromkeys(args.projects))
     config["setup_complete"] = False
     save_json(config_path(), config)
-    return config_status_command(args)
+    print_config_status(config)
+    return 0
 
 
 def set_jira_mode_command(args: argparse.Namespace) -> int:
@@ -869,7 +882,8 @@ def set_jira_mode_command(args: argparse.Namespace) -> int:
     config["jira_enabled"] = args.mode == "enabled"
     config["setup_complete"] = False
     save_json(config_path(), config)
-    return config_status_command(args)
+    print_config_status(config)
+    return 0
 
 
 def set_issue_types_command(args: argparse.Namespace) -> int:
@@ -877,7 +891,8 @@ def set_issue_types_command(args: argparse.Namespace) -> int:
     config["development_issue_types"] = list(dict.fromkeys(args.issue_types))
     config["setup_complete"] = False
     save_json(config_path(), config)
-    return config_status_command(args)
+    print_config_status(config)
+    return 0
 
 
 def set_statuses_command(args: argparse.Namespace) -> int:
@@ -885,7 +900,8 @@ def set_statuses_command(args: argparse.Namespace) -> int:
     config["status_rules"][args.kind] = list(dict.fromkeys(args.statuses))
     config["setup_complete"] = False
     save_json(config_path(), config)
-    return config_status_command(args)
+    print_config_status(config)
+    return 0
 
 
 def set_participant_command(args: argparse.Namespace) -> int:
@@ -913,7 +929,7 @@ def complete_config_command(_: argparse.Namespace) -> int:
         raise ValueError("Нельзя завершить настройку; не заполнены: " + ", ".join(gaps))
     config["setup_complete"] = True
     save_json(config_path(), config)
-    print(json.dumps({"status": "tracker-config-ready", "path": str(config_path())}, ensure_ascii=False, indent=2))
+    print_config_status(config)
     return 0
 
 

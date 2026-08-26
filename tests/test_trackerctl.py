@@ -459,6 +459,12 @@ class TrackerCtlTests(unittest.TestCase):
             initialized = json.loads(self.run_tool(state, "init-config").stdout)
             self.assertFalse(initialized["setup_complete"])
 
+            status = json.loads(self.run_tool(state, "config-status", expected=3).stdout)
+            self.assertEqual(status["status"], "tracker-config-incomplete")
+            self.assertTrue(status["must_stop"])
+            self.assertEqual(status["allowed_next_action"], "ask-user")
+            self.assertEqual(status["next_question"], "Какие проекты SberTrek входят в область чтения?")
+
             blocked = self.run_tool(state, "begin", expected=2)
             self.assertIn("Первичная настройка трекеров не завершена", blocked.stderr)
             self.assertFalse((state / "tracker-runs").exists())
@@ -482,7 +488,7 @@ class TrackerCtlTests(unittest.TestCase):
             config_path = state / "tracker-config.json"
             self.write_json(config_path, legacy)
 
-            status = json.loads(self.run_tool(state, "config-status").stdout)
+            status = json.loads(self.run_tool(state, "config-status", expected=3).stdout)
             migrated = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertIn("development_issue_types", status["gaps"])
             self.assertIn("status_rules.excluded", status["gaps"])
@@ -495,13 +501,27 @@ class TrackerCtlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state"
             self.run_tool(state, "init-config")
-            self.run_tool(state, "set-projects", "--provider", "sbertrek", "SBER")
+            saved = json.loads(
+                self.run_tool(state, "set-projects", "--provider", "sbertrek", "SBER").stdout
+            )
+            self.assertTrue(saved["must_stop"])
+            self.assertEqual(saved["allowed_next_action"], "ask-user")
+            self.assertEqual(
+                saved["next_question"],
+                "Jira доступна для дополнительного чтения на этой рабочей области?",
+            )
             self.run_tool(state, "set-jira-mode", "enabled")
             self.run_tool(state, "set-projects", "--provider", "jira", "JIRA")
             self.run_tool(state, "set-issue-types", "story", "task")
             self.run_tool(state, "set-statuses", "--kind", "completed", "done", "resolved")
             self.run_tool(state, "set-statuses", "--kind", "excluded", "cancelled", "deleted")
-            self.run_tool(state, "complete-config")
+            completed = json.loads(self.run_tool(state, "complete-config").stdout)
+            self.assertFalse(completed["must_stop"])
+            self.assertEqual(completed["allowed_next_action"], "begin")
+            ready = json.loads(self.run_tool(state, "config-status").stdout)
+            self.assertEqual(ready["status"], "tracker-config-ready")
+            self.assertFalse(ready["must_stop"])
+            self.assertEqual(ready["allowed_next_action"], "begin")
 
             started = json.loads(self.run_tool(state, "begin").stdout)
             sber = json.loads(Path(started["sbertrek_input"]).read_text(encoding="utf-8"))
