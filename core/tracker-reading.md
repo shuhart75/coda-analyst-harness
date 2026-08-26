@@ -180,6 +180,31 @@ python3 scripts/trackerctl.py set-participant \
   вызов завершился ошибкой;
 - `not-applicable` только для `counterpart_lookup` снимка SberTrek.
 
+### Штатная запись результатов MCP
+
+LLM не редактирует большой JSON-снимок вручную и не откладывает нормализацию до
+конца поиска. После `begin` она использует возвращённый `run_id` и сразу после
+каждого MCP-ответа вызывает короткую команду записи:
+
+```bash
+python3 scripts/trackerctl.py snapshot-metadata --run-id <run-id> --provider sbertrek --captured-at <timestamp> --query <query> --seed-evidence KEY=SOURCE
+python3 scripts/trackerctl.py snapshot-issue --run-id <run-id> --provider sbertrek --key <key> --summary <summary> --issue-type <type> --status <status> --discovery <kind> --updated-at <timestamp>
+python3 scripts/trackerctl.py snapshot-history --run-id <run-id> --provider sbertrek --key <key> --at <timestamp> --field assignee --from-id <id> --to-id <id>
+python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability history --state complete
+python3 scripts/trackerctl.py run-status --run-id <run-id>
+python3 scripts/trackerctl.py reconcile --run-id <run-id>
+```
+
+`snapshot-issue` поддерживает counterpart, исполнителя, оценку, эпик, релизы и
+классификацию релевантности отдельными флагами из `--help`. Команда идемпотентно
+обновляет задачу по ключу и сохраняет уже записанную историю. `snapshot-collection`
+получает `complete` только после реального вызова соответствующей возможности MCP;
+при недоступности используется `unavailable --reason <причина>`. Перед
+`reconcile` обязательный `run-status` должен вернуть `tracker-run-ready`.
+
+Прочитанные напрямую данные MCP не являются отчётом. Если LLM не записала их этими
+командами, она продолжает запись и не показывает аналитику ручную сводку.
+
 Ни одного `pending` перед `reconcile` оставаться не может. Значение `complete`
 запрещено ставить только на основании наличия поля в поисковой выдаче: история,
 прямые пары и соседи эпика должны быть реально дочитаны. Временные метки копируются

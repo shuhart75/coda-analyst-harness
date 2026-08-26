@@ -57,7 +57,7 @@
 
 | Намерение | Фразы | Действие |
 |---|---|---|
-| Прочитать и сверить | `прочитай задачи из трекеров`, `проверь задачи в трекерах`, `сверь SberTrek и Jira`, `покажи текущее состояние по трекерам` | Выполнить fail-closed цепочку `config-status -> begin -> reconcile`. При `must_stop: true` дословно задать только `response_contract.text`; статусы настроить отдельно по провайдерам. После `begin` чтение выполняет главный агент, итог разрешён только при `tracker-read-reconciled`, `workflow_complete: true` и `final_response_allowed: true` с тем же `run_id`. Ничего не изменять. |
+| Прочитать и сверить | `прочитай задачи из трекеров`, `проверь задачи в трекерах`, `сверь SberTrek и Jira`, `покажи текущее состояние по трекерам` | Выполнить fail-closed цепочку `config-status -> begin -> snapshot-* -> run-status -> reconcile`. При `must_stop: true` дословно задать только `response_contract.text`; статусы настроить отдельно по провайдерам. Каждый MCP-ответ сразу записать штатной командой. Итог разрешён только при `tracker-read-reconciled`, `workflow_complete: true` и `final_response_allowed: true` с тем же `run_id`. Ничего не изменять. |
 
 Команда чтения не означает `актуализируй реальное положение дел`: она не меняет
 execution-задачи и actual-progress. Применение прочитанных фактов вводится отдельно.

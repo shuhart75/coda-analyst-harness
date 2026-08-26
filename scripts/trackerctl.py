@@ -980,6 +980,247 @@ def set_participant_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_snapshot_path(run_id: str, provider: str) -> Path:
+    path = run_root(run_id) / "input" / f"{provider}.json"
+    if not path.is_file():
+        raise ValueError(f"Снимок {provider} не создан для run_id={run_id}")
+    return path
+
+
+def load_run_snapshot(run_id: str, provider: str) -> tuple[Path, dict]:
+    path = run_snapshot_path(run_id, provider)
+    payload = load_json(path)
+    if not isinstance(payload, dict) or payload.get("provider") != provider:
+        raise ValueError(f"Некорректный рабочий снимок {provider}")
+    return path, payload
+
+
+def parse_key_value(values: list[str], label: str) -> list[dict]:
+    parsed: list[dict] = []
+    for value in values:
+        key, separator, detail = value.partition("=")
+        if not separator or not key.strip() or not detail.strip():
+            raise ValueError(f"{label} должен иметь формат KEY=VALUE: {value}")
+        parsed.append({"key": key.strip(), "source": detail.strip()})
+    return parsed
+
+
+def snapshot_metadata_command(args: argparse.Namespace) -> int:
+    if timestamp_value(args.captured_at) is None:
+        raise ValueError("--captured-at должен содержать временную метку с часовым поясом")
+    path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    evidence = parse_key_value(args.seed_evidence, "--seed-evidence")
+    snapshot["captured_at"] = args.captured_at
+    snapshot["scope"]["query"] = args.query
+    snapshot["scope"]["seed_evidence"] = evidence
+    snapshot["scope"]["seed_keys"] = list(dict.fromkeys(item["key"] for item in evidence))
+    snapshot["scope"]["expected_epic_keys"] = list(dict.fromkeys(args.expected_epic))
+    snapshot["scope"]["expected_release_keys"] = list(dict.fromkeys(args.expected_release))
+    save_json(path, snapshot)
+    print(json.dumps({
+        "status": "tracker-snapshot-metadata-saved",
+        "run_id": args.run_id,
+        "provider": args.provider,
+        "path": str(path),
+        "final_response_allowed": False,
+        "allowed_next_action": "record-issues-and-collection",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def parse_number(value: str) -> int | float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise ValueError(f"Некорректная оценка: {value}") from exc
+    return int(number) if number.is_integer() else number
+
+
+def parse_release(value: str) -> dict:
+    key, separator, name = value.partition("=")
+    if not key.strip():
+        raise ValueError("--release требует KEY или KEY=NAME")
+    return {"key": key.strip(), "name": name.strip() if separator else key.strip()}
+
+
+def snapshot_issue_command(args: argparse.Namespace) -> int:
+    if timestamp_value(args.updated_at) is None:
+        raise ValueError("--updated-at должен содержать временную метку с часовым поясом")
+    if bool(args.assignee_id) != bool(args.assignee_name):
+        raise ValueError("--assignee-id и --assignee-name задаются вместе")
+    if bool(args.estimate_value) != bool(args.estimate_unit):
+        raise ValueError("--estimate-value и --estimate-unit задаются вместе")
+    if bool(args.epic_key) != bool(args.epic_name):
+        raise ValueError("--epic-key и --epic-name задаются вместе")
+    path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    existing = next((item for item in snapshot["issues"] if item.get("key") == args.key), None)
+    issue = {
+        "key": args.key,
+        "counterpart_key": args.counterpart_key,
+        "summary": args.summary,
+        "description": args.description,
+        "issue_type": args.issue_type,
+        "status": args.status,
+        "assignee": (
+            {"id": args.assignee_id, "name": args.assignee_name}
+            if args.assignee_id
+            else None
+        ),
+        "estimate": (
+            {"value": parse_number(args.estimate_value), "unit": args.estimate_unit}
+            if args.estimate_value
+            else None
+        ),
+        "epic": (
+            {"key": args.epic_key, "name": args.epic_name}
+            if args.epic_key
+            else None
+        ),
+        "releases": [parse_release(value) for value in args.release],
+        "discovery": args.discovery,
+        "updated_at": args.updated_at,
+        "history": existing.get("history", []) if existing else [],
+    }
+    if args.feature_relevance:
+        issue["feature_relevance"] = args.feature_relevance
+    if args.relevance_basis:
+        issue["relevance_basis"] = args.relevance_basis
+    if existing:
+        snapshot["issues"][snapshot["issues"].index(existing)] = issue
+    else:
+        snapshot["issues"].append(issue)
+    save_json(path, snapshot)
+    print(json.dumps({
+        "status": "tracker-snapshot-issue-saved",
+        "run_id": args.run_id,
+        "provider": args.provider,
+        "key": args.key,
+        "issue_count": len(snapshot["issues"]),
+        "final_response_allowed": False,
+        "allowed_next_action": "continue-collection",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def participant_value(account_id: str | None, name: str | None) -> dict | None:
+    if not account_id:
+        return None
+    return {"id": account_id, "name": name} if name else {"id": account_id}
+
+
+def snapshot_history_command(args: argparse.Namespace) -> int:
+    if timestamp_value(args.at) is None:
+        raise ValueError("--at должен содержать временную метку с часовым поясом")
+    if args.from_value and (args.from_id or args.from_name):
+        raise ValueError("--from-value нельзя сочетать с --from-id/--from-name")
+    if args.to_value and (args.to_id or args.to_name):
+        raise ValueError("--to-value нельзя сочетать с --to-id/--to-name")
+    if bool(args.from_id) != bool(args.from_name):
+        raise ValueError("--from-id и --from-name задаются вместе")
+    if bool(args.to_id) != bool(args.to_name):
+        raise ValueError("--to-id и --to-name задаются вместе")
+    path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    issue = next((item for item in snapshot["issues"] if item.get("key") == args.key), None)
+    if issue is None:
+        raise ValueError(f"Сначала зарегистрируй задачу {args.key}")
+    event = {
+        "at": args.at,
+        "field": args.field,
+        "from": args.from_value if args.from_value is not None else participant_value(args.from_id, args.from_name),
+        "to": args.to_value if args.to_value is not None else participant_value(args.to_id, args.to_name),
+    }
+    if event not in issue["history"]:
+        issue["history"].append(event)
+    save_json(path, snapshot)
+    print(json.dumps({
+        "status": "tracker-snapshot-history-saved",
+        "run_id": args.run_id,
+        "provider": args.provider,
+        "key": args.key,
+        "history_count": len(issue["history"]),
+        "final_response_allowed": False,
+        "allowed_next_action": "continue-collection",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def snapshot_collection_command(args: argparse.Namespace) -> int:
+    if args.state == "unavailable" and not str(args.reason or "").strip():
+        raise ValueError("state=unavailable требует --reason")
+    if args.provider == "sbertrek" and args.capability == "counterpart_lookup":
+        raise ValueError("counterpart_lookup для SberTrek уже имеет state=not-applicable")
+    path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    snapshot["collection"][args.capability] = {
+        "state": args.state,
+        "reason": args.reason if args.state == "unavailable" else None,
+    }
+    for key in args.not_found_key:
+        if key not in snapshot["collection"]["not_found_keys"]:
+            snapshot["collection"]["not_found_keys"].append(key)
+    for key in args.expanded_epic_key:
+        if key not in snapshot["collection"]["expanded_epic_keys"]:
+            snapshot["collection"]["expanded_epic_keys"].append(key)
+    save_json(path, snapshot)
+    print(json.dumps({
+        "status": "tracker-snapshot-collection-saved",
+        "run_id": args.run_id,
+        "provider": args.provider,
+        "capability": args.capability,
+        "state": args.state,
+        "final_response_allowed": False,
+        "allowed_next_action": "continue-collection-or-check-run",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def snapshot_progress(snapshot: dict, provider: str) -> dict:
+    missing: list[str] = []
+    if timestamp_value(snapshot.get("captured_at")) is None:
+        missing.append("captured_at")
+    if not str(snapshot.get("scope", {}).get("query") or "").strip():
+        missing.append("scope.query")
+    pending = [
+        capability
+        for capability in COLLECTION_CAPABILITIES
+        if snapshot.get("collection", {}).get(capability, {}).get("state") == "pending"
+    ]
+    validation_error = None
+    if not missing and not pending:
+        try:
+            validate_snapshot(snapshot, provider)
+        except ValueError as exc:
+            validation_error = str(exc)
+    return {
+        "provider": provider,
+        "issue_count": len(snapshot.get("issues", [])),
+        "missing_metadata": missing,
+        "pending_capabilities": pending,
+        "validation_error": validation_error,
+        "ready": not missing and not pending and validation_error is None,
+    }
+
+
+def tracker_run_status_command(args: argparse.Namespace) -> int:
+    providers = ["sbertrek"]
+    if (run_root(args.run_id) / "input" / "jira.json").is_file():
+        providers.append("jira")
+    progress = [
+        snapshot_progress(load_run_snapshot(args.run_id, provider)[1], provider)
+        for provider in providers
+    ]
+    ready = all(item["ready"] for item in progress)
+    print(json.dumps({
+        "status": "tracker-run-ready" if ready else "tracker-run-incomplete",
+        "run_id": args.run_id,
+        "snapshots": progress,
+        "workflow_complete": False,
+        "final_response_allowed": False,
+        "allowed_next_action": "reconcile" if ready else "complete-snapshots",
+        "required_success_status": "tracker-read-reconciled",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def complete_config_command(_: argparse.Namespace) -> int:
     config = load_config()
     gaps = base_config_gaps(config, require_confirmation=False)
@@ -1011,6 +1252,13 @@ def begin_command(_: argparse.Namespace) -> int:
         "workflow_complete": False,
         "final_response_allowed": False,
         "allowed_next_action": "collect-and-write-snapshots",
+        "recording_commands": [
+            "snapshot-metadata",
+            "snapshot-issue",
+            "snapshot-history",
+            "snapshot-collection",
+            "run-status",
+        ],
         "required_completion": {
             "command": f"trackerctl.py reconcile --run-id {run_id}",
             "status": "tracker-read-reconciled",
@@ -1029,8 +1277,19 @@ def reconcile_command(args: argparse.Namespace) -> int:
         else load_config()
     )
     require_base_config(config)
-    sber = validate_snapshot(load_json(Path(args.sbertrek).resolve()), "sbertrek")
-    jira = validate_snapshot(load_json(Path(args.jira).resolve()), "jira") if args.jira else None
+    if args.run_id:
+        inputs = run_root(args.run_id) / "input"
+        sber_path = Path(args.sbertrek).resolve() if args.sbertrek else inputs / "sbertrek.json"
+        jira_path = Path(args.jira).resolve() if args.jira else inputs / "jira.json"
+        if not jira_path.is_file():
+            jira_path = None
+    else:
+        if not args.sbertrek:
+            raise ValueError("reconcile требует --run-id либо --sbertrek")
+        sber_path = Path(args.sbertrek).resolve()
+        jira_path = Path(args.jira).resolve() if args.jira else None
+    sber = validate_snapshot(load_json(sber_path), "sbertrek")
+    jira = validate_snapshot(load_json(jira_path), "jira") if jira_path else None
     if jira is not None and not config.get("jira_enabled"):
         raise ValueError("Jira отключена в tracker-config.json, но передан Jira-снимок")
     validate_snapshot_scope(sber, "sbertrek", config)
@@ -1103,12 +1362,67 @@ def build_parser() -> argparse.ArgumentParser:
     set_participant.add_argument("--canonical-id", required=True)
     set_participant.add_argument("--role", choices=sorted(ROLES), required=True)
     set_participant.set_defaults(handler=set_participant_command)
+    snapshot_metadata = subparsers.add_parser("snapshot-metadata")
+    snapshot_metadata.add_argument("--run-id", required=True)
+    snapshot_metadata.add_argument("--provider", choices=PROVIDERS, required=True)
+    snapshot_metadata.add_argument("--captured-at", required=True)
+    snapshot_metadata.add_argument("--query", required=True)
+    snapshot_metadata.add_argument("--seed-evidence", action="append", default=[])
+    snapshot_metadata.add_argument("--expected-epic", action="append", default=[])
+    snapshot_metadata.add_argument("--expected-release", action="append", default=[])
+    snapshot_metadata.set_defaults(handler=snapshot_metadata_command)
+    snapshot_issue = subparsers.add_parser("snapshot-issue")
+    snapshot_issue.add_argument("--run-id", required=True)
+    snapshot_issue.add_argument("--provider", choices=PROVIDERS, required=True)
+    snapshot_issue.add_argument("--key", required=True)
+    snapshot_issue.add_argument("--counterpart-key")
+    snapshot_issue.add_argument("--summary", required=True)
+    snapshot_issue.add_argument("--description", default="")
+    snapshot_issue.add_argument("--issue-type", required=True)
+    snapshot_issue.add_argument("--status", required=True)
+    snapshot_issue.add_argument("--assignee-id")
+    snapshot_issue.add_argument("--assignee-name")
+    snapshot_issue.add_argument("--estimate-value")
+    snapshot_issue.add_argument("--estimate-unit")
+    snapshot_issue.add_argument("--epic-key")
+    snapshot_issue.add_argument("--epic-name")
+    snapshot_issue.add_argument("--release", action="append", default=[])
+    snapshot_issue.add_argument("--discovery", choices=sorted(DISCOVERY_VALUES), required=True)
+    snapshot_issue.add_argument("--feature-relevance", choices=sorted(RELEVANCE_VALUES))
+    snapshot_issue.add_argument("--relevance-basis")
+    snapshot_issue.add_argument("--updated-at", required=True)
+    snapshot_issue.set_defaults(handler=snapshot_issue_command)
+    snapshot_history = subparsers.add_parser("snapshot-history")
+    snapshot_history.add_argument("--run-id", required=True)
+    snapshot_history.add_argument("--provider", choices=PROVIDERS, required=True)
+    snapshot_history.add_argument("--key", required=True)
+    snapshot_history.add_argument("--at", required=True)
+    snapshot_history.add_argument("--field", required=True)
+    snapshot_history.add_argument("--from-id")
+    snapshot_history.add_argument("--from-name")
+    snapshot_history.add_argument("--from-value")
+    snapshot_history.add_argument("--to-id")
+    snapshot_history.add_argument("--to-name")
+    snapshot_history.add_argument("--to-value")
+    snapshot_history.set_defaults(handler=snapshot_history_command)
+    snapshot_collection = subparsers.add_parser("snapshot-collection")
+    snapshot_collection.add_argument("--run-id", required=True)
+    snapshot_collection.add_argument("--provider", choices=PROVIDERS, required=True)
+    snapshot_collection.add_argument("--capability", choices=COLLECTION_CAPABILITIES, required=True)
+    snapshot_collection.add_argument("--state", choices=("complete", "unavailable"), required=True)
+    snapshot_collection.add_argument("--reason")
+    snapshot_collection.add_argument("--not-found-key", action="append", default=[])
+    snapshot_collection.add_argument("--expanded-epic-key", action="append", default=[])
+    snapshot_collection.set_defaults(handler=snapshot_collection_command)
+    run_status = subparsers.add_parser("run-status")
+    run_status.add_argument("--run-id", required=True)
+    run_status.set_defaults(handler=tracker_run_status_command)
     complete_config = subparsers.add_parser("complete-config")
     complete_config.set_defaults(handler=complete_config_command)
     begin = subparsers.add_parser("begin")
     begin.set_defaults(handler=begin_command)
     merge = subparsers.add_parser("reconcile")
-    merge.add_argument("--sbertrek", required=True)
+    merge.add_argument("--sbertrek")
     merge.add_argument("--jira")
     merge.add_argument("--config")
     merge.add_argument("--run-id")
@@ -1124,7 +1438,7 @@ def main() -> int:
         if args.command in {"begin", "reconcile"}:
             run_id = getattr(args, "run_id", None)
             allowed_next_action = (
-                "run-config-status" if args.command == "begin" else "repair-run-input-and-retry-reconcile"
+                "run-config-status" if args.command == "begin" else "run-status-and-complete-snapshots"
             )
             next_question = None
             participant_match = re.search(
@@ -1152,6 +1466,8 @@ def main() -> int:
                     "and retry the guarded command."
                 ),
             }
+            if args.command == "reconcile" and run_id:
+                payload["next_command"] = f"trackerctl.py run-status --run-id {run_id}"
             if next_question:
                 payload["next_question"] = next_question
                 payload["response_contract"] = {

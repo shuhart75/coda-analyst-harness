@@ -580,8 +580,131 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertEqual(jira["collection"]["counterpart_lookup"]["state"], "pending")
             self.assertFalse(started["workflow_complete"])
             self.assertFalse(started["final_response_allowed"])
+            self.assertEqual(
+                started["required_completion"]["command"],
+                f"trackerctl.py reconcile --run-id {started['run_id']}",
+            )
+            self.assertIn("snapshot-issue", started["recording_commands"])
+            self.assertIn("run-status", started["recording_commands"])
             self.assertFalse(started["project_changed"])
             self.assertFalse(started["tracker_changed"])
+
+    def test_incremental_snapshot_commands_complete_run_without_manual_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            self.prepare_config(state)
+            started = json.loads(self.run_tool(state, "begin").stdout)
+            run_id = started["run_id"]
+
+            self.run_tool(
+                state,
+                "snapshot-metadata",
+                "--run-id", run_id,
+                "--provider", "sbertrek",
+                "--captured-at", "2026-08-26T10:00:00+03:00",
+                "--query", "key in (SBER-1)",
+                "--seed-evidence", "SBER-1=features/demo/actual-progress.md",
+            )
+            self.run_tool(
+                state,
+                "snapshot-issue",
+                "--run-id", run_id,
+                "--provider", "sbertrek",
+                "--key", "SBER-1",
+                "--counterpart-key", "JIRA-11",
+                "--summary", "Основная задача",
+                "--description", "Описание",
+                "--issue-type", "Story",
+                "--status", "Тестирование команды",
+                "--assignee-id", "qa-s",
+                "--assignee-name", "Тестировщик",
+                "--estimate-value", "5",
+                "--estimate-unit", "story-points",
+                "--discovery", "seed",
+                "--updated-at", "2026-08-26T09:00:00+03:00",
+            )
+            history = json.loads(self.run_tool(
+                state,
+                "snapshot-history",
+                "--run-id", run_id,
+                "--provider", "sbertrek",
+                "--key", "SBER-1",
+                "--at", "2026-08-25T12:00:00+03:00",
+                "--field", "assignee",
+                "--from-id", "dev-s",
+                "--from-name", "Разработчик",
+                "--to-id", "qa-s",
+                "--to-name", "Тестировщик",
+            ).stdout)
+            self.assertEqual(history["history_count"], 1)
+            history = json.loads(self.run_tool(
+                state,
+                "snapshot-history",
+                "--run-id", run_id,
+                "--provider", "sbertrek",
+                "--key", "SBER-1",
+                "--at", "2026-08-25T13:00:00+03:00",
+                "--field", "status",
+                "--from-value", "В работе",
+                "--to-value", "Проверка",
+            ).stdout)
+            self.assertEqual(history["history_count"], 2)
+            for capability in ("history", "epic_links", "release_links", "epic_neighbors"):
+                self.run_tool(
+                    state,
+                    "snapshot-collection",
+                    "--run-id", run_id,
+                    "--provider", "sbertrek",
+                    "--capability", capability,
+                    "--state", "complete",
+                )
+
+            self.run_tool(
+                state,
+                "snapshot-metadata",
+                "--run-id", run_id,
+                "--provider", "jira",
+                "--captured-at", "2026-08-26T10:01:00+03:00",
+                "--query", "key in (JIRA-11)",
+            )
+            self.run_tool(
+                state,
+                "snapshot-issue",
+                "--run-id", run_id,
+                "--provider", "jira",
+                "--key", "JIRA-11",
+                "--counterpart-key", "SBER-1",
+                "--summary", "Основная задача",
+                "--issue-type", "Story",
+                "--status", "To Do",
+                "--discovery", "counterpart",
+                "--updated-at", "2026-08-26T09:01:00+03:00",
+            )
+            for capability in (
+                "history", "epic_links", "release_links", "counterpart_lookup", "epic_neighbors",
+            ):
+                self.run_tool(
+                    state,
+                    "snapshot-collection",
+                    "--run-id", run_id,
+                    "--provider", "jira",
+                    "--capability", capability,
+                    "--state", "complete",
+                )
+
+            progress = json.loads(
+                self.run_tool(state, "run-status", "--run-id", run_id).stdout
+            )
+            self.assertEqual(progress["status"], "tracker-run-ready")
+            self.assertEqual(progress["allowed_next_action"], "reconcile")
+            self.assertFalse(progress["final_response_allowed"])
+
+            reconciled = json.loads(
+                self.run_tool(state, "reconcile", "--run-id", run_id).stdout
+            )
+            self.assertEqual(reconciled["status"], "tracker-read-reconciled")
+            self.assertTrue(reconciled["workflow_complete"])
+            self.assertTrue(reconciled["final_response_allowed"])
 
     def test_jira_can_be_disabled_without_creating_an_input_template(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -621,7 +744,7 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertFalse(blocked["final_response_allowed"])
             self.assertEqual(
                 blocked["allowed_next_action"],
-                "repair-run-input-and-retry-reconcile",
+                "run-status-and-complete-snapshots",
             )
             self.assertEqual(blocked["required_success_status"], "tracker-read-reconciled")
 

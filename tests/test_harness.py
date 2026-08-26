@@ -373,6 +373,10 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("`head`, `tail`, `grep`, `jq`", tracker_contract)
             self.assertIn("делегировать чтение", tracker_contract)
             self.assertIn("status: tracker-read-reconciled", tracker_contract)
+            self.assertIn("snapshot-metadata", tracker_contract)
+            self.assertIn("snapshot-issue", tracker_contract)
+            self.assertIn("run-status", tracker_contract)
+            self.assertIn("Прочитанные напрямую данные MCP не являются отчётом", tracker_contract)
             self.assertIn("collection.not_found_keys", tracker_contract)
             self.assertIn("пересчитывать или пересказывать", tracker_contract)
             delegation = (ROOT / "core/agent-delegation.md").read_text(encoding="utf-8")
@@ -389,6 +393,7 @@ class HarnessTests(unittest.TestCase):
             readme = (ROOT / "README.md").read_text(encoding="utf-8")
             self.assertIn("код `3` и `must_stop: true` запрещают любые MCP-вызовы", readme)
             self.assertIn("настраиваются отдельно для SberTrek и Jira", readme)
+            self.assertIn("После каждого MCP-ответа", readme)
 
     def test_requirements_profile_validator_checks_opted_in_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
