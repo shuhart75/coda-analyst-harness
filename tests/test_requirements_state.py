@@ -106,7 +106,7 @@ class RequirementsStateTests(unittest.TestCase):
             state["slice_derivation"] = {"state": "stale", "requirements_sha256": None}
             state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
             migrated = self.command(SCRIPT, "status", str(project), "demo")
-            self.assertEqual(migrated["state"]["schema_version"], 3)
+            self.assertEqual(migrated["state"]["schema_version"], 4)
             self.assertNotIn("slice_derivation", migrated["state"])
 
     def test_old_publication_authorization_migrates_to_required_audit(self) -> None:
@@ -123,7 +123,37 @@ class RequirementsStateTests(unittest.TestCase):
             }
             state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
             migrated = self.command(SCRIPT, "status", str(project), "demo")
-            self.assertEqual(migrated["state"]["schema_version"], 3)
+            self.assertEqual(migrated["state"]["schema_version"], 4)
+            self.assertEqual(migrated["state"]["revision_offer"]["state"], "audit-required")
+            self.assertEqual(migrated["state"]["delivery_audit"]["state"], "required")
+            self.assertEqual(
+                migrated["state"]["delivery_audit"]["method"],
+                "three-level-cross-requirement-v1",
+            )
+
+    def test_schema_three_confirmed_audit_is_invalidated_before_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, feature = self.project(Path(temp))
+            state_path = feature / "requirements-state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["schema_version"] = 3
+            state["revision_offer"] = {
+                "state": "preparation-authorized",
+                "offered_at": None,
+                "reason": "Старое подтверждение",
+            }
+            state["delivery_audit"] = {
+                "state": "confirmed",
+                "requirements_sha256": state["requirements_sha256"],
+                "audited_at": "2026-08-01T10:00:00+00:00",
+                "confirmed_at": "2026-08-01T10:01:00+00:00",
+                "finding_count": 0,
+                "blocking_finding_count": 0,
+                "summary": "Старый аудит",
+            }
+            state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            migrated = self.command(SCRIPT, "status", str(project), "demo")
+            self.assertEqual(migrated["state"]["schema_version"], 4)
             self.assertEqual(migrated["state"]["revision_offer"]["state"], "audit-required")
             self.assertEqual(migrated["state"]["delivery_audit"]["state"], "required")
 
@@ -166,6 +196,10 @@ class RequirementsStateTests(unittest.TestCase):
                 "Замечаний нет",
             )
             self.assertEqual(audited["state"]["delivery_audit"]["state"], "awaiting-confirmation")
+            self.assertEqual(
+                audited["state"]["delivery_audit"]["levels"],
+                {"individual": "complete", "system": "complete", "delivery": "complete"},
+            )
             with (feature / "requirements.md").open("a", encoding="utf-8") as handle:
                 handle.write("\nИзменение после аудита.\n")
             result = run(sys.executable, str(SCRIPT), "confirm-audit", str(project), "demo")
@@ -191,6 +225,31 @@ class RequirementsStateTests(unittest.TestCase):
             self.assertEqual(blocked["next_action"], "resolve-blocking-audit-findings")
             result = run(sys.executable, str(SCRIPT), "confirm-audit", str(project), "demo")
             self.assertNotEqual(result.returncode, 0)
+
+    def test_audit_classifies_resolved_findings_and_accepted_risks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _ = self.project(Path(temp))
+            self.command(SCRIPT, "begin-preparation", str(project), "demo")
+            audited = self.command(
+                SCRIPT,
+                "record-audit",
+                str(project),
+                "demo",
+                "--finding-count",
+                "3",
+                "--accepted-risk-count",
+                "1",
+                "--blocking-finding-count",
+                "0",
+                "--summary",
+                "Два замечания исправлены, один риск принят",
+            )
+            audit = audited["state"]["delivery_audit"]
+            self.assertEqual(audit["resolved_finding_count"], 2)
+            self.assertEqual(audit["accepted_risk_count"], 1)
+            self.assertEqual(audit["blocking_finding_count"], 0)
+            confirmed = self.command(SCRIPT, "confirm-audit", str(project), "demo")
+            self.assertEqual(confirmed["state"]["delivery_audit"]["state"], "confirmed")
 
     def test_recorded_change_invalidates_confirmed_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

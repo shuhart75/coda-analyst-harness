@@ -10,6 +10,9 @@ from typing import Any
 
 
 STATE_NAME = "requirements-state.json"
+STATE_SCHEMA_VERSION = 4
+AUDIT_METHOD = "three-level-cross-requirement-v1"
+AUDIT_LEVELS = ("individual", "system", "delivery")
 OFFER_STATES = {
     "not-needed",
     "pending-offer",
@@ -70,7 +73,7 @@ def requirements_hash(feature_root: Path, required: bool = True) -> str | None:
 
 def initial_state(feature_root: Path, feature: str) -> dict[str, Any]:
     return {
-        "schema_version": 3,
+        "schema_version": STATE_SCHEMA_VERSION,
         "feature": feature,
         "updated_at": now(),
         "requirements_sha256": requirements_hash(feature_root, required=False),
@@ -92,10 +95,14 @@ def initial_state(feature_root: Path, feature: str) -> dict[str, Any]:
 def empty_audit(state: str = "not-requested") -> dict[str, Any]:
     return {
         "state": state,
+        "method": AUDIT_METHOD if state == "required" else None,
+        "levels": {level: "pending" for level in AUDIT_LEVELS},
         "requirements_sha256": None,
         "audited_at": None,
         "confirmed_at": None,
         "finding_count": 0,
+        "resolved_finding_count": 0,
+        "accepted_risk_count": 0,
         "blocking_finding_count": 0,
         "summary": None,
     }
@@ -103,9 +110,9 @@ def empty_audit(state: str = "not-requested") -> dict[str, Any]:
 
 def migrate_state(payload: dict[str, Any], feature: str) -> dict[str, Any]:
     version = payload.get("schema_version")
-    if version == 3:
+    if version == STATE_SCHEMA_VERSION:
         return payload
-    if version not in {1, 2}:
+    if version not in {1, 2, 3}:
         return payload
     last_change = payload.get("last_change", {})
     origin = last_change.get("origin")
@@ -122,7 +129,7 @@ def migrate_state(payload: dict[str, Any], feature: str) -> dict[str, Any]:
                 "legacy_format": "feature-handoff",
             }
     migrated = {
-        "schema_version": 3,
+        "schema_version": STATE_SCHEMA_VERSION,
         "feature": feature,
         "updated_at": payload.get("updated_at") or now(),
         "requirements_sha256": payload.get("requirements_sha256"),
@@ -139,18 +146,22 @@ def migrate_state(payload: dict[str, Any], feature: str) -> dict[str, Any]:
         "last_published": published,
         "delivery_audit": empty_audit(),
     }
-    if migrated["revision_offer"].get("state") == "preparation-authorized":
+    if migrated["revision_offer"].get("state") in {
+        "audit-required",
+        "awaiting-audit-confirmation",
+        "preparation-authorized",
+    }:
         migrated["revision_offer"] = {
             "state": "audit-required",
             "offered_at": None,
-            "reason": "После обновления обвязки перед публикацией требуется подтверждённый аудит",
+            "reason": "После обновления метода перед публикацией требуется новый трёхуровневый аудит",
         }
         migrated["delivery_audit"] = empty_audit("required")
     return migrated
 
 
 def validate_state(payload: dict[str, Any], feature: str) -> None:
-    if payload.get("schema_version") != 3 or payload.get("feature") != feature:
+    if payload.get("schema_version") != STATE_SCHEMA_VERSION or payload.get("feature") != feature:
         raise ValueError("Некорректная схема или функциональность в состоянии требований")
     if not isinstance(payload.get("updated_at"), str):
         raise ValueError("В состоянии требований отсутствует дата обновления")
@@ -173,17 +184,38 @@ def validate_state(payload: dict[str, Any], feature: str) -> None:
     audit = payload.get("delivery_audit")
     if not isinstance(audit, dict) or audit.get("state") not in AUDIT_STATES:
         raise ValueError("Некорректное состояние аудита требований")
+    if audit.get("method") not in {None, AUDIT_METHOD}:
+        raise ValueError("Некорректный метод аудита требований")
+    levels = audit.get("levels")
+    if not isinstance(levels, dict) or set(levels) != set(AUDIT_LEVELS):
+        raise ValueError("В состоянии аудита отсутствуют три обязательных уровня")
+    if any(value not in {"pending", "complete"} for value in levels.values()):
+        raise ValueError("Некорректное состояние уровня аудита")
     for key in ("requirements_sha256", "audited_at", "confirmed_at", "summary"):
         if audit.get(key) is not None and not isinstance(audit.get(key), str):
             raise ValueError("Некорректные сведения об аудите требований")
-    for key in ("finding_count", "blocking_finding_count"):
+    for key in (
+        "finding_count",
+        "resolved_finding_count",
+        "accepted_risk_count",
+        "blocking_finding_count",
+    ):
         if not isinstance(audit.get(key), int) or audit.get(key) < 0:
             raise ValueError("Некорректное количество замечаний аудита")
-    if audit["blocking_finding_count"] > audit["finding_count"]:
-        raise ValueError("Количество блокирующих замечаний превышает общее количество")
+    classified = (
+        audit["resolved_finding_count"]
+        + audit["accepted_risk_count"]
+        + audit["blocking_finding_count"]
+    )
+    if classified != audit["finding_count"]:
+        raise ValueError("Результаты аудита не распределены по решениям полностью")
     if audit["state"] in {"blocked", "awaiting-confirmation", "confirmed"}:
         if not audit.get("requirements_sha256") or not audit.get("audited_at") or not audit.get("summary"):
             raise ValueError("Завершённый аудит не содержит обязательных сведений")
+        if audit.get("method") != AUDIT_METHOD or any(
+            levels[level] != "complete" for level in AUDIT_LEVELS
+        ):
+            raise ValueError("Завершённый аудит не прошёл все три уровня")
     if audit["state"] == "confirmed" and not audit.get("confirmed_at"):
         raise ValueError("Подтверждённый аудит не содержит даты подтверждения")
     published = payload.get("last_published")
@@ -205,7 +237,7 @@ def load_or_create(feature_root: Path, state_path: Path, feature: str) -> dict[s
         return payload
     payload = migrate_state(load_json(state_path), feature)
     validate_state(payload, feature)
-    if load_json(state_path).get("schema_version") != 3:
+    if load_json(state_path).get("schema_version") != STATE_SCHEMA_VERSION:
         save_json(state_path, payload)
     return payload
 
@@ -329,16 +361,25 @@ def record_audit_command(args: argparse.Namespace) -> int:
         raise ValueError("Количество замечаний не может быть отрицательным")
     if args.blocking_finding_count > args.finding_count:
         raise ValueError("Количество блокирующих замечаний превышает общее количество")
+    if args.accepted_risk_count < 0:
+        raise ValueError("Количество принятых рисков не может быть отрицательным")
+    if args.accepted_risk_count + args.blocking_finding_count > args.finding_count:
+        raise ValueError("Принятые риски и блокировки превышают общее количество замечаний")
     if not args.summary.strip():
         raise ValueError("Итог аудита не может быть пустым")
     checksum = requirements_hash(feature_root)
     blocked = args.blocking_finding_count > 0
+    resolved = args.finding_count - args.accepted_risk_count - args.blocking_finding_count
     payload["delivery_audit"] = {
         "state": "blocked" if blocked else "awaiting-confirmation",
+        "method": AUDIT_METHOD,
+        "levels": {level: "complete" for level in AUDIT_LEVELS},
         "requirements_sha256": checksum,
         "audited_at": now(),
         "confirmed_at": None,
         "finding_count": args.finding_count,
+        "resolved_finding_count": resolved,
+        "accepted_risk_count": args.accepted_risk_count,
         "blocking_finding_count": args.blocking_finding_count,
         "summary": args.summary.strip(),
     }
@@ -464,6 +505,7 @@ def parser() -> argparse.ArgumentParser:
     audit.add_argument("project")
     audit.add_argument("feature")
     audit.add_argument("--finding-count", type=int, required=True)
+    audit.add_argument("--accepted-risk-count", type=int, default=0)
     audit.add_argument("--blocking-finding-count", type=int, required=True)
     audit.add_argument("--summary", required=True)
     audit.set_defaults(handler=record_audit_command)

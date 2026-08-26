@@ -180,20 +180,23 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 ## Requirements rules
 
 - Requirements are living markdown artifacts until release fixation.
-- `core/requirements-profile.md` is the shared sequential human-readable root-document contract. It preserves quality and traceability without an ISO-shaped document.
+- `core/requirements-profile.md` is the compact business-specification contract. It uses stable `REQ-*` headings and nested Russian scenarios without the repeated passports and mandatory empty sections of the former profile.
+- `core/requirements-wording.md` is the controlled-Russian contract. Apply its isolated-reader test while writing, not only at delivery: quantities, referents, events and observable outcomes must be explicit.
+- `core/requirements-audit.md` is the mandatory three-level semantic audit: individual rules, cross-requirement system reasoning, and delivery readiness. A format validator never substitutes for it.
 - Write requirements by the harness template in `templates/requirements/`, not freeform.
 - Start from `features/<feature>/requirements.md` as the primary feature-level requirement page and only place where feature requirements are authored from scratch.
-- Use `templates/requirements/feature-requirements.readable.template.md` for new or consciously migrated documents. Existing older documents remain readable history, but they must be migrated before their next exchange revision.
+- Use `templates/requirements/feature-requirements.template.md` for new or consciously migrated documents. Existing older documents remain readable history, but the live root must use the compact profile before its next exchange revision.
 - Requirement diagrams must be PlantUML; do not introduce Mermaid blocks.
 - During ordinary requirement work, edit only the root `requirements.md`. Do not create exchange revisions after each change.
 - After changing the root document, record the change origin in `features/<feature>/requirements-state.json` through `scripts/requirementsctl.py record-change`.
 - Use `origin=developer-result` only for a change accepted from a registered return and pass its stable `return_id`. Such a change never triggers or offers an exchange revision.
 - Use `origin=analyst` for an analyst-initiated change. If a package was already published, offer a new revision once. Call `mark-offered` before asking. If the analyst declines, call `decline-revision` and do not offer again until an explicit preparation command.
 - Begin explicit transfer with `requirementsctl.py begin-preparation`. This starts the mandatory audit; it does not authorize publication.
-- Audit every direction listed in `core/requirements-profile.md`, including completeness, consistency, verifiability, edge cases, impacts, traceability and Russian language. Apply only meaning-preserving corrections automatically. For every semantic ambiguity ask the analyst exactly one question and wait.
+- Audit by `core/requirements-audit.md`. Build applicable role/action, state/transition, data, scenario, dependency, impact and internal/external-view models; reason across the full requirement set, not only one paragraph at a time. Apply only meaning-preserving corrections automatically. For every semantic ambiguity ask the analyst exactly one question and wait, then recheck affected relations. After all corrections rerun all three levels over the complete document.
+- Reject placeholder prose while authoring. `Когда` names a concrete state and event; `Тогда` states an observable outcome without repeating `система должна`. Never choose the intended meaning of vague quantifiers or references on the analyst's behalf.
 - When blockers are resolved, record the result with `requirementsctl.py record-audit`, show the full audit report in chat, and ask the exact confirmation question from the profile. Do not infer confirmation from the original transfer command or from approval of the document.
 - Only after an explicit positive answer run `requirementsctl.py confirm-audit`. Then run `requirements-exchange.py prepare` for the unchanged audited document, record the returned manifest and destination with `requirementsctl.py mark-published`, and report the actual location. Any intervening root change requires a new audit. There is no analyst-facing package state `ready`.
-- Developer SDD writes its already agreed decomposition to `returns/tasks.md`, per-task actual results to `returns/tasks/<task-id>.md`, and final coverage to `returns/summary.md`.
+- Developer SDD treats the transmitted file as a business contract, derives technical deltas against current code in each contour's local SDD, and preserves `REQ-*` links. It writes its already agreed single-contour decomposition to `returns/tasks.md`, per-task actual results and local SDD references to `returns/tasks/<task-id>.md`, and final coverage to `returns/summary.md`. Backend and frontend work must not be mixed in one task.
 - When transmitted requirements change, do not rewrite any immutable input revision or its returns. A new input revision is created only after the analyst explicitly requests or accepts its preparation.
 - Receiving `tasks.md` does not change planning stories or approved plans. The analyst separately uses it to update actual planning.
 - Requirement prose must be written in Russian. Avoid English words and transliterated anglicisms when a clear Russian formulation exists.

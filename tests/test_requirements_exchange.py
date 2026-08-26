@@ -19,99 +19,42 @@ def run(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def requirements(rule: str = "Система должна показать результат.") -> str:
-    return f"""# Требования по функциональности — Демонстрация
+    return f"""# Демонстрационная функциональность
 
 Статус: **черновик**
 Редакция: `1`
-Формат: **последовательный человекочитаемый**
+Формат: **компактная спецификация функциональности**
 Функциональность: `demo`
 
-## Кратко о функциональности
+## Назначение
 
-Понятное описание.
-
-## Цель и ожидаемый результат
-
-Получить результат.
+Пользователь должен получить однозначный наблюдаемый результат.
 
 ## Границы
 
-Входит один сценарий.
+В объём входит отображение результата. Другие действия не входят.
 
-## Текущее и требуемое состояние
+## Требования
 
-Сейчас результата нет. После изменения результат есть.
-
-## Участники, внешние системы и данные
-
-Пользователь и система.
-
-## Работа с результатом
-
-### Результат
-
-Результат показан.
-
-### Участники и начальные условия
-
-Пользователь открыл страницу.
-
-### Основной ход
-
-1. Пользователь выполняет действие.
-
-### Правила
-
-**REQ-DEMO-001. Отображение результата**
+### REQ-DEMO-001. Отображение результата
 
 {rule}
 
-### Исключения и ошибки
+#### Сценарий: успешное действие
 
-Ошибок нет.
+**Когда** пользователь выполняет действие.
 
-### Примеры приёмки
+**Тогда** система показывает результат.
 
-**AC-DEMO-001. Успешное действие**
+## Влияние на соседние функциональности
 
-- Дано: открыта страница.
-- Когда: пользователь выполняет действие.
-- Тогда: система показывает результат.
-- Требования: `REQ-DEMO-001`.
+Влияний нет.
 
-### Влияния
+## Источники и открытые вопросы
 
-Нет.
+Источник: решение аналитика.
 
-## Общие правила
-
-Нет.
-
-## Ошибки и пограничные случаи
-
-Нет.
-
-## Нефункциональные требования
-
-Нет применимых требований.
-
-## Доработки затронутых функциональностей
-
-Нет.
-
-## Подчистка устаревшего поведения
-
-Нет.
-
-## Сводная трассировка
-
-| Требование | Источник | Примеры приёмки | Задачи разработки | Результат реализации |
-|---|---|---|---|---|
-| REQ-DEMO-001 | решение | AC-DEMO-001 | задача не получена | результат не получен |
-
-## Открытые вопросы
-
-Нет.
+Открытых вопросов нет.
 """
 
 
@@ -188,7 +131,11 @@ class RequirementsExchangeTests(unittest.TestCase):
 
     def test_missing_code_uses_analytics_and_creates_no_slices(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            project, _ = self.prepare_project(Path(temp))
+            project, feature = self.prepare_project(Path(temp))
+            (feature / "requirements_iso.md").write_text(
+                "# Архив прежних требований\n",
+                encoding="utf-8",
+            )
             result = self.prepare(project)
             self.assertEqual(result["destination_role"], "analytics")
             exchange = project / "requirements-exchange"
@@ -196,8 +143,19 @@ class RequirementsExchangeTests(unittest.TestCase):
             self.assertTrue((exchange / "AGENTS.md").is_file())
             self.assertTrue((exchange / "demo/manifest.json").is_file())
             self.assertTrue((exchange / "demo/revisions/001/requirements.md").is_file())
+            self.assertFalse((exchange / "demo/revisions/001/requirements_iso.md").exists())
+            self.assertNotIn(
+                "requirements_iso.md",
+                [path.name for path in (exchange / "demo/revisions/001").iterdir()],
+            )
             manifest = json.loads((exchange / "demo/manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema_version"], 2)
             self.assertEqual(manifest["sdd_contract"], "../AGENTS.md")
+            self.assertEqual(manifest["developer_sdd"]["input_role"], "business-requirements")
+            self.assertEqual(
+                manifest["developer_sdd"]["contours"],
+                "backend-and-frontend-are-separate",
+            )
             self.assertFalse((exchange / "demo/revisions/001/returns").exists())
             self.assertFalse((project / "features/demo/slices").exists())
 
@@ -399,6 +357,69 @@ class RequirementsExchangeTests(unittest.TestCase):
             manifest = json.loads(Path(second["manifest"]).read_text(encoding="utf-8"))
             self.assertEqual(manifest["revisions"][0]["state"], "superseded")
             self.assertEqual(manifest["revisions"][1]["state"], "sent")
+
+    def test_schema_one_manifest_is_upgraded_when_new_revision_is_added(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, feature = self.prepare_project(Path(temp))
+            first = self.prepare(project)
+            manifest_path = Path(first["manifest"])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["schema_version"] = 1
+            manifest.pop("developer_sdd")
+            manifest["requested_returns"] = {
+                "tasks": {
+                    "path": "revisions/<NNN>/returns/tasks.md",
+                    "meaning": "Уже согласованная разработчиками разбивка по задачам",
+                    "estimate": "optional",
+                    "jira_key": "optional",
+                },
+                "task_results": {
+                    "path": "revisions/<NNN>/returns/tasks/<task-id>.md",
+                    "frequency": "После выполнения или существенного изменения каждой задачи",
+                },
+                "summary": {
+                    "path": "revisions/<NNN>/returns/summary.md",
+                    "meaning": "Итоговое покрытие всех требований активной редакции",
+                },
+            }
+            manifest["traceability"] = {
+                "requirement_pattern": "REQ-*",
+                "chain": "REQ-* -> tasks.md -> task result -> summary.md",
+            }
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            (feature / "requirements.md").write_text(
+                requirements("Система должна показать обновлённый результат."),
+                encoding="utf-8",
+            )
+            second = self.prepare(project)
+            self.assertEqual(second["revision"], 2)
+            upgraded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(upgraded["schema_version"], 2)
+            self.assertIn("developer_sdd", upgraded)
+            self.assertEqual(len(upgraded["revisions"]), 2)
+
+    def test_managed_receiver_contract_is_refreshed_for_new_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, feature = self.prepare_project(Path(temp))
+            first = self.prepare(project)
+            exchange = Path(first["manifest"]).parents[1]
+            agents = exchange / "AGENTS.md"
+            agents.write_text(
+                "# Договор SDD для обмена требованиями\n\nВерсия договора: `1`\n",
+                encoding="utf-8",
+            )
+            (feature / "requirements.md").write_text(
+                requirements("Система должна показать обновлённый результат."),
+                encoding="utf-8",
+            )
+            self.prepare(project)
+            refreshed = agents.read_text(encoding="utf-8")
+            self.assertIn("Версия договора: `2`", refreshed)
+            self.assertIn("бизнес-контрактом, а не готовым локальным `spec.md`", refreshed)
+            self.assertIn("Не объединяй клиентскую и серверную работу", refreshed)
 
     def test_scan_filters_by_owner_and_records_processing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

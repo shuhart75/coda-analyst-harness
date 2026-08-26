@@ -90,6 +90,7 @@ def doctor_command(args: argparse.Namespace) -> int:
         run_tool(project, "validate-links.py"),
         run_tool(project, "validate-context.py", ["--strict-features"] if args.strict else []),
         run_tool(project, "validate-requirements-profile.py"),
+        run_tool(project, "validate-requirements-wording.py"),
         run_tool(project, "validate-planning.py"),
         run_tool(project, "validate-trace.py", ["--strict"] if args.strict else []),
     ]
@@ -118,6 +119,12 @@ def requirements_check_command(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     extra = ["--feature", args.feature] if args.feature else []
     return run_tool(project, "validate-requirements-profile.py", extra)
+
+
+def wording_check_command(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    extra = ["--feature", args.feature] if args.feature else []
+    return run_tool(project, "validate-requirements-wording.py", extra)
 
 
 def session_brief_command(args: argparse.Namespace) -> int:
@@ -438,6 +445,11 @@ def build_parser() -> argparse.ArgumentParser:
     requirements.add_argument("project")
     requirements.add_argument("--feature")
     requirements.set_defaults(func=requirements_check_command)
+
+    wording = sub.add_parser("wording-check")
+    wording.add_argument("project")
+    wording.add_argument("--feature")
+    wording.set_defaults(func=wording_check_command)
 
     brief = sub.add_parser("session-brief")
     brief.add_argument("project")

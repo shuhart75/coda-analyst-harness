@@ -16,9 +16,9 @@ from typing import Any
 
 EXCHANGE_DIR = "requirements-exchange"
 STATE_NAME = "development-results-state.json"
-FORMAT_MARKER = "Формат: **последовательный человекочитаемый**"
+FORMAT_MARKER = "Формат: **компактная спецификация функциональности**"
 REQ_RE = re.compile(r"\bREQ-[A-Z0-9-]+\b")
-REQ_DEFINITION_RE = re.compile(r"^\*\*(REQ-[A-Z0-9-]+)\.\s+.+?\*\*\s*$", re.MULTILINE)
+REQ_DEFINITION_RE = re.compile(r"^### (REQ-[A-Z0-9-]+)\.\s+.+$", re.MULTILINE)
 ALLOWED_REVISION_STATES = {"sent", "in-progress", "paused", "superseded", "completed", "cancelled"}
 FEATURE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 
@@ -158,10 +158,19 @@ def resolve_code_root(project: Path, explicit: str | None) -> Path | None:
 
 def install_root_contract(exchange: Path) -> None:
     templates = harness_root() / "templates" / "exchange"
+    managed_headings = {
+        "README.md": "# Обмен требованиями и результатами разработки",
+        "AGENTS.md": "# Договор SDD для обмена требованиями",
+    }
     for source_name, target_name in (("README.template.md", "README.md"), ("AGENTS.template.md", "AGENTS.md")):
+        source = templates / source_name
         target = exchange / target_name
         if not target.exists():
-            target.write_bytes((templates / source_name).read_bytes())
+            target.write_bytes(source.read_bytes())
+            continue
+        current = target.read_text(encoding="utf-8", errors="ignore")
+        if current.startswith(managed_headings[target_name]) and target.read_bytes() != source.read_bytes():
+            target.write_bytes(source.read_bytes())
 
 
 def title_from_requirements(text: str, feature: str) -> str:
@@ -176,7 +185,7 @@ def validate_requirements_text(text: str) -> list[str]:
     identifiers = REQ_DEFINITION_RE.findall(text)
     duplicates = sorted({item for item in identifiers if identifiers.count(item) > 1})
     if FORMAT_MARKER not in text:
-        errors.append("requirements.md не использует последовательный человекочитаемый формат")
+        errors.append("requirements.md не использует компактную спецификацию функциональности")
     if not identifiers:
         errors.append("requirements.md не содержит оформленных определений REQ-*")
     if duplicates:
@@ -216,13 +225,14 @@ def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> 
     audit = state.get("delivery_audit")
     offer = state.get("revision_offer")
     if (
-        state.get("schema_version") != 3
+        state.get("schema_version") != 4
         or state.get("feature") != feature
         or not isinstance(audit, dict)
         or not isinstance(offer, dict)
     ):
         raise ValueError("Публикация запрещена: состояние требований не содержит актуального аудита")
     current_hash = sha256(requirements)
+    levels = audit.get("levels")
     if (
         offer.get("state") != "preparation-authorized"
         or audit.get("state") != "confirmed"
@@ -231,6 +241,13 @@ def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> 
         or not isinstance(audit.get("summary"), str)
         or not audit["summary"].strip()
         or not isinstance(audit.get("finding_count"), int)
+        or audit.get("method") != "three-level-cross-requirement-v1"
+        or not isinstance(levels, dict)
+        or any(levels.get(level) != "complete" for level in ("individual", "system", "delivery"))
+        or sum(
+            audit.get(key, -1)
+            for key in ("resolved_finding_count", "accepted_risk_count", "blocking_finding_count")
+        ) != audit.get("finding_count")
         or audit.get("blocking_finding_count") != 0
         or audit.get("requirements_sha256") != current_hash
     ):
@@ -239,8 +256,8 @@ def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> 
         )
 
 
-def requested_returns_contract() -> dict[str, Any]:
-    return {
+def requested_returns_contract(schema_version: int = 2) -> dict[str, Any]:
+    contract: dict[str, Any] = {
         "tasks": {
             "path": "revisions/<NNN>/returns/tasks.md",
             "meaning": "Уже согласованная разработчиками разбивка по задачам",
@@ -256,25 +273,50 @@ def requested_returns_contract() -> dict[str, Any]:
             "meaning": "Итоговое покрытие всех требований активной редакции",
         },
     }
+    if schema_version == 2:
+        contract["tasks"].update({
+            "contour_rule": "Одна задача относится ровно к одному контуру; backend и frontend не смешиваются",
+            "local_sdd_reference": "required",
+        })
+        contract["task_results"]["local_sdd_reference"] = "required"
+        contract["summary"]["requirement_coverage"] = "required"
+    return contract
+
+
+def traceability_contract(schema_version: int) -> dict[str, str]:
+    chain = "REQ-* -> tasks.md -> task result -> summary.md"
+    if schema_version == 2:
+        chain = "REQ-* -> local SDD change -> tasks.md -> task result -> summary.md"
+    return {"requirement_pattern": "REQ-*", "chain": chain}
+
+
+def developer_sdd_contract() -> dict[str, str]:
+    return {
+        "input_role": "business-requirements",
+        "code_comparison": "required-before-implementation",
+        "technical_artifacts": "developer-owned-local-sdd",
+        "contours": "backend-and-frontend-are-separate",
+    }
 
 
 def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
     errors: list[str] = []
-    if manifest.get("schema_version") != 1 or manifest.get("exchange_kind") != "feature-requirements":
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {1, 2} or manifest.get("exchange_kind") != "feature-requirements":
         errors.append("неподдерживаемая схема manifest.json")
+        schema_version = 2
     feature = manifest.get("feature")
     if not isinstance(feature, str) or not FEATURE_RE.fullmatch(feature) or feature != root.name:
         errors.append("feature в manifest.json не совпадает с каталогом функциональности")
     owner = manifest.get("owner")
     if not isinstance(owner, dict) or not isinstance(owner.get("analyst_id"), str) or not owner["analyst_id"]:
         errors.append("в manifest.json отсутствует владелец-аналитик")
-    if manifest.get("requested_returns") != requested_returns_contract():
+    if manifest.get("requested_returns") != requested_returns_contract(schema_version):
         errors.append("manifest.json содержит неподдерживаемый договор возвратов")
-    if manifest.get("traceability") != {
-        "requirement_pattern": "REQ-*",
-        "chain": "REQ-* -> tasks.md -> task result -> summary.md",
-    }:
+    if manifest.get("traceability") != traceability_contract(schema_version):
         errors.append("manifest.json содержит неподдерживаемый договор трассировки")
+    if schema_version == 2 and manifest.get("developer_sdd") != developer_sdd_contract():
+        errors.append("manifest.json не содержит договор преобразования в локальную SDD")
     if manifest.get("sdd_contract") != "../AGENTS.md" or not (root.parent / "AGENTS.md").is_file():
         errors.append("manifest.json не связан с корневым договором SDD")
     active = manifest.get("active_revision")
@@ -329,18 +371,16 @@ def prepare_in_exchange(
     feature_exchange = exchange / feature
     manifest_path = feature_exchange / "manifest.json"
     manifest = load_json(manifest_path) if manifest_path.is_file() else {
-        "schema_version": 1,
+        "schema_version": 2,
         "exchange_kind": "feature-requirements",
         "feature": feature,
         "title": title_from_requirements(requirements_text, feature),
         "owner": {"analyst_id": analyst},
         "active_revision": None,
         "revisions": [],
-        "requested_returns": requested_returns_contract(),
-        "traceability": {
-            "requirement_pattern": "REQ-*",
-            "chain": "REQ-* -> tasks.md -> task result -> summary.md",
-        },
+        "requested_returns": requested_returns_contract(2),
+        "traceability": traceability_contract(2),
+        "developer_sdd": developer_sdd_contract(),
         "sdd_contract": "../AGENTS.md",
     }
     if manifest.get("feature") != feature:
@@ -365,6 +405,13 @@ def prepare_in_exchange(
             "manifest_path": manifest_path,
             "requirements_path": feature_exchange / active_entry["requirements_path"],
         }
+    if manifest.get("schema_version") == 1:
+        manifest.update({
+            "schema_version": 2,
+            "requested_returns": requested_returns_contract(2),
+            "traceability": traceability_contract(2),
+            "developer_sdd": developer_sdd_contract(),
+        })
     revision = max(
         (item["revision"] for item in revisions if isinstance(item, dict) and isinstance(item.get("revision"), int)),
         default=0,

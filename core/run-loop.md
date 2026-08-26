@@ -39,8 +39,8 @@ A failed check does not advance the run. Repeated failure reaches the configured
 ## Requirement Impact Invariants
 
 - Cross-feature work caused by the current feature is part of the initiating feature scope and HLE.
-- Current requirements contain a dedicated `Доработки затронутых функциональностей` section.
-- Every impact row is covered by root requirements and acceptance examples, or is marked `not applicable` with a reason.
+- Current requirements contain the mandatory `Влияние на соседние функциональности` section.
+- Every required neighboring change is covered by root `REQ-*` and nested scenarios, or the section explicitly states that no neighboring functionality is affected.
 - Local stale tails block completion. Cross-mode propagation may be deferred only through a concrete consistency backlog record.
 - When requirements depend on current implementation, analyst research is bounded to one registered `coda` contour, records the exact commit, and verifies that the code worktree is unchanged.
 - Analyst code evidence improves the input but never replaces developer-side reconciliation against the implementation branch used for delivery.
@@ -52,7 +52,8 @@ A failed check does not advance the run. Repeated failure reaches the configured
 - Every root change records `analyst` or `developer-result` origin in `requirements-state.json`.
 - A `developer-result` change never triggers or offers a revision.
 - After an analyst change to previously transmitted requirements, the LLM offers a new revision at most once. A refusal suppresses further offers until an explicit preparation command.
-- Explicit preparation first audits every quality direction defined in `core/requirements-profile.md` and asks semantic questions one at a time.
+- Explicit preparation first completes the three-level cross-requirement audit in `core/requirements-audit.md` and asks semantic questions one at a time.
+- Requirement authoring and preparation both run the controlled-wording check and the isolated-reader review from `core/requirements-wording.md`.
 - The LLM shows the completed audit report to the analyst. Publication is forbidden until the analyst explicitly confirms both that report and transfer.
 - Audit confirmation is bound to the exact `requirements.md` checksum. Any later change invalidates it and requires a new audit.
 - After confirmation, preparation copies only `requirements.md`, updates `manifest.json` and records the actual destination. No exchange revision exists while audit confirmation is pending.

@@ -50,20 +50,22 @@ When working in this workspace, read in this order:
 1. `AGENTS.md`
 2. `core/llm-contract.md`
 3. `core/requirements-profile.md` before authoring or substantially rewriting requirements
-4. `core/agent-delegation.md`
-5. `core/skills-policy.md`
-6. `core/tooling-policy.md`
-7. `core/context-policy.md`
-8. `core/research-policy.md`
-9. `core/code-inspection.md`
-10. `core/run-loop.md`
-11. `core/collaboration.md` when `.workspace-state/collaboration.json` exists or the user asks to start, save, update, submit or migrate feature work
-12. `.workspace-state/run-state/session-brief.md` when present
-13. `.workspace-state/active-mode.md`
-14. `modes/<active-mode>.md`
-15. `PROJECT_ROOT/README.md`
-16. `PROJECT_ROOT/planning/team.md` before planning resources or regenerating actual-progress
-17. relevant files under `PROJECT_ROOT/context/project-rules/`
+4. `core/requirements-wording.md` before writing or checking requirement prose
+5. `core/requirements-audit.md` before checking or delivering requirements
+6. `core/agent-delegation.md`
+7. `core/skills-policy.md`
+8. `core/tooling-policy.md`
+9. `core/context-policy.md`
+10. `core/research-policy.md`
+11. `core/code-inspection.md`
+12. `core/run-loop.md`
+13. `core/collaboration.md` when `.workspace-state/collaboration.json` exists or the user asks to start, save, update, submit or migrate feature work
+14. `.workspace-state/run-state/session-brief.md` when present
+15. `.workspace-state/active-mode.md`
+16. `modes/<active-mode>.md`
+17. `PROJECT_ROOT/README.md`
+18. `PROJECT_ROOT/planning/team.md` before planning resources or regenerating actual-progress
+19. relevant files under `PROJECT_ROOT/context/project-rules/`
 
 ## Multi-user feature work
 
@@ -74,7 +76,7 @@ When working in this workspace, read in this order:
 - While feature work is active, bare `обнови`, `синкани`, `подтяни изменения`, `обнови мою ветку`, `синкани мою ветку` and `обнови рабочую ветку` mean `collaboration.py update`: merge current `origin/main` into the active feature branch with protective snapshots and push that branch. Exact phrases containing `репы`, `репозитории`, `code` or `coda` retain their registered repository meanings and must not be reinterpreted.
 - `требования готовы к объединению`, `отправь требования на проверку`, `подготовь требования к слиянию`, `отправь ветку на слияние`, `вливаем в основную ветку` and `влей в основную ветку` mean: complete requirement checks, save exact changes, update the branch, repeat checks, then run `collaboration.py submit`. This pushes only the feature branch. It does not create a merge request and never creates a developer package. Start the result with the exact `message` returned by the command. If `merge_request_create_url` is present, call it only a link to the merge-request creation form, never a link to an existing or created request.
 - `запрос на слияние принят`, `MR принят`, `PR принят`, `ветка принята в main`, `ветка влита в main` and `слияние выполнено` mean: run `collaboration.py finish`, which must first prove that the submitted commit is contained in `origin/main`, then report the resulting collaboration status. These phrases never mean accepting or creating a merge request.
-- `сформируй пакет для разработки`, `отправь требования в разработку`, `передай требования разработчикам`, `передай разрабам`, `отдай требования разрабам`, `отправь разрабам`, `отдаём в разработку` and `передаём в разработку` are exact delivery synonyms. First finish a remotely accepted branch with `collaboration.py finish`, then require `collaboration.py require-main-for-delivery --feature <slug>`. Missing collaboration state is a migration blocker, not single-user permission. If the branch is not yet in `origin/main`, stop without creating an exchange revision. After the guard passes, run the mandatory audit in `core/requirements-profile.md`, repair only meaning-preserving issues and ask one semantic question at a time. Record the audit, show its final report to the analyst, and request explicit confirmation. Only a reply that confirms both the shown audit and transfer authorizes `requirementsctl.py confirm-audit` and `requirements-exchange.py prepare`. Publish the unchanged audited file directly to `sent`; any intervening change requires a new audit. There is no package state `ready`.
+- `сформируй пакет для разработки`, `отправь требования в разработку`, `передай требования разработчикам`, `передай разрабам`, `отдай требования разрабам`, `отправь разрабам`, `отдаём в разработку` and `передаём в разработку` are exact delivery synonyms. First finish a remotely accepted branch with `collaboration.py finish`, then require `collaboration.py require-main-for-delivery --feature <slug>`. Missing collaboration state is a migration blocker, not single-user permission. If the branch is not yet in `origin/main`, stop without creating an exchange revision. After the guard passes, run all three levels from `core/requirements-audit.md`, repair only meaning-preserving issues, ask one semantic question at a time and rerun the complete audit after corrections. Record the audit, show its final report to the analyst, and request explicit confirmation. Only a reply that confirms both the shown audit and transfer authorizes `requirementsctl.py confirm-audit` and `requirements-exchange.py prepare`. Publish the unchanged audited file directly to `sent`; any intervening change requires a new audit. There is no package state `ready`.
 - `включи совместную работу`, `включи многопользовательский режим`, `мигрируй на веточную работу` and `переведи documents на работу через ветки` mean the migration procedure in `core/collaboration.md`. Ask for a short analyst id once. If local work exists, ask for exactly one feature before calling `collaboration.py migrate`; never guess its ownership.
 
 ## Primary workflow rule
@@ -94,22 +96,32 @@ Requirement templates live in `templates/requirements/`. Use them as the active 
 - `implementation task` is an execution tracking unit only.
 - They are related, but they are not the same artifact.
 
-## Feature-centered structure
+## Requirements
 
-During analytical authoring, work is grouped by `feature` and the only authored requirements source is `PROJECT_ROOT/features/<feature>/requirements.md`. Do not create slices, FE/BE packs, task candidates or preliminary developer cards. Explicit delivery copies only the root document and creates a manifest.
-
-## Developer handoff
-
+- Author requirements in Russian. Keep English only for exact code, paths, API and database identifiers, enum values, formats, fixed product names, and necessary technical terms.
+- Root requirements are authored. During ordinary work, change only `PROJECT_ROOT/features/<feature>/requirements.md`; do not create slices, contour detail packs, preliminary developer tasks or exchange revisions.
+- On an explicit one-time migration from the superseded ISO-shaped document, rename the former root to `requirements_iso.md`, create the new root from the compact template, and then treat the archive as immutable history. Never send `requirements_iso.md` or use it as the authored source.
 - Before editing an existing feature, run `requirementsctl.py status`. If it reports an unrecorded divergence from the last published revision, do not guess its origin: ask whether it came from analyst initiative or a registered developer result and record that answer first.
 - After every root requirement change, record its origin with `scripts/requirementsctl.py record-change`: `analyst` for an analyst-initiated change or `developer-result` with the stable `return_id` for accepted developer feedback.
 - A `developer-result` change never creates or offers an exchange revision. An analyst-initiated change after an existing publication may produce one offer to prepare a new revision. Record the offer before asking; if declined, persist the refusal and do not ask again until an explicit preparation command.
-- Treat `сформируй пакет для разработки` and its documented Russian synonyms as one end-to-end analyst command: validate and safely repair requirements, ask one semantic question at a time when needed, then publish directly to `sent`. Do not leave a `ready` revision for analyst inspection.
-- For new work, send one immutable root `requirements.md` plus `manifest.json` under `requirements-exchange/<feature>/`.
-- The receiving SDD reads the active revision, its local contour instructions and only the matched code and tests. It never needs the analytical repository.
-- Developers return only their already agreed decomposition in `returns/tasks.md`; how they agree it is outside the analytical workflow.
-- Per-task and final results are Markdown files under the same revision and link directly to `REQ-*`.
+- New root documents follow the compact specification contract in `core/requirements-profile.md`; the ISO-shaped and former sequential profiles are no longer used for new delivery revisions.
+- Requirement prose follows `core/requirements-wording.md`. Use explicit quantities and named referents; every scenario must identify a concrete state, event and observable result. Run `validate-requirements-wording.py` after substantive edits and before showing the document as checked.
+- Do not reproduce the developer's technical `spec.md`. Write a business contract with stable `REQ-*` headings and nested Russian `Когда`/`Тогда` scenarios; the receiving SDD derives its own technical delta from it and the code.
+- Detect impact on neighboring features, include required neighboring work in the current requirements, and record deferred propagation in `planning/consistency-backlog.md` inside the analytical project.
+- Never invent a business rule from code. Code observations are commit-bound technical evidence.
+- Only the user-owner may approve requirements or plans.
+
+## Developer handoff
+
+- Treat every documented delivery synonym as a two-stage action. First run all three audit levels in `core/requirements-audit.md`: individual rules, cross-requirement system reasoning and delivery readiness. Repair only meaning-preserving issues, ask one semantic question at a time, recheck affected relations after each answer, then rerun all three levels over the complete document. Show the final audit report and request explicit confirmation. Do not create or publish a revision before that confirmation.
+- Record the completed audit with `requirementsctl.py record-audit`. Only an analyst reply that explicitly confirms both the shown audit and transfer authorizes `requirementsctl.py confirm-audit`; silence, an earlier transfer command, or approval of the requirements document itself is not confirmation of the audit.
+- After confirmation, publish the unchanged audited file directly to `sent`. If `requirements.md` changes at any point after the audit, repeat the audit and confirmation; `requirements-exchange.py prepare` enforces this checksum boundary.
+- Send only one immutable root `requirements.md` plus `manifest.json`. Do not create slices, contour packs, analyst-authored developer tasks or local OpenSpec artifacts on behalf of developers.
+- The receiver treats `requirements.md` as an upstream business contract, compares it with current code and creates its own local SDD artifacts separately for backend and frontend. Mixed backend/frontend tasks are forbidden; one `REQ-*` may map to multiple contour tasks.
+- Developers return their already agreed decomposition in `returns/tasks.md`, per-task factual results in `returns/tasks/<task-id>.md`, and final `REQ-*` coverage in `returns/summary.md`. Analyst review never gates development.
 - Preserve every sent input revision and its returns as immutable history.
-- Do not create slices, contour requirement packs, analyst-authored developer tasks or separate test receipts.
+- Always report the actual destination: remote code branch and repository path, or the absolute reserve path in role `analytics`, plus the revision number.
+- Never create a ZIP unless the user explicitly requests it. A requested transport ZIP belongs only in `~/Downloads`, never in a repository.
 
 ## Prototype stack
 
@@ -168,3 +180,4 @@ Context summaries, checkpoints and research files are internal harness operation
 - Prefer a Russian explanation before an unavoidable special term.
 - Run `python3 scripts/validate-language.py "$PROJECT_ROOT"` for changed requirements before completion.
 - Run `python3 scripts/validate-requirements-profile.py "$PROJECT_ROOT"` for changed root documents that use the profile marker.
+- Run `python3 scripts/validate-requirements-wording.py "$PROJECT_ROOT"` for changed compact requirements. A successful script result never replaces the isolated-reader review from `core/requirements-wording.md`.
