@@ -126,12 +126,12 @@ python3 scripts/trackerctl.py set-participant \
 
 ## Нормализованный снимок
 
-Каждый провайдер преобразуется в JSON схемы 2. Снимок схемы 1 из незавершённого
+Каждый провайдер преобразуется в JSON схемы 3. Снимок предыдущей схемы из незавершённого
 старого запуска не продолжается после обновления: LLM выполняет новый `begin`.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "provider": "sbertrek",
   "captured_at": "2026-08-26T00:00:00+00:00",
   "scope": {
@@ -145,11 +145,11 @@ python3 scripts/trackerctl.py set-participant \
     "expected_release_keys": []
   },
   "collection": {
-    "history": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:history:PROJECT-1"]},
-    "epic_links": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:issue-read:PROJECT-1"]},
-    "release_links": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:issue-read:PROJECT-1"]},
-    "counterpart_lookup": {"state": "not-applicable", "reason": null, "failure_kind": null, "evidence": []},
-    "epic_neighbors": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:epic-search:EPIC-1"]},
+    "history": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:history:PROJECT-1"], "checked_keys": ["PROJECT-1"]},
+    "epic_links": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:issue-read:PROJECT-1"], "checked_keys": []},
+    "release_links": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:issue-read:PROJECT-1"], "checked_keys": []},
+    "counterpart_lookup": {"state": "not-applicable", "reason": null, "failure_kind": null, "evidence": [], "checked_keys": []},
+    "epic_neighbors": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:epic-search:EPIC-1"], "checked_keys": []},
     "not_found_keys": [],
     "not_found_evidence": [],
     "expanded_epic_keys": ["EPIC-1"]
@@ -166,6 +166,12 @@ python3 scripts/trackerctl.py set-participant \
       "estimate": {"value": 3, "unit": "days"},
       "epic": {"key": "EPIC-1", "name": "Эпик"},
       "releases": [{"key": "REL-1", "name": "Релиз"}],
+      "field_observations": {
+        "assignee": "value",
+        "estimate": "value",
+        "epic": "value",
+        "releases": "value"
+      },
       "discovery": "seed",
       "updated_at": "2026-08-26T00:00:00+00:00",
       "history": [
@@ -198,21 +204,30 @@ LLM не редактирует большой JSON-снимок вручную 
 
 ```bash
 python3 scripts/trackerctl.py snapshot-metadata --run-id <run-id> --provider sbertrek --captured-at <timestamp> --query <query> --seed-evidence KEY=SOURCE
-python3 scripts/trackerctl.py snapshot-issue --run-id <run-id> --provider sbertrek --key <key> --summary <summary> --issue-type <type> --status <status> --discovery <kind> --updated-at <timestamp>
+python3 scripts/trackerctl.py snapshot-issue --run-id <run-id> --provider sbertrek --key <key> --summary <summary> --issue-type <type> --status <status> --assignee-state <value|absent|not-returned> --estimate-state <value|absent|not-returned> --epic-state <value|absent|not-returned> --releases-state <value|absent|not-returned> --discovery <kind> --updated-at <timestamp>
 python3 scripts/trackerctl.py snapshot-not-found --run-id <run-id> --provider sbertrek --key <key> --evidence <mcp-call>
 python3 scripts/trackerctl.py snapshot-history --run-id <run-id> --provider sbertrek --key <key> --at <timestamp> --field assignee --from-id <id> --to-id <id>
-python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability history --state complete --evidence <mcp-call>
+python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability history --state complete --evidence <mcp-call> --checked-key <key> [--checked-key <key> ...]
 python3 scripts/trackerctl.py run-status --run-id <run-id>
 python3 scripts/trackerctl.py reconcile --run-id <run-id>
+python3 scripts/trackerctl.py result-status --run-id <run-id>
 ```
 
 `snapshot-issue` поддерживает counterpart, исполнителя, оценку, эпик, релизы и
-классификацию релевантности отдельными флагами из `--help`. Команда идемпотентно
+классификацию релевантности отдельными флагами из `--help`. Для `assignee`,
+`estimate`, `epic` и `releases` обязательно записывается одно из трёх состояний:
+`value` означает фактически возвращённое значение, `absent` — подтверждённое
+провайдером отсутствие, `not-returned` — поле не было возвращено MCP. Последнее
+не выдаётся за отсутствие и попадает в `limitations`. Благодаря этому назначенная
+задача не может потерять исполнителя и обойти очередь вопросов о `team_id`.
+Команда идемпотентно
 обновляет задачу по ключу и сохраняет уже записанную историю. `snapshot-collection`
 получает `complete` только после реального вызова соответствующей возможности MCP;
 при недоступности используется `unavailable --failure-kind <kind> --reason
 <причина> --evidence <mcp-call>`. Фраза «MCP не вызван» означает пропуск и не
-является недоступностью. Перед
+является недоступностью. Для `history=complete` каждый реально проверенный ключ
+задаётся отдельным `--checked-key`; полнота блокируется, если в снимке есть задача,
+ключ которой не перечислен. Перед
 `reconcile` обязательный `run-status` должен вернуть `tracker-run-ready`.
 
 Прочитанные напрямую данные MCP не являются отчётом. Если LLM не записала их этими
@@ -381,7 +396,9 @@ planning story не получает такой статус непосредс�
 7. выполнить `trackerctl.py reconcile --run-id <run-id>`; при неизвестном участнике
    дословно задать возвращённый вопрос, сохранить только `team_id`, задать следующий
    возвращённый вопрос и продолжать, пока очередь не разрешит повторить `reconcile`;
-8. показать без ручного пересчёта сводку из `counts`, `limitations` и `report.md`,
+8. получить сохранённый итог через `result-status --run-id <run-id>` (повторный
+   `run-status` возвращает тот же официальный envelope) и показать без ручного
+   пересчёта сводку из `counts`, `limitations` и `report.md`,
    обе группировки, дообогащённые поля, конфликты и неизвестные состояния.
 
 LLM не должна объявлять сверку завершённой после кода `3` от `config-status`, ошибки
@@ -392,6 +409,9 @@ LLM не должна объявлять сверку завершённой п�
 сообщении копируются из `counts`; запрещено
 пересчитывать или пересказывать их по памяти. Если `limitations` непустой, фраза
 «ограничений полноты нет» запрещена.
+После успешного `reconcile` модель не составляет статус вручную: `run-status` и
+`result-status` читают сохранённый `completion-status.json` и возвращают точный
+официальный результат этого запуска.
 
 Весь результат остаётся в игнорируемой `.workspace-state/tracker-runs/`.
 Команда не переключает режим, не создаёт рабочую ветку и не изменяет

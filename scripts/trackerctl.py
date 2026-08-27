@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CONFIG_SCHEMA_VERSION = 3
 CONFIG_INCOMPLETE_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -38,6 +38,8 @@ COLLECTION_CAPABILITIES = (
 )
 COLLECTION_STATES = {"complete", "unavailable", "not-applicable"}
 COLLECTION_FAILURE_KINDS = {"capability-absent", "call-failed", "permission-denied"}
+OBSERVED_FIELDS = ("assignee", "estimate", "epic", "releases")
+FIELD_OBSERVATION_STATES = {"value", "absent", "not-returned"}
 SKIPPED_COLLECTION_REASON = re.compile(
     r"(?:не\s+(?:вызван|вызывал|выполн|провер|прочитан|запрош)|not\s+(?:called|attempted|read)|skipped)",
     re.IGNORECASE,
@@ -113,6 +115,10 @@ def run_root(run_id: str) -> Path:
     if not RUN_ID_PATTERN.fullmatch(run_id):
         raise ValueError("Некорректный run_id чтения трекеров")
     return state_root() / "tracker-runs" / run_id
+
+
+def completion_status_path(run_id: str) -> Path:
+    return run_root(run_id) / "completion-status.json"
 
 
 def load_json(path: Path) -> Any:
@@ -282,6 +288,7 @@ def collection_template(provider: str) -> dict:
             "reason": None,
             "failure_kind": None,
             "evidence": [],
+            "checked_keys": [],
         }
         for capability in COLLECTION_CAPABILITIES
     } | {"not_found_keys": [], "not_found_evidence": [], "expanded_epic_keys": []}
@@ -339,6 +346,10 @@ def validate_collection(payload: Any, provider: str) -> dict:
             raise ValueError(
                 f"collection.{capability} снимка {provider} не должна содержать failure_kind"
             )
+        validate_string_list(
+            item.get("checked_keys", []),
+            f"collection.{capability}.checked_keys снимка {provider}",
+        )
         if capability in {"history", "epic_links", "release_links", "epic_neighbors"} and item["state"] == "not-applicable":
             raise ValueError(f"collection.{capability} не может быть not-applicable для {provider}")
     counterpart_state = payload["counterpart_lookup"]["state"]
@@ -424,6 +435,28 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
                 raise ValueError(
                     f"Задача-кандидат {issue['key']} должна иметь relevance_basis"
                 )
+        observations = issue.get("field_observations")
+        if not isinstance(observations, dict) or set(observations) != set(OBSERVED_FIELDS):
+            raise ValueError(
+                f"Задача {issue['key']} должна явно описывать field_observations: "
+                + ", ".join(OBSERVED_FIELDS)
+            )
+        for field in OBSERVED_FIELDS:
+            state = observations.get(field)
+            if state not in FIELD_OBSERVATION_STATES:
+                raise ValueError(
+                    f"Некорректное наблюдение {field} задачи {issue['key']}: {state}"
+                )
+            field_value = issue.get(field)
+            has_value = present(field_value)
+            if state == "value" and not has_value:
+                raise ValueError(
+                    f"Задача {issue['key']} объявила {field}=value без значения"
+                )
+            if state != "value" and has_value:
+                raise ValueError(
+                    f"Задача {issue['key']} содержит {field}, но observation={state}"
+                )
         history = issue.get("history", [])
         if not isinstance(history, list) or not all(isinstance(event, dict) for event in history):
             raise ValueError(f"history задачи {issue['key']} должен быть списком объектов")
@@ -445,6 +478,14 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
             f"Seed-ключи снимка {provider} не прочитаны и не отмечены not-found: "
             + ", ".join(unresolved_seeds)
         )
+    if payload["collection"]["history"]["state"] == "complete":
+        checked_history = set(payload["collection"]["history"].get("checked_keys", []))
+        unchecked_history = sorted(seen - checked_history)
+        if unchecked_history:
+            raise ValueError(
+                f"Снимок {provider} объявил history=complete без проверки задач: "
+                + ", ".join(unchecked_history)
+            )
     if payload["collection"]["epic_neighbors"]["state"] == "complete":
         discovered_epics = issue_group_keys(issues, "epic")
         expanded_epics = set(payload["collection"].get("expanded_epic_keys", []))
@@ -674,6 +715,14 @@ def collection_limitations(provider: str, snapshot: dict) -> list[str]:
     if collection["history"]["state"] == "complete" and snapshot["issues"]:
         if not any(issue.get("history") for issue in snapshot["issues"]):
             limitations.append(f"{provider}-history-returned-no-events")
+    for field in OBSERVED_FIELDS:
+        missing_count = sum(
+            1
+            for issue in snapshot["issues"]
+            if issue.get("field_observations", {}).get(field) == "not-returned"
+        )
+        if missing_count:
+            limitations.append(f"{provider}-{field}-not-returned:{missing_count}")
     epics = issue_group_keys(snapshot["issues"], "epic")
     releases = issue_group_keys(snapshot["issues"], "releases")
     for key in snapshot["scope"].get("expected_epic_keys", []):
@@ -1258,6 +1307,23 @@ def snapshot_issue_command(args: argparse.Namespace) -> int:
         raise ValueError("--estimate-value и --estimate-unit задаются вместе")
     if bool(args.epic_key) != bool(args.epic_name):
         raise ValueError("--epic-key и --epic-name задаются вместе")
+    observed_values = {
+        "assignee": bool(args.assignee_id),
+        "estimate": bool(args.estimate_value),
+        "epic": bool(args.epic_key),
+        "releases": bool(args.release),
+    }
+    observed_states = {
+        "assignee": args.assignee_state,
+        "estimate": args.estimate_state,
+        "epic": args.epic_state,
+        "releases": args.releases_state,
+    }
+    for field, state in observed_states.items():
+        if (state == "value") != observed_values[field]:
+            raise ValueError(
+                f"--{field.replace('_', '-')}-state={state} противоречит переданному значению"
+            )
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
     existing = next((item for item in snapshot["issues"] if item.get("key") == args.key), None)
     issue = {
@@ -1283,6 +1349,7 @@ def snapshot_issue_command(args: argparse.Namespace) -> int:
             else None
         ),
         "releases": [parse_release(value) for value in args.release],
+        "field_observations": observed_states,
         "discovery": args.discovery,
         "updated_at": args.updated_at,
         "history": existing.get("history", []) if existing else [],
@@ -1401,6 +1468,7 @@ def snapshot_collection_command(args: argparse.Namespace) -> int:
         "reason": args.reason if args.state == "unavailable" else None,
         "failure_kind": args.failure_kind if args.state == "unavailable" else None,
         "evidence": list(dict.fromkeys(args.evidence)),
+        "checked_keys": list(dict.fromkeys(args.checked_key)),
     }
     for key in args.expanded_epic_key:
         if key not in snapshot["collection"]["expanded_epic_keys"]:
@@ -1446,6 +1514,10 @@ def snapshot_progress(snapshot: dict, provider: str) -> dict:
 
 
 def tracker_run_status_command(args: argparse.Namespace) -> int:
+    completed = completion_status_path(args.run_id)
+    if completed.is_file():
+        print(json.dumps(load_json(completed), ensure_ascii=False, indent=2))
+        return 0
     providers = ["sbertrek"]
     if (run_root(args.run_id) / "input" / "jira.json").is_file():
         providers.append("jira")
@@ -1463,6 +1535,16 @@ def tracker_run_status_command(args: argparse.Namespace) -> int:
         "allowed_next_action": "reconcile" if ready else "complete-snapshots",
         "required_success_status": "tracker-read-reconciled",
     }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def tracker_result_status_command(args: argparse.Namespace) -> int:
+    path = completion_status_path(args.run_id)
+    if not path.is_file():
+        raise ValueError(
+            f"run_id={args.run_id} ещё не имеет успешного результата reconcile"
+        )
+    print(json.dumps(load_json(path), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1517,6 +1599,9 @@ def begin_command(_: argparse.Namespace) -> int:
 
 
 def reconcile_command(args: argparse.Namespace) -> int:
+    if args.run_id and completion_status_path(args.run_id).is_file():
+        print(json.dumps(load_json(completion_status_path(args.run_id)), ensure_ascii=False, indent=2))
+        return 0
     config = (
         validate_config(load_json(Path(args.config).resolve()))
         if args.config
@@ -1570,7 +1655,7 @@ def reconcile_command(args: argparse.Namespace) -> int:
     report_path = output_root / "report.md"
     save_json(result_path, result)
     report_path.write_text(report_text(result), encoding="utf-8")
-    print(json.dumps({
+    completion = {
         "status": "tracker-read-reconciled",
         "run_id": run_id,
         "issue_count": len(result["issues"]),
@@ -1584,7 +1669,9 @@ def reconcile_command(args: argparse.Namespace) -> int:
         "allowed_next_action": "present-report",
         "project_changed": False,
         "tracker_changed": False,
-    }, ensure_ascii=False, indent=2))
+    }
+    save_json(completion_status_path(run_id), completion)
+    print(json.dumps(completion, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1638,11 +1725,15 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_issue.add_argument("--status", required=True)
     snapshot_issue.add_argument("--assignee-id")
     snapshot_issue.add_argument("--assignee-name")
+    snapshot_issue.add_argument("--assignee-state", choices=sorted(FIELD_OBSERVATION_STATES), required=True)
     snapshot_issue.add_argument("--estimate-value")
     snapshot_issue.add_argument("--estimate-unit")
+    snapshot_issue.add_argument("--estimate-state", choices=sorted(FIELD_OBSERVATION_STATES), required=True)
     snapshot_issue.add_argument("--epic-key")
     snapshot_issue.add_argument("--epic-name")
+    snapshot_issue.add_argument("--epic-state", choices=sorted(FIELD_OBSERVATION_STATES), required=True)
     snapshot_issue.add_argument("--release", action="append", default=[])
+    snapshot_issue.add_argument("--releases-state", choices=sorted(FIELD_OBSERVATION_STATES), required=True)
     snapshot_issue.add_argument("--discovery", choices=sorted(DISCOVERY_VALUES), required=True)
     snapshot_issue.add_argument("--feature-relevance", choices=sorted(RELEVANCE_VALUES))
     snapshot_issue.add_argument("--relevance-basis")
@@ -1675,11 +1766,15 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_collection.add_argument("--reason")
     snapshot_collection.add_argument("--failure-kind", choices=sorted(COLLECTION_FAILURE_KINDS))
     snapshot_collection.add_argument("--evidence", action="append", default=[])
+    snapshot_collection.add_argument("--checked-key", action="append", default=[])
     snapshot_collection.add_argument("--expanded-epic-key", action="append", default=[])
     snapshot_collection.set_defaults(handler=snapshot_collection_command)
     run_status = subparsers.add_parser("run-status")
     run_status.add_argument("--run-id", required=True)
     run_status.set_defaults(handler=tracker_run_status_command)
+    result_status = subparsers.add_parser("result-status")
+    result_status.add_argument("--run-id", required=True)
+    result_status.set_defaults(handler=tracker_result_status_command)
     complete_config = subparsers.add_parser("complete-config")
     complete_config.set_defaults(handler=complete_config_command)
     begin = subparsers.add_parser("begin")

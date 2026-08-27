@@ -38,6 +38,9 @@ class TrackerCtlTests(unittest.TestCase):
 
     def restrict_to_issues(self, snapshot: dict, issues: list[dict]) -> None:
         snapshot["issues"] = issues
+        snapshot["collection"]["history"]["checked_keys"] = [
+            issue["key"] for issue in issues
+        ]
         seed_keys = [issue["key"] for issue in issues if issue.get("discovery") == "seed"]
         snapshot["scope"]["seed_keys"] = seed_keys
         snapshot["scope"]["seed_evidence"] = [
@@ -72,17 +75,23 @@ class TrackerCtlTests(unittest.TestCase):
         return path
 
     def collection(self, provider: str) -> dict:
+        checked_keys = (
+            ["SBER-1", "SBER-2", "SBER-3", "SBER-4"]
+            if provider == "sbertrek"
+            else ["JIRA-11", "JIRA-ONLY"]
+        )
         return {
-            "history": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:history"]},
-            "epic_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:issue-fields"]},
-            "release_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:issue-fields"]},
+            "history": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:history"], "checked_keys": checked_keys},
+            "epic_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:issue-fields"], "checked_keys": []},
+            "release_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:issue-fields"], "checked_keys": []},
             "counterpart_lookup": {
                 "state": "not-applicable" if provider == "sbertrek" else "complete",
                 "reason": None,
                 "failure_kind": None,
                 "evidence": [] if provider == "sbertrek" else ["mcp:direct-read"],
+                "checked_keys": [],
             },
-            "epic_neighbors": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:epic-search"]},
+            "epic_neighbors": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:epic-search"], "checked_keys": []},
             "not_found_keys": [],
             "not_found_evidence": [],
             "expanded_epic_keys": ["EPIC-1"],
@@ -90,7 +99,7 @@ class TrackerCtlTests(unittest.TestCase):
 
     def snapshots(self) -> tuple[dict, dict]:
         sber = {
-            "schema_version": 2,
+            "schema_version": 3,
             "provider": "sbertrek",
             "captured_at": "2026-08-26T10:00:00+00:00",
             "scope": {
@@ -117,6 +126,10 @@ class TrackerCtlTests(unittest.TestCase):
                     "estimate": None,
                     "epic": {"key": "EPIC-1", "name": "Функциональность N"},
                     "releases": [{"key": "REL-1", "name": "Релиз 1"}],
+                    "field_observations": {
+                        "assignee": "value", "estimate": "absent",
+                        "epic": "value", "releases": "value",
+                    },
                     "discovery": "seed",
                     "updated_at": "2026-08-26T09:00:00+00:00",
                     "history": [
@@ -136,6 +149,10 @@ class TrackerCtlTests(unittest.TestCase):
                     "assignee": {"id": "qa-s"},
                     "epic": {"key": "EPIC-1", "name": "Функциональность N"},
                     "releases": [],
+                    "field_observations": {
+                        "assignee": "value", "estimate": "absent",
+                        "epic": "value", "releases": "absent",
+                    },
                     "discovery": "epic-neighbor",
                     "feature_relevance": "proposed",
                     "relevance_basis": "Прямая связь с известной задачей SBER-1",
@@ -156,6 +173,10 @@ class TrackerCtlTests(unittest.TestCase):
                     "assignee": {"id": "qa-s"},
                     "epic": None,
                     "releases": [{"key": "REL-2", "name": "Релиз 2"}],
+                    "field_observations": {
+                        "assignee": "value", "estimate": "absent",
+                        "epic": "absent", "releases": "value",
+                    },
                     "discovery": "seed",
                     "history": [
                         {
@@ -174,13 +195,17 @@ class TrackerCtlTests(unittest.TestCase):
                     "assignee": {"id": "unknown"},
                     "epic": None,
                     "releases": [],
+                    "field_observations": {
+                        "assignee": "value", "estimate": "absent",
+                        "epic": "absent", "releases": "absent",
+                    },
                     "discovery": "seed",
                     "history": [],
                 },
             ],
         }
         jira = {
-            "schema_version": 2,
+            "schema_version": 3,
             "provider": "jira",
             "captured_at": "2026-08-26T10:00:00+00:00",
             "scope": {
@@ -204,6 +229,10 @@ class TrackerCtlTests(unittest.TestCase):
                     "estimate": {"value": 5, "unit": "story-points"},
                     "epic": {"key": "EPIC-1", "name": "Функциональность N"},
                     "releases": [{"name": "Релиз 1", "key": "REL-1"}],
+                    "field_observations": {
+                        "assignee": "value", "estimate": "value",
+                        "epic": "value", "releases": "value",
+                    },
                     "discovery": "counterpart",
                     "updated_at": "2026-08-26T09:30:00+00:00",
                     "history": [
@@ -229,6 +258,14 @@ class TrackerCtlTests(unittest.TestCase):
                     "discovery": "feature-search-candidate",
                     "feature_relevance": "ambiguous",
                     "relevance_basis": "Совпадает предметная область, прямой связи нет",
+                    "assignee": None,
+                    "estimate": None,
+                    "epic": None,
+                    "releases": [],
+                    "field_observations": {
+                        "assignee": "absent", "estimate": "absent",
+                        "epic": "absent", "releases": "absent",
+                    },
                     "history": [],
                 },
             ],
@@ -629,8 +666,12 @@ class TrackerCtlTests(unittest.TestCase):
                 "--status", "Тестирование команды",
                 "--assignee-id", "qa-s",
                 "--assignee-name", "Тестировщик",
+                "--assignee-state", "value",
                 "--estimate-value", "5",
                 "--estimate-unit", "story-points",
+                "--estimate-state", "value",
+                "--epic-state", "absent",
+                "--releases-state", "absent",
                 "--discovery", "seed",
                 "--updated-at", "2026-08-26T09:00:00+03:00",
             )
@@ -669,6 +710,7 @@ class TrackerCtlTests(unittest.TestCase):
                     "--capability", capability,
                     "--state", "complete",
                     "--evidence", f"mcp:{capability}",
+                    *(["--checked-key", "SBER-1"] if capability == "history" else []),
                 )
 
             self.run_tool(
@@ -689,6 +731,10 @@ class TrackerCtlTests(unittest.TestCase):
                 "--summary", "Основная задача",
                 "--issue-type", "Story",
                 "--status", "To Do",
+                "--assignee-state", "absent",
+                "--estimate-state", "absent",
+                "--epic-state", "absent",
+                "--releases-state", "absent",
                 "--discovery", "counterpart",
                 "--updated-at", "2026-08-26T09:01:00+03:00",
             )
@@ -703,6 +749,7 @@ class TrackerCtlTests(unittest.TestCase):
                     "--capability", capability,
                     "--state", "complete",
                     "--evidence", f"mcp:{capability}",
+                    *(["--checked-key", "JIRA-11"] if capability == "history" else []),
                 )
 
             progress = json.loads(
@@ -718,6 +765,24 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertEqual(reconciled["status"], "tracker-read-reconciled")
             self.assertTrue(reconciled["workflow_complete"])
             self.assertTrue(reconciled["final_response_allowed"])
+            self.assertEqual(
+                json.loads(
+                    self.run_tool(state, "run-status", "--run-id", run_id).stdout
+                ),
+                reconciled,
+            )
+            self.assertEqual(
+                json.loads(
+                    self.run_tool(state, "result-status", "--run-id", run_id).stdout
+                ),
+                reconciled,
+            )
+            self.assertEqual(
+                json.loads(
+                    self.run_tool(state, "reconcile", "--run-id", run_id).stdout
+                ),
+                reconciled,
+            )
 
     def test_jira_can_be_disabled_without_creating_an_input_template(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -813,6 +878,7 @@ class TrackerCtlTests(unittest.TestCase):
             sber, _ = self.snapshots()
             issue = sber["issues"][3]
             issue["assignee"] = None
+            issue["field_observations"]["assignee"] = "not-returned"
             self.restrict_to_issues(sber, [issue])
             sber["scope"]["expected_epic_keys"] = []
             sber["scope"]["expected_release_keys"] = []
@@ -821,6 +887,7 @@ class TrackerCtlTests(unittest.TestCase):
                 "reason": "MCP не возвращает поле эпика",
                 "failure_kind": "capability-absent",
                 "evidence": ["mcp:schema-inspection"],
+                "checked_keys": [],
             }
             sber["collection"]["expanded_epic_keys"] = []
             sber_path = root / "sber.json"
@@ -832,7 +899,38 @@ class TrackerCtlTests(unittest.TestCase):
             reconciled = json.loads(Path(output["result"]).read_text(encoding="utf-8"))
             self.assertIn("sbertrek-epic_links-unavailable", reconciled["limitations"])
             self.assertIn("sbertrek-history-returned-no-events", reconciled["limitations"])
+            self.assertIn("sbertrek-assignee-not-returned:1", reconciled["limitations"])
             self.assertIn("jira-unavailable", reconciled["limitations"])
+
+    def test_snapshot_requires_explicit_observation_for_every_critical_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, _ = self.snapshots()
+            del sber["issues"][0]["field_observations"]["assignee"]
+            sber_path = root / "sber.json"
+            self.write_json(sber_path, sber)
+
+            result = self.run_tool(
+                state, "reconcile", "--sbertrek", str(sber_path), expected=2
+            )
+            self.assertIn("явно описывать field_observations", result.stderr)
+
+    def test_complete_history_requires_every_issue_key_to_be_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, _ = self.snapshots()
+            sber["collection"]["history"]["checked_keys"].remove("SBER-4")
+            sber_path = root / "sber.json"
+            self.write_json(sber_path, sber)
+
+            result = self.run_tool(
+                state, "reconcile", "--sbertrek", str(sber_path), expected=2
+            )
+            self.assertIn("history=complete без проверки задач: SBER-4", result.stderr)
 
     def test_unknown_participant_blocks_reconcile_one_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
