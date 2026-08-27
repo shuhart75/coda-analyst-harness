@@ -126,12 +126,13 @@ python3 scripts/trackerctl.py set-participant \
 
 ## Нормализованный снимок
 
-Каждый провайдер преобразуется в JSON схемы 5. Снимок предыдущей схемы из незавершённого
-старого запуска не продолжается после обновления: LLM выполняет новый `begin`.
+Каждый провайдер преобразуется в JSON схемы 6. Снимок или completion-envelope
+предыдущей схемы не продолжается и не разрешает повторный итог после обновления:
+LLM выполняет новый `begin`.
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "provider": "sbertrek",
   "captured_at": "2026-08-26T00:00:00+00:00",
   "scope": {
@@ -145,11 +146,12 @@ python3 scripts/trackerctl.py set-participant \
     "expected_release_keys": []
   },
   "collection": {
-    "history": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:history:PROJECT-1"], "checked_keys": ["PROJECT-1"]},
-    "epic_links": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:issue-read:PROJECT-1"], "checked_keys": []},
-    "release_links": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:issue-read:PROJECT-1"], "checked_keys": []},
-    "cross_provider_lookup": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:direct-read:PROJECT-1"], "checked_keys": ["PROJECT-1"]},
-    "epic_neighbors": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:epic-search:EPIC-1"], "checked_keys": []},
+    "feature_search": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:sbertrek:feature-search:cohorts"], "checked_keys": ["PROJECT-1"]},
+    "history": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:sbertrek:history:PROJECT-1"], "checked_keys": ["PROJECT-1"]},
+    "epic_links": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:sbertrek:issue-read:PROJECT-1"], "checked_keys": ["PROJECT-1"]},
+    "release_links": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:sbertrek:issue-read:PROJECT-1"], "checked_keys": ["PROJECT-1"]},
+    "cross_provider_lookup": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:sbertrek:direct-read:PROJECT-1"], "checked_keys": ["PROJECT-1"]},
+    "epic_neighbors": {"state": "complete", "reason": null, "failure_kind": null, "evidence": ["mcp:sbertrek:epic-search:EPIC-1"], "checked_keys": ["EPIC-1"]},
     "not_found_keys": [],
     "not_found_evidence": [],
     "expanded_epic_keys": ["EPIC-1"]
@@ -207,12 +209,20 @@ python3 scripts/trackerctl.py snapshot-metadata --run-id <run-id> --provider sbe
 python3 scripts/trackerctl.py snapshot-issue --run-id <run-id> --provider sbertrek --key <key> --evidence <exact-key-mcp-call> --summary <summary> --issue-type <type> --status <status> --assignee-state <value|absent|not-returned> --estimate-state <value|absent|not-returned> --epic-state <value|absent|not-returned> --releases-state <value|absent|not-returned> --discovery <kind> --updated-at <timestamp>
 python3 scripts/trackerctl.py snapshot-not-found --run-id <run-id> --provider sbertrek --key <key> --evidence <mcp-call>
 python3 scripts/trackerctl.py snapshot-history --run-id <run-id> --provider sbertrek --key <key> --at <timestamp> --field assignee --from-id <id> --to-id <id>
+python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability feature_search --state complete --evidence <mcp-search-call> --checked-key <found-key> [--checked-key <found-key> ...]
 python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability history --state complete --evidence <mcp-call> --checked-key <key> [--checked-key <key> ...]
 python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability cross_provider_lookup --state complete
 python3 scripts/trackerctl.py run-status --run-id <run-id>
 python3 scripts/trackerctl.py reconcile --run-id <run-id>
 python3 scripts/trackerctl.py result-status --run-id <run-id>
 ```
+
+До точной перекрёстной проверки каждый включённый провайдер получает собственный
+ограниченный предметный поиск. Его результат записывается как `feature_search`: в
+`--checked-key` перечисляются все ключи поисковой выдачи, включая сомнительные и
+нерелевантные. Каждый из них затем обязан получить прямое чтение и
+`snapshot-issue` с `discovery: feature-search-candidate` либо доказанный
+`snapshot-not-found`. Поиск SberTrek не заменяет поиск Jira и наоборот.
 
 `snapshot-issue` вызывается только после прямого чтения карточки по точному ключу
 и требует `--evidence` этого вызова. Поисковая выдача сама по себе не разрешает
@@ -232,10 +242,16 @@ SberTrek и наоборот. Она
 обновляет задачу по ключу и сохраняет уже записанную историю. `snapshot-collection`
 получает `complete` только после реального вызова соответствующей возможности MCP;
 при недоступности используется `unavailable --failure-kind <kind> --reason
-<причина> --evidence <mcp-call>`. Фраза «MCP не вызван» означает пропуск и не
-является недоступностью. Для `history=complete` каждый реально проверенный ключ
-задаётся отдельным `--checked-key`; полнота блокируется, если в снимке есть задача,
-ключ которой не перечислен. Перед
+<причина> --evidence <mcp-call>`. Все evidence начинаются с логического префикса
+`mcp:<provider>:`. Для `capability-absent` evidence обязано фиксировать реальную
+проверку набора возможностей, например
+`mcp:sbertrek:capability-discovery:no-history-tool`; чтение одной карточки не
+доказывает отсутствие возможности. Фразы «MCP не вызван», «история не читалась»,
+«связи не запрашивались» и их эквиваленты означают пропуск и не являются
+недоступностью. Для `history`, `epic_links` и `release_links` в состоянии
+`complete` каждый ключ снимка задаётся отдельным `--checked-key`; полнота
+блокируется, если хотя бы один ключ не перечислен. Для `epic_neighbors` аналогично
+перечисляются все проверенные ключи эпиков. Перед
 `reconcile` обязательный `run-status` должен вернуть `tracker-run-ready`.
 
 Прочитанные напрямую данные MCP не являются отчётом. Если LLM не записала их этими

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 CONFIG_SCHEMA_VERSION = 4
 CONFIG_INCOMPLETE_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -30,6 +30,7 @@ TEAM_PREFIXES = {
     "O": ("OTHER", "other"),
 }
 COLLECTION_CAPABILITIES = (
+    "feature_search",
     "history",
     "epic_links",
     "release_links",
@@ -54,9 +55,16 @@ SP_EQUIVALENT_UNITS = {
     "чел дни",
 }
 SKIPPED_COLLECTION_REASON = re.compile(
-    r"(?:не\s+(?:вызван|вызывал|выполн|провер|прочитан|запрош)|not\s+(?:called|attempted|read)|skipped)",
+    r"(?:не\s+(?:вызван\w*|вызыв\w*|выполнен\w*|выполня\w*|проверен\w*|"
+    r"проверя\w*|прочитан\w*|чит\w*|прочитыва\w*|запрошен\w*|запрашив\w*)|"
+    r"not\s+(?:called|attempted|read|requested)|skipped)",
     re.IGNORECASE,
 )
+CAPABILITY_DISCOVERY_EVIDENCE = re.compile(
+    r"(?:capabilit|discover|list[-_ ]?tools?|tools?[-_ ]?list|schema|unsupported|no[-_ ]?tool)",
+    re.IGNORECASE,
+)
+FEATURE_SEARCH_EVIDENCE = re.compile(r"(?:search|query|jql)", re.IGNORECASE)
 DISCOVERY_VALUES = {"seed", "cross-provider-key", "epic-neighbor", "feature-search-candidate"}
 CANDIDATE_DISCOVERY_VALUES = {"epic-neighbor", "feature-search-candidate"}
 RELEVANCE_VALUES = {
@@ -132,6 +140,16 @@ def run_root(run_id: str) -> Path:
 
 def completion_status_path(run_id: str) -> Path:
     return run_root(run_id) / "completion-status.json"
+
+
+def load_current_completion(run_id: str) -> dict:
+    payload = load_json(completion_status_path(run_id))
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(
+            f"Завершённый tracker-run {run_id} создан по устаревшей схеме; "
+            "начни новый сеанс командой begin"
+        )
+    return payload
 
 
 def load_json(path: Path) -> Any:
@@ -386,10 +404,36 @@ def validate_collection(payload: Any, provider: str) -> dict:
                 raise ValueError(
                     f"collection.{capability}={item['state']} снимка {provider} требует доказательство MCP-вызова"
                 )
+            for value in evidence:
+                validate_provider_evidence(
+                    value,
+                    provider,
+                    f"collection.{capability}.evidence снимка {provider}",
+                )
         failure_kind = item.get("failure_kind")
         if item["state"] == "unavailable" and failure_kind not in COLLECTION_FAILURE_KINDS:
             raise ValueError(
                 f"collection.{capability}=unavailable снимка {provider} требует failure_kind"
+            )
+        if item["state"] == "unavailable" and SKIPPED_COLLECTION_REASON.search(
+            str(item.get("reason") or "")
+        ):
+            raise ValueError(
+                f"collection.{capability}=unavailable снимка {provider} описывает пропущенный MCP-вызов"
+            )
+        if item["state"] == "unavailable" and failure_kind == "capability-absent":
+            if not any(CAPABILITY_DISCOVERY_EVIDENCE.search(value) for value in evidence):
+                raise ValueError(
+                    f"collection.{capability}=unavailable снимка {provider}: "
+                    "capability-absent требует evidence проверки возможностей MCP"
+                )
+        if (
+            capability == "feature_search"
+            and item["state"] == "complete"
+            and not any(FEATURE_SEARCH_EVIDENCE.search(value) for value in evidence)
+        ):
+            raise ValueError(
+                f"collection.feature_search=complete снимка {provider} требует evidence поискового MCP-вызова"
             )
         if item["state"] != "unavailable" and failure_kind is not None:
             raise ValueError(
@@ -399,7 +443,9 @@ def validate_collection(payload: Any, provider: str) -> dict:
             item.get("checked_keys", []),
             f"collection.{capability}.checked_keys снимка {provider}",
         )
-        if capability in {"history", "epic_links", "release_links", "epic_neighbors"} and item["state"] == "not-applicable":
+        if capability in {
+            "feature_search", "history", "epic_links", "release_links", "epic_neighbors"
+        } and item["state"] == "not-applicable":
             raise ValueError(f"collection.{capability} не может быть not-applicable для {provider}")
     validate_string_list(payload.get("not_found_keys", []), f"collection.not_found_keys снимка {provider}")
     not_found_evidence = payload.get("not_found_evidence", [])
@@ -542,16 +588,45 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
             f"Seed-ключи снимка {provider} не прочитаны и не отмечены not-found: "
             + ", ".join(unresolved_seeds)
         )
-    if payload["collection"]["history"]["state"] == "complete":
-        checked_history = set(payload["collection"]["history"].get("checked_keys", []))
-        unchecked_history = sorted(seen - checked_history)
-        if unchecked_history:
+    feature_search = payload["collection"]["feature_search"]
+    if feature_search["state"] == "complete":
+        searched_keys = set(feature_search.get("checked_keys", []))
+        unresolved_search_hits = sorted(searched_keys - seen - not_found)
+        if unresolved_search_hits:
             raise ValueError(
-                f"Снимок {provider} объявил history=complete без проверки задач: "
-                + ", ".join(unchecked_history)
+                f"Снимок {provider} не зарегистрировал найденные поиском ключи: "
+                + ", ".join(unresolved_search_hits)
             )
+        unregistered_candidates = sorted(
+            issue["key"]
+            for issue in issues
+            if issue.get("discovery") == "feature-search-candidate"
+            and issue["key"] not in searched_keys
+        )
+        if unregistered_candidates:
+            raise ValueError(
+                f"Снимок {provider} содержит поисковые кандидаты вне паспорта feature_search: "
+                + ", ".join(unregistered_candidates)
+            )
+    for capability in ("history", "epic_links", "release_links"):
+        item = payload["collection"][capability]
+        if item["state"] == "complete":
+            checked = set(item.get("checked_keys", []))
+            unchecked = sorted(seen - checked)
+            if unchecked:
+                raise ValueError(
+                    f"Снимок {provider} объявил {capability}=complete без проверки задач: "
+                    + ", ".join(unchecked)
+                )
     if payload["collection"]["epic_neighbors"]["state"] == "complete":
+        checked_epics = set(payload["collection"]["epic_neighbors"].get("checked_keys", []))
         discovered_epics = issue_group_keys(issues, "epic")
+        unchecked_epics = sorted(discovered_epics - checked_epics)
+        if unchecked_epics:
+            raise ValueError(
+                f"Снимок {provider} объявил epic_neighbors=complete без проверки эпиков: "
+                + ", ".join(unchecked_epics)
+            )
         expanded_epics = set(payload["collection"].get("expanded_epic_keys", []))
         missing = sorted(discovered_epics - expanded_epics)
         if missing:
@@ -1565,6 +1640,22 @@ def snapshot_collection_command(args: argparse.Namespace) -> int:
         raise ValueError(
             "Пропущенный MCP-вызов нельзя обозначать как unavailable; выполни вызов или зафиксируй его ошибку"
         )
+    if (
+        args.state == "unavailable"
+        and args.failure_kind == "capability-absent"
+        and not any(CAPABILITY_DISCOVERY_EVIDENCE.search(value) for value in args.evidence)
+    ):
+        raise ValueError(
+            "capability-absent требует --evidence фактической проверки возможностей MCP"
+        )
+    if (
+        args.capability == "feature_search"
+        and args.state == "complete"
+        and not any(FEATURE_SEARCH_EVIDENCE.search(value) for value in args.evidence)
+    ):
+        raise ValueError(
+            "feature_search=complete требует --evidence фактического поискового MCP-вызова"
+        )
     if args.capability == "cross_provider_lookup" and args.state == "complete":
         if args.evidence or args.checked_key:
             raise ValueError(
@@ -1619,6 +1710,8 @@ def snapshot_collection_command(args: argparse.Namespace) -> int:
     if args.state == "complete" and args.failure_kind:
         raise ValueError("state=complete нельзя сочетать с --failure-kind")
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    for value in args.evidence:
+        validate_provider_evidence(value, args.provider, "--evidence")
     snapshot["collection"][args.capability] = {
         "state": args.state,
         "reason": args.reason if args.state == "unavailable" else None,
@@ -1672,7 +1765,7 @@ def snapshot_progress(snapshot: dict, provider: str) -> dict:
 def tracker_run_status_command(args: argparse.Namespace) -> int:
     completed = completion_status_path(args.run_id)
     if completed.is_file():
-        print(json.dumps(load_json(completed), ensure_ascii=False, indent=2))
+        print(json.dumps(load_current_completion(args.run_id), ensure_ascii=False, indent=2))
         return 0
     pending = pending_participant_stop_payload(args.run_id)
     if pending:
@@ -1722,7 +1815,7 @@ def tracker_result_status_command(args: argparse.Namespace) -> int:
         raise ValueError(
             f"run_id={args.run_id} ещё не имеет успешного результата reconcile"
         )
-    print(json.dumps(load_json(path), ensure_ascii=False, indent=2))
+    print(json.dumps(load_current_completion(args.run_id), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1778,7 +1871,7 @@ def begin_command(_: argparse.Namespace) -> int:
 
 def reconcile_command(args: argparse.Namespace) -> int:
     if args.run_id and completion_status_path(args.run_id).is_file():
-        print(json.dumps(load_json(completion_status_path(args.run_id)), ensure_ascii=False, indent=2))
+        print(json.dumps(load_current_completion(args.run_id), ensure_ascii=False, indent=2))
         return 0
     config = (
         validate_config(load_json(Path(args.config).resolve()))
@@ -1833,6 +1926,7 @@ def reconcile_command(args: argparse.Namespace) -> int:
     save_json(result_path, result)
     report_path.write_text(report_text(result), encoding="utf-8")
     completion = {
+        "schema_version": SCHEMA_VERSION,
         "status": "tracker-read-reconciled",
         "run_id": run_id,
         "issue_count": len(result["issues"]),
