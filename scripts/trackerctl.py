@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 3
-CONFIG_SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+CONFIG_SCHEMA_VERSION = 4
 CONFIG_INCOMPLETE_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
 TEAM_ID_PATTERN = re.compile(r"^(AN|A|BE|B|FE|F|QA|Q|OTHER|O)([1-9][0-9]*)$", re.IGNORECASE)
@@ -33,7 +33,7 @@ COLLECTION_CAPABILITIES = (
     "history",
     "epic_links",
     "release_links",
-    "counterpart_lookup",
+    "cross_provider_lookup",
     "epic_neighbors",
 )
 COLLECTION_STATES = {"complete", "unavailable", "not-applicable"}
@@ -57,7 +57,7 @@ SKIPPED_COLLECTION_REASON = re.compile(
     r"(?:не\s+(?:вызван|вызывал|выполн|провер|прочитан|запрош)|not\s+(?:called|attempted|read)|skipped)",
     re.IGNORECASE,
 )
-DISCOVERY_VALUES = {"seed", "counterpart", "epic-neighbor", "feature-search-candidate"}
+DISCOVERY_VALUES = {"seed", "cross-provider-key", "epic-neighbor", "feature-search-candidate"}
 CANDIDATE_DISCOVERY_VALUES = {"epic-neighbor", "feature-search-candidate"}
 RELEVANCE_VALUES = {
     "proposed",
@@ -73,7 +73,6 @@ DEFAULT_CONFIG = {
     "setup_complete": False,
     "jira_enabled": None,
     "projects": {"sbertrek": [], "jira": []},
-    "issue_pairs": {},
     "development_issue_types": [],
     "participants": {"sbertrek": {}, "jira": {}},
     "status_rules": {
@@ -221,6 +220,10 @@ def validate_config(payload: Any) -> dict:
         raise ValueError("Неподдерживаемая схема tracker-config.json")
     if payload.get("primary_provider") != "sbertrek":
         raise ValueError("Основным трекером должен оставаться sbertrek")
+    if "issue_pairs" in payload:
+        raise ValueError(
+            "issue_pairs не поддерживается: задачи SberTrek и Jira сопоставляются только по точному ключу"
+        )
     if not isinstance(payload.get("setup_complete", False), bool):
         raise ValueError("setup_complete должен быть логическим значением")
     if payload.get("jira_enabled") not in {True, False, None}:
@@ -230,9 +233,6 @@ def validate_config(payload: Any) -> dict:
         values = projects.get(provider) if isinstance(projects, dict) else None
         if not isinstance(values, list) or not all(isinstance(value, str) and value.strip() for value in values):
             raise ValueError(f"projects.{provider} должен быть списком непустых строк")
-    pairs = payload.get("issue_pairs", {})
-    if not isinstance(pairs, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in pairs.items()):
-        raise ValueError("issue_pairs должен сопоставлять ключи SberTrek ключам Jira")
     issue_types = payload.get("development_issue_types", [])
     if not isinstance(issue_types, list) or not all(isinstance(value, str) for value in issue_types):
         raise ValueError("development_issue_types должен быть списком строк")
@@ -310,10 +310,14 @@ def require_base_config(config: dict) -> None:
         )
 
 
-def collection_template(provider: str) -> dict:
+def collection_template(provider: str, jira_enabled: bool) -> dict:
     return {
         capability: {
-            "state": "not-applicable" if capability == "counterpart_lookup" and provider == "sbertrek" else "pending",
+            "state": (
+                "not-applicable"
+                if capability == "cross_provider_lookup" and not jira_enabled
+                else "pending"
+            ),
             "reason": None,
             "failure_kind": None,
             "evidence": [],
@@ -336,7 +340,7 @@ def snapshot_template(provider: str, config: dict) -> dict:
             "expected_epic_keys": [],
             "expected_release_keys": [],
         },
-        "collection": collection_template(provider),
+        "collection": collection_template(provider, bool(config.get("jira_enabled"))),
         "issues": [],
     }
 
@@ -381,11 +385,6 @@ def validate_collection(payload: Any, provider: str) -> dict:
         )
         if capability in {"history", "epic_links", "release_links", "epic_neighbors"} and item["state"] == "not-applicable":
             raise ValueError(f"collection.{capability} не может быть not-applicable для {provider}")
-    counterpart_state = payload["counterpart_lookup"]["state"]
-    if provider == "sbertrek" and counterpart_state != "not-applicable":
-        raise ValueError("collection.counterpart_lookup для sbertrek должен быть not-applicable")
-    if provider == "jira" and counterpart_state == "not-applicable":
-        raise ValueError("collection.counterpart_lookup для jira не может быть not-applicable")
     validate_string_list(payload.get("not_found_keys", []), f"collection.not_found_keys снимка {provider}")
     not_found_evidence = payload.get("not_found_evidence", [])
     if not isinstance(not_found_evidence, list) or not all(
@@ -628,19 +627,6 @@ def development_state(issue: dict, config: dict) -> dict:
     }
 
 
-def paired_jira_key(sber_issue: dict, jira_by_key: dict[str, dict], config: dict) -> str | None:
-    explicit = config.get("issue_pairs", {}).get(sber_issue["key"])
-    if explicit:
-        return explicit
-    counterpart = sber_issue.get("counterpart_key")
-    if isinstance(counterpart, str) and counterpart:
-        return counterpart
-    for key, issue in jira_by_key.items():
-        if issue.get("counterpart_key") == sber_issue["key"]:
-            return key
-    return sber_issue["key"] if sber_issue["key"] in jira_by_key else None
-
-
 def development_types(config: dict) -> set[str]:
     return {
         str(value).strip().casefold()
@@ -763,64 +749,37 @@ def collection_limitations(provider: str, snapshot: dict) -> list[str]:
     return limitations
 
 
-def validate_counterpart_uniqueness(
-    sber_snapshot: dict,
-    jira_snapshot: dict | None,
-    config: dict,
-) -> None:
-    claims_by_sber: dict[str, set[str]] = {}
-    claims_by_jira: dict[str, set[str]] = {}
-
-    def add_claim(sber_key: str, jira_key: str, source: str) -> None:
-        if not sber_key or not jira_key:
-            return
-        claims_by_sber.setdefault(sber_key, set()).add(jira_key)
-        claims_by_jira.setdefault(jira_key, set()).add(sber_key)
-        if len(claims_by_sber[sber_key]) > 1:
-            raise ValueError(
-                f"SberTrek-задача {sber_key} имеет несколько Jira-counterpart: "
-                f"{', '.join(sorted(claims_by_sber[sber_key]))}; источник {source}"
-            )
-        if len(claims_by_jira[jira_key]) > 1:
-            raise ValueError(
-                f"Jira-задача {jira_key} имеет несколько SberTrek-counterpart: "
-                f"{', '.join(sorted(claims_by_jira[jira_key]))}; источник {source}"
-            )
-
-    for sber_key, jira_key in config.get("issue_pairs", {}).items():
-        add_claim(sber_key, jira_key, "tracker-config.json")
-    for issue in sber_snapshot["issues"]:
-        counterpart = issue.get("counterpart_key")
-        if isinstance(counterpart, str) and counterpart:
-            add_claim(issue["key"], counterpart, f"SberTrek {issue['key']}")
-    for issue in (jira_snapshot or {}).get("issues", []):
-        counterpart = issue.get("counterpart_key")
-        if isinstance(counterpart, str) and counterpart:
-            add_claim(counterpart, issue["key"], f"Jira {issue['key']}")
-
-
-def validate_counterpart_lookup(sber_snapshot: dict, jira_snapshot: dict | None, config: dict) -> None:
+def validate_cross_provider_lookup(sber_snapshot: dict, jira_snapshot: dict | None) -> None:
     if jira_snapshot is None:
         return
-    collection = jira_snapshot["collection"]
-    counterpart_state = collection["counterpart_lookup"]["state"]
-    if counterpart_state == "unavailable" and any(
-        issue.get("counterpart_key") for issue in jira_snapshot["issues"]
-    ):
-        raise ValueError(
-            "Jira-снимок содержит прямые counterpart-связи, поэтому counterpart_lookup "
-            "нельзя объявить unavailable"
-        )
-    if counterpart_state != "complete":
-        return
-    jira_keys = {issue["key"] for issue in jira_snapshot["issues"]}
-    not_found = set(collection.get("not_found_keys", []))
-    for issue in sber_snapshot["issues"]:
-        expected = paired_jira_key(issue, {}, config)
-        if expected and expected not in jira_keys and expected not in not_found:
+    snapshots = {"sbertrek": sber_snapshot, "jira": jira_snapshot}
+    all_keys = {
+        issue["key"]
+        for snapshot in snapshots.values()
+        for issue in snapshot["issues"]
+    }
+    for provider, snapshot in snapshots.items():
+        lookup = snapshot["collection"]["cross_provider_lookup"]
+        if lookup["state"] == "not-applicable":
             raise ValueError(
-                f"Прямая Jira-пара {expected} для {issue['key']} не прочитана и не указана в "
-                "collection.not_found_keys"
+                f"{provider}: cross_provider_lookup не может быть not-applicable при включённой Jira"
+            )
+        if lookup["state"] != "complete":
+            continue
+        found = {issue["key"] for issue in snapshot["issues"]}
+        not_found = set(snapshot["collection"].get("not_found_keys", []))
+        checked = set(lookup.get("checked_keys", []))
+        unchecked = sorted(all_keys - checked)
+        unresolved = sorted(all_keys - found - not_found)
+        if unchecked:
+            raise ValueError(
+                f"{provider}: точная проверка ключей не выполнена для: "
+                + ", ".join(unchecked)
+            )
+        if unresolved:
+            raise ValueError(
+                f"{provider}: ключи не найдены и не подтверждены как not-found: "
+                + ", ".join(unresolved)
             )
 
 
@@ -855,8 +814,7 @@ def reconcile(sber_snapshot: dict, jira_snapshot: dict | None, config: dict) -> 
     discrepancies: list[dict] = []
 
     for sber_issue in sber_snapshot["issues"]:
-        jira_key = paired_jira_key(sber_issue, jira_by_key, config)
-        jira_issue = jira_by_key.get(jira_key) if jira_key else None
+        jira_issue = jira_by_key.get(sber_issue["key"])
         if jira_issue:
             used_jira.add(jira_issue["key"])
         merged: dict[str, Any] = {
@@ -898,22 +856,16 @@ def reconcile(sber_snapshot: dict, jira_snapshot: dict | None, config: dict) -> 
         if jira_issue and jira_issue.get("history"):
             merged["enriched_from_jira"].append("history")
         if jira_snapshot is not None and not jira_issue:
-            counterpart_state = jira_snapshot["collection"]["counterpart_lookup"]["state"]
             not_found = set(jira_snapshot["collection"].get("not_found_keys", []))
-            if jira_key and counterpart_state == "complete" and jira_key in not_found:
-                discrepancies.append({
-                    "kind": "jira-pair-not-found",
-                    "key": sber_issue["key"],
-                    "expected_jira_key": jira_key,
-                })
-            elif jira_key:
-                discrepancies.append({
-                    "kind": "jira-pair-not-read",
-                    "key": sber_issue["key"],
-                    "expected_jira_key": jira_key,
-                })
-            else:
-                discrepancies.append({"kind": "jira-pair-unmapped", "key": sber_issue["key"]})
+            discrepancies.append({
+                "kind": (
+                    "sbertrek-only"
+                    if sber_issue["key"] in not_found
+                    else "cross-provider-key-not-read"
+                ),
+                "key": sber_issue["key"],
+                "missing_provider": "jira",
+            })
         if jira_issue:
             sber_updated = timestamp_value(sber_issue.get("updated_at"))
             jira_updated = timestamp_value(jira_issue.get("updated_at"))
@@ -930,10 +882,15 @@ def reconcile(sber_snapshot: dict, jira_snapshot: dict | None, config: dict) -> 
         merged_issues.append(merged)
 
     jira_only_issues = []
+    sber_not_found = set(sber_snapshot["collection"].get("not_found_keys", []))
     for key in sorted(set(jira_by_key) - used_jira):
         issue = normalize_jira_only_issue(jira_by_key[key], config)
         jira_only_issues.append(issue)
-        discrepancies.append({"kind": "jira-only", "jira_key": key})
+        discrepancies.append({
+            "kind": "jira-only" if key in sber_not_found else "cross-provider-key-not-read",
+            "key": key,
+            "missing_provider": "sbertrek",
+        })
 
     limitations = collection_limitations("sbertrek", sber_snapshot)
     if jira_snapshot is None:
@@ -949,6 +906,7 @@ def reconcile(sber_snapshot: dict, jira_snapshot: dict | None, config: dict) -> 
         "generated_at": utc_now(),
         "primary_provider": "sbertrek",
         "merge_policy": {
+            "matching": "exact-key-only",
             "field_priority": {
                 "epic": ["sbertrek", "jira"],
                 "assignee": ["sbertrek", "jira"],
@@ -1102,11 +1060,17 @@ def init_config(force: bool) -> int:
 
 
 def migrate_legacy_config(config: Any) -> tuple[Any, bool]:
-    if not isinstance(config, dict) or config.get("schema_version") not in {1, 2}:
+    if not isinstance(config, dict) or config.get("schema_version") not in {1, 2, 3}:
         return config, False
+    if config.get("schema_version") == 3:
+        migrated = dict(config)
+        migrated["schema_version"] = CONFIG_SCHEMA_VERSION
+        migrated.pop("issue_pairs", None)
+        return migrated, True
     if config.get("schema_version") == 2:
         migrated = dict(config)
         migrated["schema_version"] = CONFIG_SCHEMA_VERSION
+        migrated.pop("issue_pairs", None)
         # Version 2 allowed guessed many-to-one mappings. Recollect them through guarded runs.
         migrated["participants"] = {"sbertrek": {}, "jira": {}}
         return migrated, True
@@ -1130,7 +1094,6 @@ def migrate_legacy_config(config: Any) -> tuple[Any, bool]:
         "setup_complete": False,
         "jira_enabled": jira_enabled,
         "projects": projects if isinstance(projects, dict) else {"sbertrek": [], "jira": []},
-        "issue_pairs": config.get("issue_pairs", {}),
         "development_issue_types": (
             [] if looks_like_empty_v1 else config.get("development_issue_types", [])
         ),
@@ -1387,7 +1350,6 @@ def snapshot_issue_command(args: argparse.Namespace) -> int:
     existing = next((item for item in snapshot["issues"] if item.get("key") == args.key), None)
     issue = {
         "key": args.key,
-        "counterpart_key": args.counterpart_key,
         "summary": args.summary,
         "description": args.description,
         "issue_type": args.issue_type,
@@ -1513,8 +1475,6 @@ def snapshot_collection_command(args: argparse.Namespace) -> int:
         raise ValueError(
             "Пропущенный MCP-вызов нельзя обозначать как unavailable; выполни вызов или зафиксируй его ошибку"
         )
-    if args.provider == "sbertrek" and args.capability == "counterpart_lookup":
-        raise ValueError("counterpart_lookup для SberTrek уже имеет state=not-applicable")
     if not args.evidence:
         raise ValueError("complete/unavailable требует хотя бы одно --evidence реального MCP-вызова")
     if args.state == "unavailable" and not args.failure_kind:
@@ -1580,15 +1540,29 @@ def tracker_run_status_command(args: argparse.Namespace) -> int:
     providers = ["sbertrek"]
     if (run_root(args.run_id) / "input" / "jira.json").is_file():
         providers.append("jira")
+    snapshots = {
+        provider: load_run_snapshot(args.run_id, provider)[1]
+        for provider in providers
+    }
     progress = [
-        snapshot_progress(load_run_snapshot(args.run_id, provider)[1], provider)
+        snapshot_progress(snapshots[provider], provider)
         for provider in providers
     ]
-    ready = all(item["ready"] for item in progress)
+    cross_provider_validation_error = None
+    if all(item["ready"] for item in progress) and "jira" in snapshots:
+        try:
+            validate_cross_provider_lookup(snapshots["sbertrek"], snapshots["jira"])
+        except ValueError as exc:
+            cross_provider_validation_error = str(exc)
+    ready = (
+        all(item["ready"] for item in progress)
+        and cross_provider_validation_error is None
+    )
     print(json.dumps({
         "status": "tracker-run-ready" if ready else "tracker-run-incomplete",
         "run_id": args.run_id,
         "snapshots": progress,
+        "cross_provider_validation_error": cross_provider_validation_error,
         "workflow_complete": False,
         "final_response_allowed": False,
         "allowed_next_action": "reconcile" if ready else "complete-snapshots",
@@ -1685,8 +1659,7 @@ def reconcile_command(args: argparse.Namespace) -> int:
     validate_snapshot_scope(sber, "sbertrek", config)
     if jira:
         validate_snapshot_scope(jira, "jira", config)
-    validate_counterpart_uniqueness(sber, jira, config)
-    validate_counterpart_lookup(sber, jira, config)
+    validate_cross_provider_lookup(sber, jira)
     unknown = first_unknown_participant(
         [("sbertrek", sber)] + ([("jira", jira)] if jira else []),
         config,
@@ -1777,7 +1750,6 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_issue.add_argument("--run-id", required=True)
     snapshot_issue.add_argument("--provider", choices=PROVIDERS, required=True)
     snapshot_issue.add_argument("--key", required=True)
-    snapshot_issue.add_argument("--counterpart-key")
     snapshot_issue.add_argument("--summary", required=True)
     snapshot_issue.add_argument("--description", default="")
     snapshot_issue.add_argument("--issue-type", required=True)

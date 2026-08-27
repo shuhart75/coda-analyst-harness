@@ -54,7 +54,6 @@ class TrackerCtlTests(unittest.TestCase):
         config["setup_complete"] = True
         config["jira_enabled"] = True
         config["projects"] = {"sbertrek": ["SBER"], "jira": ["JIRA"]}
-        config["issue_pairs"] = {"SBER-1": "JIRA-11"}
         config["development_issue_types"] = ["development-task", "Story"]
         config["participants"] = {
             "sbertrek": {
@@ -75,31 +74,40 @@ class TrackerCtlTests(unittest.TestCase):
         return path
 
     def collection(self, provider: str) -> dict:
-        checked_keys = (
+        own_keys = (
             ["SBER-1", "SBER-2", "SBER-3", "SBER-4"]
             if provider == "sbertrek"
-            else ["JIRA-11", "JIRA-ONLY"]
+            else ["SBER-1", "JIRA-ONLY"]
+        )
+        all_keys = ["SBER-1", "SBER-2", "SBER-3", "SBER-4", "JIRA-ONLY"]
+        missing_keys = (
+            ["JIRA-ONLY"]
+            if provider == "sbertrek"
+            else ["SBER-2", "SBER-3", "SBER-4"]
         )
         return {
-            "history": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:history"], "checked_keys": checked_keys},
+            "history": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:history"], "checked_keys": own_keys},
             "epic_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:issue-fields"], "checked_keys": []},
             "release_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:issue-fields"], "checked_keys": []},
-            "counterpart_lookup": {
-                "state": "not-applicable" if provider == "sbertrek" else "complete",
+            "cross_provider_lookup": {
+                "state": "complete",
                 "reason": None,
                 "failure_kind": None,
-                "evidence": [] if provider == "sbertrek" else ["mcp:direct-read"],
-                "checked_keys": [],
+                "evidence": ["mcp:direct-read"],
+                "checked_keys": all_keys,
             },
             "epic_neighbors": {"state": "complete", "reason": None, "failure_kind": None, "evidence": ["mcp:epic-search"], "checked_keys": []},
-            "not_found_keys": [],
-            "not_found_evidence": [],
+            "not_found_keys": missing_keys,
+            "not_found_evidence": [
+                {"key": key, "evidence": f"mcp:get:{key}:404"}
+                for key in missing_keys
+            ],
             "expanded_epic_keys": ["EPIC-1"],
         }
 
     def snapshots(self) -> tuple[dict, dict]:
         sber = {
-            "schema_version": 3,
+            "schema_version": 4,
             "provider": "sbertrek",
             "captured_at": "2026-08-26T10:00:00+00:00",
             "scope": {
@@ -205,7 +213,7 @@ class TrackerCtlTests(unittest.TestCase):
             ],
         }
         jira = {
-            "schema_version": 3,
+            "schema_version": 4,
             "provider": "jira",
             "captured_at": "2026-08-26T10:00:00+00:00",
             "scope": {
@@ -219,8 +227,7 @@ class TrackerCtlTests(unittest.TestCase):
             "collection": self.collection("jira"),
             "issues": [
                 {
-                    "key": "JIRA-11",
-                    "counterpart_key": "SBER-1",
+                    "key": "SBER-1",
                     "summary": "Другое название из Jira",
                     "description": "Реализовать часть функциональности.",
                     "issue_type": "development-task",
@@ -233,7 +240,7 @@ class TrackerCtlTests(unittest.TestCase):
                         "assignee": "value", "estimate": "value",
                         "epic": "value", "releases": "value",
                     },
-                    "discovery": "counterpart",
+                    "discovery": "cross-provider-key",
                     "updated_at": "2026-08-26T09:30:00+00:00",
                     "history": [
                         {
@@ -325,7 +332,11 @@ class TrackerCtlTests(unittest.TestCase):
             )
             self.assertEqual(issues["SBER-4"]["development_state"]["state"], "unknown")
             self.assertIn(
-                {"kind": "jira-only", "jira_key": "JIRA-ONLY"},
+                {
+                    "kind": "jira-only",
+                    "key": "JIRA-ONLY",
+                    "missing_provider": "sbertrek",
+                },
                 reconciled["discrepancies"],
             )
             self.assertTrue(
@@ -463,7 +474,12 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertFalse(reconciled["jira_used"])
             self.assertIn("jira-unavailable", reconciled["limitations"])
             self.assertFalse(
-                any(item["kind"].startswith("jira-pair-") for item in reconciled["discrepancies"])
+                any(
+                    item["kind"] in {
+                        "sbertrek-only", "jira-only", "cross-provider-key-not-read",
+                    }
+                    for item in reconciled["discrepancies"]
+                )
             )
 
     def test_explicit_completed_status_applies_to_unconfigured_type(self) -> None:
@@ -633,7 +649,7 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertIn("development_issue_types", status["gaps"])
             self.assertIn("status_rules.sbertrek.excluded", status["gaps"])
             self.assertEqual(migrated["development_issue_types"], [])
-            self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(migrated["schema_version"], 4)
             self.assertIsNone(migrated["status_rules"]["sbertrek"]["excluded"])
             self.assertIsNone(migrated["status_rules"]["jira"]["completed"])
             self.assertIsNone(migrated["jira_enabled"])
@@ -704,8 +720,8 @@ class TrackerCtlTests(unittest.TestCase):
             sber = json.loads(Path(started["sbertrek_input"]).read_text(encoding="utf-8"))
             jira = json.loads(Path(started["jira_input"]).read_text(encoding="utf-8"))
             self.assertEqual(sber["collection"]["history"]["state"], "pending")
-            self.assertEqual(sber["collection"]["counterpart_lookup"]["state"], "not-applicable")
-            self.assertEqual(jira["collection"]["counterpart_lookup"]["state"], "pending")
+            self.assertEqual(sber["collection"]["cross_provider_lookup"]["state"], "pending")
+            self.assertEqual(jira["collection"]["cross_provider_lookup"]["state"], "pending")
             self.assertFalse(started["workflow_complete"])
             self.assertFalse(started["final_response_allowed"])
             self.assertEqual(
@@ -739,7 +755,6 @@ class TrackerCtlTests(unittest.TestCase):
                 "--run-id", run_id,
                 "--provider", "sbertrek",
                 "--key", "SBER-1",
-                "--counterpart-key", "JIRA-11",
                 "--summary", "Основная задача",
                 "--description", "Описание",
                 "--issue-type", "Story",
@@ -781,7 +796,10 @@ class TrackerCtlTests(unittest.TestCase):
                 "--to-value", "Проверка",
             ).stdout)
             self.assertEqual(history["history_count"], 2)
-            for capability in ("history", "epic_links", "release_links", "epic_neighbors"):
+            for capability in (
+                "history", "epic_links", "release_links", "cross_provider_lookup",
+                "epic_neighbors",
+            ):
                 self.run_tool(
                     state,
                     "snapshot-collection",
@@ -790,7 +808,11 @@ class TrackerCtlTests(unittest.TestCase):
                     "--capability", capability,
                     "--state", "complete",
                     "--evidence", f"mcp:{capability}",
-                    *(["--checked-key", "SBER-1"] if capability == "history" else []),
+                    *(
+                        ["--checked-key", "SBER-1"]
+                        if capability in {"history", "cross_provider_lookup"}
+                        else []
+                    ),
                 )
 
             self.run_tool(
@@ -799,15 +821,14 @@ class TrackerCtlTests(unittest.TestCase):
                 "--run-id", run_id,
                 "--provider", "jira",
                 "--captured-at", "2026-08-26T10:01:00+03:00",
-                "--query", "key in (JIRA-11)",
+                "--query", "key in (SBER-1)",
             )
             self.run_tool(
                 state,
                 "snapshot-issue",
                 "--run-id", run_id,
                 "--provider", "jira",
-                "--key", "JIRA-11",
-                "--counterpart-key", "SBER-1",
+                "--key", "SBER-1",
                 "--summary", "Основная задача",
                 "--issue-type", "Story",
                 "--status", "To Do",
@@ -815,11 +836,12 @@ class TrackerCtlTests(unittest.TestCase):
                 "--estimate-state", "absent",
                 "--epic-state", "absent",
                 "--releases-state", "absent",
-                "--discovery", "counterpart",
+                "--discovery", "cross-provider-key",
                 "--updated-at", "2026-08-26T09:01:00+03:00",
             )
             for capability in (
-                "history", "epic_links", "release_links", "counterpart_lookup", "epic_neighbors",
+                "history", "epic_links", "release_links", "cross_provider_lookup",
+                "epic_neighbors",
             ):
                 self.run_tool(
                     state,
@@ -829,7 +851,11 @@ class TrackerCtlTests(unittest.TestCase):
                     "--capability", capability,
                     "--state", "complete",
                     "--evidence", f"mcp:{capability}",
-                    *(["--checked-key", "JIRA-11"] if capability == "history" else []),
+                    *(
+                        ["--checked-key", "SBER-1"]
+                        if capability in {"history", "cross_provider_lookup"}
+                        else []
+                    ),
                 )
 
             progress = json.loads(
@@ -877,6 +903,11 @@ class TrackerCtlTests(unittest.TestCase):
 
             started = json.loads(self.run_tool(state, "begin").stdout)
             self.assertIsNone(started["jira_input"])
+            sber = json.loads(Path(started["sbertrek_input"]).read_text(encoding="utf-8"))
+            self.assertEqual(
+                sber["collection"]["cross_provider_lookup"]["state"],
+                "not-applicable",
+            )
             self.assertFalse((Path(started["sbertrek_input"]).parent / "jira.json").exists())
 
     def test_reconcile_rejects_pending_collection_state(self) -> None:
@@ -925,7 +956,7 @@ class TrackerCtlTests(unittest.TestCase):
             )
             self.assertIn("не имеют аналитического источника", result.stderr)
 
-    def test_reconcile_rejects_direct_counterpart_that_was_not_looked_up(self) -> None:
+    def test_reconcile_rejects_exact_key_not_read_in_other_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state = root / "state"
@@ -933,22 +964,30 @@ class TrackerCtlTests(unittest.TestCase):
             sber, jira = self.snapshots()
             jira["issues"] = []
             jira["collection"]["expanded_epic_keys"] = []
-            sber_path = root / "sber.json"
-            jira_path = root / "jira.json"
+            started = json.loads(self.run_tool(state, "begin").stdout)
+            sber_path = Path(started["sbertrek_input"])
+            jira_path = Path(started["jira_input"])
             self.write_json(sber_path, sber)
             self.write_json(jira_path, jira)
+
+            status = json.loads(
+                self.run_tool(state, "run-status", "--run-id", started["run_id"]).stdout
+            )
+            self.assertEqual(status["status"], "tracker-run-incomplete")
+            self.assertIn(
+                "jira: ключи не найдены и не подтверждены как not-found",
+                status["cross_provider_validation_error"],
+            )
 
             result = self.run_tool(
                 state,
                 "reconcile",
-                "--sbertrek",
-                str(sber_path),
-                "--jira",
-                str(jira_path),
+                "--run-id",
+                started["run_id"],
                 expected=2,
             )
-            self.assertIn("Прямая Jira-пара JIRA-11", result.stderr)
-            self.assertIn("не прочитана", result.stderr)
+            self.assertIn("jira: ключи не найдены и не подтверждены как not-found", result.stderr)
+            self.assertIn("SBER-1", result.stderr)
 
     def test_reconcile_reports_unavailable_and_empty_collection_limitations(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1191,12 +1230,13 @@ class TrackerCtlTests(unittest.TestCase):
             )
             self.assertIn("нет ожидающего вопроса", result.stderr)
 
-    def test_duplicate_counterpart_claims_are_rejected(self) -> None:
+    def test_informational_counterpart_metadata_does_not_affect_exact_key_match(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state = root / "state"
             self.prepare_config(state)
             sber, jira = self.snapshots()
+            sber["issues"][1]["issue_key"] = "JIRA-ONLY"
             jira["issues"][1]["counterpart_key"] = "SBER-1"
             sber_path = root / "sber.json"
             jira_path = root / "jira.json"
@@ -1207,21 +1247,29 @@ class TrackerCtlTests(unittest.TestCase):
                 "reconcile",
                 "--sbertrek", str(sber_path),
                 "--jira", str(jira_path),
-                expected=2,
             )
-            self.assertIn("несколько Jira-counterpart", result.stderr)
+            reconciled = json.loads(
+                Path(json.loads(result.stdout)["result"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(reconciled["counts"]["matched"], 1)
+            self.assertEqual(reconciled["issues"][0]["jira_key"], "SBER-1")
+            sber_only = next(
+                issue for issue in reconciled["issues"] if issue["key"] == "SBER-2"
+            )
+            self.assertIsNone(sber_only["jira_key"])
 
-    def test_counterpart_lookup_cannot_be_unavailable_after_counterpart_was_read(self) -> None:
+    def test_unavailable_cross_provider_lookup_is_reported_as_limitation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state = root / "state"
             self.prepare_config(state)
             sber, jira = self.snapshots()
-            jira["collection"]["counterpart_lookup"] = {
+            jira["collection"]["cross_provider_lookup"] = {
                 "state": "unavailable",
                 "reason": "Direct lookup returned a provider error",
                 "failure_kind": "call-failed",
                 "evidence": ["mcp:get-issue:error"],
+                "checked_keys": [],
             }
             sber_path = root / "sber.json"
             jira_path = root / "jira.json"
@@ -1232,9 +1280,14 @@ class TrackerCtlTests(unittest.TestCase):
                 "reconcile",
                 "--sbertrek", str(sber_path),
                 "--jira", str(jira_path),
-                expected=2,
             )
-            self.assertIn("нельзя объявить unavailable", result.stderr)
+            reconciled = json.loads(
+                Path(json.loads(result.stdout)["result"]).read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "jira-cross_provider_lookup-unavailable",
+                reconciled["limitations"],
+            )
 
     def test_version_two_config_discards_unguarded_participant_mappings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1242,6 +1295,7 @@ class TrackerCtlTests(unittest.TestCase):
             path = self.prepare_config(state)
             config = json.loads(path.read_text(encoding="utf-8"))
             config["schema_version"] = 2
+            config["issue_pairs"] = {"SBER-1": "JIRA-11"}
             config["participants"] = {
                 "sbertrek": {"one": {"canonical_id": "FE2", "role": "developer"}},
                 "jira": {
@@ -1253,8 +1307,39 @@ class TrackerCtlTests(unittest.TestCase):
             status = json.loads(self.run_tool(state, "config-status").stdout)
             migrated = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(status["status"], "tracker-config-ready")
-            self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(migrated["schema_version"], 4)
+            self.assertNotIn("issue_pairs", migrated)
             self.assertEqual(migrated["participants"], {"sbertrek": {}, "jira": {}})
+
+    def test_version_four_config_rejects_manual_issue_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            path = self.prepare_config(state)
+            config = json.loads(path.read_text(encoding="utf-8"))
+            config["issue_pairs"] = {"SBER-1": "JIRA-11"}
+            self.write_json(path, config)
+
+            result = self.run_tool(state, "config-status", expected=2)
+
+            self.assertIn("сопоставляются только по точному ключу", result.stderr)
+
+    def test_version_three_config_removes_issue_pairs_and_preserves_participants(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            path = self.prepare_config(state)
+            config = json.loads(path.read_text(encoding="utf-8"))
+            expected_participants = config["participants"]
+            config["schema_version"] = 3
+            config["issue_pairs"] = {"SBER-1": "JIRA-11"}
+            self.write_json(path, config)
+
+            status = json.loads(self.run_tool(state, "config-status").stdout)
+            migrated = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(status["status"], "tracker-config-ready")
+            self.assertEqual(migrated["schema_version"], 4)
+            self.assertNotIn("issue_pairs", migrated)
+            self.assertEqual(migrated["participants"], expected_participants)
 
 
 if __name__ == "__main__":
