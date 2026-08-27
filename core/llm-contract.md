@@ -214,6 +214,7 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - Follow `core/tracker-reading.md` for every MCP-backed task lookup or comparison.
 - Resolve SberTrek and Jira by available capabilities, not by a persisted MCP server name.
 - SberTrek is primary. Jira only fills absent fields, adds non-duplicate history events and exposes conflicts.
+- Merge paired issue fields independently. For `epic`, `assignee` and `estimate`, use a populated SberTrek value; otherwise use a populated Jira value. If both are populated and differ, keep SberTrek and expose the conflict. Normalize story points and person-days to `story-points` at the agreed 1:1 ratio; do not convert other units silently.
 - Epic and release are independent task groupings. Neither grouping automatically defines an analytical feature.
 - Development completion by reassignment requires an analyst-supplied roster `team_id` and history proving the latest developer-to-non-developer handoff. The role is derived only from the `AN/BE/FE/QA` prefix; aliases `A/B/F/Q` normalize to those prefixes. Explicit excluded or completed statuses override this inference. Apply it to configured development work-item types, which may include a tracker Story.
 - Expand known tasks through their epics as bounded candidates, analyze title and description, and surface ambiguous membership to the analyst. Missing releases are proposals for later actual-progress application, not read-time writes.

@@ -359,6 +359,86 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertFalse(output["tracker_changed"])
             self.assertEqual(Path(output["result"]).parent, sber_path.parent.parent)
 
+    def test_epic_assignee_and_estimate_use_sbertrek_priority(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, jira = self.snapshots()
+            sber["issues"][0]["estimate"] = {"value": 8, "unit": "person-days"}
+            sber["issues"][0]["field_observations"]["estimate"] = "value"
+            jira["issues"][0]["assignee"] = {"id": "dev-j", "name": "Разработчик"}
+            jira["issues"][0]["estimate"] = {"value": 13, "unit": "SP"}
+            jira["issues"][0]["epic"] = {"key": "EPIC-J", "name": "Другой эпик"}
+            jira["collection"]["expanded_epic_keys"].append("EPIC-J")
+            sber_path = root / "sber.json"
+            jira_path = root / "jira.json"
+            self.write_json(sber_path, sber)
+            self.write_json(jira_path, jira)
+
+            output = json.loads(self.run_tool(
+                state,
+                "reconcile",
+                "--sbertrek", str(sber_path),
+                "--jira", str(jira_path),
+            ).stdout)
+            reconciled = json.loads(Path(output["result"]).read_text(encoding="utf-8"))
+            issue = next(item for item in reconciled["issues"] if item["key"] == "SBER-1")
+
+            self.assertEqual(issue["assignee"], {"id": "qa-s", "name": "Тестировщик"})
+            self.assertEqual(issue["estimate"], {"value": 8, "unit": "story-points"})
+            self.assertEqual(issue["epic"], {"key": "EPIC-1", "name": "Функциональность N"})
+            self.assertEqual(
+                {field: issue["field_sources"][field] for field in ("assignee", "estimate", "epic")},
+                {"assignee": "sbertrek", "estimate": "sbertrek", "epic": "sbertrek"},
+            )
+            self.assertTrue({"assignee", "estimate", "epic"}.issubset(issue["conflicting_fields"]))
+            self.assertEqual(reconciled["merge_policy"]["estimate_unit"], "story-points")
+            self.assertEqual(reconciled["merge_policy"]["story_point_person_day_ratio"], 1)
+
+            report = Path(output["report"]).read_text(encoding="utf-8")
+            self.assertIn("| Исполнитель | Оценка, SP |", report)
+            self.assertIn("Тестировщик (qa-s)", report)
+            self.assertIn("8 SP", report)
+
+    def test_jira_fills_missing_epic_assignee_and_estimate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, jira = self.snapshots()
+            issue = sber["issues"][0]
+            issue["assignee"] = None
+            issue["estimate"] = None
+            issue["epic"] = None
+            issue["field_observations"].update({
+                "assignee": "absent",
+                "estimate": "absent",
+                "epic": "absent",
+            })
+            sber_path = root / "sber.json"
+            jira_path = root / "jira.json"
+            self.write_json(sber_path, sber)
+            self.write_json(jira_path, jira)
+
+            output = json.loads(self.run_tool(
+                state,
+                "reconcile",
+                "--sbertrek", str(sber_path),
+                "--jira", str(jira_path),
+            ).stdout)
+            reconciled = json.loads(Path(output["result"]).read_text(encoding="utf-8"))
+            merged = next(item for item in reconciled["issues"] if item["key"] == "SBER-1")
+
+            self.assertEqual(merged["assignee"], jira["issues"][0]["assignee"])
+            self.assertEqual(merged["estimate"], {"value": 5, "unit": "story-points"})
+            self.assertEqual(merged["epic"], jira["issues"][0]["epic"])
+            self.assertEqual(
+                {field: merged["field_sources"][field] for field in ("assignee", "estimate", "epic")},
+                {"assignee": "jira", "estimate": "jira", "epic": "jira"},
+            )
+            self.assertTrue({"assignee", "estimate", "epic"}.issubset(merged["enriched_from_jira"]))
+
     def test_unconfigured_story_type_does_not_use_handoff_rule(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -40,6 +40,19 @@ COLLECTION_STATES = {"complete", "unavailable", "not-applicable"}
 COLLECTION_FAILURE_KINDS = {"capability-absent", "call-failed", "permission-denied"}
 OBSERVED_FIELDS = ("assignee", "estimate", "epic", "releases")
 FIELD_OBSERVATION_STATES = {"value", "absent", "not-returned"}
+SP_EQUIVALENT_UNITS = {
+    "sp",
+    "story point",
+    "story points",
+    "person day",
+    "person days",
+    "человеко день",
+    "человеко дни",
+    "человекодень",
+    "человекодни",
+    "чел день",
+    "чел дни",
+}
 SKIPPED_COLLECTION_REASON = re.compile(
     r"(?:не\s+(?:вызван|вызывал|выполн|провер|прочитан|запрош)|not\s+(?:called|attempted|read)|skipped)",
     re.IGNORECASE,
@@ -137,11 +150,27 @@ def present(value: Any) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
 
-def canonical_field(field: str, value: Any) -> Any:
-    if field != "releases" or not isinstance(value, list):
+def canonical_estimate(value: Any) -> Any:
+    if not isinstance(value, dict):
         return value
-    unique = {json.dumps(item, ensure_ascii=False, sort_keys=True): item for item in value}
-    return [unique[key] for key in sorted(unique)]
+    normalized = dict(value)
+    unit = normalized.get("unit")
+    if isinstance(unit, str):
+        comparable_unit = " ".join(
+            unit.strip().casefold().replace("_", " ").replace("-", " ").split()
+        )
+        if comparable_unit in SP_EQUIVALENT_UNITS:
+            normalized["unit"] = "story-points"
+    return normalized
+
+
+def canonical_field(field: str, value: Any) -> Any:
+    if field == "estimate":
+        return canonical_estimate(value)
+    if field == "releases" and isinstance(value, list):
+        unique = {json.dumps(item, ensure_ascii=False, sort_keys=True): item for item in value}
+        return [unique[key] for key in sorted(unique)]
+    return value
 
 
 def canonical_participant(value: Any, provider: str, config: dict) -> Any:
@@ -919,6 +948,15 @@ def reconcile(sber_snapshot: dict, jira_snapshot: dict | None, config: dict) -> 
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
         "primary_provider": "sbertrek",
+        "merge_policy": {
+            "field_priority": {
+                "epic": ["sbertrek", "jira"],
+                "assignee": ["sbertrek", "jira"],
+                "estimate": ["sbertrek", "jira"],
+            },
+            "estimate_unit": "story-points",
+            "story_point_person_day_ratio": 1,
+        },
         "jira_used": jira_snapshot is not None,
         "limitations": sorted(set(limitations)),
         "counts": {
@@ -957,18 +995,21 @@ def report_text(payload: dict) -> str:
         lines.append("- нет")
     lines.extend([
         "",
-        "| SberTrek | Jira | Название | Найдена через | Отношение к фиче | Эпик | Релизы | Состояние разработки | Дообогащение | Конфликты |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| SberTrek | Jira | Название | Найдена через | Отношение к фиче | Исполнитель | Оценка, SP | Эпик | Релизы | Состояние разработки | Дообогащение | Конфликты |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ])
     for issue in payload["issues"]:
         enriched = ", ".join(issue["enriched_from_jira"]) or "—"
         conflicts = ", ".join(issue["conflicting_fields"]) or "—"
+        assignee = markdown_cell(participant_label(issue.get("assignee")) or "Не назначен")
+        estimate = markdown_cell(estimate_label(issue.get("estimate")) or "Нет оценки")
         epic = markdown_cell(group_label(issue.get("epic")) or "Без эпика")
         releases = markdown_cell(", ".join(group_label(item) for item in (issue.get("releases") or [])) or "Без релиза")
         lines.append(
             f"| {markdown_cell(issue['key'])} | {markdown_cell(issue.get('jira_key') or '—')} | "
             f"{markdown_cell(issue.get('summary') or '—')} | "
-            f"{issue.get('discovery') or 'seed'} | {issue.get('feature_relevance') or 'known'} | {epic} | {releases} | "
+            f"{issue.get('discovery') or 'seed'} | {issue.get('feature_relevance') or 'known'} | "
+            f"{assignee} | {estimate} | {epic} | {releases} | "
             f"{issue['development_state']['state']} | {enriched} | {conflicts} |"
         )
     append_grouping(lines, payload["issues"], "Эпики", lambda issue: [group_label(issue.get("epic")) or "Без эпика"])
@@ -1012,6 +1053,24 @@ def group_label(value: Any) -> str:
     if isinstance(value, dict):
         return str(value.get("key") or value.get("name") or "").strip()
     return ""
+
+
+def participant_label(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    name = str(value.get("name") or "").strip()
+    account = str(value.get("id") or "").strip()
+    if name and account:
+        return f"{name} ({account})"
+    return name or account
+
+
+def estimate_label(value: Any) -> str:
+    if not isinstance(value, dict) or not present(value.get("value")):
+        return ""
+    unit = str(value.get("unit") or "").strip()
+    suffix = "SP" if unit == "story-points" else unit
+    return f"{value['value']} {suffix}".strip()
 
 
 def markdown_cell(value: Any) -> str:
