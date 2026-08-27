@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 CONFIG_SCHEMA_VERSION = 4
 CONFIG_INCOMPLETE_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -65,6 +65,7 @@ CAPABILITY_DISCOVERY_EVIDENCE = re.compile(
     re.IGNORECASE,
 )
 FEATURE_SEARCH_EVIDENCE = re.compile(r"(?:search|query|jql)", re.IGNORECASE)
+PLACEHOLDER_EVIDENCE = re.compile(r"(?:^|:)none(?:$|:)|[;\r\n]", re.IGNORECASE)
 DISCOVERY_VALUES = {"seed", "cross-provider-key", "epic-neighbor", "feature-search-candidate"}
 CANDIDATE_DISCOVERY_VALUES = {"epic-neighbor", "feature-search-candidate"}
 RELEVANCE_VALUES = {
@@ -249,6 +250,28 @@ def validate_provider_evidence(value: Any, provider: str, label: str) -> str:
     return value
 
 
+def evidence_mentions_key(value: str, key: str) -> bool:
+    return re.search(
+        rf"(?<![A-Z0-9_]){re.escape(key)}(?![0-9])",
+        value,
+        re.IGNORECASE,
+    ) is not None
+
+
+def require_evidence_for_keys(
+    evidence: list[str], expected_keys: set[str], label: str
+) -> None:
+    missing = sorted(
+        key
+        for key in expected_keys
+        if not any(evidence_mentions_key(value, key) for value in evidence)
+    )
+    if missing:
+        raise ValueError(
+            f"{label} не имеет отдельного evidence для ключей: " + ", ".join(missing)
+        )
+
+
 def validate_config(payload: Any) -> dict:
     if not isinstance(payload, dict) or payload.get("schema_version") != CONFIG_SCHEMA_VERSION:
         raise ValueError("Неподдерживаемая схема tracker-config.json")
@@ -410,6 +433,11 @@ def validate_collection(payload: Any, provider: str) -> dict:
                     provider,
                     f"collection.{capability}.evidence снимка {provider}",
                 )
+                if PLACEHOLDER_EVIDENCE.search(value):
+                    raise ValueError(
+                        f"collection.{capability}.evidence снимка {provider} содержит "
+                        "placeholder или объединяет несколько MCP-вызовов"
+                    )
         failure_kind = item.get("failure_kind")
         if item["state"] == "unavailable" and failure_kind not in COLLECTION_FAILURE_KINDS:
             raise ValueError(
@@ -465,6 +493,10 @@ def validate_collection(payload: Any, provider: str) -> dict:
         validate_provider_evidence(
             item["evidence"], provider, f"Not-found evidence {item['key']}"
         )
+        if not evidence_mentions_key(item["evidence"], item["key"]):
+            raise ValueError(
+                f"Not-found evidence снимка {provider} не содержит ключ {item['key']}"
+            )
     missing_not_found_evidence = sorted(set(payload.get("not_found_keys", [])) - evidence_keys)
     if missing_not_found_evidence:
         raise ValueError(
@@ -480,7 +512,8 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
         raise ValueError(f"Неподдерживаемая схема снимка {provider}")
     if payload.get("provider") != provider:
         raise ValueError(f"Снимок должен иметь provider={provider}")
-    if timestamp_value(payload.get("captured_at")) is None:
+    captured_at = timestamp_value(payload.get("captured_at"))
+    if captured_at is None:
         raise ValueError(f"Снимок {provider} должен иметь корректный captured_at")
     scope = payload.get("scope")
     if not isinstance(scope, dict):
@@ -565,6 +598,22 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
             validate_provider_evidence(
                 item, provider, f"Evidence прямого чтения {issue['key']}"
             )
+            if not evidence_mentions_key(item, issue["key"]):
+                raise ValueError(
+                    f"Evidence прямого чтения задачи {issue['key']} не содержит её точный ключ"
+                )
+            if PLACEHOLDER_EVIDENCE.search(item):
+                raise ValueError(
+                    f"Evidence прямого чтения задачи {issue['key']} содержит placeholder "
+                    "или объединяет несколько MCP-вызовов"
+                )
+        updated_at = timestamp_value(issue.get("updated_at"))
+        if updated_at is None:
+            raise ValueError(f"Задача {issue['key']} должна иметь корректный updated_at")
+        if updated_at > captured_at:
+            raise ValueError(
+                f"Задача {issue['key']} имеет updated_at позже captured_at снимка {provider}"
+            )
         history = issue.get("history", [])
         if not isinstance(history, list) or not all(isinstance(event, dict) for event in history):
             raise ValueError(f"history задачи {issue['key']} должен быть списком объектов")
@@ -573,6 +622,10 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
                 raise ValueError(f"Событие history задачи {issue['key']} должно иметь field")
             if timestamp_value(event.get("at")) is None:
                 raise ValueError(f"Событие history задачи {issue['key']} должно иметь корректный at")
+            if timestamp_value(event["at"]) > captured_at:
+                raise ValueError(
+                    f"Событие history задачи {issue['key']} произошло позже captured_at снимка {provider}"
+                )
     not_found = set(payload["collection"].get("not_found_keys", []))
     for key in not_found:
         validate_issue_key(key, f"Not-found ключ снимка {provider}")
@@ -612,29 +665,61 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
         item = payload["collection"][capability]
         if item["state"] == "complete":
             checked = set(item.get("checked_keys", []))
-            unchecked = sorted(seen - checked)
-            if unchecked:
+            if checked != seen:
                 raise ValueError(
-                    f"Снимок {provider} объявил {capability}=complete без проверки задач: "
-                    + ", ".join(unchecked)
+                    f"Снимок {provider}: {capability}.checked_keys должен точно совпадать "
+                    "с ключами задач снимка"
                 )
+            require_evidence_for_keys(
+                item.get("evidence", []),
+                seen,
+                f"Снимок {provider}: {capability}=complete",
+            )
     if payload["collection"]["epic_neighbors"]["state"] == "complete":
         checked_epics = set(payload["collection"]["epic_neighbors"].get("checked_keys", []))
         discovered_epics = issue_group_keys(issues, "epic")
-        unchecked_epics = sorted(discovered_epics - checked_epics)
-        if unchecked_epics:
+        if checked_epics != discovered_epics:
             raise ValueError(
-                f"Снимок {provider} объявил epic_neighbors=complete без проверки эпиков: "
-                + ", ".join(unchecked_epics)
+                f"Снимок {provider}: epic_neighbors.checked_keys должен точно совпадать "
+                "с найденными эпиками"
             )
         expanded_epics = set(payload["collection"].get("expanded_epic_keys", []))
-        missing = sorted(discovered_epics - expanded_epics)
-        if missing:
+        if expanded_epics != discovered_epics:
             raise ValueError(
-                f"Снимок {provider} объявил epic_neighbors=complete, но не расширил эпики: "
-                + ", ".join(missing)
+                f"Снимок {provider}: expanded_epic_keys должен точно совпадать с найденными эпиками"
             )
+        require_evidence_for_keys(
+            payload["collection"]["epic_neighbors"].get("evidence", []),
+            discovered_epics,
+            f"Снимок {provider}: epic_neighbors=complete",
+        )
     return payload
+
+
+def validate_development_field_coverage(
+    snapshot: dict, provider: str, config: dict
+) -> None:
+    development_types = {
+        value.strip().casefold()
+        for value in config.get("development_issue_types", [])
+        if isinstance(value, str) and value.strip()
+    }
+    development_issues = [
+        issue
+        for issue in snapshot.get("issues", [])
+        if str(issue.get("issue_type") or "").strip().casefold() in development_types
+    ]
+    if len(development_issues) < 2:
+        return
+    for field in ("assignee", "estimate"):
+        if all(
+            issue.get("field_observations", {}).get(field) == "not-returned"
+            for issue in development_issues
+        ):
+            raise ValueError(
+                f"Снимок {provider} потерял поле {field} у всех {len(development_issues)} "
+                "единиц разработки; проверь полную карточку и provider-specific attributes"
+            )
 
 
 def history_fingerprint(event: dict, provider: str, config: dict) -> str:
@@ -1440,9 +1525,21 @@ def parse_key_value(values: list[str], label: str) -> list[dict]:
 
 
 def snapshot_metadata_command(args: argparse.Namespace) -> int:
-    if timestamp_value(args.captured_at) is None:
+    captured_at = timestamp_value(args.captured_at)
+    if captured_at is None:
         raise ValueError("--captured-at должен содержать временную метку с часовым поясом")
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    later_issue_keys = sorted(
+        issue["key"]
+        for issue in snapshot.get("issues", [])
+        if timestamp_value(issue.get("updated_at")) is not None
+        and timestamp_value(issue["updated_at"]) > captured_at
+    )
+    if later_issue_keys:
+        raise ValueError(
+            "--captured-at должен быть не раньше updated_at прочитанных задач: "
+            + ", ".join(later_issue_keys)
+        )
     evidence = parse_key_value(args.seed_evidence, "--seed-evidence")
     for item in evidence:
         validate_issue_key(item["key"], "Seed-ключ")
@@ -1483,6 +1580,10 @@ def snapshot_issue_command(args: argparse.Namespace) -> int:
     validate_issue_key(args.key)
     for item in args.evidence:
         validate_provider_evidence(item, args.provider, "--evidence")
+        if not evidence_mentions_key(item, args.key):
+            raise ValueError(f"--evidence прямого чтения должен содержать ключ {args.key}")
+        if PLACEHOLDER_EVIDENCE.search(item):
+            raise ValueError("--evidence не может содержать placeholder или несколько MCP-вызовов")
     if timestamp_value(args.updated_at) is None:
         raise ValueError("--updated-at должен содержать временную метку с часовым поясом")
     if bool(args.assignee_id) != bool(args.assignee_name):
@@ -1604,6 +1705,10 @@ def snapshot_history_command(args: argparse.Namespace) -> int:
 def snapshot_not_found_command(args: argparse.Namespace) -> int:
     validate_issue_key(args.key)
     validate_provider_evidence(args.evidence, args.provider, "--evidence")
+    if not evidence_mentions_key(args.evidence, args.key):
+        raise ValueError(f"--evidence not-found должен содержать ключ {args.key}")
+    if PLACEHOLDER_EVIDENCE.search(args.evidence):
+        raise ValueError("--evidence не может содержать placeholder или несколько MCP-вызовов")
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
     if any(issue.get("key") == args.key for issue in snapshot["issues"]):
         raise ValueError(f"Задача {args.key} уже записана как найденная")
@@ -1639,6 +1744,10 @@ def snapshot_collection_command(args: argparse.Namespace) -> int:
     if args.state == "unavailable" and SKIPPED_COLLECTION_REASON.search(args.reason):
         raise ValueError(
             "Пропущенный MCP-вызов нельзя обозначать как unavailable; выполни вызов или зафиксируй его ошибку"
+        )
+    if any(PLACEHOLDER_EVIDENCE.search(value) for value in args.evidence):
+        raise ValueError(
+            "--evidence не может содержать placeholder :none или объединять несколько MCP-вызовов"
         )
     if (
         args.state == "unavailable"
@@ -1735,7 +1844,7 @@ def snapshot_collection_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def snapshot_progress(snapshot: dict, provider: str) -> dict:
+def snapshot_progress(snapshot: dict, provider: str, config: dict) -> dict:
     missing: list[str] = []
     if timestamp_value(snapshot.get("captured_at")) is None:
         missing.append("captured_at")
@@ -1750,6 +1859,7 @@ def snapshot_progress(snapshot: dict, provider: str) -> dict:
     if not missing and not pending:
         try:
             validate_snapshot(snapshot, provider)
+            validate_development_field_coverage(snapshot, provider, config)
         except ValueError as exc:
             validation_error = str(exc)
     return {
@@ -1778,8 +1888,10 @@ def tracker_run_status_command(args: argparse.Namespace) -> int:
         provider: load_run_snapshot(args.run_id, provider)[1]
         for provider in providers
     }
+    config = load_config()
+    require_base_config(config)
     progress = [
-        snapshot_progress(snapshots[provider], provider)
+        snapshot_progress(snapshots[provider], provider, config)
         for provider in providers
     ]
     cross_provider_validation_error = None
@@ -1895,8 +2007,10 @@ def reconcile_command(args: argparse.Namespace) -> int:
     if jira is not None and not config.get("jira_enabled"):
         raise ValueError("Jira отключена в tracker-config.json, но передан Jira-снимок")
     validate_snapshot_scope(sber, "sbertrek", config)
+    validate_development_field_coverage(sber, "sbertrek", config)
     if jira:
         validate_snapshot_scope(jira, "jira", config)
+        validate_development_field_coverage(jira, "jira", config)
     validate_cross_provider_lookup(sber, jira)
     unknown = first_unknown_participant(
         [("sbertrek", sber)] + ([("jira", jira)] if jira else []),

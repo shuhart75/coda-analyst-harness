@@ -41,11 +41,25 @@ class TrackerCtlTests(unittest.TestCase):
         issue_keys = [issue["key"] for issue in issues]
         for capability in ("history", "epic_links", "release_links"):
             snapshot["collection"][capability]["checked_keys"] = issue_keys
+            snapshot["collection"][capability]["evidence"] = [
+                f"mcp:{snapshot['provider']}:{capability}:{key}" for key in issue_keys
+            ] or [f"mcp:{snapshot['provider']}:{capability}:no-issues"]
         snapshot["collection"]["feature_search"]["checked_keys"] = [
             issue["key"]
             for issue in issues
             if issue.get("discovery") == "feature-search-candidate"
         ]
+        epic_keys = sorted({
+            issue["epic"]["key"]
+            for issue in issues
+            if isinstance(issue.get("epic"), dict) and issue["epic"].get("key")
+        })
+        snapshot["collection"]["epic_neighbors"]["checked_keys"] = epic_keys
+        snapshot["collection"]["epic_neighbors"]["evidence"] = (
+            [f"mcp:{snapshot['provider']}:epic-search:{key}" for key in epic_keys]
+            or [f"mcp:{snapshot['provider']}:epic-search:no-epics"]
+        )
+        snapshot["collection"]["expanded_epic_keys"] = epic_keys
         seed_keys = [issue["key"] for issue in issues if issue.get("discovery") == "seed"]
         snapshot["scope"]["seed_keys"] = seed_keys
         snapshot["scope"]["seed_evidence"] = [
@@ -96,9 +110,9 @@ class TrackerCtlTests(unittest.TestCase):
                 "evidence": [f"mcp:{provider}:feature-search"],
                 "checked_keys": [] if provider == "sbertrek" else ["JIRA-99"],
             },
-            "history": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:history"], "checked_keys": own_keys},
-            "epic_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:issue-fields"], "checked_keys": own_keys},
-            "release_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:issue-fields"], "checked_keys": own_keys},
+            "history": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:history:{key}" for key in own_keys], "checked_keys": own_keys},
+            "epic_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:issue-fields:{key}" for key in own_keys], "checked_keys": own_keys},
+            "release_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:issue-fields:{key}" for key in own_keys], "checked_keys": own_keys},
             "cross_provider_lookup": {
                 "state": "complete",
                 "reason": None,
@@ -106,7 +120,7 @@ class TrackerCtlTests(unittest.TestCase):
                 "evidence": [f"mcp:{provider}:direct-read"],
                 "checked_keys": all_keys,
             },
-            "epic_neighbors": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:epic-search"], "checked_keys": ["EPIC-1"]},
+            "epic_neighbors": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:epic-search:EPIC-1"], "checked_keys": ["EPIC-1"]},
             "not_found_keys": missing_keys,
             "not_found_evidence": [
                 {"key": key, "evidence": f"mcp:{provider}:get:{key}:404"}
@@ -117,7 +131,7 @@ class TrackerCtlTests(unittest.TestCase):
 
     def snapshots(self) -> tuple[dict, dict]:
         sber = {
-            "schema_version": 6,
+            "schema_version": 7,
             "provider": "sbertrek",
             "captured_at": "2026-08-26T10:00:00+00:00",
             "scope": {
@@ -223,7 +237,7 @@ class TrackerCtlTests(unittest.TestCase):
             ],
         }
         jira = {
-            "schema_version": 6,
+            "schema_version": 7,
             "provider": "jira",
             "captured_at": "2026-08-26T10:00:00+00:00",
             "scope": {
@@ -289,6 +303,7 @@ class TrackerCtlTests(unittest.TestCase):
         }
         for provider, snapshot in (("sbertrek", sber), ("jira", jira)):
             for issue in snapshot["issues"]:
+                issue.setdefault("updated_at", "2026-08-26T09:00:00+00:00")
                 issue["direct_read_evidence"] = [
                     f"mcp:{provider}:get:{issue['key']}"
                 ]
@@ -404,8 +419,11 @@ class TrackerCtlTests(unittest.TestCase):
             jira["issues"][0]["assignee"] = {"id": "dev-j", "name": "Разработчик"}
             jira["issues"][0]["estimate"] = {"value": 13, "unit": "SP"}
             jira["issues"][0]["epic"] = {"key": "EPIC-J", "name": "Другой эпик"}
-            jira["collection"]["epic_neighbors"]["checked_keys"].append("EPIC-J")
-            jira["collection"]["expanded_epic_keys"].append("EPIC-J")
+            jira["collection"]["epic_neighbors"]["checked_keys"] = ["EPIC-J"]
+            jira["collection"]["epic_neighbors"]["evidence"] = [
+                "mcp:jira:epic-search:EPIC-J"
+            ]
+            jira["collection"]["expanded_epic_keys"] = ["EPIC-J"]
             sber_path = root / "sber.json"
             jira_path = root / "jira.json"
             self.write_json(sber_path, sber)
@@ -836,7 +854,14 @@ class TrackerCtlTests(unittest.TestCase):
                     *(
                         []
                         if capability == "cross_provider_lookup"
-                        else ["--evidence", f"mcp:sbertrek:{capability}"]
+                        else [
+                            "--evidence",
+                            (
+                                f"mcp:sbertrek:{capability}:SBER-1"
+                                if capability in {"history", "epic_links", "release_links"}
+                                else f"mcp:sbertrek:{capability}"
+                            ),
+                        ]
                     ),
                     *(
                         ["--checked-key", "SBER-1"]
@@ -884,7 +909,14 @@ class TrackerCtlTests(unittest.TestCase):
                     *(
                         []
                         if capability == "cross_provider_lookup"
-                        else ["--evidence", f"mcp:jira:{capability}"]
+                        else [
+                            "--evidence",
+                            (
+                                f"mcp:jira:{capability}:SBER-1"
+                                if capability in {"history", "epic_links", "release_links"}
+                                else f"mcp:jira:{capability}"
+                            ),
+                        ]
                     ),
                     *(
                         ["--checked-key", "SBER-1"]
@@ -1053,10 +1085,7 @@ class TrackerCtlTests(unittest.TestCase):
             state = root / "state"
             self.prepare_config(state)
             sber, jira = self.snapshots()
-            jira["issues"] = []
-            jira["collection"]["feature_search"]["checked_keys"] = []
-            jira["collection"]["expanded_epic_keys"] = []
-            jira["collection"]["history"]["checked_keys"] = []
+            self.restrict_to_issues(jira, [])
             jira["collection"]["cross_provider_lookup"]["checked_keys"] = list(
                 jira["collection"]["not_found_keys"]
             )
@@ -1149,7 +1178,7 @@ class TrackerCtlTests(unittest.TestCase):
             result = self.run_tool(
                 state, "reconcile", "--sbertrek", str(sber_path), expected=2
             )
-            self.assertIn("history=complete без проверки задач: SBER-4", result.stderr)
+            self.assertIn("history.checked_keys должен точно совпадать", result.stderr)
 
     def test_unknown_participant_blocks_reconcile_one_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1290,13 +1319,13 @@ class TrackerCtlTests(unittest.TestCase):
                 "--run-id", run_id,
                 "--provider", "sbertrek",
                 "--key", "SBER-404",
-                "--evidence", "mcp:sbertrek:issue.getByKey:404",
+                "--evidence", "mcp:sbertrek:issue.getByKey:SBER-404:404",
             )
             snapshot = json.loads(Path(started["sbertrek_input"]).read_text(encoding="utf-8"))
             self.assertEqual(snapshot["collection"]["not_found_keys"], ["SBER-404"])
             self.assertEqual(
                 snapshot["collection"]["not_found_evidence"][0]["evidence"],
-                "mcp:sbertrek:issue.getByKey:404",
+                "mcp:sbertrek:issue.getByKey:SBER-404:404",
             )
 
     def test_collection_claim_requires_call_evidence_and_cannot_mean_skipped(self) -> None:
@@ -1470,8 +1499,112 @@ class TrackerCtlTests(unittest.TestCase):
             result = self.run_tool(
                 state, "reconcile", "--sbertrek", str(path), expected=2
             )
-            self.assertIn("epic_links=complete без проверки задач", result.stderr)
+            self.assertIn("epic_links.checked_keys должен точно совпадать", result.stderr)
+
+    def test_complete_collection_requires_keyed_evidence_for_every_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, _ = self.snapshots()
+            sber["collection"]["history"]["evidence"] = [
+                "mcp:sbertrek:history:SBER-1"
+            ]
+            path = root / "sber.json"
+            self.write_json(path, sber)
+
+            result = self.run_tool(
+                state, "reconcile", "--sbertrek", str(path), expected=2
+            )
+            self.assertIn("не имеет отдельного evidence для ключей", result.stderr)
             self.assertIn("SBER-4", result.stderr)
+
+    def test_placeholder_and_bundled_collection_evidence_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            self.prepare_config(state)
+            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
+
+            for evidence in (
+                "mcp:sbertrek:history-read:none",
+                "mcp:sbertrek:history:SBER-1;mcp:sbertrek:history:SBER-2",
+            ):
+                result = self.run_tool(
+                    state,
+                    "snapshot-collection",
+                    "--run-id", run_id,
+                    "--provider", "sbertrek",
+                    "--capability", "history",
+                    "--state", "complete",
+                    "--evidence", evidence,
+                    expected=2,
+                )
+                self.assertIn("placeholder", result.stderr)
+
+    def test_epic_neighbor_keys_must_be_actual_epics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, _ = self.snapshots()
+            sber["collection"]["epic_neighbors"]["checked_keys"] = ["SBER-1"]
+            path = root / "sber.json"
+            self.write_json(path, sber)
+
+            result = self.run_tool(
+                state, "reconcile", "--sbertrek", str(path), expected=2
+            )
+            self.assertIn("epic_neighbors.checked_keys должен точно совпадать", result.stderr)
+
+    def test_issue_timestamp_cannot_be_later_than_snapshot_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, _ = self.snapshots()
+            sber["issues"][0]["updated_at"] = "2026-08-26T10:00:01+00:00"
+            path = root / "sber.json"
+            self.write_json(path, sber)
+
+            result = self.run_tool(
+                state, "reconcile", "--sbertrek", str(path), expected=2
+            )
+            self.assertIn("updated_at позже captured_at", result.stderr)
+
+    def test_mass_not_returned_development_fields_block_reconcile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, _ = self.snapshots()
+            for issue in sber["issues"]:
+                if issue["issue_type"].casefold() in {"development-task", "story"}:
+                    issue["assignee"] = None
+                    issue["field_observations"]["assignee"] = "not-returned"
+            path = root / "sber.json"
+            self.write_json(path, sber)
+
+            result = self.run_tool(
+                state, "reconcile", "--sbertrek", str(path), expected=2
+            )
+            self.assertIn("потерял поле assignee у всех", result.stderr)
+
+    def test_direct_read_evidence_must_name_exact_issue_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            self.prepare_config(state)
+            sber, _ = self.snapshots()
+            sber["issues"][0]["direct_read_evidence"] = [
+                "mcp:sbertrek:issue-read:SBER-2"
+            ]
+            path = root / "sber.json"
+            self.write_json(path, sber)
+
+            result = self.run_tool(
+                state, "reconcile", "--sbertrek", str(path), expected=2
+            )
+            self.assertIn("не содержит её точный ключ", result.stderr)
 
     def test_proactive_participant_mapping_without_pending_question_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
