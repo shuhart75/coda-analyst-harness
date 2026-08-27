@@ -126,13 +126,13 @@ python3 scripts/trackerctl.py set-participant \
 
 ## Нормализованный снимок
 
-Каждый провайдер преобразуется в JSON схемы 7. Снимок или completion-envelope
+Каждый провайдер преобразуется в JSON схемы 8. Снимок или completion-envelope
 предыдущей схемы не продолжается и не разрешает повторный итог после обновления:
 LLM выполняет новый `begin`.
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "provider": "sbertrek",
   "captured_at": "2026-08-26T00:00:00+00:00",
   "scope": {
@@ -193,7 +193,8 @@ LLM выполняет новый `begin`.
 состояние на:
 
 - `complete` с непустым `evidence`, если соответствующая возможность действительно
-  вызвана для всей ограниченной выборки;
+  вызвана для всей ограниченной выборки; единственное исключение — машинно выведенный
+  пустой `epic_neighbors`, который фиксируется без `evidence`;
 - `unavailable` с `failure_kind`, непустой причиной и `evidence` фактической попытки,
   если MCP не предоставляет возможность, запретил доступ или вызов завершился ошибкой;
 - `not-applicable` для `cross_provider_lookup` только когда Jira отключена.
@@ -205,13 +206,14 @@ LLM не редактирует большой JSON-снимок вручную 
 каждого MCP-ответа вызывает короткую команду записи:
 
 ```bash
-python3 scripts/trackerctl.py snapshot-metadata --run-id <run-id> --provider sbertrek --captured-at <timestamp> --query <query> --seed-evidence KEY=SOURCE
+python3 scripts/trackerctl.py snapshot-metadata --run-id <run-id> --provider sbertrek --query <query> --seed-evidence KEY=SOURCE
 python3 scripts/trackerctl.py snapshot-issue --run-id <run-id> --provider sbertrek --key <key> --evidence <exact-key-mcp-call> --summary <summary> --issue-type <type> --status <status> --assignee-state <value|absent|not-returned> --estimate-state <value|absent|not-returned> --epic-state <value|absent|not-returned> --releases-state <value|absent|not-returned> --discovery <kind> --updated-at <timestamp>
 python3 scripts/trackerctl.py snapshot-not-found --run-id <run-id> --provider sbertrek --key <key> --evidence <mcp-call>
 python3 scripts/trackerctl.py snapshot-history --run-id <run-id> --provider sbertrek --key <key> --at <timestamp> --field assignee --from-id <id> --to-id <id>
 python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability feature_search --state complete --evidence <mcp-search-call> --checked-key <found-key> [--checked-key <found-key> ...]
 python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability history --state complete --evidence <mcp-call> --checked-key <key> [--checked-key <key> ...]
 python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability cross_provider_lookup --state complete
+python3 scripts/trackerctl.py snapshot-finalize --run-id <run-id> --provider sbertrek
 python3 scripts/trackerctl.py run-status --run-id <run-id>
 python3 scripts/trackerctl.py reconcile --run-id <run-id>
 python3 scripts/trackerctl.py result-status --run-id <run-id>
@@ -232,8 +234,9 @@ python3 scripts/trackerctl.py result-status --run-id <run-id>
 `snapshot-not-found`, поэтому результат Jira-вызова нельзя записать в паспорт
 SberTrek и наоборот. Evidence прямого чтения и not-found обязательно содержит сам
 точный ключ. Один exact-key поиск, вернувший полную карточку, допустим; обычная
-предметная поисковая выдача — нет. Строки evidence с `:none`, переводом строки или
-`;`, объединяющим несколько вызовов, запрещены. Команда
+предметная поисковая выдача — нет. Каждый элемент evidence описывает ровно один
+MCP-вызов и содержит ровно один префикс `mcp:`. Строки с `:none`, переводом строки,
+`;` или несколькими склеенными `mcp:` запрещены. Команда
 поддерживает исполнителя, оценку, эпик, релизы и классификацию релевантности
 отдельными флагами из `--help`. Для `assignee`,
 `estimate`, `epic` и `releases` обязательно записывается одно из трёх состояний:
@@ -245,10 +248,11 @@ SberTrek и наоборот. Evidence прямого чтения и not-found 
 карточки: `assigned_to` нормализуется в `assignee`, `story_points` — в `estimate`
 с единицей `story-points`, `issue_key` сохраняет только справочный смысл. Для Jira
 проверяются как нормализованные поля, так и исходные `fields`/custom fields.
-Если у двух или более настроенных единиц разработки одного провайдера `assignee`
-либо `estimate` массово записано как `not-returned`, снимок блокируется как вероятная
-ошибка нормализации; LLM дочитывает полные карточки и разбирает provider-specific
-поля.
+Если больше половины как минимум из двух настроенных единиц разработки одного
+провайдера имеют `not-returned` для `assignee`, `estimate` или для объявленных
+полными `epic_links`/`release_links`, снимок блокируется как вероятная ошибка
+нормализации; LLM дочитывает полные карточки, разбирает provider-specific поля
+либо честно фиксирует недоступность соответствующей возможности.
 Команда идемпотентно
 обновляет задачу по ключу и сохраняет уже записанную историю. `snapshot-collection`
 получает `complete` только после реального вызова соответствующей возможности MCP;
@@ -264,7 +268,10 @@ SberTrek и наоборот. Evidence прямого чтения и not-found 
 блокируется, если хотя бы один ключ не перечислен или для него нет отдельного
 evidence, содержащего этот ключ. Для `epic_neighbors` `checked_keys` и
 `expanded_epic_keys` должны точно совпадать с реально найденными ключами эпиков;
-ключи обычных задач туда не записываются. Перед
+ключи обычных задач туда не записываются. Если эпиков не найдено,
+`snapshot-collection ... --capability epic_neighbors --state complete` вызывается
+без evidence и ключей: команда сама фиксирует машинно выведенный пустой набор.
+Подменять это предметным поиском запрещено. Перед
 `reconcile` обязательный `run-status` должен вернуть `tracker-run-ready`.
 
 Прочитанные напрямую данные MCP не являются отчётом. Если LLM не записала их этими
@@ -273,10 +280,11 @@ evidence, содержащего этот ключ. Для `epic_neighbors` `che
 Ни одного `pending` перед `reconcile` оставаться не может. Значение `complete`
 запрещено ставить только на основании наличия поля в поисковой выдаче: история,
 точные ключи в обоих провайдерах и соседи эпика должны быть реально дочитаны.
-Временные метки копируются из ответа провайдера без замены часового пояса или
-повторной интерпретации смещения. `captured_at` означает конец сбора снимка данного
-провайдера и записывается после его MCP-вызовов; ни `updated_at` задачи, ни событие
-истории не может быть позже `captured_at`.
+Временные метки задач копируются из ответа провайдера без замены часового пояса
+или повторной интерпретации смещения. `captured_at` означает конец сбора снимка
+данного провайдера и создаётся самой командой `snapshot-finalize`; модель не
+передаёт эту метку вручную. После финализации снимок неизменяем. Ни `updated_at`
+задачи, ни событие истории не может быть позже `captured_at`.
 Если `epic_neighbors=complete`, каждый найденный эпик обязан присутствовать в
 `expanded_epic_keys`; противоречащий снимок блокируется.
 
@@ -291,9 +299,12 @@ evidence, содержащего этот ключ. Для `epic_neighbors` `che
 запрещён.
 Результат текстового поиска без такого источника не может стать `seed`: он получает
 `discovery: feature-search-candidate` и классификацию релевантности.
-Эпики и релизы, уже известные из actual-progress, записываются в
-`expected_epic_keys` и `expected_release_keys`: если MCP-снимок их не подтвердит,
-результат получит явное ограничение полноты.
+Эпики и релизы, уже известные из actual-progress именно для данного провайдера,
+записываются в его `expected_epic_keys` и `expected_release_keys`. При объявленной
+полной коллекции неподтверждённый ожидаемый ключ блокирует финализацию; ключ одного
+провайдера нельзя без доказательств объявлять ожидаемым во втором. Если возможность
+чтения связей действительно недоступна и это подтверждено MCP evidence, результат
+сохраняет явное ограничение полноты.
 
 Точные значения `issue_type` зависят от трекера. В
 `development_issue_types` локальной политики перечисляются типы, для которых

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 CONFIG_SCHEMA_VERSION = 4
 CONFIG_INCOMPLETE_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -247,6 +247,11 @@ def validate_provider_evidence(value: Any, provider: str, label: str) -> str:
     prefix = f"mcp:{provider}:"
     if not isinstance(value, str) or not value.strip().startswith(prefix):
         raise ValueError(f"{label} должен начинаться с {prefix}")
+    if value.casefold().count("mcp:") != 1 or PLACEHOLDER_EVIDENCE.search(value):
+        raise ValueError(
+            f"{label} должен описывать ровно один MCP-вызов; "
+            "placeholder и объединённые вызовы запрещены"
+        )
     return value
 
 
@@ -421,7 +426,12 @@ def validate_collection(payload: Any, provider: str) -> dict:
         if item["state"] == "unavailable" and not str(item.get("reason") or "").strip():
             raise ValueError(f"collection.{capability}={item['state']} требует reason")
         evidence = item.get("evidence", [])
-        if item["state"] != "not-applicable":
+        machine_empty_epic_neighbors = (
+            capability == "epic_neighbors"
+            and item["state"] == "complete"
+            and not evidence
+        )
+        if item["state"] != "not-applicable" and not machine_empty_epic_neighbors:
             validate_string_list(evidence, f"collection.{capability}.evidence снимка {provider}")
             if not evidence:
                 raise ValueError(
@@ -688,11 +698,38 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
             raise ValueError(
                 f"Снимок {provider}: expanded_epic_keys должен точно совпадать с найденными эпиками"
             )
-        require_evidence_for_keys(
-            payload["collection"]["epic_neighbors"].get("evidence", []),
-            discovered_epics,
-            f"Снимок {provider}: epic_neighbors=complete",
-        )
+        neighbor_evidence = payload["collection"]["epic_neighbors"].get("evidence", [])
+        if discovered_epics:
+            require_evidence_for_keys(
+                neighbor_evidence,
+                discovered_epics,
+                f"Снимок {provider}: epic_neighbors=complete",
+            )
+        elif neighbor_evidence:
+            raise ValueError(
+                f"Снимок {provider}: пустой epic_neighbors должен быть завершён "
+                "машинно без --evidence"
+            )
+    epics = issue_group_keys(issues, "epic") | {
+        issue["key"]
+        for issue in issues
+        if str(issue.get("issue_type") or "").strip().casefold() in {"epic", "эпик"}
+    }
+    releases = issue_group_keys(issues, "releases")
+    if payload["collection"]["epic_links"]["state"] == "complete":
+        unresolved_epics = sorted(set(scope["expected_epic_keys"]) - epics)
+        if unresolved_epics:
+            raise ValueError(
+                f"Снимок {provider}: ожидаемые эпики не подтверждены: "
+                + ", ".join(unresolved_epics)
+            )
+    if payload["collection"]["release_links"]["state"] == "complete":
+        unresolved_releases = sorted(set(scope["expected_release_keys"]) - releases)
+        if unresolved_releases:
+            raise ValueError(
+                f"Снимок {provider}: ожидаемые релизы не подтверждены: "
+                + ", ".join(unresolved_releases)
+            )
     return payload
 
 
@@ -711,14 +748,21 @@ def validate_development_field_coverage(
     ]
     if len(development_issues) < 2:
         return
-    for field in ("assignee", "estimate"):
-        if all(
+    guarded_fields = ["assignee", "estimate"]
+    if snapshot["collection"]["epic_links"]["state"] == "complete":
+        guarded_fields.append("epic")
+    if snapshot["collection"]["release_links"]["state"] == "complete":
+        guarded_fields.append("releases")
+    for field in guarded_fields:
+        missing_count = sum(
             issue.get("field_observations", {}).get(field) == "not-returned"
             for issue in development_issues
-        ):
+        )
+        if missing_count >= 2 and missing_count * 2 > len(development_issues):
             raise ValueError(
-                f"Снимок {provider} потерял поле {field} у всех {len(development_issues)} "
-                "единиц разработки; проверь полную карточку и provider-specific attributes"
+                f"Снимок {provider} потерял поле {field} у {missing_count} из "
+                f"{len(development_issues)} единиц разработки; проверь полные карточки, "
+                "provider-specific attributes и корректность состояния коллекции"
             )
 
 
@@ -1525,25 +1569,12 @@ def parse_key_value(values: list[str], label: str) -> list[dict]:
 
 
 def snapshot_metadata_command(args: argparse.Namespace) -> int:
-    captured_at = timestamp_value(args.captured_at)
-    if captured_at is None:
-        raise ValueError("--captured-at должен содержать временную метку с часовым поясом")
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
-    later_issue_keys = sorted(
-        issue["key"]
-        for issue in snapshot.get("issues", [])
-        if timestamp_value(issue.get("updated_at")) is not None
-        and timestamp_value(issue["updated_at"]) > captured_at
-    )
-    if later_issue_keys:
-        raise ValueError(
-            "--captured-at должен быть не раньше updated_at прочитанных задач: "
-            + ", ".join(later_issue_keys)
-        )
+    if snapshot.get("captured_at") is not None:
+        raise ValueError("Снимок уже финализирован; начни новый tracker-run")
     evidence = parse_key_value(args.seed_evidence, "--seed-evidence")
     for item in evidence:
         validate_issue_key(item["key"], "Seed-ключ")
-    snapshot["captured_at"] = args.captured_at
     snapshot["scope"]["query"] = args.query
     snapshot["scope"]["seed_evidence"] = evidence
     snapshot["scope"]["seed_keys"] = list(dict.fromkeys(item["key"] for item in evidence))
@@ -1557,6 +1588,44 @@ def snapshot_metadata_command(args: argparse.Namespace) -> int:
         "path": str(path),
         "final_response_allowed": False,
         "allowed_next_action": "record-issues-and-collection",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def ensure_snapshot_collecting(snapshot: dict) -> None:
+    if snapshot.get("captured_at") is not None:
+        raise ValueError("Снимок уже финализирован; его дальнейшее изменение запрещено")
+
+
+def snapshot_finalize_command(args: argparse.Namespace) -> int:
+    path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    ensure_snapshot_collecting(snapshot)
+    pending = [
+        capability
+        for capability in COLLECTION_CAPABILITIES
+        if snapshot.get("collection", {}).get(capability, {}).get("state") == "pending"
+    ]
+    if pending:
+        raise ValueError(
+            "Нельзя финализировать снимок с незавершёнными коллекциями: "
+            + ", ".join(pending)
+        )
+    snapshot["captured_at"] = datetime.now(timezone.utc).isoformat()
+    config = load_config()
+    try:
+        validate_snapshot(snapshot, args.provider)
+        validate_development_field_coverage(snapshot, args.provider, config)
+    except ValueError:
+        snapshot["captured_at"] = None
+        raise
+    save_json(path, snapshot)
+    print(json.dumps({
+        "status": "tracker-snapshot-finalized",
+        "run_id": args.run_id,
+        "provider": args.provider,
+        "captured_at": snapshot["captured_at"],
+        "final_response_allowed": False,
+        "allowed_next_action": "finalize-other-provider-or-check-run",
     }, ensure_ascii=False, indent=2))
     return 0
 
@@ -1610,6 +1679,7 @@ def snapshot_issue_command(args: argparse.Namespace) -> int:
                 f"--{field.replace('_', '-')}-state={state} противоречит переданному значению"
             )
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    ensure_snapshot_collecting(snapshot)
     existing = next((item for item in snapshot["issues"] if item.get("key") == args.key), None)
     issue = {
         "key": args.key,
@@ -1678,6 +1748,7 @@ def snapshot_history_command(args: argparse.Namespace) -> int:
     if bool(args.to_id) != bool(args.to_name):
         raise ValueError("--to-id и --to-name задаются вместе")
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    ensure_snapshot_collecting(snapshot)
     issue = next((item for item in snapshot["issues"] if item.get("key") == args.key), None)
     if issue is None:
         raise ValueError(f"Сначала зарегистрируй задачу {args.key}")
@@ -1710,6 +1781,7 @@ def snapshot_not_found_command(args: argparse.Namespace) -> int:
     if PLACEHOLDER_EVIDENCE.search(args.evidence):
         raise ValueError("--evidence не может содержать placeholder или несколько MCP-вызовов")
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    ensure_snapshot_collecting(snapshot)
     if any(issue.get("key") == args.key for issue in snapshot["issues"]):
         raise ValueError(f"Задача {args.key} уже записана как найденная")
     if args.key not in snapshot["collection"]["not_found_keys"]:
@@ -1772,6 +1844,7 @@ def snapshot_collection_command(args: argparse.Namespace) -> int:
                 "не передавай --evidence или --checked-key"
             )
         path, snapshot = load_run_snapshot(args.run_id, args.provider)
+        ensure_snapshot_collecting(snapshot)
         issues = snapshot.get("issues", [])
         missing_direct_evidence = sorted(
             issue.get("key", "")
@@ -1812,6 +1885,36 @@ def snapshot_collection_command(args: argparse.Namespace) -> int:
             "allowed_next_action": "continue-collection-or-check-run",
         }, ensure_ascii=False, indent=2))
         return 0
+    if args.capability == "epic_neighbors" and args.state == "complete":
+        path, snapshot = load_run_snapshot(args.run_id, args.provider)
+        ensure_snapshot_collecting(snapshot)
+        discovered_epics = issue_group_keys(snapshot.get("issues", []), "epic")
+        if not discovered_epics:
+            if args.evidence or args.checked_key or args.expanded_epic_key:
+                raise ValueError(
+                    "Для пустого набора эпиков epic_neighbors завершается машинно: "
+                    "не передавай --evidence, --checked-key или --expanded-epic-key"
+                )
+            snapshot["collection"][args.capability] = {
+                "state": "complete",
+                "reason": None,
+                "failure_kind": None,
+                "evidence": [],
+                "checked_keys": [],
+            }
+            snapshot["collection"]["expanded_epic_keys"] = []
+            save_json(path, snapshot)
+            print(json.dumps({
+                "status": "tracker-snapshot-collection-saved",
+                "run_id": args.run_id,
+                "provider": args.provider,
+                "capability": args.capability,
+                "state": args.state,
+                "machine_derived_empty": True,
+                "final_response_allowed": False,
+                "allowed_next_action": "continue-collection-or-finalize-provider",
+            }, ensure_ascii=False, indent=2))
+            return 0
     if not args.evidence:
         raise ValueError("complete/unavailable требует хотя бы одно --evidence реального MCP-вызова")
     if args.state == "unavailable" and not args.failure_kind:
@@ -1819,6 +1922,7 @@ def snapshot_collection_command(args: argparse.Namespace) -> int:
     if args.state == "complete" and args.failure_kind:
         raise ValueError("state=complete нельзя сочетать с --failure-kind")
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
+    ensure_snapshot_collecting(snapshot)
     for value in args.evidence:
         validate_provider_evidence(value, args.provider, "--evidence")
     snapshot["collection"][args.capability] = {
@@ -1968,6 +2072,7 @@ def begin_command(_: argparse.Namespace) -> int:
             "snapshot-history",
             "snapshot-not-found",
             "snapshot-collection",
+            "snapshot-finalize",
             "run-status",
         ],
         "required_completion": {
@@ -2093,12 +2198,15 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_metadata = subparsers.add_parser("snapshot-metadata")
     snapshot_metadata.add_argument("--run-id", required=True)
     snapshot_metadata.add_argument("--provider", choices=PROVIDERS, required=True)
-    snapshot_metadata.add_argument("--captured-at", required=True)
     snapshot_metadata.add_argument("--query", required=True)
     snapshot_metadata.add_argument("--seed-evidence", action="append", default=[])
     snapshot_metadata.add_argument("--expected-epic", action="append", default=[])
     snapshot_metadata.add_argument("--expected-release", action="append", default=[])
     snapshot_metadata.set_defaults(handler=snapshot_metadata_command)
+    snapshot_finalize = subparsers.add_parser("snapshot-finalize")
+    snapshot_finalize.add_argument("--run-id", required=True)
+    snapshot_finalize.add_argument("--provider", choices=PROVIDERS, required=True)
+    snapshot_finalize.set_defaults(handler=snapshot_finalize_command)
     snapshot_issue = subparsers.add_parser("snapshot-issue")
     snapshot_issue.add_argument("--run-id", required=True)
     snapshot_issue.add_argument("--provider", choices=PROVIDERS, required=True)

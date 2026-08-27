@@ -376,7 +376,7 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("snapshot-metadata", tracker_contract)
             self.assertIn("snapshot-issue", tracker_contract)
             self.assertIn("snapshot-not-found", tracker_contract)
-            self.assertIn("JSON схемы 7", tracker_contract)
+            self.assertIn("JSON схемы 8", tracker_contract)
             self.assertIn("служебные обозначения вроде `FEATURE` запрещены", tracker_contract)
             self.assertIn("автоматически вычисляет `evidence`", tracker_contract)
             self.assertIn("--team-id B1", tracker_contract)
