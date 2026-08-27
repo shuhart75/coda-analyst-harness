@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 CONFIG_SCHEMA_VERSION = 4
 CONFIG_INCOMPLETE_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -67,6 +67,7 @@ RELEVANCE_VALUES = {
     "reviewed-not-relevant",
 }
 RUN_ID_PATTERN = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$")
+ISSUE_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*-[1-9][0-9]*$")
 DEFAULT_CONFIG = {
     "schema_version": CONFIG_SCHEMA_VERSION,
     "primary_provider": "sbertrek",
@@ -213,6 +214,21 @@ def normalized_statuses(config: dict, provider: str, name: str) -> set[str]:
     if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
         raise ValueError(f"status_rules.{provider}.{name} должен быть списком строк")
     return {value.strip().casefold() for value in values if value.strip()}
+
+
+def validate_issue_key(value: Any, label: str = "Ключ задачи") -> str:
+    if not isinstance(value, str) or not ISSUE_KEY_PATTERN.fullmatch(value):
+        raise ValueError(
+            f"{label} должен иметь вид PROJECT-123; фиктивные и текстовые ключи запрещены: {value}"
+        )
+    return value
+
+
+def validate_provider_evidence(value: Any, provider: str, label: str) -> str:
+    prefix = f"mcp:{provider}:"
+    if not isinstance(value, str) or not value.strip().startswith(prefix):
+        raise ValueError(f"{label} должен начинаться с {prefix}")
+    return value
 
 
 def validate_config(payload: Any) -> dict:
@@ -399,6 +415,10 @@ def validate_collection(payload: Any, provider: str) -> dict:
             f"collection.not_found_evidence снимка {provider} должен содержать key и evidence"
         )
     evidence_keys = {item["key"] for item in not_found_evidence}
+    for item in not_found_evidence:
+        validate_provider_evidence(
+            item["evidence"], provider, f"Not-found evidence {item['key']}"
+        )
     missing_not_found_evidence = sorted(set(payload.get("not_found_keys", [])) - evidence_keys)
     if missing_not_found_evidence:
         raise ValueError(
@@ -432,6 +452,8 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
     ):
         raise ValueError(f"scope.seed_evidence снимка {provider} должен содержать key и source")
     evidence_keys = {item["key"] for item in evidence}
+    for key in evidence_keys:
+        validate_issue_key(key, f"Seed-ключ снимка {provider}")
     missing_evidence = sorted(set(scope["seed_keys"]) - evidence_keys)
     if missing_evidence:
         raise ValueError(
@@ -446,6 +468,7 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
     for issue in issues:
         if not isinstance(issue, dict) or not isinstance(issue.get("key"), str) or not issue["key"].strip():
             raise ValueError(f"Каждая задача {provider} должна иметь непустой key")
+        validate_issue_key(issue["key"], f"Ключ задачи {provider}")
         if issue["key"] in seen:
             raise ValueError(f"Повторяющийся ключ {provider}: {issue['key']}")
         seen.add(issue["key"])
@@ -485,6 +508,17 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
                 raise ValueError(
                     f"Задача {issue['key']} содержит {field}, но observation={state}"
                 )
+        direct_evidence = issue.get("direct_read_evidence")
+        if not isinstance(direct_evidence, list) or not all(
+            isinstance(item, str) and item.strip() for item in direct_evidence
+        ) or not direct_evidence:
+            raise ValueError(
+                f"Задача {issue['key']} не имеет evidence прямого чтения по точному ключу"
+            )
+        for item in direct_evidence:
+            validate_provider_evidence(
+                item, provider, f"Evidence прямого чтения {issue['key']}"
+            )
         history = issue.get("history", [])
         if not isinstance(history, list) or not all(isinstance(event, dict) for event in history):
             raise ValueError(f"history задачи {issue['key']} должен быть списком объектов")
@@ -494,6 +528,8 @@ def validate_snapshot(payload: Any, provider: str) -> dict:
             if timestamp_value(event.get("at")) is None:
                 raise ValueError(f"Событие history задачи {issue['key']} должно иметь корректный at")
     not_found = set(payload["collection"].get("not_found_keys", []))
+    for key in not_found:
+        validate_issue_key(key, f"Not-found ключ снимка {provider}")
     both_found_and_missing = sorted(seen & not_found)
     if both_found_and_missing:
         raise ValueError(
@@ -679,6 +715,34 @@ def pending_participant_path(run_id: str) -> Path:
     return run_root(run_id) / "pending-participant.json"
 
 
+def pending_participant_stop_payload(run_id: str) -> dict | None:
+    path = pending_participant_path(run_id)
+    if not path.is_file():
+        return None
+    pending = load_json(path)
+    question = pending.get("next_question")
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("Повреждено состояние ожидающего вопроса об участнике")
+    return {
+        "status": "tracker-participant-required",
+        "run_id": run_id,
+        "must_stop": True,
+        "workflow_complete": False,
+        "final_response_allowed": False,
+        "allowed_next_action": "ask-user",
+        "next_question": question,
+        "response_contract": {
+            "type": "exact-single-question",
+            "text": question,
+            "additional_text_forbidden": True,
+            "examples_forbidden": True,
+        },
+        "final_response_contract": (
+            "Do not present tracker facts, counts or a summary. Ask only response_contract.text."
+        ),
+    }
+
+
 def save_pending_participant(run_id: str, participant: dict) -> dict:
     pending = {
         "run_id": run_id,
@@ -769,6 +833,24 @@ def validate_cross_provider_lookup(sber_snapshot: dict, jira_snapshot: dict | No
         found = {issue["key"] for issue in snapshot["issues"]}
         not_found = set(snapshot["collection"].get("not_found_keys", []))
         checked = set(lookup.get("checked_keys", []))
+        expected_evidence = {
+            evidence
+            for issue in snapshot["issues"]
+            for evidence in issue.get("direct_read_evidence", [])
+        } | {
+            item["evidence"]
+            for item in snapshot["collection"].get("not_found_evidence", [])
+        }
+        if set(lookup.get("evidence", [])) != expected_evidence:
+            raise ValueError(
+                f"{provider}: cross_provider_lookup.evidence должен вычисляться из "
+                "прямых чтений и not-found"
+            )
+        if checked != found | not_found:
+            raise ValueError(
+                f"{provider}: cross_provider_lookup.checked_keys должен вычисляться из "
+                "прямых чтений и not-found"
+            )
         unchecked = sorted(all_keys - checked)
         unresolved = sorted(all_keys - found - not_found)
         if unchecked:
@@ -1287,6 +1369,8 @@ def snapshot_metadata_command(args: argparse.Namespace) -> int:
         raise ValueError("--captured-at должен содержать временную метку с часовым поясом")
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
     evidence = parse_key_value(args.seed_evidence, "--seed-evidence")
+    for item in evidence:
+        validate_issue_key(item["key"], "Seed-ключ")
     snapshot["captured_at"] = args.captured_at
     snapshot["scope"]["query"] = args.query
     snapshot["scope"]["seed_evidence"] = evidence
@@ -1321,6 +1405,9 @@ def parse_release(value: str) -> dict:
 
 
 def snapshot_issue_command(args: argparse.Namespace) -> int:
+    validate_issue_key(args.key)
+    for item in args.evidence:
+        validate_provider_evidence(item, args.provider, "--evidence")
     if timestamp_value(args.updated_at) is None:
         raise ValueError("--updated-at должен содержать временную метку с часовым поясом")
     if bool(args.assignee_id) != bool(args.assignee_name):
@@ -1350,6 +1437,7 @@ def snapshot_issue_command(args: argparse.Namespace) -> int:
     existing = next((item for item in snapshot["issues"] if item.get("key") == args.key), None)
     issue = {
         "key": args.key,
+        "direct_read_evidence": list(dict.fromkeys(args.evidence)),
         "summary": args.summary,
         "description": args.description,
         "issue_type": args.issue_type,
@@ -1439,6 +1527,8 @@ def snapshot_history_command(args: argparse.Namespace) -> int:
 
 
 def snapshot_not_found_command(args: argparse.Namespace) -> int:
+    validate_issue_key(args.key)
+    validate_provider_evidence(args.evidence, args.provider, "--evidence")
     path, snapshot = load_run_snapshot(args.run_id, args.provider)
     if any(issue.get("key") == args.key for issue in snapshot["issues"]):
         raise ValueError(f"Задача {args.key} уже записана как найденная")
@@ -1475,6 +1565,53 @@ def snapshot_collection_command(args: argparse.Namespace) -> int:
         raise ValueError(
             "Пропущенный MCP-вызов нельзя обозначать как unavailable; выполни вызов или зафиксируй его ошибку"
         )
+    if args.capability == "cross_provider_lookup" and args.state == "complete":
+        if args.evidence or args.checked_key:
+            raise ValueError(
+                "cross_provider_lookup=complete вычисляет evidence и checked_keys автоматически; "
+                "не передавай --evidence или --checked-key"
+            )
+        path, snapshot = load_run_snapshot(args.run_id, args.provider)
+        issues = snapshot.get("issues", [])
+        missing_direct_evidence = sorted(
+            issue.get("key", "")
+            for issue in issues
+            if not issue.get("direct_read_evidence")
+        )
+        if missing_direct_evidence:
+            raise ValueError(
+                "Нельзя завершить cross_provider_lookup: нет прямого чтения ключей "
+                + ", ".join(missing_direct_evidence)
+            )
+        not_found_evidence = snapshot.get("collection", {}).get(
+            "not_found_evidence", []
+        )
+        evidence = [
+            item
+            for issue in issues
+            for item in issue.get("direct_read_evidence", [])
+        ] + [item["evidence"] for item in not_found_evidence]
+        checked_keys = [issue["key"] for issue in issues] + [
+            item["key"] for item in not_found_evidence
+        ]
+        snapshot["collection"][args.capability] = {
+            "state": "complete",
+            "reason": None,
+            "failure_kind": None,
+            "evidence": list(dict.fromkeys(evidence)),
+            "checked_keys": list(dict.fromkeys(checked_keys)),
+        }
+        save_json(path, snapshot)
+        print(json.dumps({
+            "status": "tracker-snapshot-collection-saved",
+            "run_id": args.run_id,
+            "provider": args.provider,
+            "capability": args.capability,
+            "state": args.state,
+            "final_response_allowed": False,
+            "allowed_next_action": "continue-collection-or-check-run",
+        }, ensure_ascii=False, indent=2))
+        return 0
     if not args.evidence:
         raise ValueError("complete/unavailable требует хотя бы одно --evidence реального MCP-вызова")
     if args.state == "unavailable" and not args.failure_kind:
@@ -1537,6 +1674,10 @@ def tracker_run_status_command(args: argparse.Namespace) -> int:
     if completed.is_file():
         print(json.dumps(load_json(completed), ensure_ascii=False, indent=2))
         return 0
+    pending = pending_participant_stop_payload(args.run_id)
+    if pending:
+        print(json.dumps(pending, ensure_ascii=False, indent=2))
+        return CONFIG_INCOMPLETE_EXIT
     providers = ["sbertrek"]
     if (run_root(args.run_id) / "input" / "jira.json").is_file():
         providers.append("jira")
@@ -1574,6 +1715,10 @@ def tracker_run_status_command(args: argparse.Namespace) -> int:
 def tracker_result_status_command(args: argparse.Namespace) -> int:
     path = completion_status_path(args.run_id)
     if not path.is_file():
+        pending = pending_participant_stop_payload(args.run_id)
+        if pending:
+            print(json.dumps(pending, ensure_ascii=False, indent=2))
+            return CONFIG_INCOMPLETE_EXIT
         raise ValueError(
             f"run_id={args.run_id} ещё не имеет успешного результата reconcile"
         )
@@ -1750,6 +1895,7 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_issue.add_argument("--run-id", required=True)
     snapshot_issue.add_argument("--provider", choices=PROVIDERS, required=True)
     snapshot_issue.add_argument("--key", required=True)
+    snapshot_issue.add_argument("--evidence", action="append", required=True)
     snapshot_issue.add_argument("--summary", required=True)
     snapshot_issue.add_argument("--description", default="")
     snapshot_issue.add_argument("--issue-type", required=True)
@@ -1870,6 +2016,9 @@ def main() -> int:
                     "examples_forbidden": True,
                 }
             print(json.dumps(payload, ensure_ascii=False, indent=2))
+            if next_question:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return CONFIG_INCOMPLETE_EXIT
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 

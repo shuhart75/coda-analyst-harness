@@ -18,7 +18,8 @@ SberTrek является основным трекером. Jira использ
 конвейер с `head`, `tail`, `grep`, `jq` или иным фильтром: её код возврата является
 частью договора.
 
-Код возврата `3` и `must_stop: true` означают безусловную остановку. Единственное
+Код возврата `3` и `must_stop: true` от любой команды `trackerctl` означают
+безусловную остановку. Единственное
 разрешённое следующее действие указано как `allowed_next_action: ask-user`: ответ
 LLM дословно выводит `response_contract.text` и ничего больше: без вступления,
 пояснений, примеров и предлагаемых ответов. До сохранения ответа запрещены
@@ -125,12 +126,12 @@ python3 scripts/trackerctl.py set-participant \
 
 ## Нормализованный снимок
 
-Каждый провайдер преобразуется в JSON схемы 4. Снимок предыдущей схемы из незавершённого
+Каждый провайдер преобразуется в JSON схемы 5. Снимок предыдущей схемы из незавершённого
 старого запуска не продолжается после обновления: LLM выполняет новый `begin`.
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "provider": "sbertrek",
   "captured_at": "2026-08-26T00:00:00+00:00",
   "scope": {
@@ -156,6 +157,7 @@ python3 scripts/trackerctl.py set-participant \
   "issues": [
     {
       "key": "PROJECT-1",
+      "direct_read_evidence": ["mcp:sbertrek:get:PROJECT-1"],
       "summary": "Название",
       "description": "Описание и ожидаемый результат",
       "issue_type": "development-task",
@@ -202,17 +204,25 @@ LLM не редактирует большой JSON-снимок вручную 
 
 ```bash
 python3 scripts/trackerctl.py snapshot-metadata --run-id <run-id> --provider sbertrek --captured-at <timestamp> --query <query> --seed-evidence KEY=SOURCE
-python3 scripts/trackerctl.py snapshot-issue --run-id <run-id> --provider sbertrek --key <key> --summary <summary> --issue-type <type> --status <status> --assignee-state <value|absent|not-returned> --estimate-state <value|absent|not-returned> --epic-state <value|absent|not-returned> --releases-state <value|absent|not-returned> --discovery <kind> --updated-at <timestamp>
+python3 scripts/trackerctl.py snapshot-issue --run-id <run-id> --provider sbertrek --key <key> --evidence <exact-key-mcp-call> --summary <summary> --issue-type <type> --status <status> --assignee-state <value|absent|not-returned> --estimate-state <value|absent|not-returned> --epic-state <value|absent|not-returned> --releases-state <value|absent|not-returned> --discovery <kind> --updated-at <timestamp>
 python3 scripts/trackerctl.py snapshot-not-found --run-id <run-id> --provider sbertrek --key <key> --evidence <mcp-call>
 python3 scripts/trackerctl.py snapshot-history --run-id <run-id> --provider sbertrek --key <key> --at <timestamp> --field assignee --from-id <id> --to-id <id>
 python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability history --state complete --evidence <mcp-call> --checked-key <key> [--checked-key <key> ...]
+python3 scripts/trackerctl.py snapshot-collection --run-id <run-id> --provider sbertrek --capability cross_provider_lookup --state complete
 python3 scripts/trackerctl.py run-status --run-id <run-id>
 python3 scripts/trackerctl.py reconcile --run-id <run-id>
 python3 scripts/trackerctl.py result-status --run-id <run-id>
 ```
 
-`snapshot-issue` поддерживает исполнителя, оценку, эпик, релизы и классификацию
-релевантности отдельными флагами из `--help`. Для `assignee`,
+`snapshot-issue` вызывается только после прямого чтения карточки по точному ключу
+и требует `--evidence` этого вызова. Поисковая выдача сама по себе не разрешает
+записать задачу: сначала каждый возвращённый ключ читается отдельно. Команда
+проверяет логического провайдера evidence: значение начинается с
+`mcp:sbertrek:` для SberTrek или `mcp:jira:` для Jira. То же правило действует для
+`snapshot-not-found`, поэтому результат Jira-вызова нельзя записать в паспорт
+SberTrek и наоборот. Она
+поддерживает исполнителя, оценку, эпик, релизы и классификацию релевантности
+отдельными флагами из `--help`. Для `assignee`,
 `estimate`, `epic` и `releases` обязательно записывается одно из трёх состояний:
 `value` означает фактически возвращённое значение, `absent` — подтверждённое
 провайдером отсутствие, `not-returned` — поле не было возвращено MCP. Последнее
@@ -241,6 +251,9 @@ python3 scripts/trackerctl.py result-status --run-id <run-id>
 
 `scope.seed_keys` берётся из уже известных реальных задач аналитической фичи.
 Каждый ключ обязан иметь запись `seed_evidence` с путём аналитического источника.
+Ключ имеет вид `PROJECT-123`; служебные обозначения вроде `FEATURE` запрещены.
+Если известных ключей нет, `--seed-evidence` не передаётся, а найденные поиском
+объекты остаются кандидатами с классификацией релевантности.
 Каждый seed в снимке своего провайдера обязан быть либо записан через
 `snapshot-issue`, либо после прямого чтения записан через `snapshot-not-found` с
 доказательством вызова. Иначе `run-status` показывает ошибку, а пустой отчёт
@@ -271,7 +284,8 @@ python3 scripts/trackerctl.py result-status --run-id <run-id>
 
 Каждый ключ, найденный хотя бы в одном трекере, напрямую запрашивается по тому же
 ключу в обоих трекерах. Для каждого провайдера `cross_provider_lookup=complete`
-перечисляет все такие ключи в `checked_keys`. Отсутствующий ключ записывается
+автоматически вычисляет `evidence` и `checked_keys` из `snapshot-issue` и
+`snapshot-not-found`; модели запрещено передавать их вручную. Отсутствующий ключ записывается
 командой `snapshot-not-found` в `collection.not_found_keys` с доказательством
 точного `404/not-found`. Полный
 обход блокируется, если хотя бы один ключ не найден и не имеет такого
@@ -424,6 +438,9 @@ LLM не должна объявлять сверку завершённой п�
 После успешного `reconcile` модель не составляет статус вручную: `run-status` и
 `result-status` читают сохранённый `completion-status.json` и возвращают точный
 официальный результат этого запуска.
+Если `reconcile` остановился на неизвестном участнике, обе статусные команды
+повторяют тот же `must_stop` и точный `response_contract.text`; до ответа аналитика
+они не могут использоваться для получения или составления сводки.
 
 Весь результат остаётся в игнорируемой `.workspace-state/tracker-runs/`.
 Команда не переключает режим, не создаёт рабочую ветку и не изменяет
