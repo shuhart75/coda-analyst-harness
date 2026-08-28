@@ -14,1825 +14,419 @@ SCRIPT = ROOT / "scripts" / "trackerctl.py"
 
 
 class TrackerCtlTests(unittest.TestCase):
-    def run_tool(
-        self,
-        state: Path,
-        *arguments: str,
-        expected: int = 0,
-    ) -> subprocess.CompletedProcess[str]:
+    def run_tool(self, state: Path, *args: str, expected: int = 0) -> dict:
         result = subprocess.run(
-            (sys.executable, str(SCRIPT), *arguments),
-            text=True,
-            capture_output=True,
-            check=False,
-            env={**os.environ, "ANALYST_HARNESS_STATE_ROOT": str(state)},
+            (sys.executable, str(SCRIPT), *args), text=True, capture_output=True,
+            env={**os.environ, "ANALYST_HARNESS_STATE_ROOT": str(state)}, check=False,
         )
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-        return result
+        return json.loads(result.stdout)
 
-    def write_json(self, path: Path, payload: dict) -> None:
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+    def write(self, path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def config(self, state: Path, *, jira: bool = True, participants: bool = True) -> None:
+        mapping = (
+            {
+                "sbertrek": {"s-dev": {"team_id": "BE1"}, "s-qa": {"team_id": "QA1"}},
+                "jira": {"j-dev": {"team_id": "BE1"}, "j-qa": {"team_id": "QA1"}},
+            }
+            if participants else {"sbertrek": {}, "jira": {}}
         )
-
-    def restrict_to_issues(self, snapshot: dict, issues: list[dict]) -> None:
-        snapshot["issues"] = issues
-        issue_keys = [issue["key"] for issue in issues]
-        for capability in ("history", "epic_links", "release_links"):
-            snapshot["collection"][capability]["checked_keys"] = issue_keys
-            snapshot["collection"][capability]["evidence"] = [
-                f"mcp:{snapshot['provider']}:{capability}:{key}" for key in issue_keys
-            ] or [f"mcp:{snapshot['provider']}:{capability}:no-issues"]
-        snapshot["collection"]["feature_search"]["checked_keys"] = [
-            issue["key"]
-            for issue in issues
-            if issue.get("discovery") == "feature-search-candidate"
-        ]
-        epic_keys = sorted({
-            issue["epic"]["key"]
-            for issue in issues
-            if isinstance(issue.get("epic"), dict) and issue["epic"].get("key")
+        self.write(state / "tracker-config.json", {
+            "schema_version": 4, "primary_provider": "sbertrek", "setup_complete": True,
+            "jira_enabled": jira, "projects": {"sbertrek": ["RSCON"], "jira": ["RSCON"] if jira else []},
+            "development_issue_types": ["story", "task"], "participants": mapping,
+            "status_rules": {
+                "sbertrek": {"completed": ["done"], "excluded": ["cancelled"]},
+                "jira": {"completed": ["Done"], "excluded": ["Cancelled"]},
+            },
         })
-        snapshot["collection"]["epic_neighbors"]["checked_keys"] = epic_keys
-        snapshot["collection"]["epic_neighbors"]["evidence"] = (
-            [f"mcp:{snapshot['provider']}:epic-search:{key}" for key in epic_keys]
-            if epic_keys
-            else []
+
+    def begin(self, state: Path, *, jira: bool = True, participants: bool = True) -> str:
+        self.config(state, jira=jira, participants=participants)
+        payload = self.run_tool(
+            state, "begin", "--feature", "cohorts",
+            "--known-key", "RSCON-6845=features/cohorts/actual-progress.md",
         )
-        snapshot["collection"]["expanded_epic_keys"] = epic_keys
-        snapshot["scope"]["expected_epic_keys"] = [
-            key for key in snapshot["scope"]["expected_epic_keys"] if key in epic_keys
-        ]
-        release_keys = {
-            release["key"]
-            for issue in issues
-            for release in issue.get("releases", [])
-            if isinstance(release, dict) and release.get("key")
-        }
-        snapshot["scope"]["expected_release_keys"] = [
-            key for key in snapshot["scope"]["expected_release_keys"] if key in release_keys
-        ]
-        seed_keys = [issue["key"] for issue in issues if issue.get("discovery") == "seed"]
-        snapshot["scope"]["seed_keys"] = seed_keys
-        snapshot["scope"]["seed_evidence"] = [
-            item for item in snapshot["scope"]["seed_evidence"] if item["key"] in seed_keys
-        ]
+        return payload["run_id"]
 
-    def prepare_config(self, state: Path) -> Path:
-        initialized = self.run_tool(state, "init-config")
-        path = Path(json.loads(initialized.stdout)["path"])
-        config = json.loads(path.read_text(encoding="utf-8"))
-        config["setup_complete"] = True
-        config["jira_enabled"] = True
-        config["projects"] = {"sbertrek": ["SBER"], "jira": ["JIRA"]}
-        config["development_issue_types"] = ["development-task", "Story"]
-        config["participants"] = {
-            "sbertrek": {
-                "dev-s": {"team_id": "BE1"},
-                "qa-s": {"team_id": "QA1"},
-                "unknown": {"team_id": "OTHER1"},
-            },
-            "jira": {
-                "dev-j": {"team_id": "BE1"},
-                "qa-j": {"team_id": "QA1"},
-            },
-        }
-        config["status_rules"]["sbertrek"]["completed"] = ["Выполнена"]
-        config["status_rules"]["sbertrek"]["excluded"] = ["Отменена", "Удалена"]
-        config["status_rules"]["jira"]["completed"] = ["Done"]
-        config["status_rules"]["jira"]["excluded"] = ["Cancelled"]
-        self.write_json(path, config)
-        return path
+    def page(
+        self, state: Path, run_id: str, provider: str, keys: list[str],
+        *, links: list[str] | None = None, page: int = 1, last: bool = True,
+        cursor: str | None = None, next_cursor: str | None = None,
+    ) -> dict:
+        args = [
+            "inventory-page", "--run-id", run_id, "--provider", provider,
+            "--query", "project=RSCON AND unfinished=true", "--scope-project", "RSCON",
+            "--unfinished-confirmed", "--page-number", str(page),
+            "--evidence", f"mcp:{provider}:active-search:page-{page}",
+        ]
+        if cursor:
+            args += ["--cursor", cursor]
+        if last:
+            args += ["--last-page"]
+        else:
+            args += ["--next-cursor", next_cursor or f"cursor-{page + 1}"]
+        for issue_key in keys:
+            args += ["--key", issue_key]
+        for link in links or []:
+            args += ["--jira-link", link]
+        return self.run_tool(state, *args)
 
-    def collection(self, provider: str) -> dict:
-        own_keys = (
-            ["SBER-1", "SBER-2", "SBER-3", "SBER-4"]
-            if provider == "sbertrek"
-            else ["SBER-1", "JIRA-99"]
+    def issue_args(
+        self, run_id: str, provider: str, issue_key: str, evidence: str,
+        *, relevance: str = "relevant", selected_by: str = "description-match",
+        assignee: str | None = None, estimate: str | None = None,
+        epic: str | None = None, summary: str | None = None, status: str = "active",
+    ) -> list[str]:
+        args = [
+            "record-issue", "--run-id", run_id, "--provider", provider,
+            "--key", issue_key, "--evidence", evidence,
+            "--summary", summary or f"Issue {issue_key}", "--description", "Cohorts feature",
+            "--issue-type", "story", "--status", status,
+            "--assignee-state", "value" if assignee else "absent",
+            "--estimate-state", "value" if estimate else "absent",
+            "--epic-state", "value" if epic else "absent", "--releases-state", "absent",
+            "--relevance", relevance, "--relevance-basis", "test evidence",
+            "--selected-by", selected_by,
+        ]
+        if assignee:
+            args += ["--assignee-id", assignee, "--assignee-name", assignee]
+        if estimate:
+            args += ["--estimate", estimate, "--estimate-unit", "person-days"]
+        if epic:
+            args += ["--epic-key", epic, "--epic-name", f"Epic {epic}"]
+        return args
+
+    def add_issue(self, state: Path, run_id: str, provider: str, issue_key: str, **kwargs) -> dict:
+        return self.run_tool(
+            state, *self.issue_args(run_id, provider, issue_key, f"mcp:{provider}:active-search:page-1", **kwargs)
         )
-        all_keys = ["SBER-1", "SBER-2", "SBER-3", "SBER-4", "JIRA-99"]
-        missing_keys = (
-            ["JIRA-99"]
-            if provider == "sbertrek"
-            else ["SBER-2", "SBER-3", "SBER-4"]
+
+    def history(self, state: Path, run_id: str, provider: str, issue_key: str, *, event: bool = False) -> None:
+        if event:
+            self.run_tool(
+                state, "history-event", "--run-id", run_id, "--provider", provider,
+                "--key", issue_key, "--at", "2026-08-27T10:00:00+00:00",
+                "--field", "assignee", "--from-id", f"{provider[0]}-dev",
+                "--to-id", f"{provider[0]}-qa",
+            )
+        self.run_tool(
+            state, "history-complete", "--run-id", run_id, "--provider", provider,
+            "--key", issue_key, "--state", "complete",
+            "--evidence", f"mcp:{provider}:history:{issue_key}",
         )
-        return {
-            "feature_search": {
-                "state": "complete", "reason": None, "failure_kind": None,
-                "evidence": [f"mcp:{provider}:feature-search"],
-                "checked_keys": [] if provider == "sbertrek" else ["JIRA-99"],
-            },
-            "history": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:history:{key}" for key in own_keys], "checked_keys": own_keys},
-            "epic_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:issue-fields:{key}" for key in own_keys], "checked_keys": own_keys},
-            "release_links": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:issue-fields:{key}" for key in own_keys], "checked_keys": own_keys},
-            "cross_provider_lookup": {
-                "state": "complete",
-                "reason": None,
-                "failure_kind": None,
-                "evidence": [f"mcp:{provider}:direct-read"],
-                "checked_keys": all_keys,
-            },
-            "epic_neighbors": {"state": "complete", "reason": None, "failure_kind": None, "evidence": [f"mcp:{provider}:epic-search:EPIC-1"], "checked_keys": ["EPIC-1"]},
-            "not_found_keys": missing_keys,
-            "not_found_evidence": [
-                {"key": key, "evidence": f"mcp:{provider}:get:{key}:404"}
-                for key in missing_keys
-            ],
-            "expanded_epic_keys": ["EPIC-1"],
-        }
 
-    def snapshots(self) -> tuple[dict, dict]:
-        sber = {
-            "schema_version": 8,
-            "provider": "sbertrek",
-            "captured_at": "2026-08-26T10:00:00+00:00",
-            "scope": {
-                "projects": ["SBER"],
-                "query": "key in (...)",
-                "seed_keys": ["SBER-1", "SBER-3", "SBER-4"],
-                "seed_evidence": [
-                    {"key": "SBER-1", "source": "features/example/actual-progress.md"},
-                    {"key": "SBER-3", "source": "features/example/actual-progress.md"},
-                    {"key": "SBER-4", "source": "features/example/actual-progress.md"},
-                ],
-                "expected_epic_keys": ["EPIC-1"],
-                "expected_release_keys": ["REL-1"],
-            },
-            "collection": self.collection("sbertrek"),
-            "issues": [
-                {
-                    "key": "SBER-1",
-                    "summary": "Основная задача",
-                    "description": "Реализовать часть функциональности.",
-                    "issue_type": "Development-Task",
-                    "status": "Тестирование",
-                    "assignee": {"id": "qa-s", "name": "Тестировщик"},
-                    "estimate": None,
-                    "epic": {"key": "EPIC-1", "name": "Функциональность N"},
-                    "releases": [{"key": "REL-1", "name": "Релиз 1"}],
-                    "field_observations": {
-                        "assignee": "value", "estimate": "absent",
-                        "epic": "value", "releases": "value",
-                    },
-                    "discovery": "seed",
-                    "updated_at": "2026-08-26T09:00:00+00:00",
-                    "history": [
-                        {
-                            "at": "2026-08-25T12:00:00+00:00",
-                            "field": "assignee",
-                            "from": {"id": "dev-s"},
-                            "to": {"id": "qa-s"},
-                        }
-                    ],
-                },
-                {
-                    "key": "SBER-2",
-                    "summary": "Отменённая задача",
-                    "issue_type": "development-task",
-                    "status": "Отменена",
-                    "assignee": {"id": "qa-s"},
-                    "epic": {"key": "EPIC-1", "name": "Функциональность N"},
-                    "releases": [],
-                    "field_observations": {
-                        "assignee": "value", "estimate": "absent",
-                        "epic": "value", "releases": "absent",
-                    },
-                    "discovery": "epic-neighbor",
-                    "feature_relevance": "proposed",
-                    "relevance_basis": "Прямая связь с известной задачей SBER-1",
-                    "history": [
-                        {
-                            "at": "2026-08-25T13:00:00+00:00",
-                            "field": "assignee",
-                            "from": {"id": "dev-s"},
-                            "to": {"id": "qa-s"},
-                        }
-                    ],
-                },
-                {
-                    "key": "SBER-3",
-                    "summary": "Story как единица разработки",
-                    "issue_type": "Story",
-                    "status": "Тестирование",
-                    "assignee": {"id": "qa-s"},
-                    "epic": None,
-                    "releases": [{"key": "REL-2", "name": "Релиз 2"}],
-                    "field_observations": {
-                        "assignee": "value", "estimate": "absent",
-                        "epic": "absent", "releases": "value",
-                    },
-                    "discovery": "seed",
-                    "history": [
-                        {
-                            "at": "2026-08-25T14:00:00+00:00",
-                            "field": "assignee",
-                            "from": {"id": "dev-s"},
-                            "to": {"id": "qa-s"},
-                        }
-                    ],
-                },
-                {
-                    "key": "SBER-4",
-                    "summary": "Неизвестный исполнитель",
-                    "issue_type": "development-task",
-                    "status": "В работе",
-                    "assignee": {"id": "unknown"},
-                    "epic": None,
-                    "releases": [],
-                    "field_observations": {
-                        "assignee": "value", "estimate": "absent",
-                        "epic": "absent", "releases": "absent",
-                    },
-                    "discovery": "seed",
-                    "history": [],
-                },
-            ],
-        }
-        jira = {
-            "schema_version": 8,
-            "provider": "jira",
-            "captured_at": "2026-08-26T10:00:00+00:00",
-            "scope": {
-                "projects": ["JIRA"],
-                "query": "key in (...)",
-                "seed_keys": [],
-                "seed_evidence": [],
-                "expected_epic_keys": ["EPIC-1"],
-                "expected_release_keys": ["REL-1"],
-            },
-            "collection": self.collection("jira"),
-            "issues": [
-                {
-                    "key": "SBER-1",
-                    "summary": "Другое название из Jira",
-                    "description": "Реализовать часть функциональности.",
-                    "issue_type": "development-task",
-                    "status": "В разработке",
-                    "assignee": {"id": "qa-j", "name": "Тестировщик"},
-                    "estimate": {"value": 5, "unit": "story-points"},
-                    "epic": {"key": "EPIC-1", "name": "Функциональность N"},
-                    "releases": [{"name": "Релиз 1", "key": "REL-1"}],
-                    "field_observations": {
-                        "assignee": "value", "estimate": "value",
-                        "epic": "value", "releases": "value",
-                    },
-                    "discovery": "cross-provider-key",
-                    "updated_at": "2026-08-26T09:30:00+00:00",
-                    "history": [
-                        {
-                            "at": "2026-08-25T12:00:00+00:00",
-                            "field": "assignee",
-                            "from": {"id": "dev-j"},
-                            "to": {"id": "qa-j"},
-                        },
-                        {
-                            "at": "2026-08-24T12:00:00+00:00",
-                            "field": "estimate",
-                            "from": None,
-                            "to": {"value": 5, "unit": "story-points"},
-                        }
-                    ],
-                },
-                {
-                    "key": "JIRA-99",
-                    "summary": "Есть только в Jira",
-                    "issue_type": "development-task",
-                    "status": "В работе",
-                    "discovery": "feature-search-candidate",
-                    "feature_relevance": "ambiguous",
-                    "relevance_basis": "Совпадает предметная область, прямой связи нет",
-                    "assignee": None,
-                    "estimate": None,
-                    "epic": None,
-                    "releases": [],
-                    "field_observations": {
-                        "assignee": "absent", "estimate": "absent",
-                        "epic": "absent", "releases": "absent",
-                    },
-                    "history": [],
-                },
-            ],
-        }
-        for provider, snapshot in (("sbertrek", sber), ("jira", jira)):
-            for issue in snapshot["issues"]:
-                issue.setdefault("updated_at", "2026-08-26T09:00:00+00:00")
-                issue["direct_read_evidence"] = [
-                    f"mcp:{provider}:get:{issue['key']}"
-                ]
-            snapshot["collection"]["cross_provider_lookup"]["evidence"] = [
-                evidence
-                for issue in snapshot["issues"]
-                for evidence in issue["direct_read_evidence"]
-            ] + [
-                item["evidence"]
-                for item in snapshot["collection"]["not_found_evidence"]
-            ]
-        return sber, jira
+    def complete_basic_run(self, state: Path, *, participants: bool = True) -> tuple[str, Path]:
+        run_id = self.begin(state, participants=participants)
+        self.page(state, run_id, "sbertrek", ["RSCON-6845"], links=["RSCON-6845=RSCON-2902"])
+        self.page(state, run_id, "jira", ["RSCON-2902"])
+        self.add_issue(state, run_id, "sbertrek", "RSCON-6845", assignee="s-dev", estimate="5", epic="RSCON-6854", summary="Sber title")
+        self.add_issue(state, run_id, "jira", "RSCON-2902", selected_by="linked-counterpart", assignee="j-dev", estimate="8", epic="RSCON-2911", summary="Jira title")
+        self.run_tool(state, "selection-complete", "--run-id", run_id)
+        self.history(state, run_id, "sbertrek", "RSCON-6845")
+        self.history(state, run_id, "jira", "RSCON-2902")
+        self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "sbertrek")
+        self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "jira")
+        return run_id, state / "tracker-runs" / run_id
 
-    def test_reconcile_enriches_from_jira_and_preserves_sbertrek_priority(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, jira = self.snapshots()
-            started = json.loads(self.run_tool(state, "begin").stdout)
-            sber_path = Path(started["sbertrek_input"])
-            jira_path = Path(started["jira_input"])
-            self.write_json(sber_path, sber)
-            self.write_json(jira_path, jira)
-
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek",
-                str(sber_path),
-                "--jira",
-                str(jira_path),
-                "--run-id",
-                started["run_id"],
-            )
-            output = json.loads(result.stdout)
-            self.assertTrue(output["workflow_complete"])
-            self.assertTrue(output["final_response_allowed"])
-            self.assertEqual(output["run_id"], started["run_id"])
-            reconciled = json.loads(Path(output["result"]).read_text(encoding="utf-8"))
-            issues = {issue["key"]: issue for issue in reconciled["issues"]}
-
-            primary = issues["SBER-1"]
-            self.assertEqual(primary["status"], "Тестирование")
-            self.assertEqual(primary["estimate"], {"value": 5, "unit": "story-points"})
-            self.assertEqual(primary["field_sources"]["estimate"], "jira")
-            self.assertIn("estimate", primary["enriched_from_jira"])
-            self.assertIn("history", primary["enriched_from_jira"])
-            self.assertIn("status", primary["conflicting_fields"])
-            self.assertNotIn("issue_type", primary["conflicting_fields"])
-            self.assertNotIn("assignee", primary["conflicting_fields"])
-            assignee_events = [
-                event for event in primary["history"] if event["field"] == "assignee"
-            ]
-            self.assertEqual(assignee_events[0]["sources"], ["sbertrek", "jira"])
-            self.assertEqual(
-                primary["development_state"]["state"],
-                "development-completed-handoff",
-            )
-            self.assertEqual(issues["SBER-2"]["development_state"]["state"], "excluded")
-            self.assertEqual(
-                issues["SBER-3"]["development_state"]["state"],
-                "development-completed-handoff",
-            )
-            self.assertEqual(issues["SBER-4"]["development_state"]["state"], "unknown")
-            self.assertIn(
-                {
-                    "kind": "jira-only",
-                    "key": "JIRA-99",
-                    "missing_provider": "sbertrek",
-                },
-                reconciled["discrepancies"],
-            )
-            self.assertTrue(
-                any(item["kind"] == "jira-newer" for item in reconciled["discrepancies"])
-            )
-            status_conflict = next(
-                item
-                for item in reconciled["discrepancies"]
-                if item.get("kind") == "field-conflict" and item.get("field") == "status"
-            )
-            self.assertEqual(status_conflict["sbertrek_value"], "Тестирование")
-            self.assertEqual(status_conflict["jira_value"], "В разработке")
-            self.assertEqual(
-                reconciled["counts"]["discrepancies"],
-                len(reconciled["discrepancies"]),
-            )
-            self.assertEqual(reconciled["counts"]["sbertrek"], len(sber["issues"]))
-            self.assertEqual(reconciled["counts"]["jira"], len(jira["issues"]))
-            self.assertEqual(reconciled["release_proposals"], [{"key": "REL-2", "name": "Релиз 2"}])
-
-            report = Path(output["report"]).read_text(encoding="utf-8")
-            self.assertIn("## Эпики", report)
-            self.assertIn("## Релизы", report)
-            self.assertIn("EPIC-1", report)
-            self.assertIn("REL-1", report)
-            self.assertIn("epic-neighbor", report)
-            self.assertIn("Релизы, отсутствующие в actual-progress", report)
-            for kind, count in reconciled["counts"]["discrepancies_by_kind"].items():
-                self.assertIn(f"`{kind}`: **{count}**", report)
-            self.assertFalse(output["project_changed"])
-            self.assertFalse(output["tracker_changed"])
-            self.assertEqual(Path(output["result"]).parent, sber_path.parent.parent)
-
-    def test_epic_assignee_and_estimate_use_sbertrek_priority(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, jira = self.snapshots()
-            sber["issues"][0]["estimate"] = {"value": 8, "unit": "person-days"}
-            sber["issues"][0]["field_observations"]["estimate"] = "value"
-            jira["issues"][0]["assignee"] = {"id": "dev-j", "name": "Разработчик"}
-            jira["issues"][0]["estimate"] = {"value": 13, "unit": "SP"}
-            jira["issues"][0]["epic"] = {"key": "EPIC-J", "name": "Другой эпик"}
-            jira["scope"]["expected_epic_keys"] = ["EPIC-J"]
-            jira["collection"]["epic_neighbors"]["checked_keys"] = ["EPIC-J"]
-            jira["collection"]["epic_neighbors"]["evidence"] = [
-                "mcp:jira:epic-search:EPIC-J"
-            ]
-            jira["collection"]["expanded_epic_keys"] = ["EPIC-J"]
-            sber_path = root / "sber.json"
-            jira_path = root / "jira.json"
-            self.write_json(sber_path, sber)
-            self.write_json(jira_path, jira)
-
-            output = json.loads(self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek", str(sber_path),
-                "--jira", str(jira_path),
-            ).stdout)
-            reconciled = json.loads(Path(output["result"]).read_text(encoding="utf-8"))
-            issue = next(item for item in reconciled["issues"] if item["key"] == "SBER-1")
-
-            self.assertEqual(issue["assignee"], {"id": "qa-s", "name": "Тестировщик"})
-            self.assertEqual(issue["estimate"], {"value": 8, "unit": "story-points"})
-            self.assertEqual(issue["epic"], {"key": "EPIC-1", "name": "Функциональность N"})
-            self.assertEqual(
-                {field: issue["field_sources"][field] for field in ("assignee", "estimate", "epic")},
-                {"assignee": "sbertrek", "estimate": "sbertrek", "epic": "sbertrek"},
-            )
-            self.assertTrue({"assignee", "estimate", "epic"}.issubset(issue["conflicting_fields"]))
-            self.assertEqual(reconciled["merge_policy"]["estimate_unit"], "story-points")
-            self.assertEqual(reconciled["merge_policy"]["story_point_person_day_ratio"], 1)
-
-            report = Path(output["report"]).read_text(encoding="utf-8")
-            self.assertIn("| Исполнитель | Оценка, SP |", report)
-            self.assertIn("Тестировщик (qa-s)", report)
-            self.assertIn("8 SP", report)
-
-    def test_jira_fills_missing_epic_assignee_and_estimate(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, jira = self.snapshots()
-            issue = sber["issues"][0]
-            issue["assignee"] = None
-            issue["estimate"] = None
-            issue["epic"] = None
-            issue["field_observations"].update({
-                "assignee": "absent",
-                "estimate": "absent",
-                "epic": "absent",
-            })
-            sber_path = root / "sber.json"
-            jira_path = root / "jira.json"
-            self.write_json(sber_path, sber)
-            self.write_json(jira_path, jira)
-
-            output = json.loads(self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek", str(sber_path),
-                "--jira", str(jira_path),
-            ).stdout)
-            reconciled = json.loads(Path(output["result"]).read_text(encoding="utf-8"))
-            merged = next(item for item in reconciled["issues"] if item["key"] == "SBER-1")
-
-            self.assertEqual(merged["assignee"], jira["issues"][0]["assignee"])
-            self.assertEqual(merged["estimate"], {"value": 5, "unit": "story-points"})
-            self.assertEqual(merged["epic"], jira["issues"][0]["epic"])
-            self.assertEqual(
-                {field: merged["field_sources"][field] for field in ("assignee", "estimate", "epic")},
-                {"assignee": "jira", "estimate": "jira", "epic": "jira"},
-            )
-            self.assertTrue({"assignee", "estimate", "epic"}.issubset(merged["enriched_from_jira"]))
-
-    def test_unconfigured_story_type_does_not_use_handoff_rule(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            config_path = self.prepare_config(state)
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["development_issue_types"] = ["development-task"]
-            self.write_json(config_path, config)
-            sber, _ = self.snapshots()
-            self.restrict_to_issues(sber, [sber["issues"][2]])
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(state, "reconcile", "--sbertrek", str(sber_path))
-            reconciled = json.loads(
-                Path(json.loads(result.stdout)["result"]).read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                reconciled["issues"][0]["development_state"]["state"],
-                "not-inferred",
-            )
-            self.assertFalse(reconciled["jira_used"])
-            self.assertIn("jira-unavailable", reconciled["limitations"])
-            self.assertFalse(
-                any(
-                    item["kind"] in {
-                        "sbertrek-only", "jira-only", "cross-provider-key-not-read",
-                    }
-                    for item in reconciled["discrepancies"]
-                )
-            )
-
-    def test_explicit_completed_status_applies_to_unconfigured_type(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            config_path = self.prepare_config(state)
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["development_issue_types"] = ["development-task"]
-            self.write_json(config_path, config)
-            sber, _ = self.snapshots()
-            story = sber["issues"][2]
-            story["status"] = "Выполнена"
-            self.restrict_to_issues(sber, [story])
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(state, "reconcile", "--sbertrek", str(sber_path))
-            reconciled = json.loads(
-                Path(json.loads(result.stdout)["result"]).read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                reconciled["issues"][0]["development_state"]["state"],
-                "completed-by-status",
-            )
-
-    def test_handoff_history_is_ordered_by_instant_not_timestamp_text(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            issue = sber["issues"][0]
-            issue["assignee"] = {"id": "unknown"}
-            issue["history"] = [
-                {
-                    "at": "2026-08-25T12:30:00+03:00",
-                    "field": "assignee",
-                    "from": {"id": "dev-s"},
-                    "to": {"id": "qa-s"},
-                },
-                {
-                    "at": "2026-08-25T10:00:00+00:00",
-                    "field": "assignee",
-                    "from": {"id": "qa-s"},
-                    "to": {"id": "dev-s"},
-                },
-            ]
-            self.restrict_to_issues(sber, [issue])
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(state, "reconcile", "--sbertrek", str(sber_path))
-            reconciled = json.loads(
-                Path(json.loads(result.stdout)["result"]).read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                reconciled["issues"][0]["development_state"]["state"],
-                "unknown",
-            )
-
-    def test_invalid_history_timestamp_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["issues"][0]["history"][0]["at"] = "not-a-timestamp"
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek",
-                str(sber_path),
-                expected=2,
-            )
-            self.assertIn("должно иметь корректный at", result.stderr)
-
-    def test_invalid_participant_team_id_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            config_path = self.prepare_config(state)
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["participants"]["sbertrek"]["dev-s"]["team_id"] = "backend"
-            self.write_json(config_path, config)
-            sber, _ = self.snapshots()
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek",
-                str(sber_path),
-                expected=2,
-            )
-            self.assertIn("Командный идентификатор", result.stderr)
-
-    def test_one_team_id_cannot_map_two_accounts_in_same_provider(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            config_path = self.prepare_config(state)
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["participants"]["jira"]["another-dev"] = {"team_id": "BE1"}
-            self.write_json(config_path, config)
-            sber, _ = self.snapshots()
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek",
-                str(sber_path),
-                expected=2,
-            )
-            self.assertIn("назначен нескольким аккаунтам jira", result.stderr)
-
-    def test_begin_blocks_default_config_until_interactive_setup_is_complete(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            initialized = json.loads(self.run_tool(state, "init-config").stdout)
-            self.assertFalse(initialized["setup_complete"])
-
-            status = json.loads(self.run_tool(state, "config-status", expected=3).stdout)
-            self.assertEqual(status["status"], "tracker-config-incomplete")
-            self.assertTrue(status["must_stop"])
-            self.assertEqual(status["allowed_next_action"], "ask-user")
-            self.assertEqual(status["next_question"], "Какие проекты SberTrek входят в область чтения?")
-            self.assertEqual(status["response_contract"]["text"], status["next_question"])
-            self.assertTrue(status["response_contract"]["additional_text_forbidden"])
-            self.assertTrue(status["response_contract"]["examples_forbidden"])
-
-            blocked = self.run_tool(state, "begin", expected=2)
-            self.assertIn("Первичная настройка трекеров не завершена", blocked.stderr)
-            blocked_payload = json.loads(blocked.stdout)
-            self.assertFalse(blocked_payload["workflow_complete"])
-            self.assertFalse(blocked_payload["final_response_allowed"])
-            self.assertEqual(blocked_payload["allowed_next_action"], "run-config-status")
-            self.assertFalse((state / "tracker-runs").exists())
-
-    def test_empty_legacy_config_is_migrated_back_to_unconfigured_state(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            state.mkdir()
-            legacy = {
-                "schema_version": 1,
-                "primary_provider": "sbertrek",
-                "projects": {"sbertrek": [], "jira": []},
-                "issue_pairs": {},
-                "development_issue_types": ["development-task"],
-                "participants": {"sbertrek": {}, "jira": {}},
-                "status_rules": {
-                    "completed": [],
-                    "excluded": ["Отменена", "Удалена"],
-                },
-            }
-            config_path = state / "tracker-config.json"
-            self.write_json(config_path, legacy)
-
-            status = json.loads(self.run_tool(state, "config-status", expected=3).stdout)
-            migrated = json.loads(config_path.read_text(encoding="utf-8"))
-            self.assertIn("development_issue_types", status["gaps"])
-            self.assertIn("status_rules.sbertrek.excluded", status["gaps"])
-            self.assertEqual(migrated["development_issue_types"], [])
-            self.assertEqual(migrated["schema_version"], 4)
-            self.assertIsNone(migrated["status_rules"]["sbertrek"]["excluded"])
-            self.assertIsNone(migrated["status_rules"]["jira"]["completed"])
-            self.assertIsNone(migrated["jira_enabled"])
-            self.assertFalse(migrated["setup_complete"])
-
-    def test_completed_v1_config_reopens_provider_specific_status_questions(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            state.mkdir()
-            legacy = {
-                "schema_version": 1,
-                "primary_provider": "sbertrek",
-                "setup_complete": True,
-                "jira_enabled": True,
-                "projects": {"sbertrek": ["RSCON"], "jira": ["RSCON"]},
-                "issue_pairs": {},
-                "development_issue_types": ["story"],
-                "participants": {"sbertrek": {}, "jira": {}},
-                "status_rules": {
-                    "completed": ["Решен", "Done"],
-                    "excluded": ["Отменен", "Cancelled"],
-                },
-            }
-            config_path = state / "tracker-config.json"
-            self.write_json(config_path, legacy)
-
-            status = json.loads(self.run_tool(state, "config-status", expected=3).stdout)
-            migrated = json.loads(config_path.read_text(encoding="utf-8"))
-            self.assertEqual(status["gaps"][0], "status_rules.sbertrek.completed")
-            self.assertEqual(
-                status["next_question"],
-                "Какие статусы SberTrek однозначно означают завершение разработки?",
-            )
-            self.assertFalse(migrated["setup_complete"])
-            self.assertIsNone(migrated["status_rules"]["sbertrek"]["completed"])
-            self.assertIsNone(migrated["status_rules"]["jira"]["completed"])
-
-    def test_configuration_commands_prepare_templates_without_project_writes(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
+    def test_config_stop_gate_asks_exactly_one_question(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
             self.run_tool(state, "init-config")
-            saved = json.loads(
-                self.run_tool(state, "set-projects", "--provider", "sbertrek", "SBER").stdout
-            )
-            self.assertTrue(saved["must_stop"])
-            self.assertEqual(saved["allowed_next_action"], "ask-user")
-            self.assertEqual(
-                saved["next_question"],
-                "Jira доступна для дополнительного чтения на этой рабочей области?",
-            )
-            self.run_tool(state, "set-jira-mode", "enabled")
-            self.run_tool(state, "set-projects", "--provider", "jira", "JIRA")
-            self.run_tool(state, "set-issue-types", "story", "task")
-            self.run_tool(state, "set-statuses", "--provider", "sbertrek", "--kind", "completed", "done", "resolved")
-            self.run_tool(state, "set-statuses", "--provider", "sbertrek", "--kind", "excluded", "cancelled", "deleted")
-            self.run_tool(state, "set-statuses", "--provider", "jira", "--kind", "completed", "done", "resolved")
-            self.run_tool(state, "set-statuses", "--provider", "jira", "--kind", "excluded", "cancelled", "deleted")
-            completed = json.loads(self.run_tool(state, "complete-config").stdout)
-            self.assertFalse(completed["must_stop"])
-            self.assertEqual(completed["allowed_next_action"], "begin")
-            ready = json.loads(self.run_tool(state, "config-status").stdout)
-            self.assertEqual(ready["status"], "tracker-config-ready")
-            self.assertFalse(ready["must_stop"])
-            self.assertEqual(ready["allowed_next_action"], "begin")
-            self.assertIsNone(ready["response_contract"])
-
-            started = json.loads(self.run_tool(state, "begin").stdout)
-            sber = json.loads(Path(started["sbertrek_input"]).read_text(encoding="utf-8"))
-            jira = json.loads(Path(started["jira_input"]).read_text(encoding="utf-8"))
-            self.assertEqual(sber["collection"]["history"]["state"], "pending")
-            self.assertEqual(sber["collection"]["feature_search"]["state"], "pending")
-            self.assertEqual(sber["collection"]["cross_provider_lookup"]["state"], "pending")
-            self.assertEqual(jira["collection"]["cross_provider_lookup"]["state"], "pending")
-            self.assertFalse(started["workflow_complete"])
-            self.assertFalse(started["final_response_allowed"])
-            self.assertEqual(
-                started["required_completion"]["command"],
-                f"trackerctl.py reconcile --run-id {started['run_id']}",
-            )
-            self.assertIn("snapshot-issue", started["recording_commands"])
-            self.assertIn("run-status", started["recording_commands"])
-            self.assertFalse(started["project_changed"])
-            self.assertFalse(started["tracker_changed"])
-
-    def test_incremental_snapshot_commands_complete_run_without_manual_json(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.prepare_config(state)
-            started = json.loads(self.run_tool(state, "begin").stdout)
-            run_id = started["run_id"]
-
-            self.run_tool(
-                state,
-                "snapshot-metadata",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--query", "key in (SBER-1)",
-                "--seed-evidence", "SBER-1=features/demo/actual-progress.md",
-            )
-            self.run_tool(
-                state,
-                "snapshot-issue",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--key", "SBER-1",
-                "--evidence", "mcp:sbertrek:get:SBER-1",
-                "--summary", "Основная задача",
-                "--description", "Описание",
-                "--issue-type", "Story",
-                "--status", "Тестирование команды",
-                "--assignee-id", "qa-s",
-                "--assignee-name", "Тестировщик",
-                "--assignee-state", "value",
-                "--estimate-value", "5",
-                "--estimate-unit", "story-points",
-                "--estimate-state", "value",
-                "--epic-state", "absent",
-                "--releases-state", "absent",
-                "--discovery", "seed",
-                "--updated-at", "2026-08-26T09:00:00+03:00",
-            )
-            history = json.loads(self.run_tool(
-                state,
-                "snapshot-history",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--key", "SBER-1",
-                "--at", "2026-08-25T12:00:00+03:00",
-                "--field", "assignee",
-                "--from-id", "dev-s",
-                "--from-name", "Разработчик",
-                "--to-id", "qa-s",
-                "--to-name", "Тестировщик",
-            ).stdout)
-            self.assertEqual(history["history_count"], 1)
-            history = json.loads(self.run_tool(
-                state,
-                "snapshot-history",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--key", "SBER-1",
-                "--at", "2026-08-25T13:00:00+03:00",
-                "--field", "status",
-                "--from-value", "В работе",
-                "--to-value", "Проверка",
-            ).stdout)
-            self.assertEqual(history["history_count"], 2)
-            for capability in (
-                "feature_search", "history", "epic_links", "release_links", "cross_provider_lookup",
-                "epic_neighbors",
-            ):
-                self.run_tool(
-                    state,
-                    "snapshot-collection",
-                    "--run-id", run_id,
-                    "--provider", "sbertrek",
-                    "--capability", capability,
-                    "--state", "complete",
-                    *(
-                        []
-                        if capability in {"cross_provider_lookup", "epic_neighbors"}
-                        else [
-                            "--evidence",
-                            (
-                                f"mcp:sbertrek:{capability}:SBER-1"
-                                if capability in {"history", "epic_links", "release_links"}
-                                else f"mcp:sbertrek:{capability}"
-                            ),
-                        ]
-                    ),
-                    *(
-                        ["--checked-key", "SBER-1"]
-                        if capability in {"history", "epic_links", "release_links"}
-                        else []
-                    ),
-                )
-
-            self.run_tool(
-                state,
-                "snapshot-metadata",
-                "--run-id", run_id,
-                "--provider", "jira",
-                "--query", "key in (SBER-1)",
-            )
-            self.run_tool(
-                state,
-                "snapshot-issue",
-                "--run-id", run_id,
-                "--provider", "jira",
-                "--key", "SBER-1",
-                "--evidence", "mcp:jira:get:SBER-1",
-                "--summary", "Основная задача",
-                "--issue-type", "Story",
-                "--status", "To Do",
-                "--assignee-state", "absent",
-                "--estimate-state", "absent",
-                "--epic-state", "absent",
-                "--releases-state", "absent",
-                "--discovery", "cross-provider-key",
-                "--updated-at", "2026-08-26T09:01:00+03:00",
-            )
-            for capability in (
-                "feature_search", "history", "epic_links", "release_links", "cross_provider_lookup",
-                "epic_neighbors",
-            ):
-                self.run_tool(
-                    state,
-                    "snapshot-collection",
-                    "--run-id", run_id,
-                    "--provider", "jira",
-                    "--capability", capability,
-                    "--state", "complete",
-                    *(
-                        []
-                        if capability in {"cross_provider_lookup", "epic_neighbors"}
-                        else [
-                            "--evidence",
-                            (
-                                f"mcp:jira:{capability}:SBER-1"
-                                if capability in {"history", "epic_links", "release_links"}
-                                else f"mcp:jira:{capability}"
-                            ),
-                        ]
-                    ),
-                    *(
-                        ["--checked-key", "SBER-1"]
-                        if capability in {"history", "epic_links", "release_links"}
-                        else []
-                    ),
-                )
-
-            for provider in ("sbertrek", "jira"):
-                finalized = json.loads(self.run_tool(
-                    state,
-                    "snapshot-finalize",
-                    "--run-id", run_id,
-                    "--provider", provider,
-                ).stdout)
-                self.assertEqual(finalized["status"], "tracker-snapshot-finalized")
-                self.assertTrue(finalized["captured_at"].endswith("+00:00"))
-
-            immutable = self.run_tool(
-                state,
-                "snapshot-metadata",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--query", "changed after capture",
-                expected=2,
-            )
-            self.assertIn("уже финализирован", immutable.stderr)
-
-            progress = json.loads(
-                self.run_tool(state, "run-status", "--run-id", run_id).stdout
-            )
-            self.assertEqual(progress["status"], "tracker-run-ready")
-            self.assertEqual(progress["allowed_next_action"], "reconcile")
-            self.assertFalse(progress["final_response_allowed"])
-
-            reconciled = json.loads(
-                self.run_tool(state, "reconcile", "--run-id", run_id).stdout
-            )
-            self.assertEqual(reconciled["status"], "tracker-read-reconciled")
-            self.assertTrue(reconciled["workflow_complete"])
-            self.assertTrue(reconciled["final_response_allowed"])
-            self.assertEqual(
-                json.loads(
-                    self.run_tool(state, "run-status", "--run-id", run_id).stdout
-                ),
-                reconciled,
-            )
-            self.assertEqual(
-                json.loads(
-                    self.run_tool(state, "result-status", "--run-id", run_id).stdout
-                ),
-                reconciled,
-            )
-            self.assertEqual(
-                json.loads(
-                    self.run_tool(state, "reconcile", "--run-id", run_id).stdout
-                ),
-                reconciled,
-            )
-
-    def test_fake_seed_key_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.prepare_config(state)
-            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
-
-            result = self.run_tool(
-                state,
-                "snapshot-metadata",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--query", "text=cohort",
-                "--seed-evidence", "FEATURE=features/cohorts/README.md",
-                expected=2,
-            )
-
-            self.assertIn("фиктивные и текстовые ключи запрещены", result.stderr)
-
-    def test_cross_provider_completion_rejects_manual_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.prepare_config(state)
-            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
-
-            result = self.run_tool(
-                state,
-                "snapshot-collection",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--capability", "cross_provider_lookup",
-                "--state", "complete",
-                "--evidence", "mcp:jira-search",
-                expected=2,
-            )
-
-            self.assertIn("вычисляет evidence и checked_keys автоматически", result.stderr)
-
-    def test_not_found_rejects_evidence_from_other_provider(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.prepare_config(state)
-            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
-
-            result = self.run_tool(
-                state,
-                "snapshot-not-found",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--key", "RSCON-6849",
-                "--evidence", "mcp:jira:get:RSCON-6849:404",
-                expected=2,
-            )
-
-            self.assertIn("должен начинаться с mcp:sbertrek:", result.stderr)
-
-    def test_jira_can_be_disabled_without_creating_an_input_template(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.run_tool(state, "init-config")
-            self.run_tool(state, "set-projects", "--provider", "sbertrek", "SBER")
-            self.run_tool(state, "set-jira-mode", "disabled")
-            self.run_tool(state, "set-issue-types", "story")
-            self.run_tool(state, "set-statuses", "--provider", "sbertrek", "--kind", "completed", "done")
-            self.run_tool(state, "set-statuses", "--provider", "sbertrek", "--kind", "excluded", "--none")
-            self.run_tool(state, "complete-config")
-
-            started = json.loads(self.run_tool(state, "begin").stdout)
-            self.assertIsNone(started["jira_input"])
-            sber = json.loads(Path(started["sbertrek_input"]).read_text(encoding="utf-8"))
-            self.assertEqual(
-                sber["collection"]["cross_provider_lookup"]["state"],
-                "not-applicable",
-            )
-            self.assertFalse((Path(started["sbertrek_input"]).parent / "jira.json").exists())
-
-    def test_reconcile_rejects_pending_collection_state(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["collection"]["history"]["state"] = "pending"
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek",
-                str(sber_path),
-                expected=2,
-            )
-            self.assertIn("complete, unavailable или not-applicable", result.stderr)
-            blocked = json.loads(result.stdout)
-            self.assertFalse(blocked["workflow_complete"])
-            self.assertFalse(blocked["final_response_allowed"])
-            self.assertEqual(
-                blocked["allowed_next_action"],
-                "run-status-and-complete-snapshots",
-            )
-            self.assertEqual(blocked["required_success_status"], "tracker-read-reconciled")
-
-    def test_text_search_result_cannot_be_promoted_to_seed_without_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["scope"]["seed_evidence"] = []
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek",
-                str(sber_path),
-                expected=2,
-            )
-            self.assertIn("не имеют аналитического источника", result.stderr)
-
-    def test_reconcile_rejects_exact_key_not_read_in_other_provider(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, jira = self.snapshots()
-            self.restrict_to_issues(jira, [])
-            jira["collection"]["cross_provider_lookup"]["checked_keys"] = list(
-                jira["collection"]["not_found_keys"]
-            )
-            jira["collection"]["cross_provider_lookup"]["evidence"] = [
-                item["evidence"]
-                for item in jira["collection"]["not_found_evidence"]
-            ]
-            started = json.loads(self.run_tool(state, "begin").stdout)
-            sber_path = Path(started["sbertrek_input"])
-            jira_path = Path(started["jira_input"])
-            self.write_json(sber_path, sber)
-            self.write_json(jira_path, jira)
-
-            status = json.loads(
-                self.run_tool(state, "run-status", "--run-id", started["run_id"]).stdout
-            )
-            self.assertEqual(status["status"], "tracker-run-incomplete")
-            self.assertIn(
-                "jira: точная проверка ключей не выполнена",
-                status["cross_provider_validation_error"],
-            )
-
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--run-id",
-                started["run_id"],
-                expected=2,
-            )
-            self.assertIn("jira: точная проверка ключей не выполнена", result.stderr)
-            self.assertIn("SBER-1", result.stderr)
-
-    def test_reconcile_reports_unavailable_and_empty_collection_limitations(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            issue = sber["issues"][3]
-            issue["assignee"] = None
-            issue["field_observations"]["assignee"] = "not-returned"
-            self.restrict_to_issues(sber, [issue])
-            sber["scope"]["expected_epic_keys"] = []
-            sber["scope"]["expected_release_keys"] = []
-            sber["collection"]["epic_links"] = {
-                "state": "unavailable",
-                "reason": "MCP не возвращает поле эпика",
-                "failure_kind": "capability-absent",
-                "evidence": ["mcp:sbertrek:schema-inspection"],
-                "checked_keys": [],
-            }
-            sber["collection"]["expanded_epic_keys"] = []
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            output = json.loads(
-                self.run_tool(state, "reconcile", "--sbertrek", str(sber_path)).stdout
-            )
-            reconciled = json.loads(Path(output["result"]).read_text(encoding="utf-8"))
-            self.assertIn("sbertrek-epic_links-unavailable", reconciled["limitations"])
-            self.assertIn("sbertrek-history-returned-no-events", reconciled["limitations"])
-            self.assertIn("sbertrek-assignee-not-returned:1", reconciled["limitations"])
-            self.assertIn("jira-unavailable", reconciled["limitations"])
-
-    def test_snapshot_requires_explicit_observation_for_every_critical_field(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            del sber["issues"][0]["field_observations"]["assignee"]
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(sber_path), expected=2
-            )
-            self.assertIn("явно описывать field_observations", result.stderr)
-
-    def test_complete_history_requires_every_issue_key_to_be_checked(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["collection"]["history"]["checked_keys"].remove("SBER-4")
-            sber_path = root / "sber.json"
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(sber_path), expected=2
-            )
-            self.assertIn("history.checked_keys должен точно совпадать", result.stderr)
-
-    def test_unknown_participant_blocks_reconcile_one_at_a_time(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            config_path = self.prepare_config(state)
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            del config["participants"]["sbertrek"]["qa-s"]
-            del config["participants"]["sbertrek"]["dev-s"]
-            config["jira_enabled"] = False
-            self.write_json(config_path, config)
-            sber, _ = self.snapshots()
-            self.restrict_to_issues(sber, [sber["issues"][0]])
-            started = json.loads(self.run_tool(state, "begin").stdout)
-            run_id = started["run_id"]
-            sber_path = Path(started["sbertrek_input"])
-            self.write_json(sber_path, sber)
-
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--run-id",
-                run_id,
-                expected=3,
-            )
-            self.assertIn("provider=sbertrek", result.stderr)
-            self.assertIn("account_id=dev-s", result.stderr)
-            self.assertIn("set-participant", result.stderr)
-            blocked = json.loads(result.stdout)
-            self.assertEqual(blocked["allowed_next_action"], "ask-user")
-            self.assertNotIn("next_command", blocked)
-            self.assertIn("dev-s", blocked["next_question"])
-            self.assertEqual(
-                blocked["response_contract"]["text"],
-                blocked["next_question"],
-            )
-            for command in ("run-status", "result-status"):
-                repeated = json.loads(
-                    self.run_tool(
-                        state, command, "--run-id", run_id, expected=3
-                    ).stdout
-                )
-                self.assertTrue(repeated["must_stop"])
-                self.assertEqual(repeated["allowed_next_action"], "ask-user")
-                self.assertEqual(
-                    repeated["response_contract"]["text"],
-                    blocked["next_question"],
-                )
-            first_saved = json.loads(self.run_tool(
-                state,
-                "set-participant",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--account-id", "dev-s",
-                "--team-id", "B1",
-            ).stdout)
-            self.assertEqual(first_saved["team_id"], "BE1")
-            self.assertEqual(first_saved["derived_role"], "developer")
-            self.assertEqual(first_saved["allowed_next_action"], "ask-user")
-            self.assertIn("qa-s", first_saved["next_question"])
-
-            second_saved = json.loads(self.run_tool(
-                state,
-                "set-participant",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--account-id", "qa-s",
-                "--team-id", "QA1",
-            ).stdout)
-            self.assertEqual(second_saved["allowed_next_action"], "reconcile")
-            reconciled = json.loads(
-                self.run_tool(state, "reconcile", "--run-id", run_id).stdout
-            )
-            self.assertTrue(reconciled["final_response_allowed"])
-
-    def test_run_status_rejects_unresolved_seed_instead_of_empty_success(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            config_path = self.prepare_config(state)
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["jira_enabled"] = False
-            self.write_json(config_path, config)
-            started = json.loads(self.run_tool(state, "begin").stdout)
-            run_id = started["run_id"]
-            self.run_tool(
-                state,
-                "snapshot-metadata",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--query", "key = SBER-404",
-                "--seed-evidence", "SBER-404=features/demo/actual-progress.md",
-            )
-            for capability in (
-                "feature_search", "history", "epic_links", "release_links", "epic_neighbors"
-            ):
-                self.run_tool(
-                    state,
-                    "snapshot-collection",
-                    "--run-id", run_id,
-                    "--provider", "sbertrek",
-                    "--capability", capability,
-                    "--state", "complete",
-                    *(
-                        []
-                        if capability == "epic_neighbors"
-                        else ["--evidence", f"mcp:sbertrek:{capability}"]
-                    ),
-                )
-
-            finalize = self.run_tool(
-                state,
-                "snapshot-finalize",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                expected=2,
-            )
-            self.assertIn("не прочитаны", finalize.stderr)
-            self.assertIn("SBER-404", finalize.stderr)
-
-    def test_not_found_requires_direct_read_evidence_and_resolves_seed(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            config_path = self.prepare_config(state)
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            config["jira_enabled"] = False
-            self.write_json(config_path, config)
-            started = json.loads(self.run_tool(state, "begin").stdout)
-            run_id = started["run_id"]
-            self.run_tool(
-                state,
-                "snapshot-metadata",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--query", "key = SBER-404",
-                "--seed-evidence", "SBER-404=features/demo/actual-progress.md",
-            )
-            self.run_tool(
-                state,
-                "snapshot-not-found",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--key", "SBER-404",
-                "--evidence", "mcp:sbertrek:issue.getByKey:SBER-404:404",
-            )
-            snapshot = json.loads(Path(started["sbertrek_input"]).read_text(encoding="utf-8"))
-            self.assertEqual(snapshot["collection"]["not_found_keys"], ["SBER-404"])
-            self.assertEqual(
-                snapshot["collection"]["not_found_evidence"][0]["evidence"],
-                "mcp:sbertrek:issue.getByKey:SBER-404:404",
-            )
-
-    def test_collection_claim_requires_call_evidence_and_cannot_mean_skipped(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.prepare_config(state)
-            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
-            missing = self.run_tool(
-                state,
-                "snapshot-collection",
-                "--run-id", run_id,
-                "--provider", "jira",
-                "--capability", "history",
-                "--state", "complete",
-                expected=2,
-            )
-            self.assertIn("--evidence", missing.stderr)
-            skipped = self.run_tool(
-                state,
-                "snapshot-collection",
-                "--run-id", run_id,
-                "--provider", "jira",
-                "--capability", "history",
-                "--state", "unavailable",
-                "--failure-kind", "capability-absent",
-                "--reason", "Jira MCP не вызван",
-                "--evidence", "none",
-                expected=2,
-            )
-            self.assertIn("Пропущенный MCP-вызов", skipped.stderr)
-
-            for reason in (
-                "История не читалась отдельно",
-                "Связи эпиков не читались",
-                "Связи релизов не запрашивались",
-            ):
-                skipped = self.run_tool(
-                    state,
-                    "snapshot-collection",
-                    "--run-id", run_id,
-                    "--provider", "jira",
-                    "--capability", "history",
-                    "--state", "unavailable",
-                    "--failure-kind", "capability-absent",
-                    "--reason", reason,
-                    "--evidence", "mcp:jira:capability-discovery:no-history-tool",
-                    expected=2,
-                )
-                self.assertIn("Пропущенный MCP-вызов", skipped.stderr)
-
-    def test_capability_absent_requires_capability_discovery_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.prepare_config(state)
-            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
-
-            rejected = self.run_tool(
-                state,
-                "snapshot-collection",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--capability", "history",
-                "--state", "unavailable",
-                "--failure-kind", "capability-absent",
-                "--reason", "MCP не предоставляет отдельную историю",
-                "--evidence", "mcp:sbertrek:get:RSCON-6748",
-                expected=2,
-            )
-            self.assertIn("проверки возможностей MCP", rejected.stderr)
-
-            accepted = self.run_tool(
-                state,
-                "snapshot-collection",
-                "--run-id", run_id,
-                "--provider", "sbertrek",
-                "--capability", "history",
-                "--state", "unavailable",
-                "--failure-kind", "capability-absent",
-                "--reason", "MCP не предоставляет отдельную историю",
-                "--evidence", "mcp:sbertrek:capability-discovery:no-history-tool",
-            )
-            self.assertEqual(
-                json.loads(accepted.stdout)["status"],
-                "tracker-snapshot-collection-saved",
-            )
-
-    def test_feature_search_passport_requires_every_hit_to_be_registered(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["collection"]["feature_search"]["checked_keys"] = ["SBER-404"]
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("не зарегистрировал найденные поиском ключи: SBER-404", result.stderr)
-
-    def test_feature_search_rejects_issue_read_as_search_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.prepare_config(state)
-            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
-
-            result = self.run_tool(
-                state,
-                "snapshot-collection",
-                "--run-id", run_id,
-                "--provider", "jira",
-                "--capability", "feature_search",
-                "--state", "complete",
-                "--evidence", "mcp:jira:get:RSCON-6748",
-                expected=2,
-            )
-            self.assertIn("поискового MCP-вызова", result.stderr)
-
-    def test_old_completion_envelope_cannot_authorize_final_response(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.prepare_config(state)
-            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
-            completion = state / "tracker-runs" / run_id / "completion-status.json"
-            self.write_json(completion, {
-                "status": "tracker-read-reconciled",
-                "run_id": run_id,
-                "workflow_complete": True,
-                "final_response_allowed": True,
-            })
-
-            for command in ("run-status", "result-status", "reconcile"):
-                result = self.run_tool(
-                    state, command, "--run-id", run_id, expected=2
-                )
-                self.assertIn("устаревшей схеме", result.stderr)
-                self.assertIn("begin", result.stderr)
-
-    def test_feature_search_candidate_must_come_from_provider_search_passport(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, jira = self.snapshots()
-            jira["collection"]["feature_search"]["checked_keys"] = []
-            sber_path = root / "sber.json"
-            jira_path = root / "jira.json"
-            self.write_json(sber_path, sber)
-            self.write_json(jira_path, jira)
-
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek", str(sber_path),
-                "--jira", str(jira_path),
-                expected=2,
-            )
-            self.assertIn("поисковые кандидаты вне паспорта feature_search", result.stderr)
-
-    def test_complete_issue_collections_cover_every_issue(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["collection"]["epic_links"]["checked_keys"] = ["SBER-1"]
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("epic_links.checked_keys должен точно совпадать", result.stderr)
-
-    def test_complete_collection_requires_keyed_evidence_for_every_issue(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["collection"]["history"]["evidence"] = [
-                "mcp:sbertrek:history:SBER-1"
-            ]
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("не имеет отдельного evidence для ключей", result.stderr)
-            self.assertIn("SBER-4", result.stderr)
-
-    def test_placeholder_and_bundled_collection_evidence_are_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.prepare_config(state)
-            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
-
-            for evidence in (
-                "mcp:sbertrek:history-read:none",
-                "mcp:sbertrek:history:SBER-1;mcp:sbertrek:history:SBER-2",
-            ):
-                result = self.run_tool(
-                    state,
-                    "snapshot-collection",
-                    "--run-id", run_id,
-                    "--provider", "sbertrek",
-                    "--capability", "history",
-                    "--state", "complete",
-                    "--evidence", evidence,
-                    expected=2,
-                )
-                self.assertIn("placeholder", result.stderr)
-
-    def test_comma_concatenated_mcp_calls_are_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["collection"]["history"]["evidence"] = [
-                "mcp:sbertrek:history:SBER-1,mcp:sbertrek:history:SBER-2,"
-                "mcp:sbertrek:history:SBER-3,mcp:sbertrek:history:SBER-4"
-            ]
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("ровно один MCP-вызов", result.stderr)
-
-    def test_empty_epic_neighbors_must_be_machine_derived(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            self.restrict_to_issues(sber, [sber["issues"][2]])
-            sber["collection"]["epic_neighbors"]["evidence"] = [
-                "mcp:sbertrek:feature-search:cohorts"
-            ]
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("пустой epic_neighbors должен быть завершён машинно", result.stderr)
-
-    def test_unresolved_expected_epic_blocks_complete_snapshot(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["scope"]["expected_epic_keys"] = ["EPIC-404"]
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("ожидаемые эпики не подтверждены: EPIC-404", result.stderr)
-
-    def test_majority_not_returned_development_fields_block_reconcile(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            for issue in sber["issues"][:3]:
-                issue["assignee"] = None
-                issue["field_observations"]["assignee"] = "not-returned"
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("потерял поле assignee у 3 из 4", result.stderr)
-
-    def test_epic_neighbor_keys_must_be_actual_epics(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["collection"]["epic_neighbors"]["checked_keys"] = ["SBER-1"]
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("epic_neighbors.checked_keys должен точно совпадать", result.stderr)
-
-    def test_issue_timestamp_cannot_be_later_than_snapshot_capture(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["issues"][0]["updated_at"] = "2026-08-26T10:00:01+00:00"
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("updated_at позже captured_at", result.stderr)
-
-    def test_mass_not_returned_development_fields_block_reconcile(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            for issue in sber["issues"]:
-                if issue["issue_type"].casefold() in {"development-task", "story"}:
-                    issue["assignee"] = None
-                    issue["field_observations"]["assignee"] = "not-returned"
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("потерял поле assignee у 4 из 4", result.stderr)
-
-    def test_direct_read_evidence_must_name_exact_issue_key(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, _ = self.snapshots()
-            sber["issues"][0]["direct_read_evidence"] = [
-                "mcp:sbertrek:issue-read:SBER-2"
-            ]
-            path = root / "sber.json"
-            self.write_json(path, sber)
-
-            result = self.run_tool(
-                state, "reconcile", "--sbertrek", str(path), expected=2
-            )
-            self.assertIn("не содержит её точный ключ", result.stderr)
-
-    def test_proactive_participant_mapping_without_pending_question_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            self.prepare_config(state)
-            run_id = json.loads(self.run_tool(state, "begin").stdout)["run_id"]
-            result = self.run_tool(
-                state,
-                "set-participant",
-                "--run-id", run_id,
-                "--provider", "jira",
-                "--account-id", "invented",
-                "--team-id", "FE2",
-                expected=2,
-            )
-            self.assertIn("нет ожидающего вопроса", result.stderr)
-
-    def test_informational_counterpart_metadata_does_not_affect_exact_key_match(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, jira = self.snapshots()
-            sber["issues"][1]["issue_key"] = "JIRA-99"
-            jira["issues"][1]["counterpart_key"] = "SBER-1"
-            sber_path = root / "sber.json"
-            jira_path = root / "jira.json"
-            self.write_json(sber_path, sber)
-            self.write_json(jira_path, jira)
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek", str(sber_path),
-                "--jira", str(jira_path),
-            )
-            reconciled = json.loads(
-                Path(json.loads(result.stdout)["result"]).read_text(encoding="utf-8")
-            )
-            self.assertEqual(reconciled["counts"]["matched"], 1)
-            self.assertEqual(reconciled["issues"][0]["jira_key"], "SBER-1")
-            sber_only = next(
-                issue for issue in reconciled["issues"] if issue["key"] == "SBER-2"
-            )
-            self.assertIsNone(sber_only["jira_key"])
-
-    def test_unavailable_cross_provider_lookup_is_reported_as_limitation(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            state = root / "state"
-            self.prepare_config(state)
-            sber, jira = self.snapshots()
-            jira["collection"]["cross_provider_lookup"] = {
-                "state": "unavailable",
-                "reason": "Direct lookup returned a provider error",
-                "failure_kind": "call-failed",
-                "evidence": ["mcp:jira:get-issue:error"],
-                "checked_keys": [],
-            }
-            sber_path = root / "sber.json"
-            jira_path = root / "jira.json"
-            self.write_json(sber_path, sber)
-            self.write_json(jira_path, jira)
-            result = self.run_tool(
-                state,
-                "reconcile",
-                "--sbertrek", str(sber_path),
-                "--jira", str(jira_path),
-            )
-            reconciled = json.loads(
-                Path(json.loads(result.stdout)["result"]).read_text(encoding="utf-8")
-            )
-            self.assertIn(
-                "jira-cross_provider_lookup-unavailable",
-                reconciled["limitations"],
-            )
-
-    def test_version_two_config_discards_unguarded_participant_mappings(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            path = self.prepare_config(state)
-            config = json.loads(path.read_text(encoding="utf-8"))
-            config["schema_version"] = 2
-            config["issue_pairs"] = {"SBER-1": "JIRA-11"}
-            config["participants"] = {
-                "sbertrek": {"one": {"canonical_id": "FE2", "role": "developer"}},
-                "jira": {
-                    "two": {"canonical_id": "FE2", "role": "developer"},
-                    "three": {"canonical_id": "FE2", "role": "developer"},
-                },
-            }
-            self.write_json(path, config)
-            status = json.loads(self.run_tool(state, "config-status").stdout)
-            migrated = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(status["status"], "tracker-config-ready")
-            self.assertEqual(migrated["schema_version"], 4)
+            payload = self.run_tool(state, "config-status", expected=3)
+            self.assertTrue(payload["must_stop"])
+            self.assertEqual(payload["next_question"], payload["response_contract"]["text"])
+            self.assertEqual(payload["gaps"][0], "projects.sbertrek")
+
+    def test_begin_creates_durable_run_status_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state)
+            status = state / "tracker-runs" / run_id / "run-status.json"
+            self.assertTrue(status.is_file())
+            self.assertEqual(json.loads(status.read_text())["status"], "tracker-read-collecting")
+            self.assertTrue((status.parent / "input" / "sbertrek.json").is_file())
+            self.assertTrue((status.parent / "input" / "jira.json").is_file())
+
+    def test_begin_records_feature_and_known_key_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state)
+            snapshot = json.loads((state / "tracker-runs" / run_id / "input" / "sbertrek.json").read_text())
+            self.assertEqual(snapshot["protocol"], "active-inventory-v1")
+            self.assertEqual(snapshot["scope"]["feature"], "cohorts")
+            self.assertEqual(snapshot["scope"]["known_key_evidence"][0]["key"], "RSCON-6845")
+
+    def test_schema_four_config_is_reused_and_legacy_pairs_are_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            self.config(state)
+            config_path = state / "tracker-config.json"
+            config = json.loads(config_path.read_text())
+            config["issue_pairs"] = {"RSCON-1": "RSCON-2"}
+            self.write(config_path, config)
+            payload = self.run_tool(state, "config-status")
+            self.assertEqual(payload["status"], "tracker-config-ready")
+            migrated = json.loads(config_path.read_text())
             self.assertNotIn("issue_pairs", migrated)
-            self.assertEqual(migrated["participants"], {"sbertrek": {}, "jira": {}})
+            self.assertEqual(migrated["participants"]["sbertrek"]["s-dev"]["team_id"], "BE1")
 
-    def test_version_four_config_rejects_manual_issue_pairs(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            path = self.prepare_config(state)
-            config = json.loads(path.read_text(encoding="utf-8"))
-            config["issue_pairs"] = {"SBER-1": "JIRA-11"}
-            self.write_json(path, config)
+    def test_inventory_requires_exact_scope_and_unfinished_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            common = ["inventory-page", "--run-id", run_id, "--provider", "sbertrek", "--query", "all", "--scope-project", "OTHER", "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:search:1"]
+            self.run_tool(state, *common, expected=2)
+            common[common.index("OTHER")] = "RSCON"
+            self.run_tool(state, *common, expected=2)
 
-            result = self.run_tool(state, "config-status", expected=2)
+    def test_inventory_is_paginated_and_accepts_one_evidence_per_page(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            first = self.page(state, run_id, "sbertrek", ["RSCON-1"], last=False)
+            self.assertEqual(first["inventory_state"], "collecting")
+            second = self.page(state, run_id, "sbertrek", ["RSCON-2"], page=2, cursor="cursor-2")
+            self.assertEqual(second["key_count"], 2)
+            snapshot = json.loads((state / "tracker-runs" / run_id / "input" / "sbertrek.json").read_text())
+            self.assertEqual(len(snapshot["inventory"]["pages"]), 2)
 
-            self.assertIn("сопоставляются только по точному ключу", result.stderr)
+    def test_inventory_rejects_wrong_continuation_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-1"], last=False)
+            args = [
+                "inventory-page", "--run-id", run_id, "--provider", "sbertrek",
+                "--query", "project=RSCON AND unfinished=true", "--scope-project", "RSCON",
+                "--unfinished-confirmed", "--page-number", "2", "--cursor", "wrong",
+                "--last-page", "--evidence", "mcp:sbertrek:active-search:page-2",
+            ]
+            self.run_tool(state, *args, expected=2)
 
-    def test_version_three_config_removes_issue_pairs_and_preserves_participants(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "state"
-            path = self.prepare_config(state)
-            config = json.loads(path.read_text(encoding="utf-8"))
-            expected_participants = config["participants"]
-            config["schema_version"] = 3
-            config["issue_pairs"] = {"SBER-1": "JIRA-11"}
-            self.write_json(path, config)
+    def test_inventory_does_not_require_detail_for_every_returned_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-1", "RSCON-2", "RSCON-3"])
+            self.page(state, run_id, "jira", [])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-1")
+            payload = self.run_tool(state, "selection-complete", "--run-id", run_id)
+            self.assertEqual(payload["selected"]["sbertrek"], 1)
 
-            status = json.loads(self.run_tool(state, "config-status").stdout)
-            migrated = json.loads(path.read_text(encoding="utf-8"))
+    def test_inventory_page_can_be_detail_evidence_for_returned_full_card(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-6845"])
+            payload = self.add_issue(state, run_id, "sbertrek", "RSCON-6845")
+            self.assertEqual(payload["status"], "tracker-issue-recorded")
 
-            self.assertEqual(status["status"], "tracker-config-ready")
-            self.assertEqual(migrated["schema_version"], 4)
-            self.assertNotIn("issue_pairs", migrated)
-            self.assertEqual(migrated["participants"], expected_participants)
+    def test_record_issue_rejects_key_outside_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", [])
+            self.run_tool(state, *self.issue_args(run_id, "sbertrek", "RSCON-9", "mcp:sbertrek:get:RSCON-9"), expected=2)
+
+    def test_ambiguous_relevance_asks_one_exact_question(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-7"]); self.page(state, run_id, "jira", [])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-7", relevance="ambiguous", selected_by="ambiguous")
+            payload = self.run_tool(state, "selection-complete", "--run-id", run_id, expected=3)
+            self.assertIn("RSCON-7", payload["next_question"])
+            self.assertEqual(payload["next_question"], payload["response_contract"]["text"])
+            self.run_tool(state, "decide-relevance", "--run-id", run_id, "--provider", "sbertrek", "--key", "RSCON-7", "--relevance", "irrelevant", "--basis", "Ответ аналитика")
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+
+    def test_link_closure_uses_only_sbertrek_jira_object_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-6845"], links=["RSCON-6845=RSCON-2902"])
+            self.page(state, run_id, "jira", ["RSCON-2902"])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-6845")
+            blocked = self.run_tool(state, "selection-complete", "--run-id", run_id, expected=2)
+            self.assertIn("linked-counterpart-not-selected", blocked["error"])
+            self.add_issue(state, run_id, "jira", "RSCON-2902", selected_by="linked-counterpart")
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+
+    def test_active_known_key_must_be_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-6845"])
+            self.page(state, run_id, "jira", [])
+            payload = self.run_tool(state, "selection-complete", "--run-id", run_id, expected=2)
+            self.assertIn("active-known-key-not-selected", payload["error"])
+
+    def test_completed_selection_cannot_be_extended(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-1", "RSCON-2"])
+            self.page(state, run_id, "jira", [])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-1")
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+            self.run_tool(state, *self.issue_args(run_id, "sbertrek", "RSCON-2", "mcp:sbertrek:active-search:page-1"), expected=2)
+
+    def test_equal_own_keys_do_not_create_pair_without_jira_object(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-1"])
+            self.page(state, run_id, "jira", ["RSCON-1"])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-1")
+            self.add_issue(state, run_id, "jira", "RSCON-1", selected_by="description-match")
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+            self.history(state, run_id, "sbertrek", "RSCON-1"); self.history(state, run_id, "jira", "RSCON-1")
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "sbertrek")
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "jira")
+            result = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(result["counts"]["matched"], 0)
+
+    def test_history_is_permitted_only_for_selected_relevant_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-1", "RSCON-2"])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-1")
+            self.add_issue(state, run_id, "sbertrek", "RSCON-2", relevance="irrelevant", selected_by="description-match")
+            self.run_tool(state, "history-complete", "--run-id", run_id, "--provider", "sbertrek", "--key", "RSCON-2", "--state", "complete", "--evidence", "mcp:sbertrek:history:RSCON-2", expected=2)
+
+    def test_finalize_requires_history_only_for_relevant_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)
+            self.page(state, run_id, "sbertrek", ["RSCON-1", "RSCON-2"])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-1")
+            self.add_issue(state, run_id, "sbertrek", "RSCON-2", relevance="irrelevant", selected_by="description-match")
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "sbertrek", expected=2)
+            self.history(state, run_id, "sbertrek", "RSCON-1")
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "sbertrek")
+
+    def test_reconcile_pairs_by_jira_object_and_preserves_sbertrek_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_basic_run(state)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["counts"]["matched"], 1)
+            result = json.loads((root / "reconciled.json").read_text())
+            issue = result["issues"][0]
+            self.assertEqual(issue["summary"], "Sber title")
+            self.assertEqual(issue["estimate"], {"value": 5.0, "unit": "story-points"})
+            self.assertEqual(issue["epic"]["key"], "RSCON-6854")
+            self.assertEqual(issue["assignee"]["id"], "s-dev")
+            self.assertEqual({item["field"] for item in issue["conflicts"]}, {"summary", "assignee", "estimate", "epic"})
+
+    def test_jira_fills_missing_sbertrek_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-10"], links=["RSCON-10=RSCON-20"])
+            self.page(state, run_id, "jira", ["RSCON-20"])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-10")
+            self.add_issue(state, run_id, "jira", "RSCON-20", selected_by="linked-counterpart", estimate="3")
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+            self.history(state, run_id, "sbertrek", "RSCON-10"); self.history(state, run_id, "jira", "RSCON-20")
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "sbertrek"); self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "jira")
+            self.run_tool(state, "reconcile", "--run-id", run_id)
+            result = json.loads((state / "tracker-runs" / run_id / "reconciled.json").read_text())
+            self.assertEqual(result["issues"][0]["estimate"]["value"], 3.0)
+            self.assertEqual(result["issues"][0]["field_sources"]["estimate"], "jira")
+
+    def test_developer_handoff_marks_development_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)
+            self.page(state, run_id, "sbertrek", ["RSCON-1"])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-1", assignee="s-qa")
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+            self.history(state, run_id, "sbertrek", "RSCON-1", event=True)
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "sbertrek")
+            self.run_tool(state, "reconcile", "--run-id", run_id)
+            result = json.loads((state / "tracker-runs" / run_id / "reconciled.json").read_text())
+            self.assertEqual(result["issues"][0]["development"]["basis"], "developer-handoff")
+
+    def test_unknown_participant_question_comes_only_from_selected_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False, participants=False)
+            self.page(state, run_id, "sbertrek", ["RSCON-1", "RSCON-2"])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-1", assignee="selected-user")
+            self.add_issue(state, run_id, "sbertrek", "RSCON-2", relevance="irrelevant", selected_by="description-match", assignee="ignored-user")
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+            self.history(state, run_id, "sbertrek", "RSCON-1")
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "sbertrek")
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            self.assertIn("selected-user", payload["next_question"])
+            self.assertNotIn("ignored-user", payload["next_question"])
+
+    def test_set_participant_is_guarded_by_pending_question(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False, participants=False)
+            self.run_tool(state, "set-participant", "--run-id", run_id, "--provider", "sbertrek", "--account-id", "guess", "--team-id", "B1", expected=2)
+
+    def test_jira_inventory_can_be_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-6845"])
+            self.run_tool(state, "inventory-unavailable", "--run-id", run_id, "--provider", "jira", "--reason", "MCP unavailable", "--evidence", "mcp:jira:capability-discovery:failed")
+            self.add_issue(state, run_id, "sbertrek", "RSCON-6845")
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+            self.history(state, run_id, "sbertrek", "RSCON-6845")
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "sbertrek")
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "jira")
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertIn("jira-active-inventory-unavailable", payload["limitations"])
+
+    def test_known_key_missing_from_active_inventory_is_visible_limitation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)
+            self.page(state, run_id, "sbertrek", [])
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "sbertrek")
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["counts"]["merged"], 0)
+            self.assertIn("known-key-not-in-active-inventory:RSCON-6845", payload["limitations"])
+
+    def test_explicit_link_to_inactive_jira_is_visible_limitation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-6845"], links=["RSCON-6845=RSCON-2902"])
+            self.page(state, run_id, "jira", [])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-6845")
+            self.run_tool(state, "selection-complete", "--run-id", run_id)
+            self.history(state, run_id, "sbertrek", "RSCON-6845")
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "sbertrek")
+            self.run_tool(state, "snapshot-finalize", "--run-id", run_id, "--provider", "jira")
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertIn("linked-jira-not-in-active-inventory:RSCON-6845=RSCON-2902", payload["limitations"])
+            result = json.loads((state / "tracker-runs" / run_id / "reconciled.json").read_text())
+            self.assertEqual(result["issues"][0]["jira_key"], "RSCON-2902")
+
+    def test_report_contains_independent_epic_and_release_groupings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_basic_run(state)
+            self.run_tool(state, "reconcile", "--run-id", run_id)
+            result = json.loads((root / "reconciled.json").read_text())
+            self.assertEqual(result["groupings"]["epics"]["RSCON-6854"], ["RSCON-6845"])
+            self.assertEqual(result["groupings"]["releases"]["unassigned"], ["RSCON-6845"])
+            report = (root / "report.md").read_text(encoding="utf-8")
+            self.assertIn("## Группировка по эпикам", report)
+            self.assertIn("## Группировка по релизам", report)
+
+    def test_success_creates_all_four_diagnostic_and_result_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_basic_run(state)
+            self.run_tool(state, "reconcile", "--run-id", run_id)
+            for name in ("run-status.json", "reconciled.json", "report.md", "completion-status.json"):
+                self.assertTrue((root / name).is_file(), name)
+            result = self.run_tool(state, "result-status", "--run-id", run_id)
+            self.assertTrue(result["final_response_allowed"])
+
+    def test_old_protocol_completion_cannot_authorize_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            root = state / "tracker-runs" / run_id
+            self.write(root / "completion-status.json", {"schema_version": 9, "status": "tracker-read-reconciled"})
+            self.run_tool(state, "result-status", "--run-id", run_id, expected=2)
+
+    def test_runtime_writes_stay_under_state_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); before = {item.relative_to(ROOT) for item in ROOT.rglob("*") if item.is_file()}
+            self.begin(state)
+            after = {item.relative_to(ROOT) for item in ROOT.rglob("*") if item.is_file()}
+            self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
