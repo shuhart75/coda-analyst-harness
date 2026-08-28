@@ -266,11 +266,15 @@ class HarnessTests(unittest.TestCase):
             contract = ROOT / "core/developer-handoff.md"
             self.assertTrue(contract.exists())
             text = contract.read_text(encoding="utf-8")
+            self.assertIn("returns/receipt.json", text)
             self.assertIn("returns/tasks.md", text)
             self.assertIn("returns/tasks/<task-id>.md", text)
             self.assertIn("returns/summary.md", text)
+            self.assertIn("`new`", text)
+            self.assertIn("`completed`", text)
             self.assertTrue((ROOT / "scripts/requirements-exchange.py").exists())
             self.assertTrue((ROOT / "templates/exchange/AGENTS.template.md").exists())
+            self.assertTrue((ROOT / "templates/exchange/receipt.template.json").exists())
             self.assertFalse((project / ".workflow").exists())
 
     def test_scaffold_contains_feature_delivery_contract(self) -> None:
@@ -319,6 +323,7 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("обязательный аудит", contract)
             self.assertIn("core/requirements-audit.md", contract)
             self.assertIn("контрольной суммой", contract)
+            self.assertIn("returns/receipt.json", contract)
             self.assertIn("returns/tasks.md", contract)
             self.assertIn("returns/tasks/<task-id>.md", contract)
             self.assertIn("returns/summary.md", contract)
@@ -328,7 +333,7 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("отдаём требования разработчикам", commands)
             self.assertIn("До явного подтверждения пакет не создаётся", commands)
             self.assertIn("проверь результаты разработки", commands)
-            self.assertIn("уже содержит согласованную разработчиками декомпозицию", commands)
+            self.assertIn("согласованную разработчиками", commands)
             self.assertIn("не создаёт срезы", commands)
             self.assertNotIn("features/<feature>/tasks/", commands)
 

@@ -61,6 +61,7 @@ A failed check does not advance the run. Repeated failure reaches the configured
 ## Technical Decomposition Invariants
 
 - Analysts transmit one immutable feature requirements document plus a manifest; developers define the future Jira decomposition in their own process.
+- Developer SDD acknowledges each new revision once with an immutable `returns/receipt.json` containing the exact revision and requirements checksum. No receipt means the revision is new; a receipt from an older revision never carries forward.
 - `returns/tasks.md` appears only after developers have agreed the decomposition. The analytical workflow has no proposal or confirmation state for it.
 - Each task has one independently implementable technical result and direct links to `REQ-*`.
 - Estimate and Jira key are optional developer metadata.
@@ -79,4 +80,5 @@ These invariants apply to the receiving developer SDD in its own code workspace.
 - Continue all independent work and complete implementation, verification and commits that are feasible in the code repository.
 - Report every input item, remaining work and any additional delivery in the per-task result and final summary without hiding scope differences.
 - Return baseline and requirement feedback in the same revision's `returns/`; analyst review may happen later and never gates development or testing.
+- Derive processing state from the return sequence `receipt.json -> tasks.md -> tasks/<task-id>.md -> summary.md`; do not edit the analyst-owned manifest to acknowledge or track developer work.
 - The canonical return contract is defined in `core/developer-handoff.md`.

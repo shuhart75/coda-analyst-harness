@@ -21,6 +21,8 @@ REQ_RE = re.compile(r"\bREQ-[A-Z0-9-]+\b")
 REQ_DEFINITION_RE = re.compile(r"^### (REQ-[A-Z0-9-]+)\.\s+.+$", re.MULTILINE)
 ALLOWED_REVISION_STATES = {"sent", "in-progress", "paused", "superseded", "completed", "cancelled"}
 FEATURE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
+CURRENT_MANIFEST_SCHEMA = 3
+CURRENT_RETURNS_CONTRACT = 1
 
 
 class CodeDestinationUnavailable(ValueError):
@@ -162,11 +164,20 @@ def install_root_contract(exchange: Path) -> None:
         "README.md": "# Обмен требованиями и результатами разработки",
         "AGENTS.md": "# Договор SDD для обмена требованиями",
     }
-    for source_name, target_name in (("README.template.md", "README.md"), ("AGENTS.template.md", "AGENTS.md")):
+    managed_files = (
+        ("README.template.md", "README.md"),
+        ("AGENTS.template.md", "AGENTS.md"),
+        ("receipt.template.json", "receipt.template.json"),
+    )
+    for source_name, target_name in managed_files:
         source = templates / source_name
         target = exchange / target_name
         if not target.exists():
             target.write_bytes(source.read_bytes())
+            continue
+        if target_name == "receipt.template.json":
+            if target.read_bytes() != source.read_bytes():
+                target.write_bytes(source.read_bytes())
             continue
         current = target.read_text(encoding="utf-8", errors="ignore")
         if current.startswith(managed_headings[target_name]) and target.read_bytes() != source.read_bytes():
@@ -273,7 +284,17 @@ def requested_returns_contract(schema_version: int = 2) -> dict[str, Any]:
             "meaning": "Итоговое покрытие всех требований активной редакции",
         },
     }
-    if schema_version == 2:
+    if schema_version >= 3:
+        contract = {
+            "receipt": {
+                "path": "revisions/<NNN>/returns/receipt.json",
+                "template": "../receipt.template.json",
+                "meaning": "Неизменяемая квитанция принятия точной редакции разработческой SDD",
+                "required_before_other_returns": True,
+            },
+            **contract,
+        }
+    if schema_version >= 2:
         contract["tasks"].update({
             "contour_rule": "Одна задача относится ровно к одному контуру; backend и frontend не смешиваются",
             "local_sdd_reference": "required",
@@ -285,26 +306,143 @@ def requested_returns_contract(schema_version: int = 2) -> dict[str, Any]:
 
 def traceability_contract(schema_version: int) -> dict[str, str]:
     chain = "REQ-* -> tasks.md -> task result -> summary.md"
-    if schema_version == 2:
+    if schema_version >= 2:
         chain = "REQ-* -> local SDD change -> tasks.md -> task result -> summary.md"
     return {"requirement_pattern": "REQ-*", "chain": chain}
 
 
-def developer_sdd_contract() -> dict[str, str]:
-    return {
+def developer_sdd_contract(schema_version: int = 2) -> dict[str, str]:
+    contract = {
         "input_role": "business-requirements",
         "code_comparison": "required-before-implementation",
         "technical_artifacts": "developer-owned-local-sdd",
         "contours": "backend-and-frontend-are-separate",
+    }
+    if schema_version >= 3:
+        contract["revision_receipt"] = "required-before-other-returns"
+    return contract
+
+
+def valid_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def validate_receipt(
+    receipt: dict[str, Any], feature: str, revision: int, requirements_sha256: str
+) -> list[str]:
+    errors: list[str] = []
+    expected = {
+        "schema_version": 1,
+        "kind": "requirements-revision-receipt",
+        "feature": feature,
+        "requirements_revision": revision,
+        "requirements_sha256": requirements_sha256,
+        "state": "accepted",
+    }
+    for key, value in expected.items():
+        if receipt.get(key) != value:
+            errors.append(f"receipt.json: поле {key} не совпадает с принятой редакцией")
+    if not valid_timestamp(receipt.get("received_at")):
+        errors.append("receipt.json: received_at должен быть временной меткой с часовым поясом")
+    if not isinstance(receipt.get("received_by"), str) or not receipt["received_by"].strip():
+        errors.append("receipt.json: received_by должен идентифицировать принимающую сторону")
+    return errors
+
+
+def revision_processing_status(feature_root: Path, entry: dict[str, Any]) -> dict[str, Any]:
+    revision = entry["revision"]
+    returns = feature_root / entry["returns_path"]
+    contract_version = entry.get("returns_contract_version", 0)
+    files = sorted(path for path in returns.rglob("*") if path.is_file()) if returns.is_dir() else []
+    relative_files = [path.relative_to(returns).as_posix() for path in files]
+    if contract_version == 0:
+        return {
+            "state": "legacy-results-present" if files else "legacy-unacknowledged",
+            "returns_contract_version": 0,
+            "receipt_present": False,
+            "tasks_present": "tasks.md" in relative_files,
+            "task_result_count": sum(
+                1 for path in relative_files if re.fullmatch(r"tasks/[^/]+\.md", path)
+            ),
+            "summary_present": "summary.md" in relative_files,
+            "errors": [],
+        }
+
+    errors: list[str] = []
+    if contract_version != CURRENT_RETURNS_CONTRACT:
+        errors.append(f"неподдерживаемая версия договора возвратов: {contract_version}")
+    allowed = {"receipt.json", "tasks.md", "summary.md"}
+    unexpected = [
+        path for path in relative_files
+        if path not in allowed and not re.fullmatch(r"tasks/[^/]+\.md", path)
+    ]
+    if unexpected:
+        errors.append("неподдерживаемые файлы возвратов: " + ", ".join(unexpected))
+
+    receipt_path = returns / "receipt.json"
+    receipt_present = receipt_path.is_file()
+    other_files = [path for path in relative_files if path != "receipt.json"]
+    if not receipt_present and other_files:
+        errors.append("возвраты созданы до квитанции receipt.json")
+    elif receipt_present:
+        try:
+            receipt = load_json(receipt_path)
+        except ValueError as exc:
+            errors.append(str(exc))
+        else:
+            errors.extend(validate_receipt(receipt, feature_root.name, revision, entry["sha256"]))
+
+    tasks_present = (returns / "tasks.md").is_file()
+    task_results = sorted((returns / "tasks").glob("*.md")) if (returns / "tasks").is_dir() else []
+    summary_path = returns / "summary.md"
+    summary_present = summary_path.is_file()
+    if task_results and not tasks_present:
+        errors.append("отчёты задач созданы до согласованного returns/tasks.md")
+    if summary_present and not tasks_present:
+        errors.append("итоговый summary.md создан до согласованного returns/tasks.md")
+    if summary_present:
+        requirements_path = feature_root / entry["requirements_path"]
+        requirement_ids = set(REQ_DEFINITION_RE.findall(requirements_path.read_text(encoding="utf-8")))
+        summary_ids = set(REQ_RE.findall(summary_path.read_text(encoding="utf-8")))
+        missing = sorted(requirement_ids - summary_ids)
+        if missing:
+            errors.append("summary.md не покрывает требования: " + ", ".join(missing))
+
+    if errors:
+        state = "invalid"
+    elif not receipt_present:
+        state = "new"
+    elif summary_present:
+        state = "completed"
+    elif task_results:
+        state = "in-progress"
+    elif tasks_present:
+        state = "decomposed"
+    else:
+        state = "accepted"
+    return {
+        "state": state,
+        "returns_contract_version": contract_version,
+        "receipt_present": receipt_present,
+        "tasks_present": tasks_present,
+        "task_result_count": len(task_results),
+        "summary_present": summary_present,
+        "errors": errors,
     }
 
 
 def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
     errors: list[str] = []
     schema_version = manifest.get("schema_version")
-    if schema_version not in {1, 2} or manifest.get("exchange_kind") != "feature-requirements":
+    if schema_version not in {1, 2, 3} or manifest.get("exchange_kind") != "feature-requirements":
         errors.append("неподдерживаемая схема manifest.json")
-        schema_version = 2
+        schema_version = CURRENT_MANIFEST_SCHEMA
     feature = manifest.get("feature")
     if not isinstance(feature, str) or not FEATURE_RE.fullmatch(feature) or feature != root.name:
         errors.append("feature в manifest.json не совпадает с каталогом функциональности")
@@ -315,7 +453,7 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
         errors.append("manifest.json содержит неподдерживаемый договор возвратов")
     if manifest.get("traceability") != traceability_contract(schema_version):
         errors.append("manifest.json содержит неподдерживаемый договор трассировки")
-    if schema_version == 2 and manifest.get("developer_sdd") != developer_sdd_contract():
+    if schema_version >= 2 and manifest.get("developer_sdd") != developer_sdd_contract(schema_version):
         errors.append("manifest.json не содержит договор преобразования в локальную SDD")
     if manifest.get("sdd_contract") != "../AGENTS.md" or not (root.parent / "AGENTS.md").is_file():
         errors.append("manifest.json не связан с корневым договором SDD")
@@ -343,6 +481,10 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
             continue
         if item.get("state") not in ALLOWED_REVISION_STATES:
             errors.append(f"редакция {item.get('revision')} имеет неизвестное состояние")
+        if schema_version >= 3 and item.get("returns_contract_version") not in {0, 1}:
+            errors.append(
+                f"редакция {item.get('revision')} не содержит поддерживаемую версию договора возвратов"
+            )
         relative = item.get("requirements_path")
         expected_requirements = f"revisions/{item.get('revision'):03d}/requirements.md"
         if relative != expected_requirements:
@@ -371,16 +513,16 @@ def prepare_in_exchange(
     feature_exchange = exchange / feature
     manifest_path = feature_exchange / "manifest.json"
     manifest = load_json(manifest_path) if manifest_path.is_file() else {
-        "schema_version": 2,
+        "schema_version": CURRENT_MANIFEST_SCHEMA,
         "exchange_kind": "feature-requirements",
         "feature": feature,
         "title": title_from_requirements(requirements_text, feature),
         "owner": {"analyst_id": analyst},
         "active_revision": None,
         "revisions": [],
-        "requested_returns": requested_returns_contract(2),
-        "traceability": traceability_contract(2),
-        "developer_sdd": developer_sdd_contract(),
+        "requested_returns": requested_returns_contract(CURRENT_MANIFEST_SCHEMA),
+        "traceability": traceability_contract(CURRENT_MANIFEST_SCHEMA),
+        "developer_sdd": developer_sdd_contract(CURRENT_MANIFEST_SCHEMA),
         "sdd_contract": "../AGENTS.md",
     }
     if manifest.get("feature") != feature:
@@ -405,12 +547,15 @@ def prepare_in_exchange(
             "manifest_path": manifest_path,
             "requirements_path": feature_exchange / active_entry["requirements_path"],
         }
-    if manifest.get("schema_version") == 1:
+    if manifest.get("schema_version") in {1, 2}:
+        for item in revisions:
+            if isinstance(item, dict):
+                item["returns_contract_version"] = 0
         manifest.update({
-            "schema_version": 2,
-            "requested_returns": requested_returns_contract(2),
-            "traceability": traceability_contract(2),
-            "developer_sdd": developer_sdd_contract(),
+            "schema_version": CURRENT_MANIFEST_SCHEMA,
+            "requested_returns": requested_returns_contract(CURRENT_MANIFEST_SCHEMA),
+            "traceability": traceability_contract(CURRENT_MANIFEST_SCHEMA),
+            "developer_sdd": developer_sdd_contract(CURRENT_MANIFEST_SCHEMA),
         })
     revision = max(
         (item["revision"] for item in revisions if isinstance(item, dict) and isinstance(item.get("revision"), int)),
@@ -434,6 +579,7 @@ def prepare_in_exchange(
         "created_at": now(),
         "requirements_path": f"revisions/{revision:03d}/requirements.md",
         "returns_path": f"revisions/{revision:03d}/returns",
+        "returns_contract_version": CURRENT_RETURNS_CONTRACT,
         "sha256": current_hash,
         "source": {
             "repository_role": "analytics",
@@ -712,6 +858,19 @@ def scan_command(args: argparse.Namespace) -> int:
                 continue
             revision = manifest["active_revision"]
             revision_entry = next(item for item in manifest["revisions"] if item["revision"] == revision)
+            processing = revision_processing_status(manifest_path.parent, revision_entry)
+            if processing["errors"]:
+                items.append({
+                    "source_role": role,
+                    "feature": feature,
+                    "owner": owner,
+                    "revision": revision,
+                    "status": "invalid-return-lifecycle",
+                    "processing": processing,
+                    "errors": processing["errors"],
+                    "new_returns": [],
+                })
+                continue
             returns = manifest_path.parent / revision_entry["returns_path"]
             processed = processed_ids(project / "features" / feature)
             new_returns = []
@@ -734,6 +893,7 @@ def scan_command(args: argparse.Namespace) -> int:
                 "owner": owner,
                 "revision": revision,
                 "status": "new-results" if new_returns else "no-new-results",
+                "processing": processing,
                 "new_returns": new_returns
             })
     print(json.dumps({
@@ -785,18 +945,32 @@ def record_processed_command(args: argparse.Namespace) -> int:
 def validate_command(args: argparse.Namespace) -> int:
     root = Path(args.exchange).expanduser().resolve()
     errors: list[str] = []
+    processing: list[dict[str, Any]] = []
     manifests = sorted(root.glob("*/manifest.json"))
     if not manifests:
         errors.append("В каталоге обмена нет manifest.json функциональностей")
     for manifest_path in manifests:
-        errors.extend(
-            f"{manifest_path.parent.name}: {error}"
-            for error in validate_manifest(load_json(manifest_path), manifest_path.parent)
-        )
+        feature = manifest_path.parent.name
+        manifest = load_json(manifest_path)
+        manifest_errors = validate_manifest(manifest, manifest_path.parent)
+        errors.extend(f"{feature}: {error}" for error in manifest_errors)
+        if manifest_errors:
+            continue
+        for entry in manifest["revisions"]:
+            status = revision_processing_status(manifest_path.parent, entry)
+            processing.append({
+                "feature": feature,
+                "revision": entry["revision"],
+                **status,
+            })
+            errors.extend(
+                f"{feature}:{entry['revision']:03d}: {error}" for error in status["errors"]
+            )
     print(json.dumps({
         "status": "valid" if not errors else "invalid",
         "exchange_root": str(root),
         "features": len(manifests),
+        "processing": processing,
         "errors": errors
     }, ensure_ascii=False, indent=2))
     return 0 if not errors else 1

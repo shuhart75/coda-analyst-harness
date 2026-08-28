@@ -97,6 +97,28 @@ class RequirementsExchangeTests(unittest.TestCase):
             "prepare", str(project), "demo", "--analyst", "ivan", *extra, env=env
         )
 
+    def write_receipt(self, prepared: dict, *, sha256: str | None = None) -> Path:
+        requirements_path = Path(prepared["requirements"])
+        feature_exchange = requirements_path.parents[2]
+        manifest = json.loads((feature_exchange / "manifest.json").read_text(encoding="utf-8"))
+        revision = prepared["revision"]
+        entry = next(item for item in manifest["revisions"] if item["revision"] == revision)
+        returns = requirements_path.parent / "returns"
+        returns.mkdir(exist_ok=True)
+        receipt = {
+            "schema_version": 1,
+            "kind": "requirements-revision-receipt",
+            "feature": "demo",
+            "requirements_revision": revision,
+            "requirements_sha256": sha256 or entry["sha256"],
+            "received_at": "2026-08-28T12:00:00+00:00",
+            "received_by": "coda-sdd",
+            "state": "accepted",
+        }
+        path = returns / "receipt.json"
+        path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return path
+
     def git(self, repository: Path, *args: str) -> str:
         result = run("git", "-C", str(repository), *args)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -148,13 +170,19 @@ class RequirementsExchangeTests(unittest.TestCase):
                 [path.name for path in (exchange / "demo/revisions/001").iterdir()],
             )
             manifest = json.loads((exchange / "demo/manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["schema_version"], 3)
             self.assertEqual(manifest["sdd_contract"], "../AGENTS.md")
             self.assertEqual(manifest["developer_sdd"]["input_role"], "business-requirements")
+            self.assertEqual(
+                manifest["developer_sdd"]["revision_receipt"],
+                "required-before-other-returns",
+            )
             self.assertEqual(
                 manifest["developer_sdd"]["contours"],
                 "backend-and-frontend-are-separate",
             )
+            self.assertEqual(manifest["revisions"][0]["returns_contract_version"], 1)
+            self.assertTrue((exchange / "receipt.template.json").is_file())
             self.assertFalse((exchange / "demo/revisions/001/returns").exists())
             self.assertFalse((project / "features/demo/slices").exists())
 
@@ -262,6 +290,7 @@ class RequirementsExchangeTests(unittest.TestCase):
             clone = run("git", "clone", "--quiet", str(remote), str(inspect))
             self.assertEqual(clone.returncode, 0, clone.stdout + clone.stderr)
             self.assertTrue((inspect / "requirements-exchange/demo/revisions/001/requirements.md").is_file())
+            self.assertTrue((inspect / "requirements-exchange/receipt.template.json").is_file())
 
     def test_rejected_code_push_falls_back_without_dirtying_code(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -396,9 +425,44 @@ class RequirementsExchangeTests(unittest.TestCase):
             second = self.prepare(project)
             self.assertEqual(second["revision"], 2)
             upgraded = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.assertEqual(upgraded["schema_version"], 2)
+            self.assertEqual(upgraded["schema_version"], 3)
             self.assertIn("developer_sdd", upgraded)
             self.assertEqual(len(upgraded["revisions"]), 2)
+            self.assertEqual(upgraded["revisions"][0]["returns_contract_version"], 0)
+            self.assertEqual(upgraded["revisions"][1]["returns_contract_version"], 1)
+
+    def test_schema_two_returns_remain_valid_legacy_history_after_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, feature = self.prepare_project(Path(temp))
+            first = self.prepare(project)
+            manifest_path = Path(first["manifest"])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["schema_version"] = 2
+            manifest["requested_returns"].pop("receipt")
+            manifest["developer_sdd"].pop("revision_receipt")
+            manifest["revisions"][0].pop("returns_contract_version")
+            manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            legacy_returns = Path(first["requirements"]).parent / "returns"
+            legacy_returns.mkdir()
+            (legacy_returns / "tasks.md").write_text(
+                "# Историческая декомпозиция\n", encoding="utf-8"
+            )
+
+            (feature / "requirements.md").write_text(
+                requirements("Система должна показать новый результат."), encoding="utf-8"
+            )
+            second = self.prepare(project)
+            upgraded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(upgraded["schema_version"], 3)
+            self.assertEqual(upgraded["revisions"][0]["returns_contract_version"], 0)
+            self.assertEqual(upgraded["revisions"][1]["returns_contract_version"], 1)
+            validated = self.command("validate", str(project / "requirements-exchange"))
+            states = {
+                item["revision"]: item["state"] for item in validated["processing"]
+            }
+            self.assertEqual(states, {1: "legacy-results-present", 2: "new"})
 
     def test_managed_receiver_contract_is_refreshed_for_new_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -416,20 +480,26 @@ class RequirementsExchangeTests(unittest.TestCase):
             )
             self.prepare(project)
             refreshed = agents.read_text(encoding="utf-8")
-            self.assertIn("Версия договора: `2`", refreshed)
+            self.assertIn("Версия договора: `3`", refreshed)
             self.assertIn("бизнес-контрактом, а не готовым локальным `spec.md`", refreshed)
             self.assertIn("Не объединяй клиентскую и серверную работу", refreshed)
+            self.assertIn("returns/receipt.json", refreshed)
 
     def test_scan_filters_by_owner_and_records_processing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             project, _ = self.prepare_project(Path(temp))
             prepared = self.prepare(project)
+            self.write_receipt(prepared)
             returns = Path(prepared["requirements"]).parent / "returns"
-            returns.mkdir()
             (returns / "tasks.md").write_text("# Задачи разработки\n", encoding="utf-8")
             scan = self.command("scan", str(project), "--analyst", "ivan")
-            self.assertEqual(scan["new_result_count"], 1)
-            return_id = scan["items"][0]["new_returns"][0]["return_id"]
+            self.assertEqual(scan["items"][0]["processing"]["state"], "decomposed")
+            self.assertEqual(scan["new_result_count"], 2)
+            return_id = next(
+                item["return_id"]
+                for item in scan["items"][0]["new_returns"]
+                if item["relative_path"].endswith("tasks.md")
+            )
             self.command(
                 "record-processed",
                 str(project),
@@ -442,7 +512,100 @@ class RequirementsExchangeTests(unittest.TestCase):
                 "ivan",
             )
             repeated_scan = self.command("scan", str(project), "--analyst", "ivan")
-            self.assertEqual(repeated_scan["new_result_count"], 0)
+            self.assertEqual(repeated_scan["new_result_count"], 1)
+            self.assertTrue(
+                repeated_scan["items"][0]["new_returns"][0]["relative_path"].endswith("receipt.json")
+            )
+
+    def test_processing_stages_are_derived_from_return_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _ = self.prepare_project(Path(temp))
+            prepared = self.prepare(project)
+
+            scan = self.command("scan", str(project), "--analyst", "ivan")
+            self.assertEqual(scan["items"][0]["processing"]["state"], "new")
+
+            self.write_receipt(prepared)
+            scan = self.command("scan", str(project), "--analyst", "ivan")
+            self.assertEqual(scan["items"][0]["processing"]["state"], "accepted")
+
+            returns = Path(prepared["requirements"]).parent / "returns"
+            (returns / "tasks.md").write_text("# Задачи разработки\n", encoding="utf-8")
+            scan = self.command("scan", str(project), "--analyst", "ivan")
+            self.assertEqual(scan["items"][0]["processing"]["state"], "decomposed")
+
+            (returns / "tasks").mkdir()
+            (returns / "tasks/DEV-001.md").write_text(
+                "# Результат DEV-001\n\nREQ-DEMO-001\n", encoding="utf-8"
+            )
+            scan = self.command("scan", str(project), "--analyst", "ivan")
+            self.assertEqual(scan["items"][0]["processing"]["state"], "in-progress")
+
+            (returns / "summary.md").write_text(
+                "# Итог\n\n| Требование | Состояние |\n|---|---|\n| REQ-DEMO-001 | реализовано |\n",
+                encoding="utf-8",
+            )
+            scan = self.command("scan", str(project), "--analyst", "ivan")
+            self.assertEqual(scan["items"][0]["processing"]["state"], "completed")
+            validated = self.command("validate", str(project / "requirements-exchange"))
+            self.assertEqual(validated["processing"][0]["state"], "completed")
+
+    def test_returns_before_receipt_are_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _ = self.prepare_project(Path(temp))
+            prepared = self.prepare(project)
+            returns = Path(prepared["requirements"]).parent / "returns"
+            returns.mkdir()
+            (returns / "tasks.md").write_text("# Задачи разработки\n", encoding="utf-8")
+
+            scan = self.command("scan", str(project), "--analyst", "ivan")
+            self.assertEqual(scan["items"][0]["status"], "invalid-return-lifecycle")
+            self.assertIn("до квитанции", scan["items"][0]["errors"][0])
+            result = run(
+                sys.executable,
+                str(SCRIPT),
+                "validate",
+                str(project / "requirements-exchange"),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("до квитанции", result.stdout)
+
+    def test_receipt_must_match_revision_checksum(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _ = self.prepare_project(Path(temp))
+            prepared = self.prepare(project)
+            self.write_receipt(prepared, sha256="0" * 64)
+            scan = self.command("scan", str(project), "--analyst", "ivan")
+            self.assertEqual(scan["items"][0]["processing"]["state"], "invalid")
+            self.assertTrue(any("requirements_sha256" in error for error in scan["items"][0]["errors"]))
+
+    def test_summary_must_cover_every_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _ = self.prepare_project(Path(temp))
+            prepared = self.prepare(project)
+            self.write_receipt(prepared)
+            returns = Path(prepared["requirements"]).parent / "returns"
+            (returns / "tasks.md").write_text("# Задачи разработки\n", encoding="utf-8")
+            (returns / "summary.md").write_text(
+                "# Итог\n\nТребования не перечислены.\n", encoding="utf-8"
+            )
+            scan = self.command("scan", str(project), "--analyst", "ivan")
+            self.assertEqual(scan["items"][0]["processing"]["state"], "invalid")
+            self.assertTrue(any("REQ-DEMO-001" in error for error in scan["items"][0]["errors"]))
+
+    def test_new_revision_requires_its_own_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, feature = self.prepare_project(Path(temp))
+            first = self.prepare(project)
+            self.write_receipt(first)
+            (feature / "requirements.md").write_text(
+                requirements("Система должна показать новый результат."), encoding="utf-8"
+            )
+            second = self.prepare(project)
+            self.assertEqual(second["revision"], 2)
+            scan = self.command("scan", str(project), "--analyst", "ivan")
+            self.assertEqual(scan["items"][0]["revision"], 2)
+            self.assertEqual(scan["items"][0]["processing"]["state"], "new")
 
     def test_owned_scan_requires_identity_but_explicit_all_does_not(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
