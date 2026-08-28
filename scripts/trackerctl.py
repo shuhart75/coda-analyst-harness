@@ -12,11 +12,13 @@ from pathlib import Path
 from typing import Any
 
 
-PROTOCOL = "active-inventory-v2"
+PROTOCOL = "targeted-tracker-v1"
 SCHEMA_VERSION = 1
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
+SCOPE_KINDS = ("epic", "tasks")
+OBSERVATION_STATES = ("value", "absent", "not-returned")
 ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9_]*-[1-9][0-9]*$")
 RUN_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$")
 TEAM_ID = re.compile(r"^(AN|A|BE|B|FE|F|QA|Q|OTHER|O)([1-9][0-9]*)$", re.I)
@@ -27,11 +29,6 @@ TEAM_PREFIXES = {
     "QA": ("QA", "tester"), "Q": ("QA", "tester"),
     "OTHER": ("OTHER", "other"), "O": ("OTHER", "other"),
 }
-OBSERVATION_STATES = ("value", "absent", "not-returned")
-RELEVANCE = ("relevant", "ambiguous", "irrelevant")
-SELECTION_BASES = (
-    "known-key", "linked-counterpart", "description-match", "same-epic", "ambiguous"
-)
 SP_UNITS = {
     "sp", "story point", "story points", "person day", "person days",
     "человеко день", "человеко дни", "человекодень", "человекодни",
@@ -82,59 +79,8 @@ def session_log_path(run_id: str) -> Path:
     return run_root(run_id) / "tracker-session-log.md"
 
 
-def log_value(value: Any, *, limit: int = 500) -> str:
-    text = str(value).replace("\r", " ").replace("\n", " ").replace("|", "\\|")
-    return text if len(text) <= limit else text[: limit - 3] + "..."
-
-
-def initialize_session_log(run_id: str, feature: str, known: list[dict], providers: list[str]) -> None:
-    path = session_log_path(run_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    known_keys = ", ".join(item["key"] for item in known) or "нет"
-    path.write_text(
-        "# Журнал чтения трекеров\n\n"
-        f"- Протокол: `{PROTOCOL}`\n"
-        f"- Run ID: `{run_id}`\n"
-        f"- Функциональность: `{log_value(feature)}`\n"
-        f"- Создан: `{now()}`\n"
-        f"- Провайдеры: `{', '.join(providers)}`\n"
-        f"- Известные ключи: `{known_keys}`\n\n"
-        "Журнал создаётся автоматически и хранится рядом с остальными файлами tracker-run. "
-        "Он не является источником предметных фактов и не заменяет входные снимки.\n\n"
-        "| Время UTC | Источник | Событие | Провайдер | Evidence | Детали |\n"
-        "|---|---|---|---|---|---|\n",
-        encoding="utf-8",
-    )
-
-
-def append_session_log(
-    run_id: str, *, source: str, event: str, provider: str | None = None,
-    evidence_value: str | None = None, details: str = "",
-) -> None:
-    path = session_log_path(run_id)
-    if not path.is_file():
-        raise ValueError(f"Для tracker-run отсутствует диагностический журнал: {path}")
-    row = (
-        f"| {now()} | {log_value(source)} | {log_value(event)} | "
-        f"{log_value(provider or '-')} | "
-        f"{f'`{log_value(evidence_value)}`' if evidence_value else '-'} | {log_value(details)} |\n"
-    )
-    with path.open("a", encoding="utf-8") as stream:
-        stream.write(row)
-
-
-def logged_mcp_evidence(run_id: str, call: str) -> bool:
-    path = session_log_path(run_id)
-    provider = call.split(":", 2)[1] if call.startswith("mcp:") else ""
-    marker = f"| mcp | call | {provider} | `{call}` |"
-    return path.is_file() and marker in path.read_text(encoding="utf-8")
-
-
-def require_logged_mcp(run_id: str, call: str) -> None:
-    if not logged_mcp_evidence(run_id, call):
-        raise ValueError(
-            "Evidence MCP-вызова сначала нужно записать в tracker-session-log.md через mcp-log"
-        )
+def run_meta_path(run_id: str) -> Path:
+    return run_root(run_id) / "scope.json"
 
 
 def load_json(path: Path) -> Any:
@@ -149,10 +95,15 @@ def save_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def key(value: str, label: str = "Ключ задачи") -> str:
+def issue_key(value: str, label: str = "Ключ задачи") -> str:
+    value = value.strip().upper()
     if not ISSUE_KEY.fullmatch(value):
         raise ValueError(f"{label} должен иметь вид PROJECT-123: {value}")
     return value
+
+
+def unique_keys(values: list[str]) -> list[str]:
+    return sorted(set(issue_key(value) for value in values))
 
 
 def evidence(value: str, provider: str) -> str:
@@ -202,15 +153,15 @@ def validate_config(config: Any) -> dict:
         if not isinstance(mapping, dict):
             raise ValueError(f"participants.{provider} должен быть объектом")
         used: dict[str, str] = {}
-        for account, participant in mapping.items():
-            if not isinstance(account, str) or not isinstance(participant, dict):
+        for account, member in mapping.items():
+            if not isinstance(account, str) or not isinstance(member, dict):
                 raise ValueError(f"Некорректный participants.{provider}")
-            team = participant.get("team_id")
-            if not isinstance(team, str) or normalized_team_id(team) != team:
+            team_id = member.get("team_id")
+            if not isinstance(team_id, str) or normalized_team_id(team_id) != team_id:
                 raise ValueError(f"Некорректный team_id participants.{provider}.{account}")
-            previous = used.setdefault(team, account)
+            previous = used.setdefault(team_id, account)
             if previous != account:
-                raise ValueError(f"team_id {team} назначен нескольким аккаунтам {provider}")
+                raise ValueError(f"team_id {team_id} назначен нескольким аккаунтам {provider}")
     types = config.get("development_issue_types")
     if not isinstance(types, list) or not all(isinstance(item, str) for item in types):
         raise ValueError("development_issue_types должен быть списком строк")
@@ -303,29 +254,117 @@ def config_status(config: dict) -> dict:
     gaps = config_gaps(config)
     if gaps:
         return {"status": "tracker-config-incomplete", "path": str(config_path()), "gaps": gaps, **stop_payload(questions[gaps[0]])}
+    return {"status": "tracker-config-ready", "path": str(config_path()), "gaps": [], "must_stop": False, "allowed_next_action": "begin"}
+
+
+def log_value(value: Any, *, limit: int = 500) -> str:
+    text = str(value).replace("\r", " ").replace("\n", " ").replace("|", "\\|")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def initialize_session_log(run_id: str, scope: dict, providers: list[str]) -> None:
+    path = session_log_path(run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Журнал чтения трекеров\n\n"
+        f"- Протокол: `{PROTOCOL}`\n"
+        f"- Run ID: `{run_id}`\n"
+        f"- Область: `{scope['kind']}` в `{scope['provider']}`\n"
+        f"- Контекст: `{log_value(scope['label'])}`\n"
+        f"- Создан: `{now()}`\n"
+        f"- Провайдеры: `{', '.join(providers)}`\n"
+        f"- Входные ключи: `{', '.join(scope['ids'])}`\n"
+        f"- Источник области: `{log_value(scope['source'])}`\n\n"
+        "Журнал создаётся автоматически и не заменяет входные снимки.\n\n"
+        "| Время UTC | Источник | Событие | Провайдер | Evidence | Детали |\n"
+        "|---|---|---|---|---|---|\n",
+        encoding="utf-8",
+    )
+
+
+def append_session_log(run_id: str, *, source: str, event: str, provider: str | None = None, evidence_value: str | None = None, details: str = "") -> None:
+    path = session_log_path(run_id)
+    if not path.is_file():
+        raise ValueError(f"Для tracker-run отсутствует диагностический журнал: {path}")
+    row = (
+        f"| {now()} | {log_value(source)} | {log_value(event)} | {log_value(provider or '-')} | "
+        f"{f'`{log_value(evidence_value)}`' if evidence_value else '-'} | {log_value(details)} |\n"
+    )
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(row)
+
+
+def logged_mcp_details(run_id: str, call: str) -> str | None:
+    path = session_log_path(run_id)
+    if not path.is_file():
+        return None
+    provider = call.split(":", 2)[1] if call.startswith("mcp:") else ""
+    marker = f"| mcp | call | {provider} | `{call}` |"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if marker in line:
+            return line
+    return None
+
+
+def require_logged_mcp(run_id: str, call: str, *, outcome: str | None = None) -> None:
+    details = logged_mcp_details(run_id, call)
+    if details is None:
+        raise ValueError("Evidence MCP-вызова сначала нужно записать через mcp-log")
+    if outcome and f"outcome={outcome}" not in details:
+        raise ValueError(f"MCP-вызов должен иметь outcome={outcome}")
+
+
+def tql_epic(epic: str) -> str:
+    return f"unit IN linkedUnitsOf(\"unit = '{epic}'\", \"Состоит из\")"
+
+
+def tql_units(keys: list[str]) -> str:
+    return " or ".join(f'unit = "{item}"' for item in keys)
+
+
+def tql_jira_keys(keys: list[str]) -> str:
+    return " or ".join(f'issue_key = "{item}"' for item in keys)
+
+
+def jql_keys(keys: list[str]) -> str:
+    return "key IN (" + ", ".join(f'"{item}"' for item in keys) + ")"
+
+
+def jql_epic(epic: str, method: str) -> str:
+    if method == "parent":
+        return f'parent = "{epic}"'
+    if method == "epic-link":
+        return f'"Epic Link" = "{epic}"'
+    raise ValueError(f"Неизвестный способ раскрытия Jira-эпика: {method}")
+
+
+def query_spec(provider: str, purpose: str, exact: str | None = None, *, method: str | None = None) -> dict:
     return {
-        "status": "tracker-config-ready", "path": str(config_path()), "gaps": [],
-        "must_stop": False, "allowed_next_action": "begin",
+        "state": "pending", "purpose": purpose,
+        "language": "TQL" if provider == "sbertrek" else "JQL",
+        "exact": exact, "method": method, "pages": [], "keys": [],
+        "unavailable_reason": None, "unavailable_evidence": None,
     }
 
 
-def snapshot_template(provider: str, feature: str, known: list[dict], config: dict) -> dict:
+def primary_query(scope: dict) -> dict:
+    provider, kind, ids = scope["provider"], scope["kind"], scope["ids"]
+    if provider == "sbertrek" and kind == "epic":
+        return query_spec(provider, "epic-members", tql_epic(ids[0]))
+    if provider == "sbertrek":
+        return query_spec(provider, "task-cards", tql_units(ids))
+    if kind == "epic":
+        return query_spec(provider, "epic-members", jql_epic(ids[0], "parent"), method="parent")
+    return query_spec(provider, "task-cards", jql_keys(ids))
+
+
+def snapshot_template(provider: str, scope: dict, config: dict) -> dict:
+    query = primary_query(scope) if provider == scope["provider"] else query_spec(provider, "counterparts")
     return {
-        "protocol": PROTOCOL,
-        "schema_version": SCHEMA_VERSION,
-        "provider": provider,
-        "captured_at": None,
-        "scope": {
-            "feature": feature,
-            "projects": config["projects"][provider],
-            "known_keys": [item["key"] for item in known],
-            "known_key_evidence": known,
-        },
-        "inventory": {
-            "state": "pending", "query": None, "pages": [], "keys": [], "jira_links": {},
-            "unavailable_reason": None, "unavailable_evidence": None,
-        },
-        "selection": {"state": "pending", "issues": []},
+        "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION,
+        "provider": provider, "captured_at": None, "scope": scope,
+        "projects": config["projects"][provider], "query": query,
+        "issues": [], "collection_complete": False,
     }
 
 
@@ -346,12 +385,50 @@ def load_snapshot(run_id: str, provider: str) -> tuple[Path, dict]:
     return path, validate_snapshot(load_json(path), provider)
 
 
+def enabled_providers(config: dict) -> tuple[str, ...]:
+    return PROVIDERS if config["jira_enabled"] else ("sbertrek",)
+
+
+def all_snapshots(run_id: str, config: dict, *, finalized: bool = False) -> dict[str, dict]:
+    return {provider: validate_snapshot(load_json(snapshot_path(run_id, provider)), provider, finalized) for provider in enabled_providers(config)}
+
+
 def ensure_mutable(snapshot: dict) -> None:
     if snapshot.get("captured_at"):
         raise ValueError("Финализированный снимок неизменяем")
 
 
-def write_status(run_id: str, status: str, *, gaps: list[str] | None = None, allowed: str | None = None, complete: bool = False) -> dict:
+def issue_by_key(snapshot: dict, key_value: str) -> dict | None:
+    return next((item for item in snapshot["issues"] if item["key"] == key_value), None)
+
+
+def current_query(run_id: str, config: dict) -> tuple[str, dict] | None:
+    snapshots = all_snapshots(run_id, config)
+    scope = next(iter(snapshots.values()))["scope"]
+    primary = snapshots[scope["provider"]]
+    if primary["query"]["state"] in {"pending", "collecting"}:
+        return scope["provider"], primary["query"]
+    secondary_provider = "jira" if scope["provider"] == "sbertrek" else "sbertrek"
+    secondary = snapshots.get(secondary_provider)
+    if secondary and secondary["query"]["state"] in {"pending", "collecting"} and secondary["query"]["exact"]:
+        return secondary_provider, secondary["query"]
+    return None
+
+
+def next_query_payload(provider: str, query: dict) -> dict:
+    return {
+        "allowed_next_action": "call-exact-mcp-query",
+        "next_query": {
+            "provider": provider, "purpose": query["purpose"],
+            "language": query["language"], "query": query["exact"],
+            "method": query.get("method"), "exact_query_required": True,
+            "pagination_required": True,
+        },
+        "required_sequence": ["MCP call", "mcp-log", "query-page"],
+    }
+
+
+def write_status(run_id: str, status: str, *, gaps: list[str] | None = None, allowed: str | None = None, complete: bool = False, extra: dict | None = None) -> dict:
     payload = {
         "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": run_id,
         "status": status, "workflow_complete": complete,
@@ -360,47 +437,28 @@ def write_status(run_id: str, status: str, *, gaps: list[str] | None = None, all
         "paths": {
             "run_status": str(status_path(run_id)),
             "session_log": str(session_log_path(run_id)),
+            "scope": str(run_meta_path(run_id)),
             "input": str(run_root(run_id) / "input"),
         },
+        **(extra or {}),
     }
     save_json(status_path(run_id), payload)
     return payload
-
-
-def parse_known(values: list[str]) -> list[dict]:
-    result = []
-    for value in values:
-        issue_key, sep, source = value.partition("=")
-        if not sep or not source.strip():
-            raise ValueError("--known-key задаётся как KEY=SOURCE")
-        result.append({"key": key(issue_key), "source": source.strip()})
-    unique = {item["key"]: item for item in result}
-    return [unique[item] for item in sorted(unique)]
-
-
-def issue_by_key(snapshot: dict, issue_key: str) -> dict | None:
-    return next((item for item in snapshot["selection"]["issues"] if item["key"] == issue_key), None)
-
-
-def page_evidence_for_key(snapshot: dict, issue_key: str) -> set[str]:
-    return {page["evidence"] for page in snapshot["inventory"]["pages"] if issue_key in page["keys"]}
 
 
 def canonical_estimate(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
     result = dict(value)
-    unit = result.get("unit")
-    if isinstance(unit, str) and " ".join(unit.casefold().replace("-", " ").replace("_", " ").split()) in SP_UNITS:
+    normalized = " ".join(str(result.get("unit")).casefold().replace("-", " ").replace("_", " ").split())
+    if normalized in SP_UNITS:
         result["unit"] = "story-points"
     return result
 
 
 def parse_release(value: str) -> dict:
     release_key, sep, name = value.partition("=")
-    if sep:
-        return {"key": release_key.strip(), "name": name.strip()}
-    return {"key": value.strip(), "name": value.strip()}
+    return {"key": release_key.strip(), "name": name.strip()} if sep else {"key": value.strip(), "name": value.strip()}
 
 
 def participant(account_id: str | None, name: str | None) -> dict | None:
@@ -418,108 +476,6 @@ def participant_role(config: dict, provider: str, value: Any) -> str | None:
     return team_role(mapping["team_id"]) if mapping else None
 
 
-def selected_relevant(snapshot: dict) -> list[dict]:
-    return [item for item in snapshot["selection"]["issues"] if item["relevance"] == "relevant"]
-
-
-def all_enabled_snapshots(run_id: str, config: dict, finalized: bool = False) -> dict[str, dict]:
-    providers = PROVIDERS if config["jira_enabled"] else ("sbertrek",)
-    return {provider: validate_snapshot(load_json(snapshot_path(run_id, provider)), provider, finalized) for provider in providers}
-
-
-def inventory_gaps(snapshot: dict) -> list[str]:
-    inventory = snapshot["inventory"]
-    if inventory["state"] == "pending":
-        return [f"{snapshot['provider']}.inventory.pending"]
-    if inventory["state"] == "complete":
-        pages = inventory["pages"]
-        if not pages or not pages[-1]["last_page"]:
-            return [f"{snapshot['provider']}.inventory.pagination-incomplete"]
-    return []
-
-
-def selection_gaps(snapshot: dict) -> list[str]:
-    gaps = []
-    if snapshot["selection"]["state"] != "complete":
-        gaps.append(f"{snapshot['provider']}.selection.pending")
-    for issue in selected_relevant(snapshot):
-        history = issue["history"]
-        if history["state"] == "pending":
-            gaps.append(f"{snapshot['provider']}.{issue['key']}.history.pending")
-    return gaps
-
-
-def required_known_key_gaps(snapshot: dict) -> list[str]:
-    active_known = set(snapshot["scope"]["known_keys"]) & set(snapshot["inventory"]["keys"])
-    selected = {item["key"] for item in selected_relevant(snapshot)}
-    return [f"{snapshot['provider']}.{item}.active-known-key-not-selected" for item in sorted(active_known - selected)]
-
-
-def active_link_map(snapshots: dict[str, dict]) -> dict[str, str]:
-    sber = snapshots["sbertrek"]
-    return {
-        source: target for source, target in sber["inventory"]["jira_links"].items()
-        if source in sber["inventory"]["keys"]
-        and "jira" in snapshots and target in snapshots["jira"]["inventory"]["keys"]
-    }
-
-
-def link_closure_gaps(snapshots: dict[str, dict]) -> list[str]:
-    if "jira" not in snapshots:
-        return []
-    links = active_link_map(snapshots)
-    sber_selected = {item["key"] for item in selected_relevant(snapshots["sbertrek"])}
-    jira_selected = {item["key"] for item in selected_relevant(snapshots["jira"])}
-    gaps = []
-    for sber_key, jira_key in links.items():
-        if sber_key in sber_selected and jira_key not in jira_selected:
-            gaps.append(f"jira.{jira_key}.linked-counterpart-not-selected")
-        if jira_key in jira_selected and sber_key not in sber_selected:
-            gaps.append(f"sbertrek.{sber_key}.linked-counterpart-not-selected")
-    return gaps
-
-
-def first_ambiguous(snapshots: dict[str, dict]) -> tuple[str, dict] | None:
-    for provider in PROVIDERS:
-        if provider not in snapshots:
-            continue
-        for issue in snapshots[provider]["selection"]["issues"]:
-            if issue["relevance"] == "ambiguous":
-                return provider, issue
-    return None
-
-
-def relevance_question(provider: str, issue: dict) -> str:
-    summary = issue.get("summary") or "без названия"
-    return f"Относится ли задача {provider} {issue['key']} «{summary}» к этой фиче?"
-
-
-def first_unknown_participant(snapshots: dict[str, dict], config: dict) -> dict | None:
-    development_types = {item.casefold() for item in config["development_issue_types"]}
-    for provider in PROVIDERS:
-        if provider not in snapshots:
-            continue
-        for issue in selected_relevant(snapshots[provider]):
-            if str(issue.get("issue_type") or "").casefold() not in development_types:
-                continue
-            values = [issue.get("assignee")]
-            for event in issue["history"]["events"]:
-                if event["field"] == "assignee":
-                    values.extend((event.get("from"), event.get("to")))
-            for value in values:
-                if isinstance(value, dict) and value.get("id") and value["id"] not in config["participants"][provider]:
-                    return {"provider": provider, "account_id": value["id"], "name": value.get("name") or value["id"]}
-    return None
-
-
-def pending_participant_path(run_id: str) -> Path:
-    return run_root(run_id) / "pending-participant.json"
-
-
-def pending_relevance_path(run_id: str) -> Path:
-    return run_root(run_id) / "pending-relevance.json"
-
-
 def merged_value(field: str, sber: dict | None, jira: dict | None) -> tuple[Any, str | None, dict | None]:
     svalue = sber.get(field) if sber else None
     jvalue = jira.get(field) if jira else None
@@ -535,11 +491,11 @@ def merged_value(field: str, sber: dict | None, jira: dict | None) -> tuple[Any,
 def merged_history(sber: dict | None, jira: dict | None) -> list[dict]:
     seen: set[str] = set()
     result = []
-    for provider, issue in (("sbertrek", sber), ("jira", jira)):
-        if not issue:
+    for provider, item in (("sbertrek", sber), ("jira", jira)):
+        if not item:
             continue
-        for event in issue["history"]["events"]:
-            fingerprint = json.dumps({k: event.get(k) for k in ("at", "field", "from", "to")}, ensure_ascii=False, sort_keys=True)
+        for event in item["history"]["events"]:
+            fingerprint = json.dumps({name: event.get(name) for name in ("at", "field", "from", "to")}, ensure_ascii=False, sort_keys=True)
             if fingerprint in seen:
                 continue
             seen.add(fingerprint)
@@ -548,58 +504,84 @@ def merged_history(sber: dict | None, jira: dict | None) -> list[dict]:
 
 
 def development_state(sber: dict | None, jira: dict | None, config: dict) -> dict:
-    issue = sber or jira or {}
+    item = sber or jira or {}
     provider = "sbertrek" if sber else "jira"
-    issue_type = str(issue.get("issue_type") or "").casefold()
-    if issue_type not in {item.casefold() for item in config["development_issue_types"]}:
+    if str(item.get("issue_type") or "").casefold() not in {value.casefold() for value in config["development_issue_types"]}:
         return {"state": "not-development-unit", "basis": "issue-type"}
-    status = str(issue.get("status") or "")
-    normalized = status.casefold()
-    if normalized in normalized_status_set(config, provider, "excluded"):
+    status = str(item.get("status") or "")
+    if status.casefold() in normalized_status_set(config, provider, "excluded"):
         return {"state": "excluded", "basis": f"{provider}-status", "status": status}
-    if normalized in normalized_status_set(config, provider, "completed"):
+    if status.casefold() in normalized_status_set(config, provider, "completed"):
         return {"state": "completed", "basis": f"{provider}-status", "status": status}
-    history = merged_history(sber, jira)
-    assignee_events = [event for event in history if event["field"] == "assignee"]
+    assignee_events = [event for event in merged_history(sber, jira) if event["field"] == "assignee"]
     if assignee_events:
         latest = assignee_events[-1]
-        source = latest["source"]
-        before = participant_role(config, source, latest.get("from"))
-        after = participant_role(config, source, latest.get("to"))
+        before = participant_role(config, latest["source"], latest.get("from"))
+        after = participant_role(config, latest["source"], latest.get("to"))
         if before == "developer" and after and after != "developer":
             return {"state": "completed", "basis": "developer-handoff", "at": latest["at"]}
-    return {"state": "in-progress", "basis": f"{provider}-active-inventory"}
+    return {"state": "in-progress", "basis": f"{provider}-targeted-read"}
+
+
+def first_unknown_participant(snapshots: dict[str, dict], config: dict) -> dict | None:
+    development_types = {item.casefold() for item in config["development_issue_types"]}
+    for provider in PROVIDERS:
+        snapshot = snapshots.get(provider)
+        if not snapshot:
+            continue
+        for item in snapshot["issues"]:
+            if str(item.get("issue_type") or "").casefold() not in development_types:
+                continue
+            values = [item.get("assignee")]
+            for event in item["history"]["events"]:
+                if event["field"] == "assignee":
+                    values.extend((event.get("from"), event.get("to")))
+            for value in values:
+                if isinstance(value, dict) and value.get("id") and value["id"] not in config["participants"][provider]:
+                    return {"provider": provider, "account_id": value["id"], "name": value.get("name") or value["id"]}
+    return None
+
+
+def pending_participant_path(run_id: str) -> Path:
+    return run_root(run_id) / "pending-participant.json"
+
+
+def snapshot_gaps(snapshot: dict) -> list[str]:
+    gaps = []
+    if not snapshot["collection_complete"]:
+        gaps.append(f"{snapshot['provider']}.collection.pending")
+    missing = set(snapshot["query"]["keys"]) - {item["key"] for item in snapshot["issues"]}
+    gaps.extend(f"{snapshot['provider']}.{item}.card.pending" for item in sorted(missing))
+    for item in snapshot["issues"]:
+        if item["history"]["state"] == "pending":
+            gaps.append(f"{snapshot['provider']}.{item['key']}.history.pending")
+    return gaps
 
 
 def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
     sber = snapshots["sbertrek"]
     jira = snapshots.get("jira")
-    sber_issues = {item["key"]: item for item in selected_relevant(sber)}
-    jira_issues = {item["key"]: item for item in selected_relevant(jira)} if jira else {}
-    links = sber["inventory"]["jira_links"]
-    paired_jira = set()
-    merged = []
-    discrepancies = []
+    sber_issues = {item["key"]: item for item in sber["issues"]}
+    jira_issues = {item["key"]: item for item in jira["issues"]} if jira else {}
+    paired_jira: set[str] = set()
+    merged, discrepancies = [], []
     for sber_key, sissue in sorted(sber_issues.items()):
-        jira_key = links.get(sber_key)
+        jira_key = sissue.get("jira_key")
         jissue = jira_issues.get(jira_key) if jira_key else None
         if jissue:
             paired_jira.add(jira_key)
-        record = {"sbertrek_key": sber_key, "jira_key": jira_key}
-        sources = {}
-        conflicts = []
+        record: dict[str, Any] = {"sbertrek_key": sber_key, "jira_key": jira_key}
+        sources, conflicts = {}, []
         for field in ("summary", "description", "issue_type", "status", "assignee", "estimate", "epic", "releases"):
             value, source, conflict = merged_value(field, sissue, jissue)
-            record[field] = value
-            sources[field] = source
+            record[field], sources[field] = value, source
             if conflict:
                 conflicts.append(conflict)
                 discrepancies.append({"kind": "field-conflict", "sbertrek_key": sber_key, "jira_key": jira_key, **conflict})
-        record["field_sources"] = sources
-        record["conflicts"] = conflicts
-        record["history"] = merged_history(sissue, jissue)
-        record["development"] = development_state(sissue, jissue, config)
+        record.update({"field_sources": sources, "conflicts": conflicts, "history": merged_history(sissue, jissue), "development": development_state(sissue, jissue, config)})
         merged.append(record)
+        if jira_key and not jissue:
+            discrepancies.append({"kind": "jira-counterpart-not-returned", "sbertrek_key": sber_key, "jira_key": jira_key})
     for jira_key, jissue in sorted(jira_issues.items()):
         if jira_key in paired_jira:
             continue
@@ -610,73 +592,49 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
         record["development"] = development_state(None, jissue, config)
         merged.append(record)
         discrepancies.append({"kind": "jira-only", "jira_key": jira_key})
-    known = set(sber["scope"]["known_keys"])
-    inventory_keys = set(sber["inventory"]["keys"]) | (set(jira["inventory"]["keys"]) if jira else set())
-    limitations = [f"known-key-not-in-active-inventory:{item}" for item in sorted(known - inventory_keys)]
-    if jira:
-        for source, target in sorted(sber["inventory"]["jira_links"].items()):
-            if source in sber_issues and target not in jira["inventory"]["keys"]:
-                limitations.append(f"linked-jira-not-in-active-inventory:{source}={target}")
-    if jira and jira["inventory"]["state"] == "unavailable":
-        limitations.append("jira-active-inventory-unavailable")
+    scope = sber["scope"]
+    primary = snapshots[scope["provider"]]
+    limitations = []
+    if scope["kind"] == "tasks":
+        limitations.extend(f"scope-key-not-returned:{scope['provider']}:{item}" for item in sorted(set(scope["ids"]) - set(primary["query"]["keys"])))
     for provider, snapshot in snapshots.items():
-        for issue in selected_relevant(snapshot):
-            if issue["history"]["state"] == "unavailable":
-                limitations.append(f"{provider}-history-unavailable:{issue['key']}")
-    counts = {
-        "sbertrek_inventory": len(sber["inventory"]["keys"]),
-        "jira_inventory": len(jira["inventory"]["keys"]) if jira else 0,
-        "sbertrek_selected": len(sber_issues),
-        "jira_selected": len(jira_issues),
-        "matched": len(paired_jira),
-        "merged": len(merged),
-        "discrepancies": len(discrepancies),
-    }
-    groupings = {"epics": {}, "releases": {}}
-    for issue in merged:
-        identity = issue.get("sbertrek_key") or issue.get("jira_key")
-        epic = issue.get("epic")
+        if snapshot["query"]["state"] == "unavailable":
+            limitations.append(f"{provider}-targeted-query-unavailable")
+        for item in snapshot["issues"]:
+            if item["history"]["state"] == "unavailable":
+                limitations.append(f"{provider}-history-unavailable:{item['key']}")
+    counts = {"sbertrek": len(sber_issues), "jira": len(jira_issues), "matched": len(paired_jira), "merged": len(merged), "discrepancies": len(discrepancies)}
+    groupings: dict[str, dict[str, list[str]]] = {"epics": {}, "releases": {}}
+    for item in merged:
+        identity = item.get("sbertrek_key") or item.get("jira_key")
+        epic = item.get("epic")
         epic_key = epic.get("key") if isinstance(epic, dict) else None
         groupings["epics"].setdefault(epic_key or "unassigned", []).append(identity)
-        releases = issue.get("releases") or []
+        releases = item.get("releases") or []
         if not releases:
             groupings["releases"].setdefault("unassigned", []).append(identity)
         for release in releases:
             release_key = release.get("key") if isinstance(release, dict) else str(release)
             groupings["releases"].setdefault(release_key or "unassigned", []).append(identity)
-    return {
-        "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION,
-        "status": "tracker-read-reconciled", "feature": sber["scope"]["feature"],
-        "counts": counts, "issues": merged, "groupings": groupings, "discrepancies": discrepancies,
-        "limitations": limitations,
-    }
+    return {"protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "status": "tracker-read-reconciled", "scope": scope, "counts": counts, "issues": merged, "groupings": groupings, "discrepancies": discrepancies, "limitations": limitations}
 
 
 def render_report(result: dict) -> str:
-    lines = [f"# Сверка трекеров: {result['feature']}", "", "## Сводка", ""]
-    labels = {
-        "sbertrek_inventory": "Активных в SberTrek", "jira_inventory": "Активных в Jira",
-        "sbertrek_selected": "Выбрано в SberTrek", "jira_selected": "Выбрано в Jira",
-        "matched": "Склеено пар", "merged": "Итоговых задач", "discrepancies": "Расхождений",
-    }
+    scope = result["scope"]
+    lines = [f"# Сверка трекеров: {scope['label']}", "", "## Область", "", f"- Тип: `{scope['kind']}`", f"- Исходный трекер: `{scope['provider']}`", f"- Ключи: {', '.join(scope['ids'])}", "", "## Сводка", ""]
+    labels = {"sbertrek": "Задач SberTrek", "jira": "Задач Jira", "matched": "Склеено пар", "merged": "Итоговых задач", "discrepancies": "Расхождений"}
     lines += [f"- {labels[name]}: {value}" for name, value in result["counts"].items()]
     lines += ["", "## Задачи", "", "| SberTrek | Jira | Название | Статус | Исполнитель | Оценка | Состояние |", "|---|---|---|---|---|---|---|"]
-    for issue in result["issues"]:
-        assignee = issue.get("assignee") or {}
-        estimate = issue.get("estimate") or {}
-        cells = [
-            issue.get("sbertrek_key") or "—", issue.get("jira_key") or "—",
-            issue.get("summary") or "—", issue.get("status") or "—",
-            assignee.get("name") or assignee.get("id") or "—" if isinstance(assignee, dict) else str(assignee),
-            f"{estimate.get('value')} {estimate.get('unit')}" if isinstance(estimate, dict) and estimate.get("value") is not None else "—",
-            issue["development"]["state"],
-        ]
+    for item in result["issues"]:
+        assignee, estimate = item.get("assignee") or {}, item.get("estimate") or {}
+        assignee_text = assignee.get("name") or assignee.get("id") or "—" if isinstance(assignee, dict) else str(assignee)
+        estimate_text = f"{estimate.get('value')} {estimate.get('unit')}" if isinstance(estimate, dict) and estimate.get("value") is not None else "—"
+        cells = [item.get("sbertrek_key") or "—", item.get("jira_key") or "—", item.get("summary") or "—", item.get("status") or "—", assignee_text, estimate_text, item["development"]["state"]]
         lines.append("| " + " | ".join(str(cell).replace("|", "\\|") for cell in cells) + " |")
-    lines += ["", "## Ограничения", ""]
-    lines += [f"- {item}" for item in result["limitations"]] or ["- Нет"]
-    for grouping, title in (("epics", "Группировка по эпикам"), ("releases", "Группировка по релизам")):
+    lines += ["", "## Ограничения", ""] + ([f"- {item}" for item in result["limitations"]] or ["- Нет"])
+    for group, title in (("epics", "Группировка по эпикам"), ("releases", "Группировка по релизам")):
         lines += ["", f"## {title}", ""]
-        lines += [f"- **{group_key}**: {', '.join(keys)}" for group_key, keys in sorted(result["groupings"][grouping].items())] or ["- Нет"]
+        lines += [f"- **{name}**: {', '.join(keys)}" for name, keys in sorted(result["groupings"][group].items())] or ["- Нет"]
     lines += ["", "## Расхождения", ""]
     lines += [f"- `{item['kind']}`: {item.get('sbertrek_key') or '—'} / {item.get('jira_key') or '—'}{(' / ' + item['field']) if item.get('field') else ''}" for item in result["discrepancies"]] or ["- Нет"]
     return "\n".join(lines) + "\n"
@@ -728,250 +686,245 @@ def complete_config_command(_: argparse.Namespace) -> int:
 
 def begin_command(args: argparse.Namespace) -> int:
     config = load_config()
-    gaps = config_gaps(config)
-    if gaps:
+    if config_gaps(config):
         payload = config_status(config)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return STOP_EXIT
-    known = parse_known(args.known_key)
+    ids = unique_keys(args.scope_id)
+    if args.scope_kind == "epic" and len(ids) != 1:
+        raise ValueError("Для scope-kind=epic требуется ровно один --scope-id")
+    if args.scope_provider == "jira" and not config["jira_enabled"]:
+        raise ValueError("Jira отключена в tracker-config.json; Jira не может быть исходной областью")
+    scope = {"kind": args.scope_kind, "provider": args.scope_provider, "ids": ids, "label": args.label.strip(), "source": args.scope_source.strip()}
+    if not scope["label"] or not scope["source"]:
+        raise ValueError("--label и --scope-source не могут быть пустыми")
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
-    providers = list(PROVIDERS if config["jira_enabled"] else ("sbertrek",))
+    providers = list(enabled_providers(config))
+    save_json(run_meta_path(run_id), {"protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": run_id, "scope": scope, "created_at": now()})
     for provider in providers:
-        save_json(snapshot_path(run_id, provider), snapshot_template(provider, args.feature, known, config))
-    initialize_session_log(run_id, args.feature, known, providers)
-    status = write_status(run_id, "tracker-read-collecting", gaps=["inventories.pending"], allowed="inventory-page")
-    append_session_log(
-        run_id, source="trackerctl", event="command", details="command=begin; exit=0"
-    )
+        save_json(snapshot_path(run_id, provider), snapshot_template(provider, scope, config))
+    initialize_session_log(run_id, scope, providers)
+    provider, query = current_query(run_id, config) or (None, None)
+    assert provider and query
+    status = write_status(run_id, "tracker-read-collecting", gaps=[f"{provider}.query.pending"], extra=next_query_payload(provider, query))
+    append_session_log(run_id, source="trackerctl", event="command", details="command=begin; exit=0")
     print(json.dumps(status, ensure_ascii=False, indent=2))
     return 0
 
 
 def mcp_log_command(args: argparse.Namespace) -> int:
     call = evidence(args.evidence, args.provider)
-    if logged_mcp_evidence(args.run_id, call):
+    if logged_mcp_details(args.run_id, call):
         raise ValueError("Этот MCP-вызов уже записан в журнале")
     if not args.summary.strip() or len(args.summary) > 500:
         raise ValueError("--summary должен содержать от 1 до 500 символов")
-    if args.operation == "inventory":
+    config = load_config()
+    if args.operation == "query":
+        current = current_query(args.run_id, config)
+        if not current or current[0] != args.provider:
+            raise ValueError("Сейчас нет разрешённого поискового запроса для этого провайдера")
+        if args.query != current[1]["exact"]:
+            raise ValueError(f"Разрешён только точный {current[1]['language']} из next_query")
         if args.page_number is None or args.page_number < 1 or args.returned_count is None or args.returned_count < 0:
-            raise ValueError("Успешная или ошибочная inventory-запись требует положительный --page-number и неотрицательный --returned-count")
-    elif args.page_number is not None or args.returned_count is not None:
-        raise ValueError("--page-number и --returned-count допустимы только для operation=inventory")
+            raise ValueError("operation=query требует --page-number и --returned-count")
+    elif args.query is not None or args.page_number is not None or args.returned_count is not None:
+        raise ValueError("--query, --page-number и --returned-count допустимы только для operation=query")
     if args.operation in {"issue-detail", "history"} and not args.key:
         raise ValueError(f"operation={args.operation} требует --key")
     if args.operation not in {"issue-detail", "history"} and args.key:
         raise ValueError("--key допустим только для issue-detail и history")
     parts = [f"operation={args.operation}", f"outcome={args.outcome}"]
+    if args.query is not None:
+        parts.append(f"query={args.query}")
     if args.page_number is not None:
         parts.append(f"page={args.page_number}")
     if args.key:
-        parts.append(f"key={key(args.key)}")
+        parts.append(f"key={issue_key(args.key)}")
     if args.returned_count is not None:
         parts.append(f"returned={args.returned_count}")
     parts.append(f"summary={args.summary}")
-    append_session_log(
-        args.run_id, source="mcp", event="call", provider=args.provider,
-        evidence_value=call, details="; ".join(parts),
-    )
-    payload = {
-        "status": "tracker-mcp-call-logged", "run_id": args.run_id,
-        "provider": args.provider, "operation": args.operation,
-        "outcome": args.outcome, "evidence": call,
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    append_session_log(args.run_id, source="mcp", event="call", provider=args.provider, evidence_value=call, details="; ".join(parts))
+    print(json.dumps({"status": "tracker-mcp-call-logged", "run_id": args.run_id, "provider": args.provider, "operation": args.operation, "outcome": args.outcome, "evidence": call}, ensure_ascii=False, indent=2))
     return 0
 
 
-def inventory_page_command(args: argparse.Namespace) -> int:
+def query_page_command(args: argparse.Namespace) -> int:
     config = load_config()
+    current = current_query(args.run_id, config)
+    if not current or current[0] != args.provider:
+        raise ValueError("Эта страница не соответствует текущему разрешённому запросу")
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
-    inventory = snapshot["inventory"]
-    if inventory["state"] == "unavailable" or (inventory["pages"] and inventory["pages"][-1]["last_page"]):
-        raise ValueError("Инвентаризация уже завершена")
-    if set(args.scope_project) != set(config["projects"][args.provider]):
-        raise ValueError("--scope-project должен точно совпадать с настроенной областью провайдера")
-    if not args.unfinished_confirmed:
-        raise ValueError("Активная инвентаризация требует --unfinished-confirmed")
-    expected_page = len(inventory["pages"]) + 1
+    query = snapshot["query"]
+    if args.query != query["exact"]:
+        raise ValueError(f"Разрешён только точный {query['language']} из next_query")
+    expected_page = len(query["pages"]) + 1
     if args.page_number != expected_page:
         raise ValueError(f"Ожидалась страница {expected_page}")
     if args.last_page and args.next_cursor:
         raise ValueError("Последняя страница не может иметь --next-cursor")
     if not args.last_page and not args.next_cursor:
         raise ValueError("Непоследняя страница требует --next-cursor")
-    if inventory["pages"] and args.cursor != inventory["pages"][-1]["next_cursor"]:
+    if query["pages"] and args.cursor != query["pages"][-1]["next_cursor"]:
         raise ValueError("--cursor должен совпадать с next_cursor предыдущей страницы")
-    if not inventory["pages"] and args.cursor:
+    if not query["pages"] and args.cursor:
         raise ValueError("Первая страница не может иметь --cursor")
-    page_keys = sorted(set(key(item) for item in args.key))
-    links = {}
-    for item in args.jira_link:
-        source, sep, target = item.partition("=")
-        if not sep:
-            raise ValueError("--jira-link задаётся как SBER=JIRA")
-        source, target = key(source), key(target)
-        if source not in page_keys:
-            raise ValueError(f"Связь {source} отсутствует на этой странице SberTrek")
-        links[source] = target
-    if args.provider != "sbertrek" and links:
-        raise ValueError("Поле Объект Jira записывается только из SberTrek")
     call = evidence(args.evidence, args.provider)
-    require_logged_mcp(args.run_id, call)
-    if any(page["evidence"] == call for page in inventory["pages"]):
+    require_logged_mcp(args.run_id, call, outcome="success")
+    if any(page["evidence"] == call for page in query["pages"]):
         raise ValueError("Один MCP-вызов нельзя записать как две страницы")
-    inventory["query"] = args.query if inventory["query"] is None else inventory["query"]
-    if inventory["query"] != args.query:
-        raise ValueError("Запрос нельзя менять между страницами")
-    inventory["pages"].append({
-        "number": args.page_number, "cursor": args.cursor, "next_cursor": args.next_cursor,
-        "last_page": args.last_page, "evidence": call, "keys": page_keys,
-    })
-    inventory["keys"] = sorted(set(inventory["keys"]) | set(page_keys))
-    for source, target in links.items():
-        previous = inventory["jira_links"].get(source)
-        if previous and previous != target:
-            raise ValueError(f"SberTrek вернул противоречащие Объект Jira для {source}")
-        inventory["jira_links"][source] = target
-    inventory["state"] = "complete" if args.last_page else "collecting"
+    page_keys = unique_keys(args.key)
+    query["pages"].append({"number": args.page_number, "cursor": args.cursor, "next_cursor": args.next_cursor, "last_page": args.last_page, "evidence": call, "keys": page_keys})
+    query["keys"] = sorted(set(query["keys"]) | set(page_keys))
+    query["state"] = "complete" if args.last_page else "collecting"
     save_json(path, snapshot)
-    print(json.dumps({"status": "inventory-page-recorded", "provider": args.provider, "page": args.page_number, "inventory_state": inventory["state"], "key_count": len(inventory["keys"])}, ensure_ascii=False, indent=2))
+    print(json.dumps({"status": "tracker-query-page-recorded", "provider": args.provider, "page": args.page_number, "query_state": query["state"], "key_count": len(query["keys"])}, ensure_ascii=False, indent=2))
     return 0
 
 
-def inventory_unavailable_command(args: argparse.Namespace) -> int:
-    if args.provider == "sbertrek":
-        raise ValueError("SberTrek является обязательным основным источником")
+def query_unavailable_command(args: argparse.Namespace) -> int:
+    config = load_config()
+    current = current_query(args.run_id, config)
+    if not current or current[0] != args.provider:
+        raise ValueError("Сейчас нет разрешённого запроса для этого провайдера")
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
-    if snapshot["inventory"]["pages"]:
-        raise ValueError("Нельзя объявить недоступной уже начатую инвентаризацию")
+    if snapshot["query"]["pages"]:
+        raise ValueError("Нельзя объявить недоступным уже начатый запрос")
+    if args.provider == snapshot["scope"]["provider"]:
+        raise ValueError("Недоступность исходного трекера блокирует запуск")
     call = evidence(args.evidence, args.provider)
-    require_logged_mcp(args.run_id, call)
-    snapshot["inventory"].update({"state": "unavailable", "unavailable_reason": args.reason, "unavailable_evidence": call})
+    require_logged_mcp(args.run_id, call, outcome="error")
+    snapshot["query"].update({"state": "unavailable", "unavailable_reason": args.reason, "unavailable_evidence": call})
     save_json(path, snapshot)
-    print(json.dumps({"status": "inventory-unavailable-recorded", "provider": args.provider}, ensure_ascii=False, indent=2))
+    print(json.dumps({"status": "tracker-query-unavailable-recorded", "provider": args.provider}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def jira_epic_fallback_command(args: argparse.Namespace) -> int:
+    config = load_config()
+    current = current_query(args.run_id, config)
+    if not current or current[0] != "jira":
+        raise ValueError("Fallback допустим только для текущего Jira-запроса")
+    path, snapshot = load_snapshot(args.run_id, "jira")
+    query, scope = snapshot["query"], snapshot["scope"]
+    if scope["provider"] != "jira" or scope["kind"] != "epic" or query.get("method") != "parent" or query["pages"]:
+        raise ValueError("Fallback допустим только после отказа начального parent-запроса Jira-эпика")
+    call = evidence(args.evidence, "jira")
+    require_logged_mcp(args.run_id, call, outcome="error")
+    query.update({"exact": jql_epic(scope["ids"][0], "epic-link"), "method": "epic-link", "state": "pending"})
+    save_json(path, snapshot)
+    print(json.dumps({"status": "jira-epic-query-fallback-ready", **next_query_payload("jira", query)}, ensure_ascii=False, indent=2))
     return 0
 
 
 def record_issue_command(args: argparse.Namespace) -> int:
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
-    if snapshot["selection"]["state"] == "complete":
-        raise ValueError("Завершённую выборку нельзя дополнять")
-    issue_key = key(args.key)
-    if issue_key not in snapshot["inventory"]["keys"]:
-        raise ValueError("Подробная карточка разрешена только для задачи из активной инвентаризации")
-    if issue_by_key(snapshot, issue_key):
-        raise ValueError(f"Задача {issue_key} уже записана")
+    if snapshot["collection_complete"]:
+        raise ValueError("Завершённую коллекцию нельзя дополнять")
+    key_value = issue_key(args.key)
+    if key_value not in snapshot["query"]["keys"]:
+        raise ValueError("Карточка разрешена только для ключа текущего точного запроса")
+    if issue_by_key(snapshot, key_value):
+        raise ValueError(f"Задача {key_value} уже записана")
     call = evidence(args.evidence, args.provider)
-    require_logged_mcp(args.run_id, call)
-    page_calls = page_evidence_for_key(snapshot, issue_key)
-    exact_call = re.search(rf"(?<![A-Z0-9_]){re.escape(issue_key)}(?![0-9])", call, re.I)
-    if call not in page_calls and not exact_call:
-        raise ValueError("Evidence карточки должен быть страницей инвентаря с этим ключом или отдельным точным чтением")
-    observations = {
-        "assignee": args.assignee_state, "estimate": args.estimate_state,
-        "epic": args.epic_state, "releases": args.releases_state,
-    }
+    require_logged_mcp(args.run_id, call, outcome="success")
+    page_evidence = {page["evidence"] for page in snapshot["query"]["pages"] if key_value in page["keys"]}
+    exact_call = re.search(rf"(?<![A-Z0-9_]){re.escape(key_value)}(?![0-9])", call, re.I)
+    if call not in page_evidence and not exact_call:
+        raise ValueError("Evidence карточки должно быть страницей точного запроса или точным detail-вызовом")
     values = {
         "assignee": participant(args.assignee_id, args.assignee_name),
         "estimate": {"value": args.estimate, "unit": args.estimate_unit} if args.estimate is not None else None,
-        "epic": {"key": args.epic_key, "name": args.epic_name} if args.epic_key else None,
+        "epic": {"key": issue_key(args.epic_key), "name": args.epic_name} if args.epic_key else None,
         "releases": [parse_release(item) for item in args.release],
     }
+    observations = {"assignee": args.assignee_state, "estimate": args.estimate_state, "epic": args.epic_state, "releases": args.releases_state}
     for field, state in observations.items():
-        present = values[field] not in (None, [], {})
-        if (state == "value") != present:
+        if (state == "value") != (values[field] not in (None, [], {})):
             raise ValueError(f"{field}: состояние value должно точно соответствовать переданному значению")
-    if args.relevance == "ambiguous" and args.selected_by != "ambiguous":
-        raise ValueError("Сомнительная задача должна иметь selected_by=ambiguous")
-    if args.selected_by == "known-key" and issue_key not in snapshot["scope"]["known_keys"]:
-        raise ValueError("selected_by=known-key требует известный ключ из begin")
-    if args.selected_by == "linked-counterpart":
-        links = (
-            snapshot["inventory"]["jira_links"]
-            if args.provider == "sbertrek"
-            else load_snapshot(args.run_id, "sbertrek")[1]["inventory"]["jira_links"]
-        )
-        linked = issue_key in links if args.provider == "sbertrek" else issue_key in links.values()
-        if not linked:
-            raise ValueError("selected_by=linked-counterpart требует явный SberTrek Объект Jira")
-    if issue_key in snapshot["scope"]["known_keys"] and args.relevance != "relevant":
-        raise ValueError("Активный известный ключ должен быть выбран как relevant")
-    issue = {
-        "key": issue_key, "evidence": call, "summary": args.summary,
-        "description": args.description, "issue_type": args.issue_type,
-        "status": args.status, **values, "field_observations": observations,
-        "relevance": args.relevance, "relevance_basis": args.relevance_basis,
-        "selected_by": args.selected_by, "updated_at": args.updated_at,
-        "history": {"state": "pending" if args.relevance != "irrelevant" else "not-applicable", "evidence": [], "events": [], "reason": None},
+    jira_key = issue_key(args.jira_key, "Объект Jira") if args.jira_key else None
+    if args.provider != "sbertrek" and jira_key:
+        raise ValueError("Объект Jira записывается только для карточки SberTrek")
+    item = {
+        "key": key_value, "jira_key": jira_key, "evidence": call,
+        "summary": args.summary, "description": args.description,
+        "issue_type": args.issue_type, "status": args.status,
+        **values, "field_observations": observations,
+        "updated_at": args.updated_at,
+        "history": {"state": "pending", "evidence": [], "events": [], "reason": None},
     }
-    snapshot["selection"]["issues"].append(issue)
+    snapshot["issues"].append(item)
     save_json(path, snapshot)
-    print(json.dumps({"status": "tracker-issue-recorded", "provider": args.provider, "key": issue_key, "relevance": args.relevance}, ensure_ascii=False, indent=2))
+    print(json.dumps({"status": "tracker-issue-recorded", "provider": args.provider, "key": key_value, "jira_key": jira_key}, ensure_ascii=False, indent=2))
     return 0
 
 
-def decide_relevance_command(args: argparse.Namespace) -> int:
-    pending_path = pending_relevance_path(args.run_id)
-    if not pending_path.is_file():
-        raise ValueError("Нет ожидающего вопроса о релевантности")
-    pending = load_json(pending_path)
-    if (args.provider, args.key) != (pending["provider"], pending["key"]):
-        raise ValueError("Разрешено ответить только на текущий вопрос о релевантности")
-    path, snapshot = load_snapshot(args.run_id, args.provider)
-    issue = issue_by_key(snapshot, args.key)
-    if not issue or issue["relevance"] != "ambiguous":
-        raise ValueError("Задача больше не ожидает решения")
-    issue["relevance"] = args.relevance
-    issue["selected_by"] = "description-match" if args.relevance == "relevant" else "ambiguous"
-    issue["relevance_basis"] = args.basis
-    issue["history"]["state"] = "pending" if args.relevance == "relevant" else "not-applicable"
-    save_json(path, snapshot)
-    pending_path.unlink()
-    print(json.dumps({"status": "relevance-decided", "provider": args.provider, "key": args.key, "relevance": args.relevance}, ensure_ascii=False, indent=2))
-    return 0
+def missing_cards(snapshot: dict) -> list[str]:
+    return sorted(set(snapshot["query"]["keys"]) - {item["key"] for item in snapshot["issues"]})
 
 
-def selection_complete_command(args: argparse.Namespace) -> int:
+def collection_advance_command(args: argparse.Namespace) -> int:
     config = load_config()
-    snapshots = all_enabled_snapshots(args.run_id, config)
-    gaps = sum((inventory_gaps(snapshot) + required_known_key_gaps(snapshot) for snapshot in snapshots.values()), [])
-    if gaps:
-        raise ValueError("Инвентаризация не завершена: " + ", ".join(gaps))
-    ambiguous = first_ambiguous(snapshots)
-    if ambiguous:
-        provider, issue = ambiguous
-        pending = {"provider": provider, "key": issue["key"], "question": relevance_question(provider, issue)}
-        save_json(pending_relevance_path(args.run_id), pending)
-        payload = stop_payload(pending["question"], status="tracker-selection-blocked", run_id=args.run_id)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return STOP_EXIT
-    closure = link_closure_gaps(snapshots)
-    if closure:
-        raise ValueError("Не замкнуты явные связи SberTrek Объект Jira: " + ", ".join(closure))
+    snapshots = all_snapshots(args.run_id, config)
+    scope = next(iter(snapshots.values()))["scope"]
+    primary_provider = scope["provider"]
+    primary = snapshots[primary_provider]
+    if primary["query"]["state"] != "complete":
+        raise ValueError(f"Исходный точный запрос {primary_provider} не завершён")
+    missing = missing_cards(primary)
+    if missing:
+        raise ValueError("Не записаны карточки исходного запроса: " + ", ".join(missing))
+    secondary_provider = "jira" if primary_provider == "sbertrek" else "sbertrek"
+    secondary = snapshots.get(secondary_provider)
+    if secondary and secondary["query"]["exact"] is None:
+        if primary_provider == "sbertrek":
+            ids = sorted({item["jira_key"] for item in primary["issues"] if item.get("jira_key")})
+            exact = jql_keys(ids) if ids else None
+        else:
+            ids = list(primary["query"]["keys"])
+            exact = tql_jira_keys(ids) if ids else None
+        if exact:
+            secondary["query"].update({"exact": exact, "state": "pending"})
+        else:
+            secondary["query"].update({"state": "skipped"})
+        save_json(snapshot_path(args.run_id, secondary_provider), secondary)
+        snapshots[secondary_provider] = secondary
+        if exact:
+            payload = {"status": "tracker-counterpart-query-ready", "run_id": args.run_id, **next_query_payload(secondary_provider, secondary["query"])}
+            write_status(args.run_id, "tracker-read-collecting", gaps=[f"{secondary_provider}.query.pending"], extra=next_query_payload(secondary_provider, secondary["query"]))
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+    if secondary and secondary["query"]["state"] not in {"complete", "skipped", "unavailable"}:
+        raise ValueError(f"Counterpart-запрос {secondary_provider} не завершён")
+    if secondary:
+        missing = missing_cards(secondary)
+        if missing:
+            raise ValueError("Не записаны карточки counterpart-запроса: " + ", ".join(missing))
+        if secondary_provider == "sbertrek":
+            allowed_jira = set(primary["query"]["keys"])
+            invalid = [f"{item['key']}={item['jira_key']}" for item in secondary["issues"] if item.get("jira_key") not in allowed_jira]
+            if invalid:
+                raise ValueError("SberTrek Объект Jira вне исходной Jira-области: " + ", ".join(invalid))
     for provider, snapshot in snapshots.items():
-        path = snapshot_path(args.run_id, provider)
-        snapshot["selection"]["state"] = "complete"
-        save_json(path, snapshot)
-    print(json.dumps({"status": "tracker-selection-complete", "run_id": args.run_id, "selected": {provider: len(selected_relevant(snapshot)) for provider, snapshot in snapshots.items()}}, ensure_ascii=False, indent=2))
+        snapshot["collection_complete"] = True
+        save_json(snapshot_path(args.run_id, provider), snapshot)
+    payload = write_status(args.run_id, "tracker-read-history", gaps=["histories.pending"], allowed="history-complete")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
 def history_event_command(args: argparse.Namespace) -> int:
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
-    issue = issue_by_key(snapshot, key(args.key))
-    if not issue or issue["relevance"] != "relevant":
-        raise ValueError("История разрешена только для выбранной релевантной задачи")
-    event = {
-        "at": args.at, "field": args.field,
-        "from": participant(args.from_id, args.from_name) if args.field == "assignee" else args.from_value,
-        "to": participant(args.to_id, args.to_name) if args.field == "assignee" else args.to_value,
-    }
-    issue["history"]["events"].append(event)
+    if not snapshot["collection_complete"]:
+        raise ValueError("История разрешена только после collection-advance")
+    item = issue_by_key(snapshot, issue_key(args.key))
+    if not item:
+        raise ValueError("Задача отсутствует в целевой коллекции")
+    event = {"at": args.at, "field": args.field, "from": participant(args.from_id, args.from_name) if args.field == "assignee" else args.from_value, "to": participant(args.to_id, args.to_name) if args.field == "assignee" else args.to_value}
+    item["history"]["events"].append(event)
     save_json(path, snapshot)
     print(json.dumps({"status": "history-event-recorded", "provider": args.provider, "key": args.key}, ensure_ascii=False, indent=2))
     return 0
@@ -980,16 +933,18 @@ def history_event_command(args: argparse.Namespace) -> int:
 def history_complete_command(args: argparse.Namespace) -> int:
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
-    issue = issue_by_key(snapshot, key(args.key))
-    if not issue or issue["relevance"] != "relevant":
-        raise ValueError("История требуется только для выбранной релевантной задачи")
+    if not snapshot["collection_complete"]:
+        raise ValueError("История разрешена только после collection-advance")
+    item = issue_by_key(snapshot, issue_key(args.key))
+    if not item:
+        raise ValueError("Задача отсутствует в целевой коллекции")
     if args.state == "unavailable" and not args.reason:
         raise ValueError("Недоступная история требует --reason")
     call = evidence(args.evidence, args.provider)
-    require_logged_mcp(args.run_id, call)
-    if not re.search(rf"(?<![A-Z0-9_]){re.escape(issue['key'])}(?![0-9])", call, re.I):
-        raise ValueError("Evidence истории должен содержать точный ключ выбранной задачи")
-    issue["history"].update({"state": args.state, "evidence": [call], "reason": args.reason})
+    require_logged_mcp(args.run_id, call, outcome="success" if args.state == "complete" else "error")
+    if not re.search(rf"(?<![A-Z0-9_]){re.escape(item['key'])}(?![0-9])", call, re.I):
+        raise ValueError("Evidence истории должен содержать точный ключ задачи")
+    item["history"].update({"state": args.state, "evidence": [call], "reason": args.reason})
     save_json(path, snapshot)
     print(json.dumps({"status": "history-complete", "provider": args.provider, "key": args.key, "history_state": args.state}, ensure_ascii=False, indent=2))
     return 0
@@ -998,7 +953,7 @@ def history_complete_command(args: argparse.Namespace) -> int:
 def finalize_command(args: argparse.Namespace) -> int:
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
-    gaps = inventory_gaps(snapshot) + selection_gaps(snapshot)
+    gaps = snapshot_gaps(snapshot)
     if gaps:
         raise ValueError("Снимок не готов: " + ", ".join(gaps))
     snapshot["captured_at"] = now()
@@ -1012,48 +967,54 @@ def run_status_command(args: argparse.Namespace) -> int:
     if completion.is_file():
         payload = load_json(completion)
         if payload.get("protocol") != PROTOCOL:
-            raise ValueError("Completion-envelope создан старым протоколом")
+            raise ValueError("Completion-status создан старым протоколом")
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
     config = load_config()
-    snapshots = all_enabled_snapshots(args.run_id, config)
+    snapshots = all_snapshots(args.run_id, config)
+    current = current_query(args.run_id, config)
     gaps = []
     for snapshot in snapshots.values():
-        gaps += inventory_gaps(snapshot) + required_known_key_gaps(snapshot) + selection_gaps(snapshot)
-        if not snapshot.get("captured_at"):
-            gaps.append(f"{snapshot['provider']}.snapshot.not-finalized")
-    gaps += link_closure_gaps(snapshots)
-    payload = write_status(args.run_id, "tracker-read-ready-to-reconcile" if not gaps else "tracker-read-collecting", gaps=sorted(set(gaps)), allowed="reconcile" if not gaps else "complete-reported-gaps")
+        if snapshot["query"]["state"] in {"pending", "collecting"}:
+            gaps.append(f"{snapshot['provider']}.query.{snapshot['query']['state']}")
+        gaps += snapshot_gaps(snapshot)
+    extra = next_query_payload(current[0], current[1]) if current else {}
+    allowed = "call-exact-mcp-query" if current else "collection-advance-or-complete-history"
+    payload = write_status(args.run_id, "tracker-read-incomplete", gaps=sorted(set(gaps)), allowed=allowed, extra=extra)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0 if not gaps else 2
+    return 2 if gaps else 0
 
 
 def set_participant_command(args: argparse.Namespace) -> int:
-    pending_path = pending_participant_path(args.run_id)
-    if not pending_path.is_file():
-        raise ValueError("Нет ожидающего вопроса об участнике; сначала выполни reconcile")
-    pending = load_json(pending_path)
-    if (args.provider, args.account_id) != (pending["provider"], pending["account_id"]):
-        raise ValueError("Разрешено сохранить только участника из текущего вопроса")
+    pending = pending_participant_path(args.run_id)
+    if not pending.is_file():
+        raise ValueError("Нет ожидающего вопроса о соответствии участника")
+    expected = load_json(pending)
+    if (args.provider, args.account_id) != (expected["provider"], expected["account_id"]):
+        raise ValueError("Разрешено ответить только на текущий вопрос об участнике")
     config = load_config()
-    config["participants"][args.provider][args.account_id] = {"team_id": normalized_team_id(args.team_id)}
-    save_json(config_path(), validate_config(config))
-    pending_path.unlink()
-    print(json.dumps({"status": "tracker-participant-saved", "run_id": args.run_id, "provider": args.provider, "account_id": args.account_id, "team_id": normalized_team_id(args.team_id), "allowed_next_action": "reconcile"}, ensure_ascii=False, indent=2))
+    team_id = normalized_team_id(args.team_id)
+    for account, member in config["participants"][args.provider].items():
+        if member["team_id"] == team_id and account != args.account_id:
+            raise ValueError(f"team_id {team_id} уже назначен другому аккаунту {args.provider}")
+    config["participants"][args.provider][args.account_id] = {"team_id": team_id}
+    save_json(config_path(), config)
+    pending.unlink()
+    print(json.dumps({"status": "tracker-participant-saved", "provider": args.provider, "account_id": args.account_id, "team_id": team_id, "role": team_role(team_id)}, ensure_ascii=False, indent=2))
     return 0
 
 
 def reconcile_command(args: argparse.Namespace) -> int:
     config = load_config()
-    snapshots = all_enabled_snapshots(args.run_id, config, finalized=True)
-    gaps = sum((inventory_gaps(snapshot) + required_known_key_gaps(snapshot) + selection_gaps(snapshot) for snapshot in snapshots.values()), []) + link_closure_gaps(snapshots)
+    snapshots = all_snapshots(args.run_id, config, finalized=True)
+    gaps = sum((snapshot_gaps(snapshot) for snapshot in snapshots.values()), [])
     if gaps:
-        raise ValueError("Tracker-run неполон: " + ", ".join(gaps))
+        raise ValueError("Tracker-run не завершён: " + ", ".join(gaps))
     unknown = first_unknown_participant(snapshots, config)
     if unknown:
-        question = f"Какой командный идентификатор имеет участник {unknown['name']} ({unknown['provider']} account {unknown['account_id']})?"
+        question = f"Какой командный team_id соответствует {unknown['provider']} account {unknown['account_id']} ({unknown['name']})?"
         save_json(pending_participant_path(args.run_id), {**unknown, "question": question})
-        payload = stop_payload(question, status="tracker-read-blocked", run_id=args.run_id)
+        payload = stop_payload(question, status="tracker-reconcile-blocked", run_id=args.run_id)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return STOP_EXIT
     result = reconcile_data(snapshots, config)
@@ -1065,14 +1026,7 @@ def reconcile_command(args: argparse.Namespace) -> int:
         "run_id": args.run_id, "status": "tracker-read-reconciled",
         "workflow_complete": True, "final_response_allowed": True,
         "counts": result["counts"], "limitations": result["limitations"],
-        "paths": {
-            "session_log": str(session_log_path(args.run_id)),
-            "run_status": str(status_path(args.run_id)),
-            "input": str(root / "input"),
-            "reconciled": str(root / "reconciled.json"),
-            "report": str(root / "report.md"),
-            "completion_status": str(root / "completion-status.json"),
-        },
+        "paths": {"session_log": str(session_log_path(args.run_id)), "run_status": str(status_path(args.run_id)), "scope": str(run_meta_path(args.run_id)), "input": str(root / "input"), "reconciled": str(root / "reconciled.json"), "report": str(root / "report.md"), "completion_status": str(root / "completion-status.json")},
     }
     save_json(root / "completion-status.json", completion)
     save_json(status_path(args.run_id), completion)
@@ -1092,7 +1046,7 @@ def result_status_command(args: argparse.Namespace) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description="Guarded active-inventory tracker reconciliation")
+    root = argparse.ArgumentParser(description="Guarded targeted tracker reconciliation")
     commands = root.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init-config"); init.add_argument("--force", action="store_true"); init.set_defaults(handler=init_config_command)
     status = commands.add_parser("config-status"); status.set_defaults(handler=config_status_command)
@@ -1101,13 +1055,13 @@ def parser() -> argparse.ArgumentParser:
     types = commands.add_parser("set-issue-types"); types.add_argument("issue_types", nargs="+"); types.set_defaults(handler=update_config)
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config)
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
-    begin = commands.add_parser("begin"); begin.add_argument("--feature", required=True); begin.add_argument("--known-key", action="append", default=[]); begin.set_defaults(handler=begin_command)
-    mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("capability-discovery", "inventory", "issue-detail", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key"); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
-    page = commands.add_parser("inventory-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--scope-project", action="append", default=[]); page.add_argument("--unfinished-confirmed", action="store_true"); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.add_argument("--jira-link", action="append", default=[]); page.set_defaults(handler=inventory_page_command)
-    unavailable = commands.add_parser("inventory-unavailable"); unavailable.add_argument("--run-id", required=True); unavailable.add_argument("--provider", choices=PROVIDERS, required=True); unavailable.add_argument("--reason", required=True); unavailable.add_argument("--evidence", required=True); unavailable.set_defaults(handler=inventory_unavailable_command)
-    issue = commands.add_parser("record-issue"); issue.add_argument("--run-id", required=True); issue.add_argument("--provider", choices=PROVIDERS, required=True); issue.add_argument("--key", required=True); issue.add_argument("--evidence", required=True); issue.add_argument("--summary", required=True); issue.add_argument("--description", default=""); issue.add_argument("--issue-type", required=True); issue.add_argument("--status", required=True); issue.add_argument("--assignee-id"); issue.add_argument("--assignee-name"); issue.add_argument("--assignee-state", choices=OBSERVATION_STATES, required=True); issue.add_argument("--estimate", type=float); issue.add_argument("--estimate-unit", default="story-points"); issue.add_argument("--estimate-state", choices=OBSERVATION_STATES, required=True); issue.add_argument("--epic-key"); issue.add_argument("--epic-name"); issue.add_argument("--epic-state", choices=OBSERVATION_STATES, required=True); issue.add_argument("--release", action="append", default=[]); issue.add_argument("--releases-state", choices=OBSERVATION_STATES, required=True); issue.add_argument("--relevance", choices=RELEVANCE, required=True); issue.add_argument("--relevance-basis", required=True); issue.add_argument("--selected-by", choices=SELECTION_BASES, required=True); issue.add_argument("--updated-at"); issue.set_defaults(handler=record_issue_command)
-    decide = commands.add_parser("decide-relevance"); decide.add_argument("--run-id", required=True); decide.add_argument("--provider", choices=PROVIDERS, required=True); decide.add_argument("--key", required=True); decide.add_argument("--relevance", choices=("relevant", "irrelevant"), required=True); decide.add_argument("--basis", required=True); decide.set_defaults(handler=decide_relevance_command)
-    select = commands.add_parser("selection-complete"); select.add_argument("--run-id", required=True); select.set_defaults(handler=selection_complete_command)
+    begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.set_defaults(handler=begin_command)
+    mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("capability-discovery", "query", "issue-detail", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key"); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
+    page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)
+    unavailable = commands.add_parser("query-unavailable"); unavailable.add_argument("--run-id", required=True); unavailable.add_argument("--provider", choices=PROVIDERS, required=True); unavailable.add_argument("--reason", required=True); unavailable.add_argument("--evidence", required=True); unavailable.set_defaults(handler=query_unavailable_command)
+    fallback = commands.add_parser("jira-epic-fallback"); fallback.add_argument("--run-id", required=True); fallback.add_argument("--evidence", required=True); fallback.set_defaults(handler=jira_epic_fallback_command)
+    item = commands.add_parser("record-issue"); item.add_argument("--run-id", required=True); item.add_argument("--provider", choices=PROVIDERS, required=True); item.add_argument("--key", required=True); item.add_argument("--jira-key"); item.add_argument("--evidence", required=True); item.add_argument("--summary", required=True); item.add_argument("--description", default=""); item.add_argument("--issue-type", required=True); item.add_argument("--status", required=True); item.add_argument("--assignee-id"); item.add_argument("--assignee-name"); item.add_argument("--assignee-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--estimate", type=float); item.add_argument("--estimate-unit", default="story-points"); item.add_argument("--estimate-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--epic-key"); item.add_argument("--epic-name"); item.add_argument("--epic-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--release", action="append", default=[]); item.add_argument("--releases-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--updated-at"); item.set_defaults(handler=record_issue_command)
+    advance = commands.add_parser("collection-advance"); advance.add_argument("--run-id", required=True); advance.set_defaults(handler=collection_advance_command)
     event = commands.add_parser("history-event"); event.add_argument("--run-id", required=True); event.add_argument("--provider", choices=PROVIDERS, required=True); event.add_argument("--key", required=True); event.add_argument("--at", required=True); event.add_argument("--field", required=True); event.add_argument("--from-id"); event.add_argument("--from-name"); event.add_argument("--from-value"); event.add_argument("--to-id"); event.add_argument("--to-name"); event.add_argument("--to-value"); event.set_defaults(handler=history_event_command)
     history = commands.add_parser("history-complete"); history.add_argument("--run-id", required=True); history.add_argument("--provider", choices=PROVIDERS, required=True); history.add_argument("--key", required=True); history.add_argument("--state", choices=("complete", "unavailable"), required=True); history.add_argument("--reason"); history.add_argument("--evidence", required=True); history.set_defaults(handler=history_complete_command)
     finalize = commands.add_parser("snapshot-finalize"); finalize.add_argument("--run-id", required=True); finalize.add_argument("--provider", choices=PROVIDERS, required=True); finalize.set_defaults(handler=finalize_command)
@@ -1121,39 +1075,24 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     try:
-        initial_run_id = getattr(args, "run_id", None)
-        if initial_run_id and not session_log_path(initial_run_id).is_file():
+        run_id = getattr(args, "run_id", None)
+        if run_id and not session_log_path(run_id).is_file():
             raise ValueError("Tracker-run не содержит обязательный tracker-session-log.md; начни новый run")
         result = args.handler(args)
         run_id = getattr(args, "run_id", None)
         if run_id:
-            provider = getattr(args, "provider", None)
             details = f"command={args.command}; exit={result}"
-            for name in ("page_number", "key", "state", "relevance"):
+            for name in ("page_number", "key", "state"):
                 value = getattr(args, name, None)
                 if value is not None:
                     details += f"; {name}={value}"
-            append_session_log(
-                run_id, source="trackerctl", event="command",
-                provider=provider, evidence_value=getattr(args, "evidence", None),
-                details=details,
-            )
+            append_session_log(run_id, source="trackerctl", event="command", provider=getattr(args, "provider", None), evidence_value=getattr(args, "evidence", None), details=details)
         return result
     except ValueError as exc:
         run_id = getattr(args, "run_id", None)
         if run_id and session_log_path(run_id).is_file():
-            append_session_log(
-                run_id, source="trackerctl", event="error",
-                provider=getattr(args, "provider", None),
-                evidence_value=getattr(args, "evidence", None),
-                details=f"command={args.command}; error={exc}",
-            )
-        payload = {
-            "status": "tracker-read-blocked", "run_id": getattr(args, "run_id", None),
-            "error": str(exc), "must_stop": True, "workflow_complete": False,
-            "final_response_allowed": False, "allowed_next_action": "fix-reported-gap",
-            "required_success_status": "tracker-read-reconciled",
-        }
+            append_session_log(run_id, source="trackerctl", event="error", provider=getattr(args, "provider", None), evidence_value=getattr(args, "evidence", None), details=f"command={args.command}; error={exc}")
+        payload = {"status": "tracker-read-blocked", "run_id": run_id, "error": str(exc), "must_stop": True, "workflow_complete": False, "final_response_allowed": False, "allowed_next_action": "fix-reported-gap", "required_success_status": "tracker-read-reconciled"}
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
