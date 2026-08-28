@@ -57,11 +57,16 @@ class TrackerCtlTests(unittest.TestCase):
         *, links: list[str] | None = None, page: int = 1, last: bool = True,
         cursor: str | None = None, next_cursor: str | None = None,
     ) -> dict:
+        evidence = f"mcp:{provider}:active-search:page-{page}"
+        self.mcp_log(
+            state, run_id, provider, "inventory", evidence,
+            page=page, returned=len(keys), summary="active inventory page",
+        )
         args = [
             "inventory-page", "--run-id", run_id, "--provider", provider,
             "--query", "project=RSCON AND unfinished=true", "--scope-project", "RSCON",
             "--unfinished-confirmed", "--page-number", str(page),
-            "--evidence", f"mcp:{provider}:active-search:page-{page}",
+            "--evidence", evidence,
         ]
         if cursor:
             args += ["--cursor", cursor]
@@ -73,6 +78,25 @@ class TrackerCtlTests(unittest.TestCase):
             args += ["--key", issue_key]
         for link in links or []:
             args += ["--jira-link", link]
+        return self.run_tool(state, *args)
+
+    def mcp_log(
+        self, state: Path, run_id: str, provider: str, operation: str, evidence: str,
+        *, outcome: str = "success", page: int | None = None,
+        issue_key: str | None = None, returned: int | None = None,
+        summary: str = "test MCP call",
+    ) -> dict:
+        args = [
+            "mcp-log", "--run-id", run_id, "--provider", provider,
+            "--operation", operation, "--outcome", outcome,
+            "--evidence", evidence, "--summary", summary,
+        ]
+        if page is not None:
+            args += ["--page-number", str(page)]
+        if issue_key:
+            args += ["--key", issue_key]
+        if returned is not None:
+            args += ["--returned-count", str(returned)]
         return self.run_tool(state, *args)
 
     def issue_args(
@@ -113,10 +137,12 @@ class TrackerCtlTests(unittest.TestCase):
                 "--field", "assignee", "--from-id", f"{provider[0]}-dev",
                 "--to-id", f"{provider[0]}-qa",
             )
+        call = f"mcp:{provider}:history:{issue_key}"
+        self.mcp_log(state, run_id, provider, "history", call, issue_key=issue_key, summary="issue history")
         self.run_tool(
             state, "history-complete", "--run-id", run_id, "--provider", provider,
             "--key", issue_key, "--state", "complete",
-            "--evidence", f"mcp:{provider}:history:{issue_key}",
+            "--evidence", call,
         )
 
     def complete_basic_run(self, state: Path, *, participants: bool = True) -> tuple[str, Path]:
@@ -150,15 +176,38 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertEqual(json.loads(status.read_text())["status"], "tracker-read-collecting")
             self.assertTrue((status.parent / "input" / "sbertrek.json").is_file())
             self.assertTrue((status.parent / "input" / "jira.json").is_file())
+            log = status.parent / "tracker-session-log.md"
+            self.assertTrue(log.is_file())
+            self.assertIn("active-inventory-v2", log.read_text(encoding="utf-8"))
 
     def test_begin_records_feature_and_known_key_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
             run_id = self.begin(state)
             snapshot = json.loads((state / "tracker-runs" / run_id / "input" / "sbertrek.json").read_text())
-            self.assertEqual(snapshot["protocol"], "active-inventory-v1")
+            self.assertEqual(snapshot["protocol"], "active-inventory-v2")
             self.assertEqual(snapshot["scope"]["feature"], "cohorts")
             self.assertEqual(snapshot["scope"]["known_key_evidence"][0]["key"], "RSCON-6845")
+
+    def test_inventory_requires_prior_mcp_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            payload = self.run_tool(
+                state, "inventory-page", "--run-id", run_id, "--provider", "sbertrek",
+                "--query", "project=RSCON AND unfinished=true", "--scope-project", "RSCON",
+                "--unfinished-confirmed", "--page-number", "1", "--last-page",
+                "--evidence", "mcp:sbertrek:active-search:unlogged", expected=2,
+            )
+            self.assertIn("mcp-log", payload["error"])
+            retry = self.run_tool(
+                state, "inventory-page", "--run-id", run_id, "--provider", "sbertrek",
+                "--query", "project=RSCON AND unfinished=true", "--scope-project", "RSCON",
+                "--unfinished-confirmed", "--page-number", "1", "--last-page",
+                "--evidence", "mcp:sbertrek:active-search:unlogged", expected=2,
+            )
+            self.assertIn("mcp-log", retry["error"])
+            log = state / "tracker-runs" / run_id / "tracker-session-log.md"
+            self.assertIn("command=inventory-page", log.read_text(encoding="utf-8"))
 
     def test_schema_four_config_is_reused_and_legacy_pairs_are_removed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -218,6 +267,20 @@ class TrackerCtlTests(unittest.TestCase):
             state = Path(temp); run_id = self.begin(state)
             self.page(state, run_id, "sbertrek", ["RSCON-6845"])
             payload = self.add_issue(state, run_id, "sbertrek", "RSCON-6845")
+            self.assertEqual(payload["status"], "tracker-issue-recorded")
+
+    def test_exact_detail_call_is_logged_before_issue_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)
+            self.page(state, run_id, "sbertrek", ["RSCON-6845"])
+            call = "mcp:sbertrek:issue-detail:RSCON-6845"
+            self.mcp_log(
+                state, run_id, "sbertrek", "issue-detail", call,
+                issue_key="RSCON-6845", summary="exact issue card",
+            )
+            payload = self.run_tool(
+                state, *self.issue_args(run_id, "sbertrek", "RSCON-6845", call)
+            )
             self.assertEqual(payload["status"], "tracker-issue-recorded")
 
     def test_record_issue_rejects_key_outside_inventory(self) -> None:
@@ -360,7 +423,9 @@ class TrackerCtlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)
             self.page(state, run_id, "sbertrek", ["RSCON-6845"])
-            self.run_tool(state, "inventory-unavailable", "--run-id", run_id, "--provider", "jira", "--reason", "MCP unavailable", "--evidence", "mcp:jira:capability-discovery:failed")
+            call = "mcp:jira:capability-discovery:failed"
+            self.mcp_log(state, run_id, "jira", "capability-discovery", call, outcome="error", summary="MCP unavailable")
+            self.run_tool(state, "inventory-unavailable", "--run-id", run_id, "--provider", "jira", "--reason", "MCP unavailable", "--evidence", call)
             self.add_issue(state, run_id, "sbertrek", "RSCON-6845")
             self.run_tool(state, "selection-complete", "--run-id", run_id)
             self.history(state, run_id, "sbertrek", "RSCON-6845")
@@ -405,14 +470,19 @@ class TrackerCtlTests(unittest.TestCase):
             self.assertIn("## Группировка по эпикам", report)
             self.assertIn("## Группировка по релизам", report)
 
-    def test_success_creates_all_four_diagnostic_and_result_files(self) -> None:
+    def test_success_creates_session_log_and_all_result_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id, root = self.complete_basic_run(state)
             self.run_tool(state, "reconcile", "--run-id", run_id)
-            for name in ("run-status.json", "reconciled.json", "report.md", "completion-status.json"):
+            for name in ("tracker-session-log.md", "run-status.json", "reconciled.json", "report.md", "completion-status.json"):
                 self.assertTrue((root / name).is_file(), name)
+            log = (root / "tracker-session-log.md").read_text(encoding="utf-8")
+            self.assertIn("mcp:sbertrek:active-search:page-1", log)
+            self.assertIn("command=reconcile; exit=0", log)
             result = self.run_tool(state, "result-status", "--run-id", run_id)
             self.assertTrue(result["final_response_allowed"])
+            self.assertEqual(result["paths"]["session_log"], str(root / "tracker-session-log.md"))
+            self.assertEqual(result["paths"]["completion_status"], str(root / "completion-status.json"))
 
     def test_old_protocol_completion_cannot_authorize_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

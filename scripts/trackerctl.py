@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-PROTOCOL = "active-inventory-v1"
+PROTOCOL = "active-inventory-v2"
 SCHEMA_VERSION = 1
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
@@ -78,6 +78,65 @@ def status_path(run_id: str) -> Path:
     return run_root(run_id) / "run-status.json"
 
 
+def session_log_path(run_id: str) -> Path:
+    return run_root(run_id) / "tracker-session-log.md"
+
+
+def log_value(value: Any, *, limit: int = 500) -> str:
+    text = str(value).replace("\r", " ").replace("\n", " ").replace("|", "\\|")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def initialize_session_log(run_id: str, feature: str, known: list[dict], providers: list[str]) -> None:
+    path = session_log_path(run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    known_keys = ", ".join(item["key"] for item in known) or "нет"
+    path.write_text(
+        "# Журнал чтения трекеров\n\n"
+        f"- Протокол: `{PROTOCOL}`\n"
+        f"- Run ID: `{run_id}`\n"
+        f"- Функциональность: `{log_value(feature)}`\n"
+        f"- Создан: `{now()}`\n"
+        f"- Провайдеры: `{', '.join(providers)}`\n"
+        f"- Известные ключи: `{known_keys}`\n\n"
+        "Журнал создаётся автоматически и хранится рядом с остальными файлами tracker-run. "
+        "Он не является источником предметных фактов и не заменяет входные снимки.\n\n"
+        "| Время UTC | Источник | Событие | Провайдер | Evidence | Детали |\n"
+        "|---|---|---|---|---|---|\n",
+        encoding="utf-8",
+    )
+
+
+def append_session_log(
+    run_id: str, *, source: str, event: str, provider: str | None = None,
+    evidence_value: str | None = None, details: str = "",
+) -> None:
+    path = session_log_path(run_id)
+    if not path.is_file():
+        raise ValueError(f"Для tracker-run отсутствует диагностический журнал: {path}")
+    row = (
+        f"| {now()} | {log_value(source)} | {log_value(event)} | "
+        f"{log_value(provider or '-')} | "
+        f"{f'`{log_value(evidence_value)}`' if evidence_value else '-'} | {log_value(details)} |\n"
+    )
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(row)
+
+
+def logged_mcp_evidence(run_id: str, call: str) -> bool:
+    path = session_log_path(run_id)
+    provider = call.split(":", 2)[1] if call.startswith("mcp:") else ""
+    marker = f"| mcp | call | {provider} | `{call}` |"
+    return path.is_file() and marker in path.read_text(encoding="utf-8")
+
+
+def require_logged_mcp(run_id: str, call: str) -> None:
+    if not logged_mcp_evidence(run_id, call):
+        raise ValueError(
+            "Evidence MCP-вызова сначала нужно записать в tracker-session-log.md через mcp-log"
+        )
+
+
 def load_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -99,7 +158,7 @@ def key(value: str, label: str = "Ключ задачи") -> str:
 def evidence(value: str, provider: str) -> str:
     if not value.startswith(f"mcp:{provider}:") or value.casefold().count("mcp:") != 1:
         raise ValueError(f"Evidence должен описывать один вызов и начинаться с mcp:{provider}:")
-    if any(mark in value for mark in ("\n", "\r", ";")) or value.endswith(":none"):
+    if any(mark in value for mark in ("\n", "\r", ";", "|", "`")) or value.endswith(":none"):
         raise ValueError("Evidence не может объединять вызовы или быть placeholder")
     return value
 
@@ -298,6 +357,11 @@ def write_status(run_id: str, status: str, *, gaps: list[str] | None = None, all
         "status": status, "workflow_complete": complete,
         "final_response_allowed": complete, "gaps": gaps or [],
         "allowed_next_action": allowed,
+        "paths": {
+            "run_status": str(status_path(run_id)),
+            "session_log": str(session_log_path(run_id)),
+            "input": str(run_root(run_id) / "input"),
+        },
     }
     save_json(status_path(run_id), payload)
     return payload
@@ -671,11 +735,51 @@ def begin_command(args: argparse.Namespace) -> int:
         return STOP_EXIT
     known = parse_known(args.known_key)
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
-    root = run_root(run_id)
-    for provider in PROVIDERS if config["jira_enabled"] else ("sbertrek",):
+    providers = list(PROVIDERS if config["jira_enabled"] else ("sbertrek",))
+    for provider in providers:
         save_json(snapshot_path(run_id, provider), snapshot_template(provider, args.feature, known, config))
+    initialize_session_log(run_id, args.feature, known, providers)
     status = write_status(run_id, "tracker-read-collecting", gaps=["inventories.pending"], allowed="inventory-page")
-    print(json.dumps({**status, "paths": {"run_status": str(status_path(run_id)), "input": str(root / "input")}}, ensure_ascii=False, indent=2))
+    append_session_log(
+        run_id, source="trackerctl", event="command", details="command=begin; exit=0"
+    )
+    print(json.dumps(status, ensure_ascii=False, indent=2))
+    return 0
+
+
+def mcp_log_command(args: argparse.Namespace) -> int:
+    call = evidence(args.evidence, args.provider)
+    if logged_mcp_evidence(args.run_id, call):
+        raise ValueError("Этот MCP-вызов уже записан в журнале")
+    if not args.summary.strip() or len(args.summary) > 500:
+        raise ValueError("--summary должен содержать от 1 до 500 символов")
+    if args.operation == "inventory":
+        if args.page_number is None or args.page_number < 1 or args.returned_count is None or args.returned_count < 0:
+            raise ValueError("Успешная или ошибочная inventory-запись требует положительный --page-number и неотрицательный --returned-count")
+    elif args.page_number is not None or args.returned_count is not None:
+        raise ValueError("--page-number и --returned-count допустимы только для operation=inventory")
+    if args.operation in {"issue-detail", "history"} and not args.key:
+        raise ValueError(f"operation={args.operation} требует --key")
+    if args.operation not in {"issue-detail", "history"} and args.key:
+        raise ValueError("--key допустим только для issue-detail и history")
+    parts = [f"operation={args.operation}", f"outcome={args.outcome}"]
+    if args.page_number is not None:
+        parts.append(f"page={args.page_number}")
+    if args.key:
+        parts.append(f"key={key(args.key)}")
+    if args.returned_count is not None:
+        parts.append(f"returned={args.returned_count}")
+    parts.append(f"summary={args.summary}")
+    append_session_log(
+        args.run_id, source="mcp", event="call", provider=args.provider,
+        evidence_value=call, details="; ".join(parts),
+    )
+    payload = {
+        "status": "tracker-mcp-call-logged", "run_id": args.run_id,
+        "provider": args.provider, "operation": args.operation,
+        "outcome": args.outcome, "evidence": call,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -714,6 +818,7 @@ def inventory_page_command(args: argparse.Namespace) -> int:
     if args.provider != "sbertrek" and links:
         raise ValueError("Поле Объект Jira записывается только из SberTrek")
     call = evidence(args.evidence, args.provider)
+    require_logged_mcp(args.run_id, call)
     if any(page["evidence"] == call for page in inventory["pages"]):
         raise ValueError("Один MCP-вызов нельзя записать как две страницы")
     inventory["query"] = args.query if inventory["query"] is None else inventory["query"]
@@ -742,7 +847,9 @@ def inventory_unavailable_command(args: argparse.Namespace) -> int:
     ensure_mutable(snapshot)
     if snapshot["inventory"]["pages"]:
         raise ValueError("Нельзя объявить недоступной уже начатую инвентаризацию")
-    snapshot["inventory"].update({"state": "unavailable", "unavailable_reason": args.reason, "unavailable_evidence": evidence(args.evidence, args.provider)})
+    call = evidence(args.evidence, args.provider)
+    require_logged_mcp(args.run_id, call)
+    snapshot["inventory"].update({"state": "unavailable", "unavailable_reason": args.reason, "unavailable_evidence": call})
     save_json(path, snapshot)
     print(json.dumps({"status": "inventory-unavailable-recorded", "provider": args.provider}, ensure_ascii=False, indent=2))
     return 0
@@ -759,6 +866,7 @@ def record_issue_command(args: argparse.Namespace) -> int:
     if issue_by_key(snapshot, issue_key):
         raise ValueError(f"Задача {issue_key} уже записана")
     call = evidence(args.evidence, args.provider)
+    require_logged_mcp(args.run_id, call)
     page_calls = page_evidence_for_key(snapshot, issue_key)
     exact_call = re.search(rf"(?<![A-Z0-9_]){re.escape(issue_key)}(?![0-9])", call, re.I)
     if call not in page_calls and not exact_call:
@@ -878,6 +986,7 @@ def history_complete_command(args: argparse.Namespace) -> int:
     if args.state == "unavailable" and not args.reason:
         raise ValueError("Недоступная история требует --reason")
     call = evidence(args.evidence, args.provider)
+    require_logged_mcp(args.run_id, call)
     if not re.search(rf"(?<![A-Z0-9_]){re.escape(issue['key'])}(?![0-9])", call, re.I):
         raise ValueError("Evidence истории должен содержать точный ключ выбранной задачи")
     issue["history"].update({"state": args.state, "evidence": [call], "reason": args.reason})
@@ -956,7 +1065,14 @@ def reconcile_command(args: argparse.Namespace) -> int:
         "run_id": args.run_id, "status": "tracker-read-reconciled",
         "workflow_complete": True, "final_response_allowed": True,
         "counts": result["counts"], "limitations": result["limitations"],
-        "paths": {"reconciled": str(root / "reconciled.json"), "report": str(root / "report.md")},
+        "paths": {
+            "session_log": str(session_log_path(args.run_id)),
+            "run_status": str(status_path(args.run_id)),
+            "input": str(root / "input"),
+            "reconciled": str(root / "reconciled.json"),
+            "report": str(root / "report.md"),
+            "completion_status": str(root / "completion-status.json"),
+        },
     }
     save_json(root / "completion-status.json", completion)
     save_json(status_path(args.run_id), completion)
@@ -986,6 +1102,7 @@ def parser() -> argparse.ArgumentParser:
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config)
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--feature", required=True); begin.add_argument("--known-key", action="append", default=[]); begin.set_defaults(handler=begin_command)
+    mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("capability-discovery", "inventory", "issue-detail", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key"); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     page = commands.add_parser("inventory-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--scope-project", action="append", default=[]); page.add_argument("--unfinished-confirmed", action="store_true"); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.add_argument("--jira-link", action="append", default=[]); page.set_defaults(handler=inventory_page_command)
     unavailable = commands.add_parser("inventory-unavailable"); unavailable.add_argument("--run-id", required=True); unavailable.add_argument("--provider", choices=PROVIDERS, required=True); unavailable.add_argument("--reason", required=True); unavailable.add_argument("--evidence", required=True); unavailable.set_defaults(handler=inventory_unavailable_command)
     issue = commands.add_parser("record-issue"); issue.add_argument("--run-id", required=True); issue.add_argument("--provider", choices=PROVIDERS, required=True); issue.add_argument("--key", required=True); issue.add_argument("--evidence", required=True); issue.add_argument("--summary", required=True); issue.add_argument("--description", default=""); issue.add_argument("--issue-type", required=True); issue.add_argument("--status", required=True); issue.add_argument("--assignee-id"); issue.add_argument("--assignee-name"); issue.add_argument("--assignee-state", choices=OBSERVATION_STATES, required=True); issue.add_argument("--estimate", type=float); issue.add_argument("--estimate-unit", default="story-points"); issue.add_argument("--estimate-state", choices=OBSERVATION_STATES, required=True); issue.add_argument("--epic-key"); issue.add_argument("--epic-name"); issue.add_argument("--epic-state", choices=OBSERVATION_STATES, required=True); issue.add_argument("--release", action="append", default=[]); issue.add_argument("--releases-state", choices=OBSERVATION_STATES, required=True); issue.add_argument("--relevance", choices=RELEVANCE, required=True); issue.add_argument("--relevance-basis", required=True); issue.add_argument("--selected-by", choices=SELECTION_BASES, required=True); issue.add_argument("--updated-at"); issue.set_defaults(handler=record_issue_command)
@@ -1004,8 +1121,33 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     try:
-        return args.handler(args)
+        initial_run_id = getattr(args, "run_id", None)
+        if initial_run_id and not session_log_path(initial_run_id).is_file():
+            raise ValueError("Tracker-run не содержит обязательный tracker-session-log.md; начни новый run")
+        result = args.handler(args)
+        run_id = getattr(args, "run_id", None)
+        if run_id:
+            provider = getattr(args, "provider", None)
+            details = f"command={args.command}; exit={result}"
+            for name in ("page_number", "key", "state", "relevance"):
+                value = getattr(args, name, None)
+                if value is not None:
+                    details += f"; {name}={value}"
+            append_session_log(
+                run_id, source="trackerctl", event="command",
+                provider=provider, evidence_value=getattr(args, "evidence", None),
+                details=details,
+            )
+        return result
     except ValueError as exc:
+        run_id = getattr(args, "run_id", None)
+        if run_id and session_log_path(run_id).is_file():
+            append_session_log(
+                run_id, source="trackerctl", event="error",
+                provider=getattr(args, "provider", None),
+                evidence_value=getattr(args, "evidence", None),
+                details=f"command={args.command}; error={exc}",
+            )
         payload = {
             "status": "tracker-read-blocked", "run_id": getattr(args, "run_id", None),
             "error": str(exc), "must_stop": True, "workflow_complete": False,
