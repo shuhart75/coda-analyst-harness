@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -12,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 
-PROTOCOL = "targeted-tracker-v1"
-SCHEMA_VERSION = 1
+PROTOCOL = "targeted-tracker-v2"
+SCHEMA_VERSION = 2
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -34,6 +35,11 @@ SP_UNITS = {
     "человеко день", "человеко дни", "человекодень", "человекодни",
     "чел день", "чел дни",
 }
+HISTORY_BATCH_SIZE = 8
+MERGED_FIELDS = (
+    "summary", "issue_type", "status", "assignee", "estimate", "epic",
+    "releases", "created_at", "updated_at",
+)
 DEFAULT_CONFIG = {
     "schema_version": CONFIG_SCHEMA_VERSION,
     "primary_provider": "sbertrek",
@@ -68,7 +74,17 @@ def run_root(run_id: str) -> Path:
 
 
 def snapshot_path(run_id: str, provider: str) -> Path:
-    return run_root(run_id) / "input" / f"{provider}.json"
+    return run_root(run_id) / "providers" / f"{provider}.json"
+
+
+def jobs_root(run_id: str) -> Path:
+    return run_root(run_id) / "jobs"
+
+
+def job_path(run_id: str, job_id: str) -> Path:
+    if not re.fullmatch(r"(?:collection-(?:sbertrek|jira)|history-(?:sbertrek|jira)-[0-9]{2})", job_id):
+        raise ValueError("Некорректный job_id чтения трекеров")
+    return jobs_root(run_id) / f"{job_id}.json"
 
 
 def status_path(run_id: str) -> Path:
@@ -415,9 +431,148 @@ def current_query(run_id: str, config: dict) -> tuple[str, dict] | None:
     return None
 
 
+def query_digest(query: str) -> str:
+    return hashlib.sha256(query.encode("utf-8")).hexdigest()
+
+
+def collection_job(run_id: str, provider: str, query: dict, role: str) -> dict:
+    exact = query.get("exact")
+    if not exact:
+        raise ValueError("Нельзя создать collector-job без точного запроса")
+    job_id = f"collection-{provider}"
+    return {
+        "protocol": PROTOCOL,
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "job_id": job_id,
+        "kind": "provider-collection",
+        "state": "pending",
+        "provider": provider,
+        "role": role,
+        "query": {
+            "language": query["language"],
+            "text": exact,
+            "sha256": query_digest(exact),
+            "purpose": query["purpose"],
+            "method": query.get("method"),
+        },
+        "output": str(snapshot_path(run_id, provider)),
+        "collector_contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-collector.md"),
+        "allowed_operations": [
+            "select-runtime-query-tool", "execute-exact-query", "paginate",
+            "record-bounded-call", "record-page", "record-compact-card",
+            "complete-job",
+        ],
+        "forbidden_operations": [
+            "read-mcp-documentation", "probe-with-alternative-query",
+            "search-by-title-or-description", "read-returned-issues-one-by-one",
+            "change-tracker-or-analytical-artifacts", "continue-to-next-job",
+        ],
+        "required_task_fields": [
+            "key", "jira_key", "summary", "issue_type", "status", "assignee",
+            "estimate", "epic", "releases", "created_at", "updated_at",
+        ],
+        "created_at": now(),
+        "completed_at": None,
+    }
+
+
+def history_job(run_id: str, provider: str, number: int, keys: list[str]) -> dict:
+    job_id = f"history-{provider}-{number:02d}"
+    return {
+        "protocol": PROTOCOL,
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "job_id": job_id,
+        "kind": "provider-history",
+        "state": "pending",
+        "provider": provider,
+        "keys": keys,
+        "output": str(snapshot_path(run_id, provider)),
+        "collector_contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-collector.md"),
+        "allowed_operations": [
+            "read-exact-key-history", "record-bounded-call",
+            "record-assignee-or-status-events", "complete-key-history", "complete-job",
+        ],
+        "forbidden_operations": [
+            "read-mcp-documentation", "search-for-other-issues",
+            "record-comments-or-description-history", "change-tracker-or-analytical-artifacts",
+            "continue-to-next-job",
+        ],
+        "created_at": now(),
+        "completed_at": None,
+    }
+
+
+def save_job(run_id: str, job: dict) -> Path:
+    path = job_path(run_id, job["job_id"])
+    save_json(path, job)
+    return path
+
+
+def load_job(run_id: str, job_id: str) -> tuple[Path, dict]:
+    path = job_path(run_id, job_id)
+    if not path.is_file():
+        raise ValueError(f"Collector-job не найден: {job_id}")
+    job = load_json(path)
+    if (
+        not isinstance(job, dict)
+        or job.get("protocol") != PROTOCOL
+        or job.get("schema_version") != SCHEMA_VERSION
+        or job.get("run_id") != run_id
+        or job.get("job_id") != job_id
+    ):
+        raise ValueError("Collector-job создан старым или повреждённым протоколом")
+    if job.get("state") not in {"pending", "running", "complete"}:
+        raise ValueError("Collector-job содержит некорректное состояние")
+    if job.get("kind") == "provider-collection":
+        query = job.get("query")
+        if (
+            not isinstance(query, dict)
+            or not isinstance(query.get("text"), str)
+            or query.get("sha256") != query_digest(query["text"])
+        ):
+            raise ValueError("Контрольная сумма запроса collector-job не совпадает")
+    return path, job
+
+
+def all_jobs(run_id: str) -> list[dict]:
+    root = jobs_root(run_id)
+    if not root.is_dir():
+        return []
+    return [load_job(run_id, path.stem)[1] for path in sorted(root.glob("*.json"))]
+
+
+def active_job(run_id: str) -> dict | None:
+    pending = [job for job in all_jobs(run_id) if job.get("state") in {"pending", "running"}]
+    pending.sort(key=lambda job: (
+        0 if job.get("kind") == "provider-collection" else 1,
+        0 if job.get("provider") == "sbertrek" else 1,
+        job.get("job_id", ""),
+    ))
+    return pending[0] if pending else None
+
+
+def next_job_payload(run_id: str) -> dict:
+    job = active_job(run_id)
+    if not job:
+        return {}
+    return {
+        "allowed_next_action": "delegate-collector-job",
+        "delegation_required": True,
+        "next_job": {
+            "job_id": job["job_id"],
+            "kind": job["kind"],
+            "provider": job["provider"],
+            "path": str(job_path(run_id, job["job_id"])),
+            "collector_contract": job["collector_contract"],
+            "return_contract": "status-and-paths-only",
+        },
+    }
+
+
 def next_query_payload(provider: str, query: dict) -> dict:
     return {
-        "allowed_next_action": "call-exact-mcp-query",
         "next_query": {
             "provider": provider, "purpose": query["purpose"],
             "language": query["language"], "query": query["exact"],
@@ -438,7 +593,8 @@ def write_status(run_id: str, status: str, *, gaps: list[str] | None = None, all
             "run_status": str(status_path(run_id)),
             "session_log": str(session_log_path(run_id)),
             "scope": str(run_meta_path(run_id)),
-            "input": str(run_root(run_id) / "input"),
+            "jobs": str(jobs_root(run_id)),
+            "providers": str(run_root(run_id) / "providers"),
         },
         **(extra or {}),
     }
@@ -501,6 +657,27 @@ def merged_history(sber: dict | None, jira: dict | None) -> list[dict]:
             seen.add(fingerprint)
             result.append({**event, "source": provider})
     return sorted(result, key=lambda item: item["at"])
+
+
+def assignment_dates(sber: dict | None, jira: dict | None, config: dict) -> tuple[str | None, str | None]:
+    assigned_at = None
+    work_started_at = None
+    for event in merged_history(sber, jira):
+        if event["field"] != "assignee" or not isinstance(event.get("to"), dict) or not event["to"].get("id"):
+            continue
+        assigned_at = assigned_at or event["at"]
+        if work_started_at is None and participant_role(config, event["source"], event["to"]) == "developer":
+            work_started_at = event["at"]
+    return assigned_at, work_started_at
+
+
+def enrich_assignee(value: Any, source: str | None, config: dict) -> Any:
+    if not isinstance(value, dict) or not value.get("id") or source not in PROVIDERS:
+        return value
+    member = config["participants"][source].get(value["id"])
+    if not member:
+        return value
+    return {**value, "team_id": member["team_id"], "role": team_role(member["team_id"])}
 
 
 def development_state(sber: dict | None, jira: dict | None, config: dict) -> dict:
@@ -572,13 +749,22 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
             paired_jira.add(jira_key)
         record: dict[str, Any] = {"sbertrek_key": sber_key, "jira_key": jira_key}
         sources, conflicts = {}, []
-        for field in ("summary", "description", "issue_type", "status", "assignee", "estimate", "epic", "releases"):
+        for field in MERGED_FIELDS:
             value, source, conflict = merged_value(field, sissue, jissue)
             record[field], sources[field] = value, source
             if conflict:
                 conflicts.append(conflict)
                 discrepancies.append({"kind": "field-conflict", "sbertrek_key": sber_key, "jira_key": jira_key, **conflict})
-        record.update({"field_sources": sources, "conflicts": conflicts, "history": merged_history(sissue, jissue), "development": development_state(sissue, jissue, config)})
+        record["assignee"] = enrich_assignee(record.get("assignee"), sources.get("assignee"), config)
+        assigned_at, work_started_at = assignment_dates(sissue, jissue, config)
+        record.update({
+            "field_sources": sources,
+            "conflicts": conflicts,
+            "history": merged_history(sissue, jissue),
+            "assigned_at": assigned_at,
+            "work_started_at": work_started_at,
+            "development": development_state(sissue, jissue, config),
+        })
         merged.append(record)
         if jira_key and not jissue:
             discrepancies.append({"kind": "jira-counterpart-not-returned", "sbertrek_key": sber_key, "jira_key": jira_key})
@@ -586,9 +772,11 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
         if jira_key in paired_jira:
             continue
         record = {"sbertrek_key": None, "jira_key": jira_key, "history": merged_history(None, jissue), "conflicts": []}
-        for field in ("summary", "description", "issue_type", "status", "assignee", "estimate", "epic", "releases"):
+        for field in MERGED_FIELDS:
             record[field] = canonical_estimate(jissue.get(field)) if field == "estimate" else jissue.get(field)
-        record["field_sources"] = {field: "jira" if record.get(field) not in (None, "", [], {}) else None for field in ("summary", "description", "issue_type", "status", "assignee", "estimate", "epic", "releases")}
+        record["field_sources"] = {field: "jira" if record.get(field) not in (None, "", [], {}) else None for field in MERGED_FIELDS}
+        record["assignee"] = enrich_assignee(record.get("assignee"), "jira", config)
+        record["assigned_at"], record["work_started_at"] = assignment_dates(None, jissue, config)
         record["development"] = development_state(None, jissue, config)
         merged.append(record)
         discrepancies.append({"kind": "jira-only", "jira_key": jira_key})
@@ -624,12 +812,12 @@ def render_report(result: dict) -> str:
     lines = [f"# Сверка трекеров: {scope['label']}", "", "## Область", "", f"- Тип: `{scope['kind']}`", f"- Исходный трекер: `{scope['provider']}`", f"- Ключи: {', '.join(scope['ids'])}", "", "## Сводка", ""]
     labels = {"sbertrek": "Задач SberTrek", "jira": "Задач Jira", "matched": "Склеено пар", "merged": "Итоговых задач", "discrepancies": "Расхождений"}
     lines += [f"- {labels[name]}: {value}" for name, value in result["counts"].items()]
-    lines += ["", "## Задачи", "", "| SberTrek | Jira | Название | Статус | Исполнитель | Оценка | Состояние |", "|---|---|---|---|---|---|---|"]
+    lines += ["", "## Задачи", "", "| SberTrek | Jira | Название | Статус | Исполнитель | Оценка | В работе с | Состояние |", "|---|---|---|---|---|---|---|---|"]
     for item in result["issues"]:
         assignee, estimate = item.get("assignee") or {}, item.get("estimate") or {}
         assignee_text = assignee.get("name") or assignee.get("id") or "—" if isinstance(assignee, dict) else str(assignee)
         estimate_text = f"{estimate.get('value')} {estimate.get('unit')}" if isinstance(estimate, dict) and estimate.get("value") is not None else "—"
-        cells = [item.get("sbertrek_key") or "—", item.get("jira_key") or "—", item.get("summary") or "—", item.get("status") or "—", assignee_text, estimate_text, item["development"]["state"]]
+        cells = [item.get("sbertrek_key") or "—", item.get("jira_key") or "—", item.get("summary") or "—", item.get("status") or "—", assignee_text, estimate_text, item.get("work_started_at") or "—", item["development"]["state"]]
         lines.append("| " + " | ".join(str(cell).replace("|", "\\|") for cell in cells) + " |")
     lines += ["", "## Ограничения", ""] + ([f"- {item}" for item in result["limitations"]] or ["- Нет"])
     for group, title in (("epics", "Группировка по эпикам"), ("releases", "Группировка по релизам")):
@@ -695,7 +883,14 @@ def begin_command(args: argparse.Namespace) -> int:
         raise ValueError("Для scope-kind=epic требуется ровно один --scope-id")
     if args.scope_provider == "jira" and not config["jira_enabled"]:
         raise ValueError("Jira отключена в tracker-config.json; Jira не может быть исходной областью")
-    scope = {"kind": args.scope_kind, "provider": args.scope_provider, "ids": ids, "label": args.label.strip(), "source": args.scope_source.strip()}
+    scope = {
+        "kind": args.scope_kind,
+        "provider": args.scope_provider,
+        "ids": ids,
+        "label": args.label.strip(),
+        "source": args.scope_source.strip(),
+        "intent": args.intent,
+    }
     if not scope["label"] or not scope["source"]:
         raise ValueError("--label и --scope-source не могут быть пустыми")
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
@@ -706,7 +901,13 @@ def begin_command(args: argparse.Namespace) -> int:
     initialize_session_log(run_id, scope, providers)
     provider, query = current_query(run_id, config) or (None, None)
     assert provider and query
-    status = write_status(run_id, "tracker-read-collecting", gaps=[f"{provider}.query.pending"], extra=next_query_payload(provider, query))
+    save_job(run_id, collection_job(run_id, provider, query, "primary"))
+    status = write_status(
+        run_id,
+        "tracker-read-awaiting-collector",
+        gaps=[f"{provider}.collection-job.pending"],
+        extra=next_job_payload(run_id),
+    )
     append_session_log(run_id, source="trackerctl", event="command", details="command=begin; exit=0")
     print(json.dumps(status, ensure_ascii=False, indent=2))
     return 0
@@ -718,13 +919,18 @@ def mcp_log_command(args: argparse.Namespace) -> int:
         raise ValueError("Этот MCP-вызов уже записан в журнале")
     if not args.summary.strip() or len(args.summary) > 500:
         raise ValueError("--summary должен содержать от 1 до 500 символов")
+    if args.operation in {"capability-discovery", "issue-detail"}:
+        raise ValueError("targeted-tracker-v2 запрещает exploratory и поштучные MCP-вызовы")
     config = load_config()
     if args.operation == "query":
         current = current_query(args.run_id, config)
         if not current or current[0] != args.provider:
             raise ValueError("Сейчас нет разрешённого поискового запроса для этого провайдера")
+        job = active_job(args.run_id)
+        if not job or job.get("kind") != "provider-collection" or job.get("provider") != args.provider:
+            raise ValueError("Поисковый MCP-вызов разрешён только активному collector-job")
         if args.query != current[1]["exact"]:
-            raise ValueError(f"Разрешён только точный {current[1]['language']} из next_query")
+            raise ValueError(f"Разрешён только точный {current[1]['language']} активного collector-job")
         if args.page_number is None or args.page_number < 1 or args.returned_count is None or args.returned_count < 0:
             raise ValueError("operation=query требует --page-number и --returned-count")
     elif args.query is not None or args.page_number is not None or args.returned_count is not None:
@@ -733,6 +939,15 @@ def mcp_log_command(args: argparse.Namespace) -> int:
         raise ValueError(f"operation={args.operation} требует --key")
     if args.operation not in {"issue-detail", "history"} and args.key:
         raise ValueError("--key допустим только для issue-detail и history")
+    if args.operation == "history":
+        job = active_job(args.run_id)
+        if (
+            not job
+            or job.get("kind") != "provider-history"
+            or job.get("provider") != args.provider
+            or issue_key(args.key) not in job.get("keys", [])
+        ):
+            raise ValueError("Историю разрешено читать только для ключа активного history-job")
     parts = [f"operation={args.operation}", f"outcome={args.outcome}"]
     if args.query is not None:
         parts.append(f"query={args.query}")
@@ -755,9 +970,12 @@ def query_page_command(args: argparse.Namespace) -> int:
         raise ValueError("Эта страница не соответствует текущему разрешённому запросу")
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
+    job_path_value, job = load_job(args.run_id, f"collection-{args.provider}")
+    if job.get("state") not in {"pending", "running"} or active_job(args.run_id) != job:
+        raise ValueError("Страница разрешена только активному collector-job")
     query = snapshot["query"]
     if args.query != query["exact"]:
-        raise ValueError(f"Разрешён только точный {query['language']} из next_query")
+        raise ValueError(f"Разрешён только точный {query['language']} активного collector-job")
     expected_page = len(query["pages"]) + 1
     if args.page_number != expected_page:
         raise ValueError(f"Ожидалась страница {expected_page}")
@@ -778,6 +996,8 @@ def query_page_command(args: argparse.Namespace) -> int:
     query["keys"] = sorted(set(query["keys"]) | set(page_keys))
     query["state"] = "complete" if args.last_page else "collecting"
     save_json(path, snapshot)
+    job["state"] = "running"
+    save_json(job_path_value, job)
     print(json.dumps({"status": "tracker-query-page-recorded", "provider": args.provider, "page": args.page_number, "query_state": query["state"], "key_count": len(query["keys"])}, ensure_ascii=False, indent=2))
     return 0
 
@@ -797,6 +1017,9 @@ def query_unavailable_command(args: argparse.Namespace) -> int:
     require_logged_mcp(args.run_id, call, outcome="error")
     snapshot["query"].update({"state": "unavailable", "unavailable_reason": args.reason, "unavailable_evidence": call})
     save_json(path, snapshot)
+    job_file, job = load_job(args.run_id, f"collection-{args.provider}")
+    job["state"] = "running"
+    save_json(job_file, job)
     print(json.dumps({"status": "tracker-query-unavailable-recorded", "provider": args.provider}, ensure_ascii=False, indent=2))
     return 0
 
@@ -814,6 +1037,13 @@ def jira_epic_fallback_command(args: argparse.Namespace) -> int:
     require_logged_mcp(args.run_id, call, outcome="error")
     query.update({"exact": jql_epic(scope["ids"][0], "epic-link"), "method": "epic-link", "state": "pending"})
     save_json(path, snapshot)
+    job_file, job = load_job(args.run_id, "collection-jira")
+    job["query"].update({
+        "text": query["exact"],
+        "sha256": query_digest(query["exact"]),
+        "method": "epic-link",
+    })
+    save_json(job_file, job)
     print(json.dumps({"status": "jira-epic-query-fallback-ready", **next_query_payload("jira", query)}, ensure_ascii=False, indent=2))
     return 0
 
@@ -823,6 +1053,9 @@ def record_issue_command(args: argparse.Namespace) -> int:
     ensure_mutable(snapshot)
     if snapshot["collection_complete"]:
         raise ValueError("Завершённую коллекцию нельзя дополнять")
+    job = active_job(args.run_id)
+    if not job or job.get("kind") != "provider-collection" or job.get("provider") != args.provider:
+        raise ValueError("Карточки разрешено записывать только активному collector-job")
     key_value = issue_key(args.key)
     if key_value not in snapshot["query"]["keys"]:
         raise ValueError("Карточка разрешена только для ключа текущего точного запроса")
@@ -831,9 +1064,8 @@ def record_issue_command(args: argparse.Namespace) -> int:
     call = evidence(args.evidence, args.provider)
     require_logged_mcp(args.run_id, call, outcome="success")
     page_evidence = {page["evidence"] for page in snapshot["query"]["pages"] if key_value in page["keys"]}
-    exact_call = re.search(rf"(?<![A-Z0-9_]){re.escape(key_value)}(?![0-9])", call, re.I)
-    if call not in page_evidence and not exact_call:
-        raise ValueError("Evidence карточки должно быть страницей точного запроса или точным detail-вызовом")
+    if call not in page_evidence:
+        raise ValueError("Evidence карточки должно быть страницей точного bulk-запроса")
     values = {
         "assignee": participant(args.assignee_id, args.assignee_name),
         "estimate": {"value": args.estimate, "unit": args.estimate_unit} if args.estimate is not None else None,
@@ -849,10 +1081,9 @@ def record_issue_command(args: argparse.Namespace) -> int:
         raise ValueError("Объект Jira записывается только для карточки SberTrek")
     item = {
         "key": key_value, "jira_key": jira_key, "evidence": call,
-        "summary": args.summary, "description": args.description,
-        "issue_type": args.issue_type, "status": args.status,
+        "summary": args.summary, "issue_type": args.issue_type, "status": args.status,
         **values, "field_observations": observations,
-        "updated_at": args.updated_at,
+        "created_at": args.created_at, "updated_at": args.updated_at,
         "history": {"state": "pending", "evidence": [], "events": [], "reason": None},
     }
     snapshot["issues"].append(item)
@@ -865,14 +1096,29 @@ def missing_cards(snapshot: dict) -> list[str]:
     return sorted(set(snapshot["query"]["keys"]) - {item["key"] for item in snapshot["issues"]})
 
 
-def collection_advance_command(args: argparse.Namespace) -> int:
+def create_history_jobs(run_id: str, snapshots: dict[str, dict]) -> list[dict]:
+    created = []
+    for provider in PROVIDERS:
+        snapshot = snapshots.get(provider)
+        if not snapshot:
+            continue
+        keys = sorted(item["key"] for item in snapshot["issues"])
+        for offset in range(0, len(keys), HISTORY_BATCH_SIZE):
+            job = history_job(run_id, provider, offset // HISTORY_BATCH_SIZE + 1, keys[offset:offset + HISTORY_BATCH_SIZE])
+            save_job(run_id, job)
+            created.append(job)
+    return created
+
+
+def advance_after_collection(run_id: str) -> dict:
     config = load_config()
-    snapshots = all_snapshots(args.run_id, config)
+    snapshots = all_snapshots(run_id, config)
     scope = next(iter(snapshots.values()))["scope"]
     primary_provider = scope["provider"]
     primary = snapshots[primary_provider]
-    if primary["query"]["state"] != "complete":
-        raise ValueError(f"Исходный точный запрос {primary_provider} не завершён")
+    primary_job_file = job_path(run_id, f"collection-{primary_provider}")
+    if not primary_job_file.is_file() or load_job(run_id, f"collection-{primary_provider}")[1].get("state") != "complete":
+        raise ValueError(f"Исходный collector-job {primary_provider} не завершён")
     missing = missing_cards(primary)
     if missing:
         raise ValueError("Не записаны карточки исходного запроса: " + ", ".join(missing))
@@ -889,15 +1135,22 @@ def collection_advance_command(args: argparse.Namespace) -> int:
             secondary["query"].update({"exact": exact, "state": "pending"})
         else:
             secondary["query"].update({"state": "skipped"})
-        save_json(snapshot_path(args.run_id, secondary_provider), secondary)
+        save_json(snapshot_path(run_id, secondary_provider), secondary)
         snapshots[secondary_provider] = secondary
         if exact:
-            payload = {"status": "tracker-counterpart-query-ready", "run_id": args.run_id, **next_query_payload(secondary_provider, secondary["query"])}
-            write_status(args.run_id, "tracker-read-collecting", gaps=[f"{secondary_provider}.query.pending"], extra=next_query_payload(secondary_provider, secondary["query"]))
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
-            return 0
+            save_job(run_id, collection_job(run_id, secondary_provider, secondary["query"], "counterpart"))
+            return write_status(
+                run_id,
+                "tracker-read-awaiting-collector",
+                gaps=[f"{secondary_provider}.collection-job.pending"],
+                extra=next_job_payload(run_id),
+            )
     if secondary and secondary["query"]["state"] not in {"complete", "skipped", "unavailable"}:
         raise ValueError(f"Counterpart-запрос {secondary_provider} не завершён")
+    if secondary and secondary["query"]["state"] in {"complete", "unavailable"}:
+        secondary_job_file = job_path(run_id, f"collection-{secondary_provider}")
+        if not secondary_job_file.is_file() or load_job(run_id, f"collection-{secondary_provider}")[1].get("state") != "complete":
+            raise ValueError(f"Counterpart collector-job {secondary_provider} не завершён")
     if secondary:
         missing = missing_cards(secondary)
         if missing:
@@ -909,9 +1162,45 @@ def collection_advance_command(args: argparse.Namespace) -> int:
                 raise ValueError("SberTrek Объект Jira вне исходной Jira-области: " + ", ".join(invalid))
     for provider, snapshot in snapshots.items():
         snapshot["collection_complete"] = True
-        save_json(snapshot_path(args.run_id, provider), snapshot)
-    payload = write_status(args.run_id, "tracker-read-history", gaps=["histories.pending"], allowed="history-complete")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+        save_json(snapshot_path(run_id, provider), snapshot)
+    history_jobs = create_history_jobs(run_id, snapshots)
+    if history_jobs:
+        return write_status(
+            run_id,
+            "tracker-read-awaiting-history-collector",
+            gaps=[f"{job['job_id']}.pending" for job in history_jobs],
+            extra=next_job_payload(run_id),
+        )
+    return write_status(run_id, "tracker-read-ready-to-reconcile", allowed="reconcile")
+
+
+def collector_complete_command(args: argparse.Namespace) -> int:
+    job_id = f"collection-{args.provider}"
+    path, job = load_job(args.run_id, job_id)
+    if job.get("state") not in {"pending", "running"} or active_job(args.run_id) != job:
+        raise ValueError("Завершить можно только активный collector-job")
+    _, snapshot = load_snapshot(args.run_id, args.provider)
+    if snapshot["query"]["state"] not in {"complete", "unavailable"}:
+        raise ValueError("Точный запрос collector-job не завершён")
+    missing = missing_cards(snapshot)
+    if missing:
+        raise ValueError("Не записаны компактные карточки: " + ", ".join(missing))
+    job["state"] = "complete"
+    job["completed_at"] = now()
+    save_json(path, job)
+    advance_after_collection(args.run_id)
+    print(json.dumps({
+        "protocol": PROTOCOL,
+        "run_id": args.run_id,
+        "status": "collector-job-complete",
+        "completed_job": job_id,
+        "collector_must_return": True,
+        "paths": {
+            "run_status": str(status_path(args.run_id)),
+            "jobs": str(jobs_root(args.run_id)),
+            "providers": str(run_root(args.run_id) / "providers"),
+        },
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -919,10 +1208,22 @@ def history_event_command(args: argparse.Namespace) -> int:
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
     if not snapshot["collection_complete"]:
-        raise ValueError("История разрешена только после collection-advance")
+        raise ValueError("История разрешена только после завершения collection-jobs")
+    job = active_job(args.run_id)
+    if (
+        not job
+        or job.get("kind") != "provider-history"
+        or job.get("provider") != args.provider
+        or issue_key(args.key) not in job.get("keys", [])
+    ):
+        raise ValueError("Событие разрешено только для ключа активного history-job")
     item = issue_by_key(snapshot, issue_key(args.key))
     if not item:
         raise ValueError("Задача отсутствует в целевой коллекции")
+    call = evidence(args.evidence, args.provider)
+    require_logged_mcp(args.run_id, call, outcome="success")
+    if not re.search(rf"(?<![A-Z0-9_]){re.escape(item['key'])}(?![0-9])", call, re.I):
+        raise ValueError("Evidence события истории должен содержать точный ключ задачи")
     event = {"at": args.at, "field": args.field, "from": participant(args.from_id, args.from_name) if args.field == "assignee" else args.from_value, "to": participant(args.to_id, args.to_name) if args.field == "assignee" else args.to_value}
     item["history"]["events"].append(event)
     save_json(path, snapshot)
@@ -934,7 +1235,15 @@ def history_complete_command(args: argparse.Namespace) -> int:
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
     if not snapshot["collection_complete"]:
-        raise ValueError("История разрешена только после collection-advance")
+        raise ValueError("История разрешена только после завершения collection-jobs")
+    job = active_job(args.run_id)
+    if (
+        not job
+        or job.get("kind") != "provider-history"
+        or job.get("provider") != args.provider
+        or issue_key(args.key) not in job.get("keys", [])
+    ):
+        raise ValueError("Историю разрешено завершать только в активном history-job")
     item = issue_by_key(snapshot, issue_key(args.key))
     if not item:
         raise ValueError("Задача отсутствует в целевой коллекции")
@@ -950,15 +1259,45 @@ def history_complete_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def finalize_command(args: argparse.Namespace) -> int:
-    path, snapshot = load_snapshot(args.run_id, args.provider)
-    ensure_mutable(snapshot)
-    gaps = snapshot_gaps(snapshot)
-    if gaps:
-        raise ValueError("Снимок не готов: " + ", ".join(gaps))
-    snapshot["captured_at"] = now()
-    save_json(path, snapshot)
-    print(json.dumps({"status": "tracker-snapshot-finalized", "provider": args.provider, "captured_at": snapshot["captured_at"]}, ensure_ascii=False, indent=2))
+def history_job_complete_command(args: argparse.Namespace) -> int:
+    path, job = load_job(args.run_id, args.job_id)
+    if job.get("kind") != "provider-history" or job.get("state") not in {"pending", "running"}:
+        raise ValueError("Завершить можно только активный history-job")
+    if active_job(args.run_id) != job:
+        raise ValueError("Завершить можно только текущий history-job")
+    _, snapshot = load_snapshot(args.run_id, job["provider"])
+    pending = []
+    for key in job["keys"]:
+        item = issue_by_key(snapshot, key)
+        if not item or item.get("history", {}).get("state") == "pending":
+            pending.append(key)
+    if pending:
+        raise ValueError("Не завершена история ключей: " + ", ".join(pending))
+    job["state"] = "complete"
+    job["completed_at"] = now()
+    save_json(path, job)
+    next_payload = next_job_payload(args.run_id)
+    if next_payload:
+        payload = write_status(
+            args.run_id,
+            "tracker-read-awaiting-history-collector",
+            gaps=[f"{item['job_id']}.pending" for item in all_jobs(args.run_id) if item.get("state") in {"pending", "running"}],
+            extra=next_payload,
+        )
+    else:
+        payload = write_status(args.run_id, "tracker-read-ready-to-reconcile", allowed="reconcile")
+    print(json.dumps({
+        "protocol": PROTOCOL,
+        "run_id": args.run_id,
+        "status": "history-job-complete",
+        "completed_job": args.job_id,
+        "collector_must_return": True,
+        "paths": {
+            "run_status": str(status_path(args.run_id)),
+            "jobs": str(jobs_root(args.run_id)),
+            "providers": str(run_root(args.run_id) / "providers"),
+        },
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -970,19 +1309,52 @@ def run_status_command(args: argparse.Namespace) -> int:
             raise ValueError("Completion-status создан старым протоколом")
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
-    config = load_config()
-    snapshots = all_snapshots(args.run_id, config)
-    current = current_query(args.run_id, config)
-    gaps = []
-    for snapshot in snapshots.values():
-        if snapshot["query"]["state"] in {"pending", "collecting"}:
-            gaps.append(f"{snapshot['provider']}.query.{snapshot['query']['state']}")
-        gaps += snapshot_gaps(snapshot)
-    extra = next_query_payload(current[0], current[1]) if current else {}
-    allowed = "call-exact-mcp-query" if current else "collection-advance-or-complete-history"
-    payload = write_status(args.run_id, "tracker-read-incomplete", gaps=sorted(set(gaps)), allowed=allowed, extra=extra)
+    extra = next_job_payload(args.run_id)
+    if extra:
+        job_id = extra["next_job"]["job_id"]
+        payload = write_status(
+            args.run_id,
+            "tracker-read-awaiting-collector",
+            gaps=[f"{job_id}.pending"],
+            allowed="delegate-collector-job",
+            extra=extra,
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    snapshots = all_snapshots(args.run_id, load_config())
+    gaps = sum((snapshot_gaps(snapshot) for snapshot in snapshots.values()), [])
+    payload = write_status(
+        args.run_id,
+        "tracker-read-ready-to-reconcile" if not gaps else "tracker-read-incomplete",
+        gaps=sorted(set(gaps)),
+        allowed="reconcile" if not gaps else "fix-reported-gap",
+    )
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 2 if gaps else 0
+
+
+def collector_brief_command(args: argparse.Namespace) -> int:
+    job = active_job(args.run_id)
+    if not job:
+        raise ValueError("У tracker-run нет ожидающего collector-job")
+    path = job_path(args.run_id, job["job_id"])
+    contract = job["collector_contract"]
+    prompt = (
+        f"Ты изолированный сборщик {job['provider']}. Прочитай только {contract} и {path}. "
+        "Выполни ровно описанный job, не читай документацию MCP и не ищи другие задачи. "
+        "После команды завершения немедленно верни координатору только status, job_id и пути; "
+        "не запускай следующий job и не пересказывай данные задач."
+    )
+    print(json.dumps({
+        "protocol": PROTOCOL,
+        "run_id": args.run_id,
+        "status": "collector-brief-ready",
+        "job_id": job["job_id"],
+        "job_path": str(path),
+        "collector_contract": contract,
+        "prompt": prompt,
+    }, ensure_ascii=False, indent=2))
+    return 0
 
 
 def set_participant_command(args: argparse.Namespace) -> int:
@@ -1006,7 +1378,10 @@ def set_participant_command(args: argparse.Namespace) -> int:
 
 def reconcile_command(args: argparse.Namespace) -> int:
     config = load_config()
-    snapshots = all_snapshots(args.run_id, config, finalized=True)
+    pending_jobs = [job["job_id"] for job in all_jobs(args.run_id) if job.get("state") in {"pending", "running"}]
+    if pending_jobs:
+        raise ValueError("Collector-jobs не завершены: " + ", ".join(pending_jobs))
+    snapshots = all_snapshots(args.run_id, config)
     gaps = sum((snapshot_gaps(snapshot) for snapshot in snapshots.values()), [])
     if gaps:
         raise ValueError("Tracker-run не завершён: " + ", ".join(gaps))
@@ -1017,6 +1392,10 @@ def reconcile_command(args: argparse.Namespace) -> int:
         payload = stop_payload(question, status="tracker-reconcile-blocked", run_id=args.run_id)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return STOP_EXIT
+    for provider, snapshot in snapshots.items():
+        if not snapshot.get("captured_at"):
+            snapshot["captured_at"] = now()
+            save_json(snapshot_path(args.run_id, provider), snapshot)
     result = reconcile_data(snapshots, config)
     root = run_root(args.run_id)
     save_json(root / "reconciled.json", result)
@@ -1025,8 +1404,18 @@ def reconcile_command(args: argparse.Namespace) -> int:
         "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION,
         "run_id": args.run_id, "status": "tracker-read-reconciled",
         "workflow_complete": True, "final_response_allowed": True,
+        "planning_application_allowed": result["scope"].get("intent") == "update-planning",
         "counts": result["counts"], "limitations": result["limitations"],
-        "paths": {"session_log": str(session_log_path(args.run_id)), "run_status": str(status_path(args.run_id)), "scope": str(run_meta_path(args.run_id)), "input": str(root / "input"), "reconciled": str(root / "reconciled.json"), "report": str(root / "report.md"), "completion_status": str(root / "completion-status.json")},
+        "paths": {
+            "session_log": str(session_log_path(args.run_id)),
+            "run_status": str(status_path(args.run_id)),
+            "scope": str(run_meta_path(args.run_id)),
+            "jobs": str(jobs_root(args.run_id)),
+            "providers": str(root / "providers"),
+            "reconciled": str(root / "reconciled.json"),
+            "report": str(root / "report.md"),
+            "completion_status": str(root / "completion-status.json"),
+        },
     }
     save_json(root / "completion-status.json", completion)
     save_json(status_path(args.run_id), completion)
@@ -1055,17 +1444,18 @@ def parser() -> argparse.ArgumentParser:
     types = commands.add_parser("set-issue-types"); types.add_argument("issue_types", nargs="+"); types.set_defaults(handler=update_config)
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config)
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
-    begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.set_defaults(handler=begin_command)
-    mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("capability-discovery", "query", "issue-detail", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key"); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
+    begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
+    mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key"); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)
     unavailable = commands.add_parser("query-unavailable"); unavailable.add_argument("--run-id", required=True); unavailable.add_argument("--provider", choices=PROVIDERS, required=True); unavailable.add_argument("--reason", required=True); unavailable.add_argument("--evidence", required=True); unavailable.set_defaults(handler=query_unavailable_command)
     fallback = commands.add_parser("jira-epic-fallback"); fallback.add_argument("--run-id", required=True); fallback.add_argument("--evidence", required=True); fallback.set_defaults(handler=jira_epic_fallback_command)
-    item = commands.add_parser("record-issue"); item.add_argument("--run-id", required=True); item.add_argument("--provider", choices=PROVIDERS, required=True); item.add_argument("--key", required=True); item.add_argument("--jira-key"); item.add_argument("--evidence", required=True); item.add_argument("--summary", required=True); item.add_argument("--description", default=""); item.add_argument("--issue-type", required=True); item.add_argument("--status", required=True); item.add_argument("--assignee-id"); item.add_argument("--assignee-name"); item.add_argument("--assignee-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--estimate", type=float); item.add_argument("--estimate-unit", default="story-points"); item.add_argument("--estimate-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--epic-key"); item.add_argument("--epic-name"); item.add_argument("--epic-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--release", action="append", default=[]); item.add_argument("--releases-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--updated-at"); item.set_defaults(handler=record_issue_command)
-    advance = commands.add_parser("collection-advance"); advance.add_argument("--run-id", required=True); advance.set_defaults(handler=collection_advance_command)
-    event = commands.add_parser("history-event"); event.add_argument("--run-id", required=True); event.add_argument("--provider", choices=PROVIDERS, required=True); event.add_argument("--key", required=True); event.add_argument("--at", required=True); event.add_argument("--field", required=True); event.add_argument("--from-id"); event.add_argument("--from-name"); event.add_argument("--from-value"); event.add_argument("--to-id"); event.add_argument("--to-name"); event.add_argument("--to-value"); event.set_defaults(handler=history_event_command)
+    item = commands.add_parser("record-issue"); item.add_argument("--run-id", required=True); item.add_argument("--provider", choices=PROVIDERS, required=True); item.add_argument("--key", required=True); item.add_argument("--jira-key"); item.add_argument("--evidence", required=True); item.add_argument("--summary", required=True); item.add_argument("--issue-type", required=True); item.add_argument("--status", required=True); item.add_argument("--assignee-id"); item.add_argument("--assignee-name"); item.add_argument("--assignee-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--estimate", type=float); item.add_argument("--estimate-unit", default="story-points"); item.add_argument("--estimate-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--epic-key"); item.add_argument("--epic-name"); item.add_argument("--epic-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--release", action="append", default=[]); item.add_argument("--releases-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--created-at"); item.add_argument("--updated-at"); item.set_defaults(handler=record_issue_command)
+    collector_complete = commands.add_parser("collector-complete"); collector_complete.add_argument("--run-id", required=True); collector_complete.add_argument("--provider", choices=PROVIDERS, required=True); collector_complete.set_defaults(handler=collector_complete_command)
+    event = commands.add_parser("history-event"); event.add_argument("--run-id", required=True); event.add_argument("--provider", choices=PROVIDERS, required=True); event.add_argument("--key", required=True); event.add_argument("--evidence", required=True); event.add_argument("--at", required=True); event.add_argument("--field", choices=("assignee", "status"), required=True); event.add_argument("--from-id"); event.add_argument("--from-name"); event.add_argument("--from-value"); event.add_argument("--to-id"); event.add_argument("--to-name"); event.add_argument("--to-value"); event.set_defaults(handler=history_event_command)
     history = commands.add_parser("history-complete"); history.add_argument("--run-id", required=True); history.add_argument("--provider", choices=PROVIDERS, required=True); history.add_argument("--key", required=True); history.add_argument("--state", choices=("complete", "unavailable"), required=True); history.add_argument("--reason"); history.add_argument("--evidence", required=True); history.set_defaults(handler=history_complete_command)
-    finalize = commands.add_parser("snapshot-finalize"); finalize.add_argument("--run-id", required=True); finalize.add_argument("--provider", choices=PROVIDERS, required=True); finalize.set_defaults(handler=finalize_command)
+    history_job_done = commands.add_parser("history-job-complete"); history_job_done.add_argument("--run-id", required=True); history_job_done.add_argument("--job-id", required=True); history_job_done.set_defaults(handler=history_job_complete_command)
     run_status = commands.add_parser("run-status"); run_status.add_argument("--run-id", required=True); run_status.set_defaults(handler=run_status_command)
+    collector_brief = commands.add_parser("collector-brief"); collector_brief.add_argument("--run-id", required=True); collector_brief.set_defaults(handler=collector_brief_command)
     participant_parser = commands.add_parser("set-participant"); participant_parser.add_argument("--run-id", required=True); participant_parser.add_argument("--provider", choices=PROVIDERS, required=True); participant_parser.add_argument("--account-id", required=True); participant_parser.add_argument("--team-id", required=True); participant_parser.set_defaults(handler=set_participant_command)
     reconcile = commands.add_parser("reconcile"); reconcile.add_argument("--run-id", required=True); reconcile.set_defaults(handler=reconcile_command)
     result = commands.add_parser("result-status"); result.add_argument("--run-id", required=True); result.set_defaults(handler=result_status_command)

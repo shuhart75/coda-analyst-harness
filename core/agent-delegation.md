@@ -21,10 +21,15 @@ Avoid delegating:
 - baseline promotion decisions;
 - cross-feature semantic reconciliation that requires one coherent judgment;
 - the exact next step when the main agent is blocked on that answer.
-- any task-tracker workflow step, including MCP discovery, issue search, issue or
-  history reads, snapshot assembly and reconciliation. Tracker reading is kept in
-  the main agent so `config-status`, `begin`, `run_id` and `reconcile` remain one
-  fail-closed chain.
+- tracker scope selection, job creation, cross-provider reconciliation or plan
+  application. These remain coordinator/script responsibilities.
+
+Tracker collection is the required exception to the general critical-path rule.
+Under `targeted-tracker-v2`, every provider collection job and every bounded
+history job must run in a fresh isolated subagent. The coordinator keeps
+`config-status`, `begin`, `run_id`, `run-status`, `reconcile` and plan application;
+collectors keep MCP output out of the coordinator context and write only their
+owned runtime provider file.
 
 ## Ownership rules
 
