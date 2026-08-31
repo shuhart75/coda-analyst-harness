@@ -111,6 +111,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
         jira_key: str | None = None, assignee: str | None = None,
         estimate: str | None = None, epic: str | None = None,
         summary: str | None = None, status: str = "active",
+        jira_key_state: str | None = None,
     ) -> list[str]:
         args = [
             "record-issue", "--run-id", run_id, "--provider", provider,
@@ -123,6 +124,8 @@ class TrackerCtlV2Tests(unittest.TestCase):
             "--created-at", "2026-08-01T08:00:00+00:00",
             "--updated-at", "2026-08-27T08:00:00+00:00",
         ]
+        if provider == "sbertrek":
+            args += ["--jira-key-state", jira_key_state or ("value" if jira_key else "absent")]
         if jira_key:
             args += ["--jira-key", jira_key]
         if assignee:
@@ -214,15 +217,34 @@ class TrackerCtlV2Tests(unittest.TestCase):
             query = 'unit = "RSCON-6848" or unit = "RSCON-6849"'
             self.assertEqual(job["query"]["text"], query)
             self.assertEqual(job["query"]["sha256"], hashlib.sha256(query.encode()).hexdigest())
+            self.assertNotIn("role", job)
+            self.assertNotIn("purpose", job["query"])
+            self.assertNotIn("method", job["query"])
             self.assertIn("read-mcp-documentation", job["forbidden_operations"])
             self.assertIn("read-returned-issues-one-by-one", job["forbidden_operations"])
 
-    def test_collector_brief_contains_only_job_handoff(self) -> None:
+    def test_collector_brief_contains_only_exact_query_and_recording_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp); begin = self.begin(state)
+            state = Path(temp); begin = self.begin(state, kind="epic", ids=("RSCON-6854",))
             payload = self.run_tool(state, "collector-brief", "--run-id", begin["run_id"])
-            self.assertIn("не читай документацию MCP", payload["prompt"])
-            self.assertNotIn('unit = "', payload["prompt"])
+            exact = 'unit IN linkedUnitsOf("unit = \'RSCON-6854\'", "Состоит из")'
+            self.assertIn(f"ровно этот TQL-запрос без изменений:\n\n{exact}", payload["prompt"])
+            self.assertNotIn("Когорты", payload["prompt"])
+            self.assertNotIn("эпик", payload["prompt"].casefold())
+            self.assertIn("не заменяй запрос поиском по тексту", payload["prompt"].casefold())
+
+    def test_collector_brief_uses_same_narrow_prompt_for_all_query_scenarios(self) -> None:
+        cases = [
+            ("sbertrek", "tasks", ("RSCON-6848", "RSCON-6849"), 'unit = "RSCON-6848" or unit = "RSCON-6849"'),
+            ("jira", "tasks", ("RSCON-2905", "RSCON-2906"), 'key IN ("RSCON-2905", "RSCON-2906")'),
+            ("jira", "epic", ("RSCON-2911",), 'parent = "RSCON-2911"'),
+        ]
+        for provider, kind, ids, exact in cases:
+            with self.subTest(provider=provider, kind=kind), tempfile.TemporaryDirectory() as temp:
+                state = Path(temp); begin = self.begin(state, provider=provider, kind=kind, ids=ids)
+                payload = self.run_tool(state, "collector-brief", "--run-id", begin["run_id"])
+                self.assertIn(exact, payload["prompt"])
+                self.assertNotIn("Когорты", payload["prompt"])
 
     def test_tampered_job_query_hash_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -273,6 +295,39 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertNotIn("capability-discovery", help_text)
             self.assertNotIn("issue-detail", help_text)
 
+    def test_only_one_bulk_call_is_allowed_for_each_query_page(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            query = self.snapshot(state, run_id, "sbertrek")["query"]["exact"]
+            common = [
+                "--run-id", run_id, "--provider", "sbertrek", "--operation", "query",
+                "--outcome", "success", "--summary", "targeted query", "--query", query,
+                "--page-number", "1", "--returned-count", "1",
+            ]
+            self.run_tool(state, "mcp-log", *common, "--evidence", "mcp:sbertrek:query:first")
+            payload = self.run_tool(
+                state, "mcp-log", *common, "--evidence", "mcp:sbertrek:query:second", expected=2,
+            )
+            self.assertIn("ровно один MCP-вызов", payload["error"])
+
+    def test_query_page_rejects_returned_count_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            query = self.snapshot(state, run_id, "sbertrek")["query"]["exact"]
+            evidence = "mcp:sbertrek:query:count-mismatch"
+            self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "query", "--outcome", "success", "--evidence", evidence,
+                "--summary", "targeted query", "--query", query, "--page-number", "1",
+                "--returned-count", "2",
+            )
+            payload = self.run_tool(
+                state, "query-page", "--run-id", run_id, "--provider", "sbertrek",
+                "--query", query, "--page-number", "1", "--last-page", "--evidence", evidence,
+                "--key", "RSCON-6845", expected=2,
+            )
+            self.assertIn("числом возвращённых ключей", payload["error"])
+
     def test_collector_complete_requires_every_returned_card(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)["run_id"]
@@ -294,6 +349,57 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.collect(state, run_id, "sbertrek", [("RSCON-6845", {"jira_key": "RSCON-2902"})])
             self.assertEqual((self.active_job(state, run_id) or {}).get("provider"), "jira")
             self.assertEqual(self.job(state, run_id, "collection-jira")["query"]["text"], 'key IN ("RSCON-2902")')
+
+    def test_absent_jira_key_is_valid_but_not_returned_blocks_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            result = self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
+            self.assertEqual(result["status"], "collector-job-complete")
+            self.assertEqual(self.snapshot(state, run_id, "jira")["query"]["state"], "skipped")
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            _, evidence = self.query_page(state, run_id, "sbertrek", ["RSCON-6845"])
+            self.add_issue(
+                state, run_id, "sbertrek", "RSCON-6845", evidence,
+                jira_key_state="not-returned",
+            )
+            payload = self.run_tool(
+                state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek", expected=2,
+            )
+            self.assertIn("absent допустим", payload["error"])
+
+    def test_sbertrek_not_returned_optional_field_blocks_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            _, evidence = self.query_page(state, run_id, "sbertrek", ["RSCON-6845"])
+            args = self.issue_args(run_id, "sbertrek", "RSCON-6845", evidence)
+            index = args.index("--estimate-state") + 1
+            args[index] = "not-returned"
+            self.run_tool(state, *args)
+            payload = self.run_tool(
+                state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek", expected=2,
+            )
+            self.assertIn("RSCON-6845.estimate", payload["error"])
+
+    def test_placeholder_card_and_unexpected_helper_file_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            _, evidence = self.query_page(state, run_id, "sbertrek", ["RSCON-6845"])
+            payload = self.run_tool(
+                state, *self.issue_args(run_id, "sbertrek", "RSCON-6845", evidence, summary="RSCON-6845"),
+                expected=2,
+            )
+            self.assertIn("обязательные данные", payload["error"])
+
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            _, evidence = self.query_page(state, run_id, "sbertrek", ["RSCON-6845"])
+            self.add_issue(state, run_id, "sbertrek", "RSCON-6845", evidence)
+            (self.root(state, run_id) / "record_cards.py").write_text("# helper\n", encoding="utf-8")
+            payload = self.run_tool(
+                state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek", expected=2,
+            )
+            self.assertIn("record_cards.py", payload["error"])
 
     def test_history_is_split_into_bounded_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
