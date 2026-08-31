@@ -277,6 +277,15 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertNotIn("method", job["query"])
             self.assertIn("read-mcp-documentation", job["forbidden_operations"])
             self.assertIn("read-returned-issues-one-by-one", job["forbidden_operations"])
+            self.assertEqual(
+                job["response_contract"]["mcp_tool_contract"],
+                {
+                    "required_capability": "exact-tql-bulk-json-export",
+                    "preferred_operation": "issue.exportJson",
+                    "query_parameter": "query",
+                    "forbidden_operations": ["issue.search", "issue.getByKey", "link.list"],
+                },
+            )
 
     def test_collector_brief_contains_only_exact_query_and_recording_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -290,6 +299,12 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertIn("полный исходный JSON-ответ", payload["prompt"])
             self.assertIn("не передавай fields=null", payload["prompt"])
             self.assertIn("ingest-query-response", payload["prompt"])
+            self.assertIn("issue.exportJson", payload["prompt"])
+            self.assertIn("параметре query", payload["prompt"])
+            self.assertIn("Не используй issue.search", payload["prompt"])
+            self.assertIn("issue.getByKey", payload["prompt"])
+            self.assertIn("link.list", payload["prompt"])
+            self.assertIn("верни ошибку и немедленно остановись", payload["prompt"])
 
     def test_collector_brief_uses_same_narrow_prompt_for_all_query_scenarios(self) -> None:
         cases = [

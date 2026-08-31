@@ -970,7 +970,8 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
         "output": str(snapshot_path(run_id, provider)),
         "collector_contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-collector.md"),
         "allowed_operations": [
-            "select-runtime-query-tool", "execute-exact-query", "paginate",
+            "select-runtime-json-export-tool" if provider == "sbertrek" else "select-runtime-query-tool",
+            "execute-exact-query", "paginate",
             "record-bounded-call", "structurally-import-full-json-response",
             "record-page", "record-compact-card",
             "complete-job",
@@ -978,6 +979,7 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
         "forbidden_operations": [
             "read-mcp-documentation", "probe-with-alternative-query",
             "search-by-title-or-description", "read-returned-issues-one-by-one",
+            "issue.search", "issue.getByKey", "link.list",
             "change-tracker-or-analytical-artifacts", "continue-to-next-job",
         ],
         "required_task_fields": [
@@ -988,6 +990,12 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
             "full_json_required": provider == "sbertrek",
             "rendered_preview_is_not_data": True,
             "structural_import_command": "ingest-query-response" if provider == "sbertrek" else None,
+            "mcp_tool_contract": {
+                "required_capability": "exact-tql-bulk-json-export",
+                "preferred_operation": "issue.exportJson",
+                "query_parameter": "query",
+                "forbidden_operations": ["issue.search", "issue.getByKey", "link.list"],
+            } if provider == "sbertrek" else None,
             "preferred_fields": [
                 "key", "summary", "suit", "status", "assigned_to",
                 "story_points", "issue_key", "epic", "fixversion", "created_at", "updated_at",
@@ -2008,12 +2016,17 @@ def collector_brief_command(args: argparse.Namespace) -> int:
         if job["provider"] == "sbertrek":
             prompt = (
                 f"Выполни в sbertrek ровно этот {language}-запрос без изменений:\n\n{query}\n\n"
+                "Выбери только MCP-операцию issue.exportJson либо эквивалентную операцию bulk JSON export, "
+                "которая принимает точный TQL в параметре query и возвращает полный JSON как файл. Имя MCP-сервера "
+                "может отличаться. Не используй issue.search, параметр text, issue.getByKey или link.list; "
+                "не проверяй ими доступность TQL и не выполняй обходных запросов. "
                 "Запроси только поля из response_contract.preferred_fields, если MCP-инструмент поддерживает "
                 "проекцию полей; не передавай fields=null. Получи полный исходный JSON-ответ как файл. "
                 "Не читай и не пересказывай отображённый или усечённый preview ответа. Передай путь полного "
                 "JSON в trackerctl.py ingest-query-response: эта команда сама структурно извлечёт все карточки "
                 "и посчитает их. Не выполняй других поисков, detail-вызовов или ручного record-issue. "
-                "Не заменяй запрос поиском по тексту, названию или смыслу. "
+                "Не заменяй запрос поиском по тексту, названию или смыслу. Если подходящей export-операции нет, "
+                "не вызывай никакой другой MCP-инструмент: верни ошибку и немедленно остановись. "
                 f"Прочитай только {contract} и {path}. После collector-complete немедленно верни только "
                 "status, job_id и пути."
             )
