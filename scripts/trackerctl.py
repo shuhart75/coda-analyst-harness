@@ -14,7 +14,7 @@ from typing import Any
 
 
 PROTOCOL = "targeted-tracker-v2"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -41,6 +41,25 @@ MERGED_FIELDS = (
     "summary", "issue_type", "status", "assignee", "estimate", "epic",
     "releases", "created_at", "updated_at",
 )
+RAW_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
+ISSUE_COLLECTION_KEYS = ("issues", "items", "results", "values", "units", "data")
+ISSUE_KEY_ALIASES = ("key", "issueKey", "issue_key", "unitKey", "unit_key")
+SUMMARY_ALIASES = ("summary", "name", "title")
+TYPE_ALIASES = ("issue_type", "issueType", "issuetype", "type", "suit")
+STATUS_ALIASES = ("status", "state")
+CREATED_ALIASES = ("created_at", "createdAt", "created", "creationDate", "creation_date")
+UPDATED_ALIASES = ("updated_at", "updatedAt", "updated", "updateDate", "update_date")
+ASSIGNEE_ALIASES = ("assignee", "assigned_to", "assignedTo")
+ESTIMATE_ALIASES = ("estimate", "story_points", "storyPoints", "story_point", "customfield_10016")
+EPIC_ALIASES = ("epic", "epic_key", "epicKey", "parent")
+RELEASE_ALIASES = ("releases", "release", "fixVersions", "fix_versions", "fixversion")
+SBER_ATTRIBUTE_CODES = {
+    "assignee": ("assigned_to", "assignee"),
+    "estimate": ("story_points", "story_point", "estimate"),
+    "jira_key": ("issue_key",),
+    "epic": ("epic", "epic_key", "parent"),
+    "releases": ("release", "releases", "fix_versions", "fixversion"),
+}
 DEFAULT_CONFIG = {
     "schema_version": CONFIG_SCHEMA_VERSION,
     "primary_provider": "sbertrek",
@@ -110,6 +129,330 @@ def load_json(path: Path) -> Any:
 def save_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def cards_sha256(cards: list[dict]) -> str:
+    immutable_cards = [
+        {key: value for key, value in card.items() if key != "history"}
+        for card in cards
+    ]
+    canonical = json.dumps(
+        sorted(immutable_cards, key=lambda item: item["key"]),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def response_json(path_value: str) -> tuple[Path, Any, int, str]:
+    path = Path(path_value).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"Полный JSON-ответ MCP не найден: {path}")
+    size = path.stat().st_size
+    if size <= 0:
+        raise ValueError("Полный JSON-ответ MCP пуст")
+    if size > RAW_RESPONSE_MAX_BYTES:
+        raise ValueError(f"JSON-ответ MCP превышает {RAW_RESPONSE_MAX_BYTES} байт")
+    payload = load_json(path)
+    return path, payload, size, file_sha256(path)
+
+
+def decoded_json_string(value: str) -> Any | None:
+    text = value.strip()
+    if text.startswith("```json") and text.endswith("```"):
+        text = text[7:-3].strip()
+    elif text.startswith("```") and text.endswith("```"):
+        text = text[3:-3].strip()
+    if not text.startswith(("{", "[")):
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def alias_value(container: Any, aliases: tuple[str, ...]) -> tuple[bool, Any]:
+    if not isinstance(container, dict):
+        return False, None
+    folded = {str(key).casefold(): value for key, value in container.items()}
+    for alias in aliases:
+        if alias.casefold() in folded:
+            return True, folded[alias.casefold()]
+    return False, None
+
+
+def record_issue_key(record: Any) -> str | None:
+    found, value = alias_value(record, ISSUE_KEY_ALIASES)
+    if found and isinstance(value, str) and ISSUE_KEY.fullmatch(value.strip().upper()):
+        return value.strip().upper()
+    if isinstance(record, dict):
+        unit = record.get("unit")
+        found, value = alias_value(unit, ISSUE_KEY_ALIASES)
+        if found and isinstance(value, str) and ISSUE_KEY.fullmatch(value.strip().upper()):
+            return value.strip().upper()
+    return None
+
+
+def issue_record_candidates(payload: Any) -> list[tuple[str, list[dict]]]:
+    candidates: list[tuple[str, list[dict]]] = []
+    visited_strings: set[str] = set()
+
+    def walk(value: Any, path: str, preferred: bool = False, depth: int = 0) -> None:
+        if depth > 20:
+            return
+        if isinstance(value, str):
+            if value in visited_strings:
+                return
+            decoded = decoded_json_string(value)
+            if decoded is not None:
+                visited_strings.add(value)
+                walk(decoded, path + "<json>", preferred, depth + 1)
+            return
+        if isinstance(value, list):
+            if not value:
+                if preferred or path == "$":
+                    candidates.append((path, []))
+            elif all(isinstance(item, dict) and record_issue_key(item) for item in value):
+                candidates.append((path, value))
+            for index, item in enumerate(value):
+                walk(item, f"{path}[{index}]", False, depth + 1)
+            return
+        if not isinstance(value, dict):
+            return
+        if path == "$" and record_issue_key(value):
+            candidates.append((path, [value]))
+        for key, item in value.items():
+            key_text = str(key)
+            walk(item, f"{path}.{key_text}", key_text.casefold() in ISSUE_COLLECTION_KEYS, depth + 1)
+
+    walk(payload, "$")
+    return candidates
+
+
+def full_issue_records(payload: Any) -> tuple[list[dict], str]:
+    candidates = issue_record_candidates(payload)
+    if not candidates:
+        raise ValueError("В полном JSON-ответе MCP не найден массив карточек с ключами задач")
+    max_count = max(len(records) for _, records in candidates)
+    largest = [(path, records) for path, records in candidates if len(records) == max_count]
+    key_sets = {tuple(sorted(record_issue_key(item) or "" for item in records)) for _, records in largest}
+    if len(key_sets) > 1:
+        paths = ", ".join(path for path, _ in largest)
+        raise ValueError(f"JSON-ответ содержит несколько неоднозначных массивов задач: {paths}")
+    path, records = largest[0]
+    keys = [record_issue_key(item) for item in records]
+    if len(keys) != len(set(keys)):
+        raise ValueError("Полный JSON-ответ MCP содержит повторяющиеся ключи задач")
+    return records, path
+
+
+def object_text(value: Any, aliases: tuple[str, ...] = ("code", "name", "value", "title", "key")) -> str | None:
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    found, nested = alias_value(value, aliases)
+    return object_text(nested, aliases) if found else None
+
+
+def record_fields(record: dict) -> dict:
+    fields = record.get("fields")
+    if isinstance(fields, dict):
+        return {**record, **fields}
+    unit = record.get("unit")
+    if isinstance(unit, dict):
+        return {**unit, **{key: value for key, value in record.items() if key != "unit"}}
+    return record
+
+
+def attribute_entries(record: dict) -> tuple[dict[str, Any], bool]:
+    sources = [record]
+    unit = record.get("unit")
+    if isinstance(unit, dict):
+        sources.append(unit)
+    fields = record.get("fields")
+    if isinstance(fields, dict):
+        sources.append(fields)
+    for source in sources:
+        found, raw = alias_value(source, ("attributes",))
+        if not found:
+            continue
+        result: dict[str, Any] = {}
+        if isinstance(raw, dict):
+            return {str(key).casefold(): value for key, value in raw.items()}, True
+        if not isinstance(raw, list):
+            return {}, True
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            found_code, code = alias_value(entry, ("code", "attributeCode", "attribute_code"))
+            if not found_code and isinstance(entry.get("attribute"), dict):
+                found_code, code = alias_value(entry["attribute"], ("code", "key", "name"))
+            code_text = object_text(code, ("code", "key", "name", "value")) if found_code else None
+            if not code_text:
+                continue
+            found_value, value = alias_value(entry, ("value", "values", "data"))
+            if not found_value:
+                value = None
+            if isinstance(value, list) and len(value) == 1:
+                value = value[0]
+            result[code_text.casefold()] = value
+        return result, True
+    return {}, False
+
+
+def attribute_value(attributes: dict[str, Any], codes: tuple[str, ...]) -> tuple[bool, Any]:
+    for code in codes:
+        if code.casefold() in attributes:
+            return True, attributes[code.casefold()]
+    return False, None
+
+
+def optional_value(record: dict, aliases: tuple[str, ...], attributes: dict[str, Any], codes: tuple[str, ...]) -> tuple[Any, str]:
+    fields = record_fields(record)
+    field_found, field_value = alias_value(fields, aliases)
+    if field_found and field_value not in (None, "", [], {}):
+        return field_value, "value"
+    attribute_found, attribute_value_raw = attribute_value(attributes, codes)
+    if attribute_found and attribute_value_raw not in (None, "", [], {}):
+        return attribute_value_raw, "value"
+    if not field_found and not attribute_found:
+        return None, "absent" if attributes or "attributes" in {str(key).casefold() for key in record} or isinstance(record.get("fields"), dict) else "not-returned"
+    return None, "absent"
+
+
+def normalized_person(value: Any) -> dict | None:
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if not isinstance(value, dict):
+        text = object_text(value)
+        return {"id": text, "name": text} if text else None
+    found_id, account_id = alias_value(value, ("externalId", "accountId", "account_id", "login", "id", "key"))
+    found_name, name = alias_value(value, ("displayName", "display_name", "fullName", "full_name", "name"))
+    if not found_name:
+        parts = []
+        for alias in ("lastName", "firstName", "middleName"):
+            found, part = alias_value(value, (alias,))
+            if found and object_text(part):
+                parts.append(object_text(part) or "")
+        name = " ".join(parts) if parts else None
+    account_text = object_text(account_id) if found_id else None
+    name_text = object_text(name) if name is not None else None
+    return {"id": account_text, "name": name_text or account_text} if account_text else None
+
+
+def normalized_estimate(value: Any) -> dict | None:
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, dict):
+        found, nested = alias_value(value, ("value", "amount", "estimate"))
+        value = nested if found else None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return {"value": number, "unit": "story-points"}
+
+
+def normalized_epic(value: Any) -> dict | None:
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, str):
+        key = value.strip().upper()
+        return {"key": key, "name": key} if ISSUE_KEY.fullmatch(key) else None
+    if not isinstance(value, dict):
+        return None
+    found, key_value = alias_value(value, ISSUE_KEY_ALIASES + ("code", "id"))
+    key = object_text(key_value) if found else None
+    if not key or not ISSUE_KEY.fullmatch(key.strip().upper()):
+        return None
+    found_name, name_value = alias_value(value, ("name", "summary", "title"))
+    return {"key": key.strip().upper(), "name": object_text(name_value) if found_name else key.strip().upper()}
+
+
+def normalized_releases(value: Any) -> list[dict]:
+    values = value if isinstance(value, list) else [value]
+    result = []
+    for item in values:
+        release = normalized_epic(item)
+        if release:
+            result.append(release)
+            continue
+        text = object_text(item)
+        if text:
+            result.append({"key": text, "name": text})
+    return result
+
+
+def required_record_text(record: dict, aliases: tuple[str, ...], label: str, key_value: str) -> str:
+    found, value = alias_value(record_fields(record), aliases)
+    text = object_text(value, ("code", "name", "value", "title", "key")) if found else None
+    if not text or text.casefold() in MISSING_SENTINELS:
+        raise ValueError(f"Карточка {key_value} не содержит обязательное поле {label}")
+    return text
+
+
+def compact_issue_from_response(record: dict, provider: str, scope: dict) -> dict:
+    key_value = record_issue_key(record)
+    if not key_value:
+        raise ValueError("JSON-объект карточки не содержит ключ задачи")
+    attributes, _ = attribute_entries(record)
+    assignee_raw, assignee_state = optional_value(record, ASSIGNEE_ALIASES, attributes, SBER_ATTRIBUTE_CODES["assignee"])
+    estimate_raw, estimate_state = optional_value(record, ESTIMATE_ALIASES, attributes, SBER_ATTRIBUTE_CODES["estimate"])
+    epic_raw, epic_state = optional_value(record, EPIC_ALIASES, attributes, SBER_ATTRIBUTE_CODES["epic"])
+    releases_raw, releases_state = optional_value(record, RELEASE_ALIASES, attributes, SBER_ATTRIBUTE_CODES["releases"])
+    assignee = normalized_person(assignee_raw)
+    estimate = normalized_estimate(estimate_raw)
+    epic = normalized_epic(epic_raw)
+    releases = normalized_releases(releases_raw) if releases_state == "value" else []
+    if assignee_state == "value" and assignee is None:
+        raise ValueError(f"Карточка {key_value}: исполнитель имеет неподдерживаемый формат")
+    if estimate_state == "value" and estimate is None:
+        raise ValueError(f"Карточка {key_value}: оценка имеет неподдерживаемый формат")
+    if epic_state == "value" and epic is None:
+        raise ValueError(f"Карточка {key_value}: эпик имеет неподдерживаемый формат")
+    if provider == "sbertrek" and scope.get("provider") == "sbertrek" and scope.get("kind") == "epic":
+        epic = {"key": scope["ids"][0], "name": scope["ids"][0]}
+        epic_state = "value"
+    if provider == "sbertrek":
+        jira_raw, jira_key_state = optional_value(record, ("issue_key",), attributes, SBER_ATTRIBUTE_CODES["jira_key"])
+        jira_text = object_text(jira_raw, ("key", "code", "value", "name")) if jira_key_state == "value" else None
+        jira_key = issue_key(jira_text, "Объект Jira") if jira_text else None
+        if jira_key_state == "value" and jira_key is None:
+            raise ValueError(f"Карточка {key_value}: Объект Jira имеет неподдерживаемый формат")
+    else:
+        jira_key, jira_key_state = None, "absent"
+    observations = {
+        "assignee": assignee_state if assignee is not None or assignee_state != "value" else "not-returned",
+        "estimate": estimate_state if estimate is not None or estimate_state != "value" else "not-returned",
+        "epic": epic_state if epic is not None or epic_state != "value" else "not-returned",
+        "releases": releases_state,
+    }
+    return {
+        "key": key_value,
+        "jira_key": jira_key,
+        "jira_key_state": jira_key_state,
+        "summary": required_record_text(record, SUMMARY_ALIASES, "summary", key_value),
+        "issue_type": required_record_text(record, TYPE_ALIASES, "issue_type", key_value),
+        "status": required_record_text(record, STATUS_ALIASES, "status", key_value),
+        "assignee": assignee,
+        "estimate": estimate,
+        "epic": epic,
+        "releases": releases,
+        "field_observations": observations,
+        "created_at": required_record_text(record, CREATED_ALIASES, "created_at", key_value),
+        "updated_at": required_record_text(record, UPDATED_ALIASES, "updated_at", key_value),
+        "history": {"state": "pending", "evidence": [], "events": [], "reason": None},
+    }
 
 
 def issue_key(value: str, label: str = "Ключ задачи") -> str:
@@ -433,6 +776,138 @@ def validate_snapshot(snapshot: Any, provider: str, finalized: bool = False) -> 
     return snapshot
 
 
+def validate_issue_card(item: Any, provider: str) -> None:
+    if not isinstance(item, dict):
+        raise ValueError(f"Карточка {provider} должна быть JSON-объектом")
+    key_value = item.get("key")
+    if not isinstance(key_value, str) or not ISSUE_KEY.fullmatch(key_value):
+        raise ValueError(f"Карточка {provider} содержит некорректный key")
+    for field in ("summary", "issue_type", "status", "created_at", "updated_at", "evidence"):
+        if not isinstance(item.get(field), str) or not item[field].strip():
+            raise ValueError(f"Карточка {key_value} не содержит строковое поле {field}")
+    if item["summary"].casefold() == key_value.casefold():
+        raise ValueError(f"Карточка {key_value} содержит placeholder вместо summary")
+    assignee = item.get("assignee")
+    if assignee is not None and (
+        not isinstance(assignee, dict)
+        or not isinstance(assignee.get("id"), str)
+        or not assignee["id"]
+    ):
+        raise ValueError(f"Карточка {key_value}: assignee должен быть структурированным объектом")
+    estimate = item.get("estimate")
+    if estimate is not None and (
+        not isinstance(estimate, dict)
+        or not isinstance(estimate.get("value"), (int, float))
+        or isinstance(estimate.get("value"), bool)
+        or not isinstance(estimate.get("unit"), str)
+    ):
+        raise ValueError(f"Карточка {key_value}: estimate должен содержать value и unit")
+    epic = item.get("epic")
+    if epic is not None and (
+        not isinstance(epic, dict)
+        or not isinstance(epic.get("key"), str)
+        or not ISSUE_KEY.fullmatch(epic["key"])
+    ):
+        raise ValueError(f"Карточка {key_value}: epic должен быть структурированным объектом")
+    releases = item.get("releases")
+    if not isinstance(releases, list) or any(
+        not isinstance(release, dict) or not isinstance(release.get("key"), str) or not release["key"]
+        for release in releases
+    ):
+        raise ValueError(f"Карточка {key_value}: releases должен быть списком объектов")
+    observations = item.get("field_observations")
+    if not isinstance(observations, dict) or set(observations) != {"assignee", "estimate", "epic", "releases"}:
+        raise ValueError(f"Карточка {key_value}: field_observations имеет неполную схему")
+    for field, state in observations.items():
+        if state not in OBSERVATION_STATES:
+            raise ValueError(f"Карточка {key_value}: некорректное состояние {field}")
+        populated = item.get(field) not in (None, [], {})
+        if (state == "value") != populated:
+            raise ValueError(f"Карточка {key_value}: состояние {field} не соответствует значению")
+    jira_state = item.get("jira_key_state")
+    jira_key_value = item.get("jira_key")
+    if provider == "sbertrek":
+        if jira_state not in OBSERVATION_STATES:
+            raise ValueError(f"Карточка {key_value}: отсутствует jira_key_state")
+        if (jira_state == "value") != (jira_key_value is not None):
+            raise ValueError(f"Карточка {key_value}: jira_key_state не соответствует Объекту Jira")
+        if jira_key_value is not None and (not isinstance(jira_key_value, str) or not ISSUE_KEY.fullmatch(jira_key_value)):
+            raise ValueError(f"Карточка {key_value}: некорректный Объект Jira")
+    elif jira_key_value is not None or jira_state != "absent":
+        raise ValueError(f"Карточка {key_value}: Jira-карточка не должна содержать Объект Jira")
+    history = item.get("history")
+    if not isinstance(history, dict) or history.get("state") not in {"pending", "complete", "unavailable"}:
+        raise ValueError(f"Карточка {key_value}: некорректное состояние истории")
+    if not isinstance(history.get("events"), list) or not isinstance(history.get("evidence"), list):
+        raise ValueError(f"Карточка {key_value}: история имеет неполную схему")
+
+
+def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) -> None:
+    query = snapshot.get("query")
+    if not isinstance(query, dict) or query.get("state") not in {"complete", "skipped", "unavailable"}:
+        raise ValueError(f"Коллекция {provider} не завершена")
+    pages = query.get("pages")
+    issues = snapshot.get("issues")
+    if not isinstance(pages, list) or not isinstance(issues, list) or not isinstance(query.get("keys"), list):
+        raise ValueError(f"Коллекция {provider} имеет неполную схему")
+    if query["state"] == "complete" and not pages:
+        raise ValueError(f"Коллекция {provider} помечена complete без зарегистрированной страницы MCP")
+    if query["state"] in {"skipped", "unavailable"}:
+        if pages or issues or query["keys"]:
+            raise ValueError(f"Коллекция {provider} {query['state']} не должна содержать страницы или карточки")
+        return
+    page_keys: list[str] = []
+    page_evidence: dict[str, set[str]] = {}
+    structural_pages: list[dict] = []
+    for expected_number, page in enumerate(pages, start=1):
+        if not isinstance(page, dict) or page.get("number") != expected_number:
+            raise ValueError(f"Коллекция {provider}: нарушена нумерация страниц")
+        keys = page.get("keys")
+        if not isinstance(keys, list) or len(keys) != len(set(keys)) or any(not isinstance(key, str) or not ISSUE_KEY.fullmatch(key) for key in keys):
+            raise ValueError(f"Коллекция {provider}: страница {expected_number} содержит некорректные ключи")
+        call = evidence(str(page.get("evidence") or ""), provider)
+        details = require_logged_mcp(run_id, call, outcome="success")
+        expected_details = (
+            f"operation=query; outcome=success; query_sha256={query_digest(query['exact'])}; "
+            f"page={expected_number}; returned={len(keys)};"
+        )
+        if expected_details not in details:
+            raise ValueError(f"Коллекция {provider}: evidence страницы {expected_number} не совпадает с bulk-запросом")
+        if page.get("recording_method") == "structural-json-import":
+            if not re.fullmatch(r"[a-f0-9]{64}", str(page.get("response_sha256") or "")):
+                raise ValueError(f"Коллекция {provider}: страница {expected_number} не содержит SHA-256 ответа")
+            if not isinstance(page.get("response_bytes"), int) or page["response_bytes"] <= 0:
+                raise ValueError(f"Коллекция {provider}: страница {expected_number} не содержит размер ответа")
+            if page.get("returned_count") != len(keys):
+                raise ValueError(f"Коллекция {provider}: машинное число карточек страницы не совпадает с ключами")
+            if not re.fullmatch(r"[a-f0-9]{64}", str(page.get("cards_sha256") or "")):
+                raise ValueError(f"Коллекция {provider}: страница {expected_number} не содержит SHA-256 карточек")
+            structural_pages.append(page)
+        elif provider == "sbertrek":
+            raise ValueError("SberTrek-страница должна быть записана только структурным импортом полного JSON")
+        page_keys.extend(keys)
+        for key_value in keys:
+            page_evidence.setdefault(key_value, set()).add(call)
+    if not pages[-1].get("last_page") or any(page.get("last_page") for page in pages[:-1]):
+        raise ValueError(f"Коллекция {provider}: пагинация не имеет единственной последней страницы")
+    if len(page_keys) != len(set(page_keys)):
+        raise ValueError(f"Коллекция {provider}: ключ задачи повторяется на нескольких страницах")
+    if sorted(page_keys) != sorted(query["keys"]):
+        raise ValueError(f"Коллекция {provider}: query.keys не совпадает с машинными страницами")
+    issue_keys = []
+    for item in issues:
+        validate_issue_card(item, provider)
+        issue_keys.append(item["key"])
+        if item["evidence"] not in page_evidence.get(item["key"], set()):
+            raise ValueError(f"Карточка {item['key']} не связана с evidence своей bulk-страницы")
+    if len(issue_keys) != len(set(issue_keys)) or sorted(issue_keys) != sorted(page_keys):
+        raise ValueError(f"Коллекция {provider}: набор карточек не совпадает с полным bulk-ответом")
+    for page in structural_pages:
+        page_cards = [item for item in issues if item["evidence"] == page["evidence"]]
+        if cards_sha256(page_cards) != page["cards_sha256"]:
+            raise ValueError(f"Коллекция {provider}: компактные карточки страницы изменены после структурного импорта")
+
+
 def load_snapshot(run_id: str, provider: str) -> tuple[Path, dict]:
     path = snapshot_path(run_id, provider)
     if not path.is_file():
@@ -496,7 +971,8 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
         "collector_contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-collector.md"),
         "allowed_operations": [
             "select-runtime-query-tool", "execute-exact-query", "paginate",
-            "record-bounded-call", "record-page", "record-compact-card",
+            "record-bounded-call", "structurally-import-full-json-response",
+            "record-page", "record-compact-card",
             "complete-job",
         ],
         "forbidden_operations": [
@@ -508,6 +984,15 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
             "key", "jira_key", "jira_key_state", "summary", "issue_type", "status", "assignee",
             "estimate", "epic", "releases", "created_at", "updated_at",
         ],
+        "response_contract": {
+            "full_json_required": provider == "sbertrek",
+            "rendered_preview_is_not_data": True,
+            "structural_import_command": "ingest-query-response" if provider == "sbertrek" else None,
+            "preferred_fields": [
+                "key", "summary", "suit", "status", "assigned_to",
+                "story_points", "issue_key", "epic", "fixversion", "created_at", "updated_at",
+            ],
+        },
         "created_at": now(),
         "completed_at": None,
     }
@@ -949,6 +1434,91 @@ def begin_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def ingest_query_response_command(args: argparse.Namespace) -> int:
+    if args.provider != "sbertrek":
+        raise ValueError("Структурный импорт полного ответа пока обязателен только для SberTrek")
+    config = load_config()
+    current = current_query(args.run_id, config)
+    if not current or current[0] != args.provider:
+        raise ValueError("Сейчас нет разрешённого поискового запроса для этого провайдера")
+    path, snapshot = load_snapshot(args.run_id, args.provider)
+    ensure_mutable(snapshot)
+    job_path_value, job = load_job(args.run_id, f"collection-{args.provider}")
+    if job.get("state") not in {"pending", "running"} or active_job(args.run_id) != job:
+        raise ValueError("JSON-ответ разрешено импортировать только активному collector-job")
+    query = snapshot["query"]
+    exact_query = job["query"]["text"]
+    if query["exact"] != exact_query:
+        raise ValueError("Точный запрос снимка не совпадает с активным collector-job")
+    expected_page = len(query["pages"]) + 1
+    if args.page_number != expected_page:
+        raise ValueError(f"Ожидалась страница {expected_page}")
+    if args.last_page and args.next_cursor:
+        raise ValueError("Последняя страница не может иметь --next-cursor")
+    if not args.last_page and not args.next_cursor:
+        raise ValueError("Непоследняя страница требует --next-cursor")
+    if query["pages"] and args.cursor != query["pages"][-1]["next_cursor"]:
+        raise ValueError("--cursor должен совпадать с next_cursor предыдущей страницы")
+    if not query["pages"] and args.cursor:
+        raise ValueError("Первая страница не может иметь --cursor")
+    call = evidence(args.evidence, args.provider)
+    if logged_mcp_details(args.run_id, call):
+        raise ValueError("Этот MCP-вызов уже записан в журнале")
+    if logged_query_calls(args.run_id, args.provider, exact_query, args.page_number):
+        raise ValueError("Для одной страницы точного bulk-запроса разрешён ровно один MCP-вызов")
+    _, payload, response_size, response_digest = response_json(args.response_file)
+    records, records_path = full_issue_records(payload)
+    cards = [compact_issue_from_response(record, args.provider, snapshot["scope"]) for record in records]
+    keys = [item["key"] for item in cards]
+    existing_keys = set(query["keys"])
+    repeated = sorted(existing_keys & set(keys))
+    if repeated:
+        raise ValueError("JSON-ответ повторяет ключи предыдущей страницы: " + ", ".join(repeated))
+    details = (
+        f"operation=query; outcome=success; query_sha256={query_digest(exact_query)}; "
+        f"page={args.page_number}; returned={len(keys)}; response_sha256={response_digest}; "
+        f"response_bytes={response_size}; parser_path={records_path}; query={exact_query}; "
+        "summary=full JSON structurally imported"
+    )
+    append_session_log(
+        args.run_id, source="mcp", event="call", provider=args.provider,
+        evidence_value=call, details=details,
+    )
+    for item in cards:
+        item["evidence"] = call
+        validate_issue_card(item, args.provider)
+    compact_digest = cards_sha256(cards)
+    query["pages"].append({
+        "number": args.page_number,
+        "cursor": args.cursor,
+        "next_cursor": args.next_cursor,
+        "last_page": args.last_page,
+        "evidence": call,
+        "keys": keys,
+        "recording_method": "structural-json-import",
+        "response_sha256": response_digest,
+        "response_bytes": response_size,
+        "returned_count": len(keys),
+        "records_path": records_path,
+        "cards_sha256": compact_digest,
+    })
+    query["keys"] = sorted(existing_keys | set(keys))
+    query["state"] = "complete" if args.last_page else "collecting"
+    snapshot["issues"].extend(cards)
+    save_json(path, snapshot)
+    job["state"] = "running"
+    save_json(job_path_value, job)
+    print(json.dumps({
+        "status": "tracker-query-response-imported",
+        "provider": args.provider,
+        "page": args.page_number,
+        "query_state": query["state"],
+        "returned_count": len(keys),
+        "response_sha256": response_digest,
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def mcp_log_command(args: argparse.Namespace) -> int:
     call = evidence(args.evidence, args.provider)
     if logged_mcp_details(args.run_id, call):
@@ -959,6 +1529,8 @@ def mcp_log_command(args: argparse.Namespace) -> int:
         raise ValueError("targeted-tracker-v2 запрещает exploratory и поштучные MCP-вызовы")
     config = load_config()
     if args.operation == "query":
+        if args.provider == "sbertrek" and args.outcome == "success":
+            raise ValueError("Успешный SberTrek bulk-ответ регистрируется только через ingest-query-response")
         current = current_query(args.run_id, config)
         if not current or current[0] != args.provider:
             raise ValueError("Сейчас нет разрешённого поискового запроса для этого провайдера")
@@ -1004,6 +1576,8 @@ def mcp_log_command(args: argparse.Namespace) -> int:
 
 
 def query_page_command(args: argparse.Namespace) -> int:
+    if args.provider == "sbertrek":
+        raise ValueError("SberTrek-страница регистрируется только через ingest-query-response")
     config = load_config()
     current = current_query(args.run_id, config)
     if not current or current[0] != args.provider:
@@ -1038,7 +1612,11 @@ def query_page_command(args: argparse.Namespace) -> int:
     )
     if expected_details not in details:
         raise ValueError("Evidence страницы не совпадает с запросом, номером страницы или числом возвращённых ключей")
-    query["pages"].append({"number": args.page_number, "cursor": args.cursor, "next_cursor": args.next_cursor, "last_page": args.last_page, "evidence": call, "keys": page_keys})
+    query["pages"].append({
+        "number": args.page_number, "cursor": args.cursor, "next_cursor": args.next_cursor,
+        "last_page": args.last_page, "evidence": call, "keys": page_keys,
+        "recording_method": "bounded-inline-recording",
+    })
     query["keys"] = sorted(set(query["keys"]) | set(page_keys))
     query["state"] = "complete" if args.last_page else "collecting"
     save_json(path, snapshot)
@@ -1094,6 +1672,8 @@ def jira_epic_fallback_command(args: argparse.Namespace) -> int:
 
 
 def record_issue_command(args: argparse.Namespace) -> int:
+    if args.provider == "sbertrek":
+        raise ValueError("SberTrek-карточки создаются только структурным импортом полного JSON")
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
     if snapshot["collection_complete"]:
@@ -1243,6 +1823,7 @@ def collector_complete_command(args: argparse.Namespace) -> int:
     _, snapshot = load_snapshot(args.run_id, args.provider)
     if snapshot["query"]["state"] not in {"complete", "unavailable"}:
         raise ValueError("Точный запрос collector-job не завершён")
+    validate_collection_integrity(args.run_id, snapshot, args.provider)
     missing = missing_cards(snapshot)
     if missing:
         raise ValueError("Не записаны компактные карточки: " + ", ".join(missing))
@@ -1424,14 +2005,27 @@ def collector_brief_command(args: argparse.Namespace) -> int:
     if job["kind"] == "provider-collection":
         language = job["query"]["language"]
         query = job["query"]["text"]
-        prompt = (
-            f"Выполни в {job['provider']} ровно этот {language}-запрос без изменений:\n\n"
-            f"{query}\n\n"
-            "Не выполняй никаких других поисков и не заменяй запрос поиском по тексту, названию или смыслу. "
-            f"Для записи компактного результата прочитай только {contract} и {path}. "
-            "Не создавай скрипты или другие вспомогательные файлы. После collector-complete немедленно "
-            "верни только status, job_id и пути."
-        )
+        if job["provider"] == "sbertrek":
+            prompt = (
+                f"Выполни в sbertrek ровно этот {language}-запрос без изменений:\n\n{query}\n\n"
+                "Запроси только поля из response_contract.preferred_fields, если MCP-инструмент поддерживает "
+                "проекцию полей; не передавай fields=null. Получи полный исходный JSON-ответ как файл. "
+                "Не читай и не пересказывай отображённый или усечённый preview ответа. Передай путь полного "
+                "JSON в trackerctl.py ingest-query-response: эта команда сама структурно извлечёт все карточки "
+                "и посчитает их. Не выполняй других поисков, detail-вызовов или ручного record-issue. "
+                "Не заменяй запрос поиском по тексту, названию или смыслу. "
+                f"Прочитай только {contract} и {path}. После collector-complete немедленно верни только "
+                "status, job_id и пути."
+            )
+        else:
+            prompt = (
+                f"Выполни в {job['provider']} ровно этот {language}-запрос без изменений:\n\n"
+                f"{query}\n\n"
+                "Не выполняй никаких других поисков и не заменяй запрос поиском по тексту, названию или смыслу. "
+                f"Для записи компактного результата прочитай только {contract} и {path}. "
+                "Не создавай скрипты или другие вспомогательные файлы. После collector-complete немедленно "
+                "верни только status, job_id и пути."
+            )
     else:
         keys = ", ".join(job["keys"])
         prompt = (
@@ -1480,6 +2074,8 @@ def reconcile_command(args: argparse.Namespace) -> int:
     if pending_jobs:
         raise ValueError("Collector-jobs не завершены: " + ", ".join(pending_jobs))
     snapshots = all_snapshots(args.run_id, config)
+    for provider, snapshot in snapshots.items():
+        validate_collection_integrity(args.run_id, snapshot, provider)
     gaps = sum((snapshot_gaps(snapshot) for snapshot in snapshots.values()), [])
     if gaps:
         raise ValueError("Tracker-run не завершён: " + ", ".join(gaps))
@@ -1543,6 +2139,7 @@ def parser() -> argparse.ArgumentParser:
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config)
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
+    ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.set_defaults(handler=ingest_query_response_command)
     mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key"); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)
     unavailable = commands.add_parser("query-unavailable"); unavailable.add_argument("--run-id", required=True); unavailable.add_argument("--provider", choices=PROVIDERS, required=True); unavailable.add_argument("--reason", required=True); unavailable.add_argument("--evidence", required=True); unavailable.set_defaults(handler=query_unavailable_command)

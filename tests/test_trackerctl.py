@@ -23,7 +23,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return json.loads(result.stdout)
 
-    def write(self, path: Path, payload: dict) -> None:
+    def write(self, path: Path, payload: object) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -84,6 +84,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
         page: int = 1, last: bool = True, cursor: str | None = None,
         next_cursor: str | None = None,
     ) -> tuple[dict, str]:
+        self.assertEqual(provider, "jira", "SberTrek pages must use structural JSON import")
         query = self.snapshot(state, run_id, provider)["query"]["exact"]
         evidence = f"mcp:{provider}:query:page-{page}"
         self.run_tool(
@@ -105,6 +106,57 @@ class TrackerCtlV2Tests(unittest.TestCase):
         for key in keys:
             args += ["--key", key]
         return self.run_tool(state, *args), evidence
+
+    def sber_response_issue(
+        self, key: str, *, jira_key: str | None = None, assignee: str | None = None,
+        estimate: str | None = None, epic: str | None = None,
+        summary: str | None = None, status: str = "active",
+        include_attributes: bool = True,
+    ) -> dict:
+        attributes = []
+        if assignee:
+            attributes.append({
+                "code": "assigned_to",
+                "value": {"externalId": assignee, "displayName": assignee},
+            })
+        if estimate:
+            attributes.append({"code": "story_points", "value": estimate})
+        if jira_key:
+            attributes.append({"code": "issue_key", "value": jira_key})
+        if epic:
+            attributes.append({"code": "epic", "value": {"key": epic, "name": f"Epic {epic}"}})
+        issue = {
+            "key": key,
+            "summary": summary or f"Issue {key}",
+            "issue_type": {"code": "story", "name": "Story"},
+            "status": {"code": status, "name": status},
+            "created_at": "2026-08-01T08:00:00+00:00",
+            "updated_at": "2026-08-27T08:00:00+00:00",
+        }
+        if include_attributes:
+            issue["attributes"] = attributes
+        return issue
+
+    def ingest_sber_response(
+        self, state: Path, run_id: str, issues: list[tuple[str, dict]], *,
+        wrapper: bool = False, last: bool = True,
+    ) -> dict:
+        records = [self.sber_response_issue(key, **values) for key, values in issues]
+        payload: object = {"issues": records}
+        if wrapper:
+            payload = {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}]}
+        response = state / "mcp-responses" / f"{run_id}-sbertrek.json"
+        self.write(response, payload)
+        args = [
+            "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
+            "--page-number", "1",
+            "--evidence", "mcp:sbertrek:query:page-1", "--response-file", str(response),
+        ]
+        if last:
+            args.append("--last-page")
+        else:
+            args += ["--next-cursor", "cursor-2"]
+        return self.run_tool(state, *args)
 
     def issue_args(
         self, run_id: str, provider: str, key: str, evidence: str, *,
@@ -140,9 +192,12 @@ class TrackerCtlV2Tests(unittest.TestCase):
         return self.run_tool(state, *self.issue_args(run_id, provider, key, evidence, **kwargs))
 
     def collect(self, state: Path, run_id: str, provider: str, issues: list[tuple[str, dict]]) -> dict:
-        _, evidence = self.query_page(state, run_id, provider, [key for key, _ in issues])
-        for key, values in issues:
-            self.add_issue(state, run_id, provider, key, evidence, **values)
+        if provider == "sbertrek":
+            self.ingest_sber_response(state, run_id, issues)
+        else:
+            _, evidence = self.query_page(state, run_id, provider, [key for key, _ in issues])
+            for key, values in issues:
+                self.add_issue(state, run_id, provider, key, evidence, **values)
         return self.run_tool(state, "collector-complete", "--run-id", run_id, "--provider", provider)
 
     def complete_history_job(self, state: Path, run_id: str, *, handoff_key: str | None = None) -> None:
@@ -232,6 +287,9 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertNotIn("Когорты", payload["prompt"])
             self.assertNotIn("эпик", payload["prompt"].casefold())
             self.assertIn("не заменяй запрос поиском по тексту", payload["prompt"].casefold())
+            self.assertIn("полный исходный JSON-ответ", payload["prompt"])
+            self.assertIn("не передавай fields=null", payload["prompt"])
+            self.assertIn("ingest-query-response", payload["prompt"])
 
     def test_collector_brief_uses_same_narrow_prompt_for_all_query_scenarios(self) -> None:
         cases = [
@@ -245,6 +303,158 @@ class TrackerCtlV2Tests(unittest.TestCase):
                 payload = self.run_tool(state, "collector-brief", "--run-id", begin["run_id"])
                 self.assertIn(exact, payload["prompt"])
                 self.assertNotIn("Когорты", payload["prompt"])
+
+    def test_structural_import_reads_all_22_cards_from_full_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state, kind="epic", ids=("RSCON-6854",), jira=False)["run_id"]
+            issues = [
+                (f"RSCON-{6800 + index}", {
+                    "jira_key": f"RSCON-{2800 + index}",
+                    "estimate": "1",
+                    "assignee": "s-dev" if index == 1 else None,
+                })
+                for index in range(1, 23)
+            ]
+            payload = self.ingest_sber_response(state, run_id, issues, wrapper=True)
+            self.assertEqual(payload["returned_count"], 22)
+            snapshot = self.snapshot(state, run_id, "sbertrek")
+            self.assertEqual(len(snapshot["issues"]), 22)
+            self.assertEqual(len(snapshot["query"]["keys"]), 22)
+            self.assertEqual(snapshot["query"]["pages"][0]["recording_method"], "structural-json-import")
+            self.assertRegex(snapshot["query"]["pages"][0]["response_sha256"], r"^[a-f0-9]{64}$")
+
+    def test_sbertrek_manual_page_and_card_recording_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            query = self.snapshot(state, run_id, "sbertrek")["query"]["exact"]
+            payload = self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "query", "--outcome", "success",
+                "--evidence", "mcp:sbertrek:query:manual", "--summary", "manual",
+                "--query", query, "--page-number", "1", "--returned-count", "2",
+                expected=2,
+            )
+            self.assertIn("ingest-query-response", payload["error"])
+
+    def test_structural_import_accepts_flat_projected_sbertrek_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, kind="epic", ids=("RSCON-6854",))["run_id"]
+            response = state / "projected.json"
+            self.write(response, {"items": [{
+                "key": "RSCON-6893",
+                "summary": "CRUD для когорт",
+                "issue_type": "story",
+                "status": "code_review",
+                "assigned_to": {"externalId": "s-dev", "displayName": "Developer"},
+                "story_points": 1,
+                "issue_key": "RSCON-2949",
+                "releases": [],
+                "created_at": "2026-08-26T06:23:00+00:00",
+                "updated_at": "2026-08-31T08:08:00+00:00",
+                "fields": {},
+            }]})
+            payload = self.run_tool(
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
+                "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:query:projected",
+                "--response-file", str(response),
+            )
+            self.assertEqual(payload["returned_count"], 1)
+            issue = self.snapshot(state, run_id, "sbertrek")["issues"][0]
+            self.assertEqual(issue["jira_key"], "RSCON-2949")
+            self.assertEqual(issue["estimate"], {"value": 1.0, "unit": "story-points"})
+            self.assertEqual(issue["epic"]["key"], "RSCON-6854")
+
+    def test_structural_import_accepts_real_sbertrek_linked_units_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, kind="epic", ids=("RSCON-6854",))["run_id"]
+            response = state / "linked-units.json"
+            self.write(response, [{
+                "key": "RSCON-6893",
+                "summary": "CRUD для когорт",
+                "description": "Not retained in the compact snapshot",
+                "space": "RSCON",
+                "suit": "story",
+                "status": "code_review",
+                "priority": "normal",
+                "labels": ["SDD"],
+                "assignee": None,
+                "reporter": {"externalId": "reporter"},
+                "created_at": "2026-08-26T06:23:00+00:00",
+                "updated_at": "2026-08-31T08:08:00+00:00",
+                "attributes": [
+                    {
+                        "code": "assigned_to", "name": "Исполнитель", "type": "user",
+                        "value": {
+                            "externalId": "s-dev", "firstName": "Арсений",
+                            "lastName": "Савочкин", "middleName": "Игоревич",
+                            "login": "s-dev", "userDetails": [],
+                        },
+                    },
+                    {"code": "story_points", "name": "Относительная сложность", "type": "non_negative_int", "value": 1},
+                    {"code": "issue_key", "name": "Объект Jira", "type": "issue_key", "value": "RSCON-2949"},
+                    {"code": "fixversion", "name": "Релиз", "type": "unit", "value": []},
+                ],
+            }])
+            payload = self.run_tool(
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
+                "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:query:real-shape",
+                "--response-file", str(response),
+            )
+            self.assertEqual(payload["returned_count"], 1)
+            issue = self.snapshot(state, run_id, "sbertrek")["issues"][0]
+            self.assertEqual(issue["issue_type"], "story")
+            self.assertEqual(issue["assignee"], {"id": "s-dev", "name": "Савочкин Арсений Игоревич"})
+            self.assertEqual(issue["estimate"], {"value": 1.0, "unit": "story-points"})
+            self.assertEqual(issue["jira_key"], "RSCON-2949")
+            self.assertEqual(issue["releases"], [])
+            self.assertEqual(issue["field_observations"]["releases"], "absent")
+            self.assertNotIn("description", issue)
+
+    def test_complete_without_machine_page_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            snapshot_path = self.root(state, run_id) / "providers" / "sbertrek.json"
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            snapshot["query"].update({"state": "complete", "keys": ["RSCON-6893"]})
+            snapshot["issues"] = [{
+                "key": "RSCON-6893", "summary": "Issue", "issue_type": "story", "status": "created",
+                "assignee": None, "estimate": "1", "epic": "RSCON-6854", "releases": [],
+                "created_at": "2026-08-01T08:00:00+00:00", "updated_at": "2026-08-01T08:00:00+00:00",
+                "jira_key": "RSCON-2949", "jira_key_state": "present", "field_observations": {},
+                "history": {"state": "pending", "evidence": [], "events": [], "reason": None},
+            }]
+            self.write(snapshot_path, snapshot)
+            payload = self.run_tool(
+                state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek", expected=2,
+            )
+            self.assertIn("без зарегистрированной страницы", payload["error"])
+
+    def test_structural_import_accepts_a_proven_empty_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            response = state / "empty.json"
+            self.write(response, {"issues": []})
+            payload = self.run_tool(
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
+                "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:query:empty",
+                "--response-file", str(response),
+            )
+            self.assertEqual(payload["returned_count"], 0)
+            self.run_tool(state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek")
+
+    def test_card_tampering_after_structural_import_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            self.ingest_sber_response(state, run_id, [("RSCON-6893", {"estimate": "1"})])
+            snapshot_path = self.root(state, run_id) / "providers" / "sbertrek.json"
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            snapshot["issues"][0]["estimate"]["value"] = 99.0
+            self.write(snapshot_path, snapshot)
+            payload = self.run_tool(
+                state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek", expected=2,
+            )
+            self.assertIn("изменены после структурного импорта", payload["error"])
 
     def test_tampered_job_query_hash_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -275,6 +485,18 @@ class TrackerCtlV2Tests(unittest.TestCase):
                 state = Path(temp); begin = self.begin(state, provider=provider, kind=kind, ids=ids)
                 self.assertEqual(self.job(state, begin["run_id"], f"collection-{provider}")["query"]["text"], expected_query)
 
+    def test_sbertrek_job_requests_native_export_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            fields = self.job(state, run_id, "collection-sbertrek")["response_contract"]["preferred_fields"]
+            self.assertIn("suit", fields)
+            self.assertIn("fixversion", fields)
+            self.assertIn("assigned_to", fields)
+            self.assertIn("story_points", fields)
+            self.assertIn("issue_key", fields)
+            self.assertNotIn("issue_type", fields)
+            self.assertNotIn("releases", fields)
+
     def test_jira_epic_fallback_updates_job_hash(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state, provider="jira", kind="epic", ids=("RSCON-2911",))["run_id"]
@@ -288,41 +510,41 @@ class TrackerCtlV2Tests(unittest.TestCase):
 
     def test_arbitrary_query_is_rejected_and_exploratory_commands_are_not_exposed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp); run_id = self.begin(state)["run_id"]
-            payload = self.run_tool(state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek", "--operation", "query", "--outcome", "success", "--evidence", "mcp:sbertrek:query:wrong", "--summary", "wrong", "--query", "unit contains cohorts", "--page-number", "1", "--returned-count", "1", expected=2)
-            self.assertIn("точный TQL", payload["error"])
+            state = Path(temp); run_id = self.begin(state, provider="jira")["run_id"]
+            payload = self.run_tool(state, "mcp-log", "--run-id", run_id, "--provider", "jira", "--operation", "query", "--outcome", "success", "--evidence", "mcp:jira:query:wrong", "--summary", "wrong", "--query", "summary contains cohorts", "--page-number", "1", "--returned-count", "1", expected=2)
+            self.assertIn("точный JQL", payload["error"])
             help_text = subprocess.run((sys.executable, str(SCRIPT), "mcp-log", "--help"), text=True, capture_output=True, check=True).stdout
             self.assertNotIn("capability-discovery", help_text)
             self.assertNotIn("issue-detail", help_text)
 
     def test_only_one_bulk_call_is_allowed_for_each_query_page(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp); run_id = self.begin(state)["run_id"]
-            query = self.snapshot(state, run_id, "sbertrek")["query"]["exact"]
+            state = Path(temp); run_id = self.begin(state, provider="jira")["run_id"]
+            query = self.snapshot(state, run_id, "jira")["query"]["exact"]
             common = [
-                "--run-id", run_id, "--provider", "sbertrek", "--operation", "query",
+                "--run-id", run_id, "--provider", "jira", "--operation", "query",
                 "--outcome", "success", "--summary", "targeted query", "--query", query,
                 "--page-number", "1", "--returned-count", "1",
             ]
-            self.run_tool(state, "mcp-log", *common, "--evidence", "mcp:sbertrek:query:first")
+            self.run_tool(state, "mcp-log", *common, "--evidence", "mcp:jira:query:first")
             payload = self.run_tool(
-                state, "mcp-log", *common, "--evidence", "mcp:sbertrek:query:second", expected=2,
+                state, "mcp-log", *common, "--evidence", "mcp:jira:query:second", expected=2,
             )
             self.assertIn("ровно один MCP-вызов", payload["error"])
 
     def test_query_page_rejects_returned_count_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp); run_id = self.begin(state)["run_id"]
-            query = self.snapshot(state, run_id, "sbertrek")["query"]["exact"]
-            evidence = "mcp:sbertrek:query:count-mismatch"
+            state = Path(temp); run_id = self.begin(state, provider="jira")["run_id"]
+            query = self.snapshot(state, run_id, "jira")["query"]["exact"]
+            evidence = "mcp:jira:query:count-mismatch"
             self.run_tool(
-                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                state, "mcp-log", "--run-id", run_id, "--provider", "jira",
                 "--operation", "query", "--outcome", "success", "--evidence", evidence,
                 "--summary", "targeted query", "--query", query, "--page-number", "1",
                 "--returned-count", "2",
             )
             payload = self.run_tool(
-                state, "query-page", "--run-id", run_id, "--provider", "sbertrek",
+                state, "query-page", "--run-id", run_id, "--provider", "jira",
                 "--query", query, "--page-number", "1", "--last-page", "--evidence", evidence,
                 "--key", "RSCON-6845", expected=2,
             )
@@ -331,9 +553,13 @@ class TrackerCtlV2Tests(unittest.TestCase):
     def test_collector_complete_requires_every_returned_card(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)["run_id"]
-            self.query_page(state, run_id, "sbertrek", ["RSCON-6845"])
+            self.ingest_sber_response(state, run_id, [("RSCON-6845", {})])
+            snapshot_path = self.root(state, run_id) / "providers" / "sbertrek.json"
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            snapshot["issues"] = []
+            self.write(snapshot_path, snapshot)
             payload = self.run_tool(state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek", expected=2)
-            self.assertIn("RSCON-6845", payload["error"])
+            self.assertIn("набор карточек", payload["error"])
 
     def test_compact_provider_file_omits_description(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -358,11 +584,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertEqual(self.snapshot(state, run_id, "jira")["query"]["state"], "skipped")
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)["run_id"]
-            _, evidence = self.query_page(state, run_id, "sbertrek", ["RSCON-6845"])
-            self.add_issue(
-                state, run_id, "sbertrek", "RSCON-6845", evidence,
-                jira_key_state="not-returned",
-            )
+            self.ingest_sber_response(state, run_id, [("RSCON-6845", {"include_attributes": False})])
             payload = self.run_tool(
                 state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek", expected=2,
             )
@@ -371,11 +593,15 @@ class TrackerCtlV2Tests(unittest.TestCase):
     def test_sbertrek_not_returned_optional_field_blocks_collection(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)["run_id"]
-            _, evidence = self.query_page(state, run_id, "sbertrek", ["RSCON-6845"])
-            args = self.issue_args(run_id, "sbertrek", "RSCON-6845", evidence)
-            index = args.index("--estimate-state") + 1
-            args[index] = "not-returned"
-            self.run_tool(state, *args)
+            response = state / "missing-fields.json"
+            issue = self.sber_response_issue("RSCON-6845", include_attributes=False)
+            issue["issue_key"] = "RSCON-2902"
+            self.write(response, {"issues": [issue]})
+            self.run_tool(
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
+                "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:query:missing-fields",
+                "--response-file", str(response),
+            )
             payload = self.run_tool(
                 state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek", expected=2,
             )
@@ -384,17 +610,14 @@ class TrackerCtlV2Tests(unittest.TestCase):
     def test_placeholder_card_and_unexpected_helper_file_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)["run_id"]
-            _, evidence = self.query_page(state, run_id, "sbertrek", ["RSCON-6845"])
-            payload = self.run_tool(
-                state, *self.issue_args(run_id, "sbertrek", "RSCON-6845", evidence, summary="RSCON-6845"),
-                expected=2,
-            )
-            self.assertIn("обязательные данные", payload["error"])
+            response = state / "placeholder.json"
+            self.write(response, {"issues": [self.sber_response_issue("RSCON-6845", summary="RSCON-6845")]})
+            payload = self.run_tool(state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek", "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:query:placeholder", "--response-file", str(response), expected=2)
+            self.assertIn("placeholder", payload["error"])
 
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)["run_id"]
-            _, evidence = self.query_page(state, run_id, "sbertrek", ["RSCON-6845"])
-            self.add_issue(state, run_id, "sbertrek", "RSCON-6845", evidence)
+            self.ingest_sber_response(state, run_id, [("RSCON-6845", {})])
             (self.root(state, run_id) / "record_cards.py").write_text("# helper\n", encoding="utf-8")
             payload = self.run_tool(
                 state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek", expected=2,
@@ -442,6 +665,11 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertEqual(item["work_started_at"], "2026-08-10T10:00:00+00:00")
             self.assertEqual(item["development"]["basis"], "developer-handoff")
             self.assertEqual({entry["field"] for entry in item["conflicts"]}, {"summary", "assignee", "estimate", "epic"})
+            result = json.loads((root / "reconciled.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["groupings"]["epics"]["RSCON-6854"], ["RSCON-6845"])
+            report = (root / "report.md").read_text(encoding="utf-8")
+            self.assertIn("5.0 story-points", report)
+            self.assertIn("**RSCON-6854**: RSCON-6845", report)
 
     def test_jira_fills_a_missing_sbertrek_value(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
