@@ -26,11 +26,13 @@ SberTrek collection-job выбери только операцию `issue.export
    как значение параметра `query` операции bulk JSON export. Никогда не передавай
    TQL в `issue.search.text`. Не интерпретируй назначение запроса и не заменяй его
    поиском по тексту, названию или смыслу.
-2. Если SberTrek MCP поддерживает `fields` или аналогичную проекцию, запроси только
-   `response_contract.preferred_fields`. Не передавай `fields=null` и не запрашивай
-   все поля карточки. Это уменьшает ответ, но не заменяет проверку полноты.
-3. Выполни один поисковый вызов на страницу. Продолжай только реальную пагинацию
-   тем же запросом и полученным cursor.
+2. Для каждого SberTrek export обязательно передай `max_results: 50`; меньшее или
+   другое значение запрещено. Если MCP поддерживает `fields` или аналогичную
+   проекцию, запроси только `response_contract.preferred_fields`. Не передавай
+   `fields=null` и не запрашивай все поля карточки.
+3. Для SberTrek выполни один export-вызов с `max_results: 50`; пагинацию и
+   альтернативное получение ключей не придумывай. Для Jira продолжай только
+   реальную пагинацию тем же запросом и полученным cursor.
 4. Для SberTrek используй полный JSON-файл, созданный самим MCP-инструментом. Не
    открывай его через `read_file`, не анализируй preview и не переписывай увиденные
    элементы вручную: интерфейс может скрыть середину большого ответа. Передай
@@ -42,6 +44,7 @@ SberTrek collection-job выбери только операцию `issue.export
    ```bash
    python3 <HARNESS_ROOT>/scripts/trackerctl.py ingest-query-response \
      --run-id <run-id> --provider sbertrek --page-number 1 --last-page \
+     --max-results 50 \
      --evidence mcp:sbertrek:<unique-call-id> \
      --response-file <absolute-mcp-json-path>
    ```

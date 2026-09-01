@@ -149,7 +149,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
         self.write(response, payload)
         args = [
             "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
-            "--page-number", "1",
+            "--page-number", "1", "--max-results", "50",
             "--evidence", "mcp:sbertrek:query:page-1", "--response-file", str(response),
         ]
         if last:
@@ -283,6 +283,8 @@ class TrackerCtlV2Tests(unittest.TestCase):
                     "required_capability": "exact-tql-bulk-json-export",
                     "preferred_operation": "issue.exportJson",
                     "query_parameter": "query",
+                    "max_results_parameter": "max_results",
+                    "max_results": 50,
                     "forbidden_operations": ["issue.search", "issue.getByKey", "link.list"],
                 },
             )
@@ -301,6 +303,8 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertIn("ingest-query-response", payload["prompt"])
             self.assertIn("issue.exportJson", payload["prompt"])
             self.assertIn("параметре query", payload["prompt"])
+            self.assertIn("max_results=50", payload["prompt"])
+            self.assertIn("--max-results 50", payload["prompt"])
             self.assertIn("Не используй issue.search", payload["prompt"])
             self.assertIn("issue.getByKey", payload["prompt"])
             self.assertIn("link.list", payload["prompt"])
@@ -337,7 +341,32 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertEqual(len(snapshot["issues"]), 22)
             self.assertEqual(len(snapshot["query"]["keys"]), 22)
             self.assertEqual(snapshot["query"]["pages"][0]["recording_method"], "structural-json-import")
+            self.assertEqual(snapshot["query"]["pages"][0]["requested_max_results"], 50)
             self.assertRegex(snapshot["query"]["pages"][0]["response_sha256"], r"^[a-f0-9]{64}$")
+
+    def test_structural_import_rejects_non_maximum_sbertrek_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state, kind="epic", ids=("RSCON-6854",), jira=False)["run_id"]
+            response = state / "limited.json"
+            self.write(response, {"issues": [self.sber_response_issue("RSCON-6845")]})
+            payload = self.run_tool(
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
+                "--page-number", "1", "--max-results", "10", "--last-page",
+                "--evidence", "mcp:sbertrek:query:limited", "--response-file", str(response),
+                expected=2,
+            )
+            self.assertIn("--max-results 50", payload["error"])
+
+    def test_reconcile_reports_possible_truncation_at_sbertrek_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state, kind="epic", ids=("RSCON-6854",), jira=False)["run_id"]
+            issues = [(f"RSCON-{6800 + index}", {}) for index in range(1, 51)]
+            self.collect(state, run_id, "sbertrek", issues)
+            self.complete_all_histories(state, run_id)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertIn("sbertrek-export-limit-reached:50", payload["limitations"])
 
     def test_sbertrek_manual_page_and_card_recording_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -371,7 +400,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             }]})
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
-                "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:query:projected",
+                "--page-number", "1", "--max-results", "50", "--last-page", "--evidence", "mcp:sbertrek:query:projected",
                 "--response-file", str(response),
             )
             self.assertEqual(payload["returned_count"], 1)
@@ -413,7 +442,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             }])
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
-                "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:query:real-shape",
+                "--page-number", "1", "--max-results", "50", "--last-page", "--evidence", "mcp:sbertrek:query:real-shape",
                 "--response-file", str(response),
             )
             self.assertEqual(payload["returned_count"], 1)
@@ -452,7 +481,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.write(response, {"issues": []})
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
-                "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:query:empty",
+                "--page-number", "1", "--max-results", "50", "--last-page", "--evidence", "mcp:sbertrek:query:empty",
                 "--response-file", str(response),
             )
             self.assertEqual(payload["returned_count"], 0)
@@ -614,7 +643,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.write(response, {"issues": [issue]})
             self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
-                "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:query:missing-fields",
+                "--page-number", "1", "--max-results", "50", "--last-page", "--evidence", "mcp:sbertrek:query:missing-fields",
                 "--response-file", str(response),
             )
             payload = self.run_tool(
@@ -627,7 +656,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             state = Path(temp); run_id = self.begin(state)["run_id"]
             response = state / "placeholder.json"
             self.write(response, {"issues": [self.sber_response_issue("RSCON-6845", summary="RSCON-6845")]})
-            payload = self.run_tool(state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek", "--page-number", "1", "--last-page", "--evidence", "mcp:sbertrek:query:placeholder", "--response-file", str(response), expected=2)
+            payload = self.run_tool(state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek", "--page-number", "1", "--max-results", "50", "--last-page", "--evidence", "mcp:sbertrek:query:placeholder", "--response-file", str(response), expected=2)
             self.assertIn("placeholder", payload["error"])
 
         with tempfile.TemporaryDirectory() as temp:

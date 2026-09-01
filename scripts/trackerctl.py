@@ -42,6 +42,7 @@ MERGED_FIELDS = (
     "releases", "created_at", "updated_at",
 )
 RAW_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
+SBER_EXPORT_MAX_RESULTS = 50
 ISSUE_COLLECTION_KEYS = ("issues", "items", "results", "values", "units", "data")
 ISSUE_KEY_ALIASES = ("key", "issueKey", "issue_key", "unitKey", "unit_key")
 SUMMARY_ALIASES = ("summary", "name", "title")
@@ -880,6 +881,8 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
                 raise ValueError(f"Коллекция {provider}: страница {expected_number} не содержит размер ответа")
             if page.get("returned_count") != len(keys):
                 raise ValueError(f"Коллекция {provider}: машинное число карточек страницы не совпадает с ключами")
+            if provider == "sbertrek" and page.get("requested_max_results") != SBER_EXPORT_MAX_RESULTS:
+                raise ValueError(f"Коллекция SberTrek должна быть запрошена с max_results={SBER_EXPORT_MAX_RESULTS}")
             if not re.fullmatch(r"[a-f0-9]{64}", str(page.get("cards_sha256") or "")):
                 raise ValueError(f"Коллекция {provider}: страница {expected_number} не содержит SHA-256 карточек")
             structural_pages.append(page)
@@ -994,6 +997,8 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
                 "required_capability": "exact-tql-bulk-json-export",
                 "preferred_operation": "issue.exportJson",
                 "query_parameter": "query",
+                "max_results_parameter": "max_results",
+                "max_results": SBER_EXPORT_MAX_RESULTS,
                 "forbidden_operations": ["issue.search", "issue.getByKey", "link.list"],
             } if provider == "sbertrek" else None,
             "preferred_fields": [
@@ -1320,6 +1325,11 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
         for item in snapshot["issues"]:
             if item["history"]["state"] == "unavailable":
                 limitations.append(f"{provider}-history-unavailable:{item['key']}")
+        if provider == "sbertrek" and any(
+            page.get("returned_count") == SBER_EXPORT_MAX_RESULTS
+            for page in snapshot["query"].get("pages", [])
+        ):
+            limitations.append(f"sbertrek-export-limit-reached:{SBER_EXPORT_MAX_RESULTS}")
     counts = {"sbertrek": len(sber_issues), "jira": len(jira_issues), "matched": len(paired_jira), "merged": len(merged), "discrepancies": len(discrepancies)}
     groupings: dict[str, dict[str, list[str]]] = {"epics": {}, "releases": {}}
     for item in merged:
@@ -1458,6 +1468,9 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
     exact_query = job["query"]["text"]
     if query["exact"] != exact_query:
         raise ValueError("Точный запрос снимка не совпадает с активным collector-job")
+    expected_max_results = job["response_contract"]["mcp_tool_contract"]["max_results"]
+    if args.max_results != expected_max_results:
+        raise ValueError(f"SberTrek export должен использовать --max-results {expected_max_results}")
     expected_page = len(query["pages"]) + 1
     if args.page_number != expected_page:
         raise ValueError(f"Ожидалась страница {expected_page}")
@@ -1484,7 +1497,7 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
         raise ValueError("JSON-ответ повторяет ключи предыдущей страницы: " + ", ".join(repeated))
     details = (
         f"operation=query; outcome=success; query_sha256={query_digest(exact_query)}; "
-        f"page={args.page_number}; returned={len(keys)}; response_sha256={response_digest}; "
+        f"page={args.page_number}; returned={len(keys)}; max_results={args.max_results}; response_sha256={response_digest}; "
         f"response_bytes={response_size}; parser_path={records_path}; query={exact_query}; "
         "summary=full JSON structurally imported"
     )
@@ -1507,6 +1520,7 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
         "response_sha256": response_digest,
         "response_bytes": response_size,
         "returned_count": len(keys),
+        "requested_max_results": args.max_results,
         "records_path": records_path,
         "cards_sha256": compact_digest,
     })
@@ -2018,12 +2032,13 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                 f"Выполни в sbertrek ровно этот {language}-запрос без изменений:\n\n{query}\n\n"
                 "Выбери только MCP-операцию issue.exportJson либо эквивалентную операцию bulk JSON export, "
                 "которая принимает точный TQL в параметре query и возвращает полный JSON как файл. Имя MCP-сервера "
-                "может отличаться. Не используй issue.search, параметр text, issue.getByKey или link.list; "
+                f"может отличаться. Передай max_results={SBER_EXPORT_MAX_RESULTS}; другое значение запрещено. "
+                "Не используй issue.search, параметр text, issue.getByKey или link.list; "
                 "не проверяй ими доступность TQL и не выполняй обходных запросов. "
                 "Запроси только поля из response_contract.preferred_fields, если MCP-инструмент поддерживает "
                 "проекцию полей; не передавай fields=null. Получи полный исходный JSON-ответ как файл. "
                 "Не читай и не пересказывай отображённый или усечённый preview ответа. Передай путь полного "
-                "JSON в trackerctl.py ingest-query-response: эта команда сама структурно извлечёт все карточки "
+                f"JSON в trackerctl.py ingest-query-response с --max-results {SBER_EXPORT_MAX_RESULTS}: эта команда сама структурно извлечёт все карточки "
                 "и посчитает их. Не выполняй других поисков, detail-вызовов или ручного record-issue. "
                 "Не заменяй запрос поиском по тексту, названию или смыслу. Если подходящей export-операции нет, "
                 "не вызывай никакой другой MCP-инструмент: верни ошибку и немедленно остановись. "
@@ -2152,7 +2167,7 @@ def parser() -> argparse.ArgumentParser:
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config)
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
-    ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.set_defaults(handler=ingest_query_response_command)
+    ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
     mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key"); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)
     unavailable = commands.add_parser("query-unavailable"); unavailable.add_argument("--run-id", required=True); unavailable.add_argument("--provider", choices=PROVIDERS, required=True); unavailable.add_argument("--reason", required=True); unavailable.add_argument("--evidence", required=True); unavailable.set_defaults(handler=query_unavailable_command)
