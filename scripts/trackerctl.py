@@ -1236,8 +1236,8 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
                 "forbidden_operations": ["issue.search", "issue.getByKey", "link.list"],
             } if provider == "sbertrek" else None,
             "preferred_fields": [
-                "key", "summary", "suit", "status", "assigned_to",
-                "story_points", "issue_key", "epic", "fixversion", "created_at", "updated_at",
+                "key", "summary", "suit", "status", "attributes", "epic",
+                "created_at", "updated_at",
             ],
         },
         "created_at": now(),
@@ -2520,7 +2520,9 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                 "Не используй issue.search, параметр text, issue.getByKey или link.list; "
                 "не проверяй ими доступность TQL и не выполняй обходных запросов. "
                 "Запроси только поля из response_contract.preferred_fields, если MCP-инструмент поддерживает "
-                "проекцию полей; не передавай fields=null. Получи полный исходный JSON-ответ как файл. "
+                "проекцию полей; поле attributes обязательно содержит пользовательские атрибуты assigned_to, "
+                "story_points, issue_key и fixversion, поэтому не заменяй его этими кодами. Не передавай "
+                "fields=null. Получи полный исходный JSON-ответ как файл. "
                 "Не читай и не пересказывай отображённый или усечённый preview ответа. Передай путь полного "
                 f"JSON в trackerctl.py ingest-query-response с --max-results {SBER_EXPORT_MAX_RESULTS}: эта команда сама структурно извлечёт все карточки "
                 "и посчитает их. Не выполняй других поисков, detail-вызовов или ручного record-issue. "

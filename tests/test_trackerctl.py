@@ -345,7 +345,8 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertNotIn("эпик", payload["prompt"].casefold())
             self.assertIn("не заменяй запрос поиском по тексту", payload["prompt"].casefold())
             self.assertIn("полный исходный JSON-ответ", payload["prompt"])
-            self.assertIn("не передавай fields=null", payload["prompt"])
+            self.assertIn("не передавай fields=null", payload["prompt"].casefold())
+            self.assertIn("поле attributes обязательно", payload["prompt"])
             self.assertIn("ingest-query-response", payload["prompt"])
             self.assertIn("issue.exportJson", payload["prompt"])
             self.assertIn("параметре query", payload["prompt"])
@@ -578,15 +579,16 @@ class TrackerCtlV2Tests(unittest.TestCase):
                 state = Path(temp); begin = self.begin(state, provider=provider, kind=kind, ids=ids)
                 self.assertEqual(self.job(state, begin["run_id"], f"collection-{provider}")["query"]["text"], expected_query)
 
-    def test_sbertrek_job_requests_native_export_fields(self) -> None:
+    def test_sbertrek_job_requests_native_attributes_container(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)["run_id"]
             fields = self.job(state, run_id, "collection-sbertrek")["response_contract"]["preferred_fields"]
             self.assertIn("suit", fields)
-            self.assertIn("fixversion", fields)
-            self.assertIn("assigned_to", fields)
-            self.assertIn("story_points", fields)
-            self.assertIn("issue_key", fields)
+            self.assertIn("attributes", fields)
+            self.assertNotIn("fixversion", fields)
+            self.assertNotIn("assigned_to", fields)
+            self.assertNotIn("story_points", fields)
+            self.assertNotIn("issue_key", fields)
             self.assertNotIn("issue_type", fields)
             self.assertNotIn("releases", fields)
 
