@@ -109,6 +109,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
 
     def sber_response_issue(
         self, key: str, *, jira_key: str | None = None, assignee: str | None = None,
+        assignee_name: str | None = None,
         estimate: str | None = None, epic: str | None = None,
         summary: str | None = None, status: str = "active",
         include_attributes: bool = True,
@@ -117,7 +118,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
         if assignee:
             attributes.append({
                 "code": "assigned_to",
-                "value": {"externalId": assignee, "displayName": assignee},
+                "value": {"externalId": assignee, "displayName": assignee_name or assignee},
             })
         if estimate:
             attributes.append({"code": "story_points", "value": estimate})
@@ -289,6 +290,28 @@ class TrackerCtlV2Tests(unittest.TestCase):
                 },
             )
 
+    def test_begin_rejects_second_active_run_until_abandoned(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            first = self.begin(state)
+            payload = self.run_tool(
+                state, "begin", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
+                "--scope-id", "RSCON-6846", "--label", "Second",
+                "--scope-source", "Запрос аналитика", expected=2,
+            )
+            self.assertIn(first["run_id"], payload["error"])
+            self.assertIn("новый begin запрещён", payload["error"])
+            self.run_tool(
+                state, "abandon-run", "--run-id", first["run_id"],
+                "--reason", "Явно начат новый сеанс",
+            )
+            second = self.run_tool(
+                state, "begin", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
+                "--scope-id", "RSCON-6846", "--label", "Second",
+                "--scope-source", "Запрос аналитика",
+            )
+            self.assertNotEqual(first["run_id"], second["run_id"])
+
     def test_collector_brief_contains_only_exact_query_and_recording_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); begin = self.begin(state, kind="epic", ids=("RSCON-6854",))
@@ -309,6 +332,9 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertIn("issue.getByKey", payload["prompt"])
             self.assertIn("link.list", payload["prompt"])
             self.assertIn("верни ошибку и немедленно остановись", payload["prompt"])
+            self.assertIn(f"run_id={begin['run_id']}", payload["prompt"])
+            self.assertIn("Не запускай begin", payload["prompt"])
+            self.assertIn("Не редактируй scope.json", payload["prompt"])
 
     def test_collector_brief_uses_same_narrow_prompt_for_all_query_scenarios(self) -> None:
         cases = [
@@ -741,6 +767,72 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertIn("s-dev", payload["next_question"])
             self.assertNotIn("j-dev", payload["next_question"])
 
+    def test_multiple_provider_accounts_can_share_one_team_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, ids=("RSCON-6845", "RSCON-6846"), jira=False,
+            )["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-6845", {"assignee": "s-dev", "assignee_name": "Один Участник"}),
+                ("RSCON-6846", {"assignee": "s-dev-alias", "assignee_name": "Один Участник"}),
+            ])
+            self.complete_all_histories(state, run_id)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            self.assertIn("уже соответствуют BE1", payload["next_question"])
+            self.run_tool(
+                state, "set-participant", "--run-id", run_id, "--provider", "sbertrek",
+                "--account-id", "s-dev-alias", "--team-id", "BE1",
+            )
+            result = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertTrue(result["workflow_complete"])
+            config = json.loads((state / "tracker-config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["participants"]["sbertrek"]["s-dev"]["team_id"], "BE1")
+            self.assertEqual(config["participants"]["sbertrek"]["s-dev-alias"]["team_id"], "BE1")
+
+    def test_snapshot_from_another_run_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); begin = self.begin(state, jira=False); run_id = begin["run_id"]
+            path = self.root(state, run_id) / "providers" / "sbertrek.json"
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
+            snapshot["run_id"] = "20260101T000000Z-deadbeef"
+            self.write(path, snapshot)
+            payload = self.run_tool(
+                state, "collector-complete", "--run-id", run_id,
+                "--provider", "sbertrek", expected=2,
+            )
+            self.assertIn("другому tracker-run", payload["error"])
+
+    def test_direct_jira_card_edit_blocks_reconcile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_sber_run(state)
+            path = root / "providers" / "jira.json"
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
+            snapshot["issues"][0]["summary"] = "Ручная подмена"
+            self.write(path, snapshot)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=2)
+            self.assertIn("record-issue", payload["error"])
+
+    def test_direct_history_event_edit_blocks_reconcile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_sber_run(state, handoff=True)
+            path = root / "providers" / "sbertrek.json"
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
+            snapshot["issues"][0]["history"]["events"][0]["at"] = "2026-01-01T00:00:00+00:00"
+            self.write(path, snapshot)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=2)
+            self.assertIn("изменена вне trackerctl", payload["error"])
+
+    def test_direct_history_event_deletion_blocks_reconcile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_sber_run(state, handoff=True)
+            path = root / "providers" / "sbertrek.json"
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
+            snapshot["issues"][0]["history"]["events"].pop()
+            self.write(path, snapshot)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=2)
+            self.assertIn("не совпадает с журналом trackerctl", payload["error"])
+
     def test_secondary_query_unavailable_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)["run_id"]
@@ -771,6 +863,12 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertTrue((root / "providers" / "sbertrek.json").is_file())
             self.assertFalse(payload["planning_application_allowed"])
             self.assertEqual(payload["protocol"], "targeted-tracker-v2")
+            self.assertEqual(payload["summary"]["story_points_total"], 5.0)
+            self.assertEqual(
+                sum(payload["summary"]["discrepancy_kind_counts"].values()),
+                payload["counts"]["discrepancies"],
+            )
+            self.assertIn("Суммарная оценка: 5.0 story-points", (root / "report.md").read_text(encoding="utf-8"))
             self.assertTrue(self.run_tool(state, "result-status", "--run-id", run_id)["final_response_allowed"])
 
     def test_update_planning_intent_is_explicit(self) -> None:
