@@ -230,13 +230,23 @@ class TrackerCtlV2Tests(unittest.TestCase):
         assert job
         self.assertEqual(job["kind"], "provider-history")
         provider = job["provider"]
-        for key in job["keys"]:
-            evidence = f"mcp:{provider}:history:{key}"
-            self.run_tool(
-                state, "mcp-log", "--run-id", run_id, "--provider", provider,
+        if job["call_mode"] == "batch":
+            calls = [(f"mcp:{provider}:history-batch:{job['job_id']}", job["keys"])]
+        else:
+            calls = [(f"mcp:{provider}:history:{key}", [key]) for key in job["keys"]]
+        evidence_by_key = {}
+        for evidence, keys in calls:
+            args = [
+                "mcp-log", "--run-id", run_id, "--provider", provider,
                 "--operation", "history", "--outcome", "success", "--evidence", evidence,
-                "--summary", "bounded history", "--key", key,
-            )
+                "--summary", "bounded history",
+            ]
+            for key in keys:
+                args += ["--key", key]
+                evidence_by_key[key] = evidence
+            self.run_tool(state, *args)
+        for key in job["keys"]:
+            evidence = evidence_by_key[key]
             if key == handoff_key:
                 self.run_tool(
                     state, "history-event", "--run-id", run_id, "--provider", provider,
@@ -832,7 +842,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             active = self.active_job(state, run_id); assert active
             outside = next(key for key in ids if key not in active["keys"])
             payload = self.run_tool(state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek", "--operation", "history", "--outcome", "success", "--evidence", f"mcp:sbertrek:history:{outside}", "--summary", "outside", "--key", outside, expected=2)
-            self.assertIn("активного history-job", payload["error"])
+            self.assertIn("точный набор ключей job", payload["error"])
 
     def test_history_event_requires_prior_real_call_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -844,7 +854,53 @@ class TrackerCtlV2Tests(unittest.TestCase):
                 "--at", "2026-08-10T10:00:00+00:00", "--field", "status",
                 "--from-value", "created", "--to-value", "in_progress", expected=2,
             )
-            self.assertIn("mcp-log", payload["error"])
+            self.assertIn("зарегистрированным каноническим вызовом", payload["error"])
+
+    def test_jira_history_rejects_relabelled_per_key_evidence_for_one_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state, ids=("RSCON-6845", "RSCON-6846"))["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-6845", {"jira_key": "RSCON-2902"}),
+                ("RSCON-6846", {"jira_key": "RSCON-2903"}),
+            ])
+            self.collect(state, run_id, "jira", [("RSCON-2902", {}), ("RSCON-2903", {})])
+            self.complete_history_job(state, run_id)
+            job = self.active_job(state, run_id); assert job
+            self.assertEqual(job["provider"], "jira")
+            self.assertEqual(job["call_mode"], "batch")
+            payload = self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "jira",
+                "--operation", "history", "--outcome", "success",
+                "--evidence", "mcp:jira:history:RSCON-2902",
+                "--summary", "one batch relabelled as one key", "--key", "RSCON-2902",
+                expected=2,
+            )
+            self.assertIn("канонический evidence", payload["error"])
+
+            canonical = f"mcp:jira:history-batch:{job['job_id']}"
+            payload = self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "jira",
+                "--operation", "history", "--outcome", "success",
+                "--evidence", canonical, "--summary", "incomplete batch key set",
+                "--key", "RSCON-2902", expected=2,
+            )
+            self.assertIn("точный набор ключей job", payload["error"])
+
+    def test_jira_history_job_records_one_canonical_batch_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state, ids=("RSCON-6845", "RSCON-6846"))["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-6845", {"jira_key": "RSCON-2902"}),
+                ("RSCON-6846", {"jira_key": "RSCON-2903"}),
+            ])
+            self.collect(state, run_id, "jira", [("RSCON-2902", {}), ("RSCON-2903", {})])
+            self.complete_all_histories(state, run_id)
+            job = self.job(state, run_id, "history-jira-01")
+            self.assertEqual(len(job["calls"]), 1)
+            self.assertEqual(job["calls"][0]["keys"], ["RSCON-2902", "RSCON-2903"])
+            self.assertEqual(job["calls"][0]["evidence"], "mcp:jira:history-batch:history-jira-01")
 
     def test_reconcile_preserves_sbertrek_and_computes_dates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -864,6 +920,67 @@ class TrackerCtlV2Tests(unittest.TestCase):
             report = (root / "report.md").read_text(encoding="utf-8")
             self.assertIn("5.0 story-points", report)
             self.assertIn("**RSCON-6854**: RSCON-6845", report)
+
+    def test_unassigned_issue_with_complete_empty_history_is_not_started(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
+            self.complete_all_histories(state, run_id)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["summary"]["development_state_counts"], {"not-started": 1})
+
+    def test_current_developer_assignee_is_in_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.collect(state, run_id, "sbertrek", [("RSCON-6845", {"assignee": "s-dev"})])
+            self.complete_all_histories(state, run_id)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["summary"]["development_state_counts"], {"in-progress": 1})
+
+    def test_developer_assignment_history_is_in_progress_without_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
+            job = self.active_job(state, run_id); assert job
+            evidence = "mcp:sbertrek:history:RSCON-6845"
+            self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "history", "--outcome", "success", "--evidence", evidence,
+                "--summary", "bounded history", "--key", "RSCON-6845",
+            )
+            self.run_tool(
+                state, "history-event", "--run-id", run_id, "--provider", "sbertrek",
+                "--key", "RSCON-6845", "--evidence", evidence,
+                "--at", "2026-08-10T10:00:00+00:00", "--field", "assignee",
+                "--to-id", "s-dev", "--to-name", "Developer",
+            )
+            self.run_tool(
+                state, "history-complete", "--run-id", run_id, "--provider", "sbertrek",
+                "--key", "RSCON-6845", "--state", "complete", "--evidence", evidence,
+            )
+            self.run_tool(state, "history-job-complete", "--run-id", run_id, "--job-id", job["job_id"])
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["summary"]["development_state_counts"], {"in-progress": 1})
+
+    def test_unavailable_history_without_developer_evidence_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
+            job = self.active_job(state, run_id); assert job
+            evidence = "mcp:sbertrek:history:RSCON-6845"
+            self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "history", "--outcome", "error", "--evidence", evidence,
+                "--summary", "history unavailable", "--key", "RSCON-6845",
+            )
+            self.run_tool(
+                state, "history-complete", "--run-id", run_id, "--provider", "sbertrek",
+                "--key", "RSCON-6845", "--state", "unavailable", "--reason", "no access",
+                "--evidence", evidence,
+            )
+            self.run_tool(state, "history-job-complete", "--run-id", run_id, "--job-id", job["job_id"])
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["summary"]["development_state_counts"], {"unknown": 1})
 
     def test_developer_handoff_survives_later_non_developer_reassignment(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -992,6 +1109,16 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.write(path, snapshot)
             payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=2)
             self.assertIn("не совпадает с журналом trackerctl", payload["error"])
+
+    def test_direct_history_call_record_edit_blocks_reconcile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_sber_run(state)
+            path = root / "jobs" / "history-jira-01.json"
+            job = json.loads(path.read_text(encoding="utf-8"))
+            job["calls"][0]["keys_sha256"] = "0" * 64
+            self.write(path, job)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=2)
+            self.assertIn("каноническому контракту", payload["error"])
 
     def test_secondary_query_unavailable_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

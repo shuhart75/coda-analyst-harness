@@ -14,7 +14,7 @@ from typing import Any
 
 
 PROTOCOL = "targeted-tracker-v2"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -500,6 +500,10 @@ def issue_key(value: str, label: str = "Ключ задачи") -> str:
 
 def unique_keys(values: list[str]) -> list[str]:
     return sorted(set(issue_key(value) for value in values))
+
+
+def keys_sha256(values: list[str]) -> str:
+    return object_sha256(unique_keys(values))
 
 
 def evidence(value: str, provider: str) -> str:
@@ -1106,6 +1110,8 @@ def validate_run_provenance(run_id: str, snapshots: dict[str, dict]) -> None:
     for job in all_jobs(run_id):
         if job.get("state") != "complete":
             raise ValueError(f"Job {job.get('job_id')} не завершён")
+        if job.get("kind") == "provider-history":
+            validate_history_job_calls(run_id, job, require_complete=True)
         command = "collector-complete" if job["kind"] == "provider-collection" else "history-job-complete"
         markers = () if command == "collector-complete" else (f"job_id={job['job_id']}",)
         require_tracker_command(run_id, command, provider=job["provider"] if command == "collector-complete" else None, detail_markers=markers)
@@ -1245,8 +1251,52 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
     }
 
 
+def canonical_history_calls(job: dict) -> list[dict]:
+    provider = job["provider"]
+    job_id = job["job_id"]
+    keys = unique_keys(job["keys"])
+    if provider == "jira":
+        evidence_value = f"mcp:jira:history-batch:{job_id}"
+        return [{"evidence": evidence_value, "keys": keys, "keys_sha256": keys_sha256(keys)}]
+    return [
+        {
+            "evidence": f"mcp:{provider}:history:{key}",
+            "keys": [key],
+            "keys_sha256": keys_sha256([key]),
+        }
+        for key in keys
+    ]
+
+
+def history_call_for_key(job: dict, key: str, evidence_value: str, outcome: str) -> dict:
+    normalized_key = issue_key(key)
+    for call in job.get("calls", []):
+        if call["evidence"] == evidence_value and normalized_key in call["keys"]:
+            if call["outcome"] != outcome:
+                raise ValueError(f"History-вызов должен иметь outcome={outcome}")
+            return call
+    raise ValueError("Ключ истории не связан с зарегистрированным каноническим вызовом активного job")
+
+
+def validate_history_job_calls(run_id: str, job: dict, *, require_complete: bool) -> None:
+    expected = canonical_history_calls(job)
+    actual = job.get("calls", [])
+    if require_complete and len(actual) != len(expected):
+        raise ValueError("History-job не содержит полного набора канонических MCP-вызовов")
+    for call in actual:
+        details = require_logged_mcp(run_id, call["evidence"], outcome=call["outcome"])
+        markers = (
+            "operation=history;",
+            f"keys_sha256={call['keys_sha256']};",
+            f"keys={','.join(call['keys'])};",
+        )
+        if not all(marker in details for marker in markers):
+            raise ValueError("History-job не совпадает с машинным журналом MCP-вызовов")
+
+
 def history_job(run_id: str, provider: str, number: int, keys: list[str]) -> dict:
     job_id = f"history-{provider}-{number:02d}"
+    keys = unique_keys(keys)
     return {
         "protocol": PROTOCOL,
         "schema_version": SCHEMA_VERSION,
@@ -1256,6 +1306,8 @@ def history_job(run_id: str, provider: str, number: int, keys: list[str]) -> dic
         "state": "pending",
         "provider": provider,
         "keys": keys,
+        "call_mode": "batch" if provider == "jira" else "per-key",
+        "calls": [],
         "output": str(snapshot_path(run_id, provider)),
         "collector_contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-collector.md"),
         "allowed_operations": [
@@ -1303,6 +1355,31 @@ def load_job(run_id: str, job_id: str) -> tuple[Path, dict]:
             or query.get("initial_sha256") != query_digest(query["initial_text"])
         ):
             raise ValueError("Контрольная сумма запроса collector-job не совпадает")
+    elif job.get("kind") == "provider-history":
+        keys = job.get("keys")
+        expected_mode = "batch" if job.get("provider") == "jira" else "per-key"
+        if (
+            not isinstance(keys, list)
+            or keys != unique_keys(keys)
+            or job.get("call_mode") != expected_mode
+            or not isinstance(job.get("calls"), list)
+        ):
+            raise ValueError("History-job содержит некорректный контракт вызовов")
+        expected_calls = canonical_history_calls(job)
+        seen: set[str] = set()
+        for call in job["calls"]:
+            if not isinstance(call, dict) or call.get("evidence") in seen:
+                raise ValueError("History-job содержит повреждённые или повторные вызовы")
+            seen.add(call["evidence"])
+            expected = next((item for item in expected_calls if item["evidence"] == call.get("evidence")), None)
+            if (
+                expected is None
+                or call.get("keys") != expected["keys"]
+                or call.get("keys_sha256") != expected["keys_sha256"]
+                or call.get("outcome") not in {"success", "error"}
+                or set(call) != {"evidence", "keys", "keys_sha256", "outcome"}
+            ):
+                raise ValueError("History-job содержит вызов, не соответствующий каноническому контракту")
     return path, job
 
 
@@ -1496,7 +1573,18 @@ def development_state(sber: dict | None, jira: dict | None, config: dict) -> dic
             latest_handoff = event
     if latest_handoff:
         return {"state": "completed", "basis": "developer-handoff", "at": latest_handoff["at"]}
-    return {"state": "in-progress", "basis": f"{provider}-targeted-read"}
+    current_assignee, assignee_source, _ = merged_value("assignee", sber, jira)
+    if assignee_source and participant_role(config, assignee_source, current_assignee) == "developer":
+        return {"state": "in-progress", "basis": f"{assignee_source}-developer-assignee"}
+    if any(
+        participant_role(config, event["source"], event.get("to")) == "developer"
+        for event in assignee_events
+    ):
+        return {"state": "in-progress", "basis": "developer-assignment-history"}
+    histories = [item["history"]["state"] for item in (sber, jira) if item]
+    if current_assignee is None and histories and all(state == "complete" for state in histories):
+        return {"state": "not-started", "basis": "complete-history-without-developer-assignment"}
+    return {"state": "unknown", "basis": "insufficient-development-evidence"}
 
 
 def first_unknown_participant(snapshots: dict[str, dict], config: dict) -> dict | None:
@@ -1948,26 +2036,32 @@ def mcp_log_command(args: argparse.Namespace) -> int:
             raise ValueError("Для одной страницы точного bulk-запроса разрешён ровно один MCP-вызов")
     elif args.query is not None or args.page_number is not None or args.returned_count is not None:
         raise ValueError("--query, --page-number и --returned-count допустимы только для operation=query")
-    if args.operation in {"issue-detail", "history"} and not args.key:
-        raise ValueError(f"operation={args.operation} требует --key")
-    if args.operation not in {"issue-detail", "history"} and args.key:
-        raise ValueError("--key допустим только для issue-detail и history")
+    if args.operation == "history" and not args.key:
+        raise ValueError("operation=history требует хотя бы один --key")
+    if args.operation != "history" and args.key:
+        raise ValueError("--key допустим только для operation=history")
     if args.operation == "history":
         job = active_job(args.run_id)
-        if (
-            not job
-            or job.get("kind") != "provider-history"
-            or job.get("provider") != args.provider
-            or issue_key(args.key) not in job.get("keys", [])
-        ):
-            raise ValueError("Историю разрешено читать только для ключа активного history-job")
+        if not job or job.get("kind") != "provider-history" or job.get("provider") != args.provider:
+            raise ValueError("Историю разрешено читать только для активного history-job")
+        keys = unique_keys(args.key)
+        expected = canonical_history_calls(job)
+        expected_call = next((item for item in expected if item["evidence"] == call), None)
+        if expected_call is None or expected_call["keys"] != keys:
+            raise ValueError("History MCP-вызов должен использовать канонический evidence и точный набор ключей job")
+        if any(item["evidence"] == call or set(item["keys"]) & set(keys) for item in job["calls"]):
+            raise ValueError("Для каждого канонического набора ключей разрешён ровно один history MCP-вызов")
+        job["calls"].append({**expected_call, "outcome": args.outcome})
+        save_json(job_path(args.run_id, job["job_id"]), job)
     parts = [f"operation={args.operation}", f"outcome={args.outcome}"]
     if args.query is not None:
         parts.append(f"query_sha256={query_digest(args.query)}")
     if args.page_number is not None:
         parts.append(f"page={args.page_number}")
     if args.key:
-        parts.append(f"key={issue_key(args.key)}")
+        normalized_keys = unique_keys(args.key)
+        parts.append(f"keys_sha256={keys_sha256(normalized_keys)}")
+        parts.append(f"keys={','.join(normalized_keys)}")
     if args.returned_count is not None:
         parts.append(f"returned={args.returned_count}")
     if args.query is not None:
@@ -2371,9 +2465,8 @@ def history_event_command(args: argparse.Namespace) -> int:
     if not item:
         raise ValueError("Задача отсутствует в целевой коллекции")
     call = evidence(args.evidence, args.provider)
+    history_call_for_key(job, item["key"], call, "success")
     require_logged_mcp(args.run_id, call, outcome="success")
-    if not re.search(rf"(?<![A-Z0-9_]){re.escape(item['key'])}(?![0-9])", call, re.I):
-        raise ValueError("Evidence события истории должен содержать точный ключ задачи")
     event = {
         "at": args.at,
         "field": args.field,
@@ -2407,9 +2500,9 @@ def history_complete_command(args: argparse.Namespace) -> int:
     if args.state == "unavailable" and not args.reason:
         raise ValueError("Недоступная история требует --reason")
     call = evidence(args.evidence, args.provider)
-    require_logged_mcp(args.run_id, call, outcome="success" if args.state == "complete" else "error")
-    if not re.search(rf"(?<![A-Z0-9_]){re.escape(item['key'])}(?![0-9])", call, re.I):
-        raise ValueError("Evidence истории должен содержать точный ключ задачи")
+    outcome = "success" if args.state == "complete" else "error"
+    history_call_for_key(job, item["key"], call, outcome)
+    require_logged_mcp(args.run_id, call, outcome=outcome)
     item["history"].update({"state": args.state, "evidence": [call], "reason": args.reason})
     save_json(path, snapshot)
     args.record_sha256 = object_sha256({name: item["history"][name] for name in ("state", "evidence", "reason")})
@@ -2423,6 +2516,7 @@ def history_job_complete_command(args: argparse.Namespace) -> int:
         raise ValueError("Завершить можно только активный history-job")
     if active_job(args.run_id) != job:
         raise ValueError("Завершить можно только текущий history-job")
+    validate_history_job_calls(args.run_id, job, require_complete=True)
     _, snapshot = load_snapshot(args.run_id, job["provider"])
     pending = []
     for key in job["keys"]:
@@ -2548,12 +2642,26 @@ def collector_brief_command(args: argparse.Namespace) -> int:
             )
     else:
         keys = ", ".join(job["keys"])
+        calls = canonical_history_calls(job)
+        if job["call_mode"] == "batch":
+            call = calls[0]
+            history_instruction = (
+                f"Выполни в {job['provider']} ровно один batch-запрос истории сразу для полного набора ключей: "
+                f"{keys}. Зарегистрируй этот единственный вызов через mcp-log с evidence "
+                f"{call['evidence']} и передай каждый ключ отдельным --key. Один batch-ответ нельзя "
+                "переименовывать или повторно регистрировать как несколько вызовов. "
+            )
+        else:
+            call_list = "; ".join(f"{item['keys'][0]} -> {item['evidence']}" for item in calls)
+            history_instruction = (
+                f"Выполни в {job['provider']} ровно по одному запросу истории на каждый ключ: {keys}. "
+                f"Для mcp-log используй только эти соответствия ключа и evidence: {call_list}. "
+            )
         prompt = (
-            run_guard +
-            f"Выполни в {job['provider']} ровно по одному запросу истории только для этих ключей: {keys}. "
-            f"Для записи результата прочитай только {contract} и {path}. Не ищи другие задачи, не создавай "
-            "скрипты или вспомогательные файлы. После history-job-complete немедленно верни только status, "
-            "job_id и пути."
+            run_guard + history_instruction +
+            f"Для записи результата прочитай только {contract} и {path}. Не придумывай evidence, не ищи "
+            "другие задачи, не создавай скрипты или вспомогательные файлы. После history-job-complete "
+            "немедленно верни только status, job_id и пути."
         )
     print(json.dumps({
         "protocol": PROTOCOL,
@@ -2684,7 +2792,7 @@ def parser() -> argparse.ArgumentParser:
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
     ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
-    mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key"); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
+    mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key", action="append", default=[]); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     absent = commands.add_parser("jira-record-absent-counterparts"); absent.add_argument("--run-id", required=True); absent.add_argument("--evidence", required=True); absent.add_argument("--key", action="append", default=[]); absent.set_defaults(handler=jira_record_absent_counterparts_command, provider="jira")
     page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)
     unavailable = commands.add_parser("query-unavailable"); unavailable.add_argument("--run-id", required=True); unavailable.add_argument("--provider", choices=PROVIDERS, required=True); unavailable.add_argument("--reason", required=True); unavailable.add_argument("--evidence", required=True); unavailable.set_defaults(handler=query_unavailable_command)
