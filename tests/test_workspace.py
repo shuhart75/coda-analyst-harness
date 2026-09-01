@@ -132,6 +132,19 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
 
             documents = workspace / "documents"
+            hook_path = Path(run(
+                "git", "-C", str(documents), "rev-parse", "--path-format=absolute",
+                "--git-path", "hooks/commit-msg",
+            ).stdout.strip())
+            self.assertTrue(hook_path.is_file())
+            self.assertTrue(os.access(hook_path, os.X_OK))
+            self.assertIn("analyst-harness-commit-message-policy:v1", hook_path.read_text(encoding="utf-8"))
+            blocked_commit = run(
+                "git", "-C", str(documents), "commit", "--allow-empty",
+                "-m", "Обновить RSCON-123",
+            )
+            self.assertNotEqual(blocked_commit.returncode, 0)
+            self.assertIn("Сообщение коммита отклонено", blocked_commit.stderr)
             entrypoint = documents / "AGENTS.md"
             self.assertTrue(entrypoint.is_file())
             entrypoint_text = entrypoint.read_text(encoding="utf-8")

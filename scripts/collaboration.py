@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from commit_message_policy import require_valid_commit_message
+
 
 BRANCH = "main"
 STATE_FILE = "collaboration.json"
@@ -417,6 +419,7 @@ def save_command(args: argparse.Namespace) -> int:
             "requested_paths": sorted(requested),
             "message": "Перед сохранением нужно осознанно перечислить все и только изменённые пути",
         }, ensure_ascii=False))
+    require_valid_commit_message(args.message)
     for path in sorted(requested):
         staged = git(analytics, "add", "--", path)
         if staged.returncode != 0:

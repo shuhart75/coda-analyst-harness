@@ -66,6 +66,8 @@ For a command that starts work on an existing feature, absence of `.workspace-st
 
 `collaboration.py submit` pushes a feature branch but does not create or accept a merge request. Start the user-facing result with its exact `message`. A returned `merge_request_create_url` is a link to the creation form, not evidence that a request exists. After the user reports that the request was accepted, run `collaboration.py finish` and prove that the submitted commit is contained in `origin/main`.
 
+Git commit messages are a strict privacy boundary. Never put a task number or tracker identifier in the subject or body, including generated, merge and squash messages and identifiers embedded in branch names or URLs. A semantic description is required instead. This rule does not remove identifiers from tracker evidence, branch names or project artifacts where they are operationally necessary. Validate the complete proposed message before every programmatic commit and keep the bootstrap-installed `commit-msg` hook active; if an existing hook configuration prevents enforcement, stop instead of bypassing or weakening the rule.
+
 For the exact full-exchange command `синкани репы`, use `workspace.py sync` even when an `awaiting-merge` feature branch is still checked out. The program itself attempts guarded finish: it continues only when `origin/main` contains the submitted commit and otherwise stops before code and source updates. Do not decide from the stale local collaboration status that a remotely accepted request is still unmerged.
 
 If the command references impacted requirements, prototypes, or rollback of a known decision, consult:

@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from commit_message_policy import require_valid_commit_message
+
 
 EXCHANGE_DIR = "requirements-exchange"
 STATE_NAME = "development-results-state.json"
@@ -716,11 +718,13 @@ def publish_to_code(
                 result.pop("manifest_path", None)
                 result.pop("requirements_path", None)
                 return result
+            commit_message = f"Передать требования {feature}, редакция {prepared['revision']:03d}"
+            require_valid_commit_message(commit_message)
             committed = git(
                 clone,
                 "-c", "user.name=Analyst Requirements Exchange",
                 "-c", "user.email=analyst-harness@local.invalid",
-                "commit", "--quiet", "-m", f"Передать требования {feature}, редакция {prepared['revision']:03d}",
+                "commit", "--quiet", "-m", commit_message,
             )
             if committed.returncode != 0:
                 raise ValueError(f"не удалось создать защищённый коммит передачи: {committed.stderr.strip()}")

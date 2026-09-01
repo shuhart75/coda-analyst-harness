@@ -13,6 +13,8 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from commit_message_policy import require_valid_commit_message
+
 from workspace_entrypoint import (
     embedded_harness_paths as local_embedded_harness_paths,
     write_local_entrypoint,
@@ -1105,12 +1107,14 @@ def update_feature_branch_command(args: argparse.Namespace) -> int:
         if operation == "feature-main-fast-forward":
             merged = git(analytics, "merge", "--ff-only", f"origin/{BRANCH}")
         else:
+            merge_message = f"Merge origin/{BRANCH} into {branch}"
+            require_valid_commit_message(merge_message)
             merged = git(
                 analytics,
                 "-c", "user.name=Coda Analyst Harness",
                 "-c", "user.email=coda-analyst-harness@local.invalid",
                 "merge", "--no-ff", f"origin/{BRANCH}",
-                "-m", f"Merge origin/{BRANCH} into {branch}",
+                "-m", merge_message,
             )
         if merged.returncode != 0:
             conflicts = analytics_origin_conflict_records(analytics)
