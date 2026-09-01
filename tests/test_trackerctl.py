@@ -107,6 +107,29 @@ class TrackerCtlV2Tests(unittest.TestCase):
             args += ["--key", key]
         return self.run_tool(state, *args), evidence
 
+    def record_absent_counterparts(
+        self, state: Path, run_id: str, keys: list[str], *,
+        evidence: str = "mcp:jira:query:absent-counterparts",
+    ) -> dict:
+        query = self.snapshot(state, run_id, "jira")["query"]["exact"]
+        summary = "\n".join(
+            f"An issue with key '{key}' does not exist for field 'key'."
+            for key in keys
+        )
+        self.run_tool(
+            state, "mcp-log", "--run-id", run_id, "--provider", "jira",
+            "--operation", "query", "--outcome", "error", "--evidence", evidence,
+            "--summary", summary, "--query", query,
+            "--page-number", "1", "--returned-count", "0",
+        )
+        args = [
+            "jira-record-absent-counterparts", "--run-id", run_id,
+            "--evidence", evidence,
+        ]
+        for key in keys:
+            args += ["--key", key]
+        return self.run_tool(state, *args)
+
     def sber_response_issue(
         self, key: str, *, jira_key: str | None = None, assignee: str | None = None,
         assignee_name: str | None = None,
@@ -646,6 +669,105 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertEqual((self.active_job(state, run_id) or {}).get("provider"), "jira")
             self.assertEqual(self.job(state, run_id, "collection-jira")["query"]["text"], 'key IN ("RSCON-2902")')
 
+    def test_absent_jira_counterpart_excludes_only_linked_sbertrek_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(
+                state, ids=("RSCON-1", "RSCON-2", "RSCON-3"),
+            )["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-1", {"jira_key": "RSCON-101", "estimate": "5"}),
+                ("RSCON-2", {"jira_key": "RSCON-102", "estimate": "8"}),
+                ("RSCON-3", {"estimate": "3"}),
+            ])
+            retry = self.record_absent_counterparts(state, run_id, ["RSCON-102"])
+            self.assertEqual(retry["remaining_key_count"], 1)
+            self.assertEqual(retry["next_query"]["query"], 'key IN ("RSCON-101")')
+            self.collect(state, run_id, "jira", [("RSCON-101", {"estimate": "5"})])
+            history_keys = {
+                key
+                for path in (self.root(state, run_id) / "jobs").glob("history-*.json")
+                for key in json.loads(path.read_text(encoding="utf-8"))["keys"]
+            }
+            self.assertNotIn("RSCON-2", history_keys)
+            self.assertIn("RSCON-3", history_keys)
+            self.complete_all_histories(state, run_id)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["counts"], {
+                "sbertrek": 3, "jira": 1, "matched": 1,
+                "excluded": 1, "merged": 2, "discrepancies": 2,
+            })
+            self.assertEqual(payload["summary"]["story_points_total"], 8.0)
+            self.assertEqual(payload["summary"]["excluded_sbertrek_issues"], ["RSCON-2"])
+            self.assertEqual(payload["summary"]["absent_jira_counterparts"], ["RSCON-102"])
+            result = json.loads((self.root(state, run_id) / "reconciled.json").read_text(encoding="utf-8"))
+            self.assertEqual({item["sbertrek_key"] for item in result["issues"]}, {"RSCON-1", "RSCON-3"})
+            self.assertEqual(result["excluded_issues"][0]["reason"], "jira-counterpart-absent")
+            report = (self.root(state, run_id) / "report.md").read_text(encoding="utf-8")
+            self.assertIn("Исключено SberTrek-задач: 1", report)
+            self.assertIn("`RSCON-2` исключена", report)
+
+    def test_all_jira_counterparts_absent_still_keeps_unlinked_sbertrek_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(
+                state, ids=("RSCON-1", "RSCON-2"),
+            )["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-1", {"jira_key": "RSCON-101", "estimate": "5"}),
+                ("RSCON-2", {"estimate": "3"}),
+            ])
+            result = self.record_absent_counterparts(state, run_id, ["RSCON-101"])
+            self.assertEqual(result["status"], "jira-counterpart-all-absent")
+            self.run_tool(state, "collector-complete", "--run-id", run_id, "--provider", "jira")
+            self.complete_all_histories(state, run_id)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["counts"]["excluded"], 1)
+            self.assertEqual(payload["counts"]["merged"], 1)
+            self.assertEqual(payload["summary"]["story_points_total"], 3.0)
+
+    def test_absent_counterpart_must_be_named_by_exact_jira_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-6845", {"jira_key": "RSCON-2902"}),
+            ])
+            query = self.snapshot(state, run_id, "jira")["query"]["exact"]
+            evidence = "mcp:jira:query:wrong-absence"
+            self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "jira",
+                "--operation", "query", "--outcome", "error", "--evidence", evidence,
+                "--summary", "Temporary Jira failure", "--query", query,
+                "--page-number", "1", "--returned-count", "0",
+            )
+            payload = self.run_tool(
+                state, "jira-record-absent-counterparts", "--run-id", run_id,
+                "--evidence", evidence, "--key", "RSCON-2902", expected=2,
+            )
+            self.assertIn("точно совпадать с ошибкой Jira", payload["error"])
+
+    def test_manually_narrowed_counterpart_job_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, ids=("RSCON-1", "RSCON-2"))["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-1", {"jira_key": "RSCON-101"}),
+                ("RSCON-2", {"jira_key": "RSCON-102"}),
+            ])
+            snapshot_path = self.root(state, run_id) / "providers" / "jira.json"
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            narrowed = 'key IN ("RSCON-101")'
+            snapshot["query"]["exact"] = narrowed
+            self.write(snapshot_path, snapshot)
+            job_path = self.root(state, run_id) / "jobs" / "collection-jira.json"
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job["query"].update({"text": narrowed, "sha256": hashlib.sha256(narrowed.encode()).hexdigest()})
+            self.write(job_path, job)
+            _, evidence = self.query_page(state, run_id, "jira", ["RSCON-101"])
+            self.add_issue(state, run_id, "jira", "RSCON-101", evidence)
+            payload = self.run_tool(
+                state, "collector-complete", "--run-id", run_id,
+                "--provider", "jira", expected=2,
+            )
+            self.assertIn("не покрывает все исходно запрошенные ключи", payload["error"])
+
     def test_absent_jira_key_is_valid_but_not_returned_blocks_collection(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)["run_id"]
@@ -740,6 +862,42 @@ class TrackerCtlV2Tests(unittest.TestCase):
             report = (root / "report.md").read_text(encoding="utf-8")
             self.assertIn("5.0 story-points", report)
             self.assertIn("**RSCON-6854**: RSCON-6845", report)
+
+    def test_developer_handoff_survives_later_non_developer_reassignment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-6845", {"assignee": "s-qa"}),
+            ])
+            evidence = "mcp:sbertrek:history:RSCON-6845"
+            self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "history", "--outcome", "success", "--evidence", evidence,
+                "--summary", "bounded history", "--key", "RSCON-6845",
+            )
+            events = [
+                ("2026-08-10T10:00:00+00:00", None, "s-dev"),
+                ("2026-08-20T10:00:00+00:00", "s-dev", "s-qa"),
+                ("2026-08-21T10:00:00+00:00", "s-qa", "s-qa"),
+            ]
+            for at, before, after in events:
+                args = [
+                    "history-event", "--run-id", run_id, "--provider", "sbertrek",
+                    "--key", "RSCON-6845", "--evidence", evidence,
+                    "--at", at, "--field", "assignee",
+                    "--to-id", after, "--to-name", after,
+                ]
+                if before:
+                    args += ["--from-id", before, "--from-name", before]
+                self.run_tool(state, *args)
+            self.run_tool(
+                state, "history-complete", "--run-id", run_id, "--provider", "sbertrek",
+                "--key", "RSCON-6845", "--state", "complete", "--evidence", evidence,
+            )
+            job = self.active_job(state, run_id); assert job
+            self.run_tool(state, "history-job-complete", "--run-id", run_id, "--job-id", job["job_id"])
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["summary"]["development_state_counts"], {"completed": 1})
 
     def test_jira_fills_a_missing_sbertrek_value(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

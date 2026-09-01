@@ -62,6 +62,14 @@ SberTrek collection-job выбери только операцию `issue.export
    затем страницу через `query-page`; для каждого ключа страницы запиши компактную
    карточку через `record-issue`. Используй только данные bulk-ответа. Не вызывай
    detail по каждой задаче.
+   Если точный Jira counterpart-запрос завершился ошибкой, которая явно состоит
+   из сообщений `An issue with key 'KEY' does not exist for field 'key'`, передай
+   полный текст ошибки в `mcp-log --outcome error --summary`, затем одной командой
+   `jira-record-absent-counterparts` зарегистрируй все и только перечисленные
+   ключи. Команда проверит их против исходного запроса и вернёт новый точный JQL
+   для оставшихся ключей либо разрешит `collector-complete`, если не осталось ни
+   одного. Выполни только возвращённый JQL. Не редактируй job, provider JSON,
+   текст запроса или SHA-256 вручную. При ошибке другого вида остановись.
 6. Не сохраняй описание, комментарии, вложения и полный ответ в tracker-run.
 7. Для `assignee`, `estimate`, `epic`, `releases` различай `value`, `absent` и
    `not-returned`. Сохрани обязательные `created_at` и `updated_at`.
@@ -90,6 +98,8 @@ counterpart-провайдера можно зарегистрировать ч�
 ## Запрещено
 
 - менять текст точного запроса;
+- вручную исключать отсутствующие Jira-ключи из job вместо
+  `jira-record-absent-counterparts`;
 - читать документацию MCP или вызывать capability discovery;
 - передавать TQL через `issue.search.text`;
 - заменять bulk JSON export вызовами `issue.getByKey` или `link.list`;

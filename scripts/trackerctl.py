@@ -14,7 +14,7 @@ from typing import Any
 
 
 PROTOCOL = "targeted-tracker-v2"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -649,7 +649,7 @@ def config_status(config: dict) -> dict:
     return {"status": "tracker-config-ready", "path": str(config_path()), "gaps": [], "must_stop": False, "allowed_next_action": "begin"}
 
 
-def log_value(value: Any, *, limit: int = 500) -> str:
+def log_value(value: Any, *, limit: int = 8000) -> str:
     text = str(value).replace("\r", " ").replace("\n", " ").replace("|", "\\|")
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
@@ -791,7 +791,8 @@ def query_spec(provider: str, purpose: str, exact: str | None = None, *, method:
     return {
         "state": "pending", "purpose": purpose,
         "language": "TQL" if provider == "sbertrek" else "JQL",
-        "exact": exact, "method": method, "pages": [], "keys": [],
+        "exact": exact, "initial_exact": exact, "method": method,
+        "pages": [], "keys": [], "requested_keys": [], "confirmed_absent": [],
         "unavailable_reason": None, "unavailable_evidence": None,
     }
 
@@ -899,6 +900,27 @@ def validate_issue_card(item: Any, provider: str) -> None:
         evidence(event.get("evidence") or "", provider)
 
 
+def confirmed_absent_map(snapshot: dict | None) -> dict[str, str]:
+    if not snapshot:
+        return {}
+    result: dict[str, str] = {}
+    for item in snapshot.get("query", {}).get("confirmed_absent", []):
+        if isinstance(item, dict) and isinstance(item.get("key"), str) and isinstance(item.get("evidence"), str):
+            result[item["key"]] = item["evidence"]
+    return result
+
+
+def excluded_sbertrek_keys(snapshots: dict[str, dict]) -> set[str]:
+    jira_absent = set(confirmed_absent_map(snapshots.get("jira")))
+    if not jira_absent:
+        return set()
+    return {
+        item["key"]
+        for item in snapshots["sbertrek"]["issues"]
+        if item.get("jira_key_state") == "value" and item.get("jira_key") in jira_absent
+    }
+
+
 def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) -> None:
     query = snapshot.get("query")
     if not isinstance(query, dict) or query.get("state") not in {"complete", "skipped", "unavailable"}:
@@ -907,7 +929,40 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
     issues = snapshot.get("issues")
     if not isinstance(pages, list) or not isinstance(issues, list) or not isinstance(query.get("keys"), list):
         raise ValueError(f"Коллекция {provider} имеет неполную схему")
-    if query["state"] == "complete" and not pages:
+    requested_keys = query.get("requested_keys")
+    confirmed_absent = query.get("confirmed_absent")
+    if not isinstance(requested_keys, list) or len(requested_keys) != len(set(requested_keys)):
+        raise ValueError(f"Коллекция {provider} содержит некорректный requested_keys")
+    if not isinstance(confirmed_absent, list):
+        raise ValueError(f"Коллекция {provider} содержит некорректный confirmed_absent")
+    absent_keys: list[str] = []
+    for item in confirmed_absent:
+        if (
+            provider != "jira"
+            or query.get("purpose") != "counterparts"
+            or not isinstance(item, dict)
+            or not isinstance(item.get("key"), str)
+            or not ISSUE_KEY.fullmatch(item["key"])
+            or not re.fullmatch(r"[a-f0-9]{64}", str(item.get("batch_sha256") or ""))
+        ):
+            raise ValueError(f"Коллекция {provider} содержит некорректное подтверждение отсутствия")
+        call = evidence(str(item.get("evidence") or ""), "jira")
+        require_logged_mcp(run_id, call, outcome="error")
+        require_tracker_command(
+            run_id, "jira-record-absent-counterparts", provider="jira",
+            evidence_value=call,
+            detail_markers=(f"record_sha256={item['batch_sha256']}",),
+        )
+        absent_keys.append(item["key"])
+    if len(absent_keys) != len(set(absent_keys)) or not set(absent_keys).issubset(set(requested_keys)):
+        raise ValueError("Подтверждённые отсутствующие Jira-ключи не соответствуют исходному counterpart-запросу")
+    all_counterparts_absent = (
+        provider == "jira"
+        and query.get("purpose") == "counterparts"
+        and bool(requested_keys)
+        and set(absent_keys) == set(requested_keys)
+    )
+    if query["state"] == "complete" and not pages and not all_counterparts_absent:
         raise ValueError(f"Коллекция {provider} помечена complete без зарегистрированной страницы MCP")
     if query["state"] in {"skipped", "unavailable"}:
         if pages or issues or query["keys"]:
@@ -947,12 +1002,15 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
         page_keys.extend(keys)
         for key_value in keys:
             page_evidence.setdefault(key_value, set()).add(call)
-    if not pages[-1].get("last_page") or any(page.get("last_page") for page in pages[:-1]):
+    if pages and (not pages[-1].get("last_page") or any(page.get("last_page") for page in pages[:-1])):
         raise ValueError(f"Коллекция {provider}: пагинация не имеет единственной последней страницы")
     if len(page_keys) != len(set(page_keys)):
         raise ValueError(f"Коллекция {provider}: ключ задачи повторяется на нескольких страницах")
     if sorted(page_keys) != sorted(query["keys"]):
         raise ValueError(f"Коллекция {provider}: query.keys не совпадает с машинными страницами")
+    if provider == "jira" and query.get("purpose") == "counterparts":
+        if sorted(set(page_keys) | set(absent_keys)) != sorted(requested_keys):
+            raise ValueError("Jira counterpart-коллекция не покрывает все исходно запрошенные ключи")
     issue_keys = []
     for item in issues:
         validate_issue_card(item, provider)
@@ -982,8 +1040,16 @@ def validate_run_provenance(run_id: str, snapshots: dict[str, dict]) -> None:
     meta = load_json(run_meta_path(run_id))
     if not isinstance(meta, dict) or meta.get("run_id") != run_id or meta.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("scope.json не соответствует tracker-run")
+    validate_counterpart_contract(run_id, snapshots)
+    excluded_sber = excluded_sbertrek_keys(snapshots)
     for provider, snapshot in snapshots.items():
         query = snapshot["query"]
+        for absent in query.get("confirmed_absent", []):
+            require_tracker_command(
+                run_id, "jira-record-absent-counterparts", provider="jira",
+                evidence_value=absent["evidence"],
+                detail_markers=(f"record_sha256={absent['batch_sha256']}",),
+            )
         if query["state"] == "complete":
             for page in query["pages"]:
                 command = "ingest-query-response" if provider == "sbertrek" else "query-page"
@@ -1004,6 +1070,8 @@ def validate_run_provenance(run_id: str, snapshots: dict[str, dict]) -> None:
         if collection_path.is_file():
             require_tracker_command(run_id, "collector-complete", provider=provider)
         for item in snapshot["issues"]:
+            if provider == "sbertrek" and item["key"] in excluded_sber:
+                continue
             event_groups: dict[tuple[str, str], int] = {}
             for event in item["history"]["events"]:
                 call = evidence(event["evidence"], provider)
@@ -1058,6 +1126,36 @@ def all_snapshots(run_id: str, config: dict, *, finalized: bool = False) -> dict
     return {provider: validate_snapshot(load_json(snapshot_path(run_id, provider)), run_id, provider, finalized) for provider in enabled_providers(config)}
 
 
+def validate_counterpart_contract(run_id: str, snapshots: dict[str, dict]) -> None:
+    jira = snapshots.get("jira")
+    sber = snapshots.get("sbertrek")
+    if not jira or not sber or sber["scope"]["provider"] != "sbertrek":
+        return
+    query = jira["query"]
+    if query.get("purpose") != "counterparts" or query.get("initial_exact") is None:
+        return
+    expected_keys = sorted({
+        item["jira_key"] for item in sber["issues"]
+        if item.get("jira_key_state") == "value" and item.get("jira_key")
+    })
+    expected_initial = jql_keys(expected_keys) if expected_keys else None
+    if query.get("requested_keys") != expected_keys or query.get("initial_exact") != expected_initial:
+        raise ValueError("Исходный Jira counterpart-запрос не соответствует Объектам Jira из SberTrek")
+    absent_keys = set(confirmed_absent_map(jira))
+    remaining = sorted(set(expected_keys) - absent_keys)
+    expected_active = jql_keys(remaining) if remaining else None
+    if query.get("state") not in {"skipped", "unavailable"} and query.get("exact") != expected_active:
+        raise ValueError("Активный Jira counterpart-запрос изменён вне управляемого исключения отсутствующих ключей")
+    job_file = job_path(run_id, "collection-jira")
+    if not job_file.is_file():
+        return
+    _, job = load_job(run_id, "collection-jira")
+    if job["query"].get("initial_text") != expected_initial:
+        raise ValueError("Исходный Jira collector-job изменён после создания")
+    if expected_active is not None and job["query"].get("text") != expected_active:
+        raise ValueError("Активный Jira collector-job не соответствует управляемому counterpart-запросу")
+
+
 def ensure_mutable(snapshot: dict) -> None:
     if snapshot.get("captured_at"):
         raise ValueError("Финализированный снимок неизменяем")
@@ -1088,6 +1186,7 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
     exact = query.get("exact")
     if not exact:
         raise ValueError("Нельзя создать collector-job без точного запроса")
+    initial_exact = query.get("initial_exact") or exact
     job_id = f"collection-{provider}"
     return {
         "protocol": PROTOCOL,
@@ -1101,6 +1200,8 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
             "language": query["language"],
             "text": exact,
             "sha256": query_digest(exact),
+            "initial_text": initial_exact,
+            "initial_sha256": query_digest(initial_exact),
         },
         "output": str(snapshot_path(run_id, provider)),
         "collector_contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-collector.md"),
@@ -1109,6 +1210,7 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
             "execute-exact-query", "paginate",
             "record-bounded-call", "structurally-import-full-json-response",
             "record-page", "record-compact-card",
+            *(["record-confirmed-absent-counterparts"] if provider == "jira" else []),
             "complete-job",
         ],
         "forbidden_operations": [
@@ -1197,6 +1299,8 @@ def load_job(run_id: str, job_id: str) -> tuple[Path, dict]:
             not isinstance(query, dict)
             or not isinstance(query.get("text"), str)
             or query.get("sha256") != query_digest(query["text"])
+            or not isinstance(query.get("initial_text"), str)
+            or query.get("initial_sha256") != query_digest(query["initial_text"])
         ):
             raise ValueError("Контрольная сумма запроса collector-job не совпадает")
     return path, job
@@ -1382,22 +1486,29 @@ def development_state(sber: dict | None, jira: dict | None, config: dict) -> dic
     if status.casefold() in normalized_status_set(config, provider, "completed"):
         return {"state": "completed", "basis": f"{provider}-status", "status": status}
     assignee_events = [event for event in merged_history(sber, jira) if event["field"] == "assignee"]
-    if assignee_events:
-        latest = assignee_events[-1]
-        before = participant_role(config, latest["source"], latest.get("from"))
-        after = participant_role(config, latest["source"], latest.get("to"))
+    latest_handoff = None
+    for event in assignee_events:
+        before = participant_role(config, event["source"], event.get("from"))
+        after = participant_role(config, event["source"], event.get("to"))
+        if after == "developer":
+            latest_handoff = None
         if before == "developer" and after and after != "developer":
-            return {"state": "completed", "basis": "developer-handoff", "at": latest["at"]}
+            latest_handoff = event
+    if latest_handoff:
+        return {"state": "completed", "basis": "developer-handoff", "at": latest_handoff["at"]}
     return {"state": "in-progress", "basis": f"{provider}-targeted-read"}
 
 
 def first_unknown_participant(snapshots: dict[str, dict], config: dict) -> dict | None:
     development_types = {item.casefold() for item in config["development_issue_types"]}
+    excluded_sber = excluded_sbertrek_keys(snapshots)
     for provider in PROVIDERS:
         snapshot = snapshots.get(provider)
         if not snapshot:
             continue
         for item in snapshot["issues"]:
+            if provider == "sbertrek" and item["key"] in excluded_sber:
+                continue
             if str(item.get("issue_type") or "").casefold() not in development_types:
                 continue
             values = [item.get("assignee")]
@@ -1420,13 +1531,16 @@ def pending_participant_path(run_id: str) -> Path:
     return run_root(run_id) / "pending-participant.json"
 
 
-def snapshot_gaps(snapshot: dict) -> list[str]:
+def snapshot_gaps(snapshot: dict, excluded_keys: set[str] | None = None) -> list[str]:
     gaps = []
+    excluded_keys = excluded_keys or set()
     if not snapshot["collection_complete"]:
         gaps.append(f"{snapshot['provider']}.collection.pending")
     missing = set(snapshot["query"]["keys"]) - {item["key"] for item in snapshot["issues"]}
     gaps.extend(f"{snapshot['provider']}.{item}.card.pending" for item in sorted(missing))
     for item in snapshot["issues"]:
+        if item["key"] in excluded_keys:
+            continue
         if item["history"]["state"] == "pending":
             gaps.append(f"{snapshot['provider']}.{item['key']}.history.pending")
     return gaps
@@ -1455,6 +1569,14 @@ def machine_summary(issues: list[dict], discrepancies: list[dict]) -> dict:
         item["jira_key"] for item in discrepancies
         if item.get("kind") == "jira-counterpart-not-returned" and item.get("jira_key")
     )
+    excluded = sorted(
+        item["sbertrek_key"] for item in discrepancies
+        if item.get("kind") == "jira-counterpart-absent-excluded" and item.get("sbertrek_key")
+    )
+    absent = sorted(
+        item["jira_key"] for item in discrepancies
+        if item.get("kind") == "jira-counterpart-absent-excluded" and item.get("jira_key")
+    )
     return {
         "story_points_total": story_points_total,
         "unestimated_issue_count": unestimated,
@@ -1463,6 +1585,9 @@ def machine_summary(issues: list[dict], discrepancies: list[dict]) -> dict:
         "development_state_counts": count_values([str(item["development"]["state"]) for item in issues]),
         "discrepancy_kind_counts": count_values([str(item["kind"]) for item in discrepancies]),
         "missing_jira_counterparts": missing,
+        "absent_jira_counterparts": absent,
+        "excluded_sbertrek_issue_count": len(excluded),
+        "excluded_sbertrek_issues": excluded,
     }
 
 
@@ -1471,10 +1596,21 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
     jira = snapshots.get("jira")
     sber_issues = {item["key"]: item for item in sber["issues"]}
     jira_issues = {item["key"]: item for item in jira["issues"]} if jira else {}
+    absent_jira = confirmed_absent_map(jira)
     paired_jira: set[str] = set()
-    merged, discrepancies = [], []
+    merged, discrepancies, excluded = [], [], []
     for sber_key, sissue in sorted(sber_issues.items()):
         jira_key = sissue.get("jira_key")
+        if jira_key and jira_key in absent_jira:
+            exclusion = {
+                "sbertrek_key": sber_key,
+                "jira_key": jira_key,
+                "reason": "jira-counterpart-absent",
+                "evidence": absent_jira[jira_key],
+            }
+            excluded.append(exclusion)
+            discrepancies.append({"kind": "jira-counterpart-absent-excluded", **exclusion})
+            continue
         jissue = jira_issues.get(jira_key) if jira_key else None
         if jissue:
             paired_jira.add(jira_key)
@@ -1527,7 +1663,14 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
             for page in snapshot["query"].get("pages", [])
         ):
             limitations.append(f"sbertrek-export-limit-reached:{SBER_EXPORT_MAX_RESULTS}")
-    counts = {"sbertrek": len(sber_issues), "jira": len(jira_issues), "matched": len(paired_jira), "merged": len(merged), "discrepancies": len(discrepancies)}
+    counts = {
+        "sbertrek": len(sber_issues),
+        "jira": len(jira_issues),
+        "matched": len(paired_jira),
+        "excluded": len(excluded),
+        "merged": len(merged),
+        "discrepancies": len(discrepancies),
+    }
     groupings: dict[str, dict[str, list[str]]] = {"epics": {}, "releases": {}}
     for item in merged:
         identity = item.get("sbertrek_key") or item.get("jira_key")
@@ -1541,13 +1684,25 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
             release_key = release.get("key") if isinstance(release, dict) else str(release)
             groupings["releases"].setdefault(release_key or "unassigned", []).append(identity)
     summary = machine_summary(merged, discrepancies)
-    return {"protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "status": "tracker-read-reconciled", "scope": scope, "counts": counts, "summary": summary, "issues": merged, "groupings": groupings, "discrepancies": discrepancies, "limitations": limitations}
+    return {
+        "protocol": PROTOCOL,
+        "schema_version": SCHEMA_VERSION,
+        "status": "tracker-read-reconciled",
+        "scope": scope,
+        "counts": counts,
+        "summary": summary,
+        "issues": merged,
+        "excluded_issues": excluded,
+        "groupings": groupings,
+        "discrepancies": discrepancies,
+        "limitations": limitations,
+    }
 
 
 def render_report(result: dict) -> str:
     scope = result["scope"]
     lines = [f"# Сверка трекеров: {scope['label']}", "", "## Область", "", f"- Тип: `{scope['kind']}`", f"- Исходный трекер: `{scope['provider']}`", f"- Ключи: {', '.join(scope['ids'])}", "", "## Сводка", ""]
-    labels = {"sbertrek": "Задач SberTrek", "jira": "Задач Jira", "matched": "Склеено пар", "merged": "Итоговых задач", "discrepancies": "Расхождений"}
+    labels = {"sbertrek": "Задач SberTrek", "jira": "Задач Jira", "matched": "Склеено пар", "excluded": "Исключено SberTrek-задач", "merged": "Итоговых задач", "discrepancies": "Расхождений"}
     lines += [f"- {labels[name]}: {value}" for name, value in result["counts"].items()]
     summary = result["summary"]
     lines += [
@@ -1558,15 +1713,26 @@ def render_report(result: dict) -> str:
         "- Состояния разработки: " + ", ".join(f"{name}={value}" for name, value in summary["development_state_counts"].items()),
         "- Виды расхождений: " + ", ".join(f"{name}={value}" for name, value in summary["discrepancy_kind_counts"].items()),
         "- Не найдены в Jira: " + (", ".join(summary["missing_jira_counterparts"]) or "нет"),
+        "- Подтверждённо отсутствуют в Jira: " + (", ".join(summary["absent_jira_counterparts"]) or "нет"),
+        "- Исключены задачи SberTrek: " + (", ".join(summary["excluded_sbertrek_issues"]) or "нет"),
     ]
     lines += ["", "## Задачи", "", "| SberTrek | Jira | Название | Статус | Исполнитель | Оценка | В работе с | Состояние |", "|---|---|---|---|---|---|---|---|"]
     for item in result["issues"]:
         assignee, estimate = item.get("assignee") or {}, item.get("estimate") or {}
-        assignee_text = assignee.get("name") or assignee.get("id") or "—" if isinstance(assignee, dict) else str(assignee)
+        if isinstance(assignee, dict):
+            team_id, name = assignee.get("team_id"), assignee.get("name")
+            assignee_text = f"{team_id} ({name})" if team_id and name else team_id or name or assignee.get("id") or "—"
+        else:
+            assignee_text = str(assignee)
         estimate_text = f"{estimate.get('value')} {estimate.get('unit')}" if isinstance(estimate, dict) and estimate.get("value") is not None else "—"
         cells = [item.get("sbertrek_key") or "—", item.get("jira_key") or "—", item.get("summary") or "—", item.get("status") or "—", assignee_text, estimate_text, item.get("work_started_at") or "—", item["development"]["state"]]
         lines.append("| " + " | ".join(str(cell).replace("|", "\\|") for cell in cells) + " |")
     lines += ["", "## Ограничения", ""] + ([f"- {item}" for item in result["limitations"]] or ["- Нет"])
+    lines += ["", "## Исключённые задачи", ""]
+    lines += [
+        f"- `{item['sbertrek_key']}` исключена: Jira-контрагент `{item['jira_key']}` подтверждённо отсутствует."
+        for item in result["excluded_issues"]
+    ] or ["- Нет"]
     for group, title in (("epics", "Группировка по эпикам"), ("releases", "Группировка по релизам")):
         lines += ["", f"## {title}", ""]
         lines += [f"- **{name}**: {', '.join(keys)}" for name, keys in sorted(result["groupings"][group].items())] or ["- Нет"]
@@ -1760,8 +1926,8 @@ def mcp_log_command(args: argparse.Namespace) -> int:
     call = evidence(args.evidence, args.provider)
     if logged_mcp_details(args.run_id, call):
         raise ValueError("Этот MCP-вызов уже записан в журнале")
-    if not args.summary.strip() or len(args.summary) > 500:
-        raise ValueError("--summary должен содержать от 1 до 500 символов")
+    if not args.summary.strip() or len(args.summary) > 8000:
+        raise ValueError("--summary должен содержать от 1 до 8000 символов")
     if args.operation in {"capability-discovery", "issue-detail"}:
         raise ValueError("targeted-tracker-v2 запрещает exploratory и поштучные MCP-вызовы")
     config = load_config()
@@ -1809,6 +1975,76 @@ def mcp_log_command(args: argparse.Namespace) -> int:
     parts.append(f"summary={args.summary}")
     append_session_log(args.run_id, source="mcp", event="call", provider=args.provider, evidence_value=call, details="; ".join(parts))
     print(json.dumps({"status": "tracker-mcp-call-logged", "run_id": args.run_id, "provider": args.provider, "operation": args.operation, "outcome": args.outcome, "evidence": call}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def jira_record_absent_counterparts_command(args: argparse.Namespace) -> int:
+    config = load_config()
+    current = current_query(args.run_id, config)
+    if not current or current[0] != "jira":
+        raise ValueError("Сейчас нет активного Jira counterpart-запроса")
+    path, snapshot = load_snapshot(args.run_id, "jira")
+    ensure_mutable(snapshot)
+    query = snapshot["query"]
+    job_path_value, job = load_job(args.run_id, "collection-jira")
+    if (
+        query.get("purpose") != "counterparts"
+        or snapshot["scope"]["provider"] != "sbertrek"
+        or job.get("state") not in {"pending", "running"}
+        or active_job(args.run_id) != job
+    ):
+        raise ValueError("Отсутствующие Jira-контрагенты регистрируются только активным counterpart-job")
+    if query["pages"] or snapshot["issues"]:
+        raise ValueError("Подтверждение отсутствия допустимо до первой успешной страницы Jira")
+    call = evidence(args.evidence, "jira")
+    details = require_logged_mcp(args.run_id, call, outcome="error")
+    if f"query_sha256={query_digest(query['exact'])};" not in details:
+        raise ValueError("Ошибка Jira относится не к текущему точному counterpart-запросу")
+    keys = unique_keys(args.key)
+    if not keys:
+        raise ValueError("Укажи хотя бы один подтверждённо отсутствующий Jira-ключ")
+    already_absent = set(confirmed_absent_map(snapshot))
+    requested = set(query.get("requested_keys") or [])
+    invalid = sorted(set(keys) - requested | set(keys) & already_absent)
+    if invalid:
+        raise ValueError("Jira-ключи отсутствия не входят в текущий исходный counterpart-запрос: " + ", ".join(invalid))
+    reported = set(re.findall(
+        r"An issue with key ['\"]([A-Z][A-Z0-9_]*-[1-9][0-9]*)['\"] does not exist for field ['\"]key['\"]",
+        details,
+        flags=re.I,
+    ))
+    if set(keys) != reported:
+        raise ValueError("Список отсутствующих ключей должен точно совпадать с ошибкой Jira")
+    batch_digest = object_sha256({"evidence": call, "keys": keys})
+    query["confirmed_absent"].extend({
+        "key": key_value,
+        "evidence": call,
+        "batch_sha256": batch_digest,
+    } for key_value in keys)
+    remaining = sorted(requested - already_absent - set(keys))
+    if remaining:
+        retry_query = jql_keys(remaining)
+        query.update({"exact": retry_query, "state": "pending"})
+        job["query"].update({"text": retry_query, "sha256": query_digest(retry_query)})
+        status = "jira-counterpart-retry-ready"
+    else:
+        query.update({"exact": None, "state": "complete"})
+        status = "jira-counterpart-all-absent"
+    job["state"] = "running"
+    save_json(path, snapshot)
+    save_json(job_path_value, job)
+    args.record_sha256 = batch_digest
+    payload = {
+        "status": status,
+        "run_id": args.run_id,
+        "confirmed_absent": keys,
+        "remaining_key_count": len(remaining),
+    }
+    if remaining:
+        payload.update(next_query_payload("jira", query))
+    else:
+        payload["allowed_next_action"] = "collector-complete"
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1979,11 +2215,15 @@ def missing_cards(snapshot: dict) -> list[str]:
 
 def create_history_jobs(run_id: str, snapshots: dict[str, dict]) -> list[dict]:
     created = []
+    excluded_sber = excluded_sbertrek_keys(snapshots)
     for provider in PROVIDERS:
         snapshot = snapshots.get(provider)
         if not snapshot:
             continue
-        keys = sorted(item["key"] for item in snapshot["issues"])
+        keys = sorted(
+            item["key"] for item in snapshot["issues"]
+            if provider != "sbertrek" or item["key"] not in excluded_sber
+        )
         for offset in range(0, len(keys), HISTORY_BATCH_SIZE):
             job = history_job(run_id, provider, offset // HISTORY_BATCH_SIZE + 1, keys[offset:offset + HISTORY_BATCH_SIZE])
             save_job(run_id, job)
@@ -2005,7 +2245,7 @@ def advance_after_collection(run_id: str) -> dict:
         raise ValueError("Не записаны карточки исходного запроса: " + ", ".join(missing))
     secondary_provider = "jira" if primary_provider == "sbertrek" else "sbertrek"
     secondary = snapshots.get(secondary_provider)
-    if secondary and secondary["query"]["exact"] is None:
+    if secondary and secondary["query"].get("initial_exact") is None:
         if primary_provider == "sbertrek":
             ids = sorted({item["jira_key"] for item in primary["issues"] if item.get("jira_key")})
             exact = jql_keys(ids) if ids else None
@@ -2013,7 +2253,13 @@ def advance_after_collection(run_id: str) -> dict:
             ids = list(primary["query"]["keys"])
             exact = tql_jira_keys(ids) if ids else None
         if exact:
-            secondary["query"].update({"exact": exact, "state": "pending"})
+            secondary["query"].update({
+                "exact": exact,
+                "initial_exact": exact,
+                "requested_keys": ids,
+                "confirmed_absent": [],
+                "state": "pending",
+            })
         else:
             secondary["query"].update({"state": "skipped"})
         save_json(snapshot_path(run_id, secondary_provider), secondary)
@@ -2064,6 +2310,7 @@ def collector_complete_command(args: argparse.Namespace) -> int:
     if snapshot["query"]["state"] not in {"complete", "unavailable"}:
         raise ValueError("Точный запрос collector-job не завершён")
     validate_collection_integrity(args.run_id, snapshot, args.provider)
+    validate_counterpart_contract(args.run_id, all_snapshots(args.run_id, load_config()))
     missing = missing_cards(snapshot)
     if missing:
         raise ValueError("Не записаны компактные карточки: " + ", ".join(missing))
@@ -2233,7 +2480,11 @@ def run_status_command(args: argparse.Namespace) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
     snapshots = all_snapshots(args.run_id, load_config())
-    gaps = sum((snapshot_gaps(snapshot) for snapshot in snapshots.values()), [])
+    excluded_sber = excluded_sbertrek_keys(snapshots)
+    gaps = sum((
+        snapshot_gaps(snapshot, excluded_sber if snapshot["provider"] == "sbertrek" else set())
+        for snapshot in snapshots.values()
+    ), [])
     payload = write_status(
         args.run_id,
         "tracker-read-ready-to-reconcile" if not gaps else "tracker-read-incomplete",
@@ -2284,6 +2535,11 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                 f"Выполни в {job['provider']} ровно этот {language}-запрос без изменений:\n\n"
                 f"{query}\n\n"
                 "Не выполняй никаких других поисков и не заменяй запрос поиском по тексту, названию или смыслу. "
+                "Если точный Jira-запрос завершился только ошибками вида `An issue with key 'KEY' does not exist "
+                "for field 'key'`, запиши один ошибочный вызов через mcp-log, передав полный текст ошибки в "
+                "--summary, затем зарегистрируй все перечисленные ключи одной командой "
+                "jira-record-absent-counterparts. Выполни только новый точный JQL, который вернёт эта команда. "
+                "Не редактируй job, снимок, JQL или SHA-256 вручную. При любой другой ошибке остановись. "
                 f"Для записи компактного результата прочитай только {contract} и {path}. "
                 "Не создавай скрипты или другие вспомогательные файлы. После collector-complete немедленно "
                 "верни только status, job_id и пути."
@@ -2355,7 +2611,11 @@ def reconcile_command(args: argparse.Namespace) -> int:
     for provider, snapshot in snapshots.items():
         validate_collection_integrity(args.run_id, snapshot, provider)
     validate_run_provenance(args.run_id, snapshots)
-    gaps = sum((snapshot_gaps(snapshot) for snapshot in snapshots.values()), [])
+    excluded_sber = excluded_sbertrek_keys(snapshots)
+    gaps = sum((
+        snapshot_gaps(snapshot, excluded_sber if snapshot["provider"] == "sbertrek" else set())
+        for snapshot in snapshots.values()
+    ), [])
     if gaps:
         raise ValueError("Tracker-run не завершён: " + ", ".join(gaps))
     unknown = first_unknown_participant(snapshots, config)
@@ -2423,6 +2683,7 @@ def parser() -> argparse.ArgumentParser:
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
     ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
     mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key"); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
+    absent = commands.add_parser("jira-record-absent-counterparts"); absent.add_argument("--run-id", required=True); absent.add_argument("--evidence", required=True); absent.add_argument("--key", action="append", default=[]); absent.set_defaults(handler=jira_record_absent_counterparts_command, provider="jira")
     page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)
     unavailable = commands.add_parser("query-unavailable"); unavailable.add_argument("--run-id", required=True); unavailable.add_argument("--provider", choices=PROVIDERS, required=True); unavailable.add_argument("--reason", required=True); unavailable.add_argument("--evidence", required=True); unavailable.set_defaults(handler=query_unavailable_command)
     fallback = commands.add_parser("jira-epic-fallback"); fallback.add_argument("--run-id", required=True); fallback.add_argument("--evidence", required=True); fallback.set_defaults(handler=jira_epic_fallback_command)
