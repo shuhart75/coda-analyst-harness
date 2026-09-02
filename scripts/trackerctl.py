@@ -21,6 +21,7 @@ PROVIDERS = ("sbertrek", "jira")
 SCOPE_KINDS = ("epic", "tasks")
 OBSERVATION_STATES = ("value", "absent", "not-returned")
 MISSING_SENTINELS = {"not-returned", "not returned", "unknown", "none", "null", "-", "—"}
+UNASSIGNED_SENTINELS = {"unassigned", "not assigned", "не назначен", "не назначено"}
 ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9_]*-[1-9][0-9]*$")
 RUN_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$")
 TEAM_ID = re.compile(r"^(AN|A|BE|B|FE|F|QA|Q|OTHER|O)([1-9][0-9]*)$", re.I)
@@ -493,6 +494,19 @@ def normalized_person(value: Any) -> dict | None:
     return {"id": account_text, "name": name_text or account_text} if account_text else None
 
 
+def is_explicitly_unassigned(value: Any) -> bool:
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, dict):
+        found_id, account_id = alias_value(value, ("externalId", "accountId", "account_id", "login", "id", "key"))
+        found_name, name = alias_value(value, ("displayName", "display_name", "fullName", "full_name", "name"))
+        account_text = object_text(account_id) if found_id else None
+        name_text = object_text(name) if found_name else None
+        return not account_text and bool(name_text) and name_text.casefold() in UNASSIGNED_SENTINELS
+    text = object_text(value)
+    return bool(text) and text.casefold() in UNASSIGNED_SENTINELS
+
+
 def normalized_estimate(value: Any) -> dict | None:
     if isinstance(value, list):
         value = value[0] if value else None
@@ -713,7 +727,10 @@ def compact_issue_from_response(record: dict, provider: str, scope: dict) -> dic
     )
     epic_raw, epic_state = optional_value(record, EPIC_ALIASES, attributes, SBER_ATTRIBUTE_CODES["epic"])
     releases_raw, releases_state = optional_value(record, RELEASE_ALIASES, attributes, SBER_ATTRIBUTE_CODES["releases"])
-    assignee = normalized_person(assignee_raw)
+    assignee_unassigned = assignee_state == "value" and is_explicitly_unassigned(assignee_raw)
+    assignee = None if assignee_unassigned else normalized_person(assignee_raw)
+    if assignee_unassigned:
+        assignee_state = "absent"
     epic = normalized_epic(epic_raw)
     releases = normalized_releases(releases_raw) if releases_state == "value" else []
     if assignee_state == "value" and assignee is None:

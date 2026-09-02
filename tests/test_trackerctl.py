@@ -618,6 +618,44 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertEqual(issue["field_observations"]["releases"], "absent")
             self.assertNotIn("description", issue)
 
+    def test_structural_import_treats_jira_unassigned_placeholder_as_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, provider="jira", ids=("RSCON-2960",),
+            )["run_id"]
+            issue = self.jira_response_issue("RSCON-2960")
+            issue["assignee"] = {"display_name": "Unassigned"}
+            response = state / "jira-unassigned.json"
+            self.write(response, {"total": 1, "issues": [issue]})
+            payload = self.run_tool(
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
+                "--page-number", "1", "--max-results", "50", "--last-page",
+                "--evidence", "mcp:jira:query:unassigned", "--response-file", str(response),
+            )
+            self.assertEqual(payload["returned_count"], 1)
+            imported = self.snapshot(state, run_id, "jira")["issues"][0]
+            self.assertIsNone(imported["assignee"])
+            self.assertEqual(imported["field_observations"]["assignee"], "absent")
+
+    def test_structural_import_rejects_unknown_jira_assignee_object(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, provider="jira", ids=("RSCON-2960",),
+            )["run_id"]
+            issue = self.jira_response_issue("RSCON-2960")
+            issue["assignee"] = {"display_name": "Known Person"}
+            response = state / "jira-unsupported-assignee.json"
+            self.write(response, {"total": 1, "issues": [issue]})
+            payload = self.run_tool(
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
+                "--page-number", "1", "--max-results", "50", "--last-page",
+                "--evidence", "mcp:jira:query:unsupported-assignee", "--response-file", str(response),
+                expected=2,
+            )
+            self.assertIn("исполнитель имеет неподдерживаемый формат", payload["error"])
+
     def test_complete_without_machine_page_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state)["run_id"]
