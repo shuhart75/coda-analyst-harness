@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from workspace_paths import team_path
+import math
 import os
 import re
 import sys
@@ -107,10 +108,11 @@ class StoryMap:
 @dataclass
 class Task:
     task_id: str
+    tracker_key: str
     summary: str
     kind: str
     role: str
-    estimate: int
+    estimate: float
     executor: str
     planned_start: str
     planned_finish: str
@@ -181,6 +183,11 @@ def fmt_date(value: date) -> str:
 def parse_int(value: str, default: int = 0) -> int:
     match = re.search(r"\d+", clean_cell(value))
     return int(match.group(0)) if match else default
+
+
+def parse_number(value: str, default: float = 0.0) -> float:
+    match = re.search(r"\d+(?:[.,]\d+)?", clean_cell(value))
+    return float(match.group(0).replace(",", ".")) if match else default
 
 
 def load_closed_days(project_root: Path, quarter_id: str) -> set[date]:
@@ -440,6 +447,9 @@ def explicit_executor(task: Task, team_resources: dict[str, list[str]]) -> str:
     if not normalized or normalized.startswith("TBD_"):
         return ""
     role = resource_role(normalized)
+    task_role = role_for_task(task)
+    if role and task_role in ROLE_COLORS and role != task_role:
+        return ""
     if role and normalized not in team_resources.get(role, []):
         return ""
     return normalized
@@ -450,18 +460,25 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
     for path in sorted(feature_dir.glob("slices/*/execution/tasks.md")):
         rows = first_table_with(path, "Jira")
         for row in rows:
-            task_id = clean_cell(row.get("Jira", ""))
-            if not task_id:
+            tracker_key = clean_cell(row.get("Jira", ""))
+            if not tracker_key:
                 continue
             status = clean_cell(row.get("Status", "planned"))
             progress_value = row.get("Progress %", "")
             progress = parse_int(progress_value, progress_from_status(status)) if progress_value else progress_from_status(status)
+            kind = clean_cell(row.get("Kind", "virtual")).lower()
+            role = clean_cell(row.get("Role", ""))
+            normalized_role = normalize_role(role)
+            task_id = f"{tracker_key}/{normalized_role}" if kind == "real" and normalized_role in ROLE_COLORS else tracker_key
+            if task_id in tasks:
+                raise ValueError(f"Duplicate execution work item: {task_id}")
             tasks[task_id] = Task(
                 task_id=task_id,
-                summary=clean_cell(row.get("Summary", task_id)),
-                kind=clean_cell(row.get("Kind", "virtual")).lower(),
-                role=clean_cell(row.get("Role", "")),
-                estimate=parse_int(row.get("Estimate (дн)", ""), 1),
+                tracker_key=tracker_key,
+                summary=clean_cell(row.get("Summary", tracker_key)),
+                kind=kind,
+                role=role,
+                estimate=parse_number(row.get("Estimate (дн)", ""), 1.0),
                 executor=clean_cell(row.get("Executor", "")),
                 planned_start=clean_cell(row.get("Planned Start", "")),
                 planned_finish=clean_cell(row.get("Planned Finish", "")),
@@ -484,10 +501,11 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
             status = clean_cell(row.get("Статус" if russian else "Status", "proposed"))
             tasks[task_id] = Task(
                 task_id=task_id,
+                tracker_key=task_id,
                 summary=clean_cell(row.get("Краткое описание" if russian else "Summary", task_id)),
                 kind="candidate",
                 role=clean_cell(row.get("Роль" if russian else "Role", "")),
-                estimate=parse_int(row.get("Оценка (дн)" if russian else "Estimate (дн)", ""), 1),
+                estimate=parse_number(row.get("Оценка (дн)" if russian else "Estimate (дн)", ""), 1.0),
                 executor="",
                 planned_start="",
                 planned_finish="",
@@ -511,7 +529,7 @@ def task_finish(task: Task) -> date | None:
     start = task_start(task)
     if not start:
         return None
-    return start + timedelta(days=max(task.estimate - 1, 0))
+    return start + timedelta(days=task_duration(task) - 1)
 
 
 def is_not_started(task: Task) -> bool:
@@ -525,7 +543,7 @@ def is_not_started(task: Task) -> bool:
 
 
 def task_duration(task: Task) -> int:
-    return max(task.estimate, 1)
+    return max(math.ceil(task.estimate), 1)
 
 
 def open_days_between(start: date, finish: date, closed_days: set[date]) -> list[date]:
@@ -755,6 +773,25 @@ def role_color(role: str) -> str:
     return ROLE_COLORS.get(normalize_role(role), "Wheat")
 
 
+def plantuml_label(value: str) -> str:
+    return " ".join(value.replace("[", "").replace("]", "").split())
+
+
+def role_prefixed_summary(task: Task) -> str:
+    role = role_for_task(task)
+    summary = task.summary.strip()
+    if role not in ROLE_COLORS:
+        return plantuml_label(summary)
+    bracketed = re.match(r"^\s*\[\s*([^\]]+)\s*\]\s*", summary)
+    if bracketed and normalize_role(bracketed.group(1)) == role:
+        summary = summary[bracketed.end():].strip()
+    else:
+        plain = re.match(r"^\s*([^\s:_/\-]+)(?=[\s:_/\-])\s*[:_\-/]?\s*", summary)
+        if plain and normalize_role(plain.group(1)) == role:
+            summary = summary[plain.end():].strip()
+    return plantuml_label(f"{role} {summary}")
+
+
 def story_type(story: StoryMap, tasks: dict[str, Task]) -> str:
     summary = story.summary.lower()
     fe_keywords = [
@@ -809,8 +846,8 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
     assignee = scheduled.assignee
     assignee_part = f" on {{{assignee}}}" if assignee else ""
     lines = [
-        f"[{task.summary}] as [{alias}]{assignee_part} starts {fmt_date(scheduled.start)}",
-        f"[{alias}] ends {fmt_date(scheduled.finish)}" if scheduled.finish else f"[{alias}] lasts {max(task.estimate, 1)} days",
+        f"[{role_prefixed_summary(task)}] as [{alias}]{assignee_part} starts {fmt_date(scheduled.start)}",
+        f"[{alias}] ends {fmt_date(scheduled.finish)}" if scheduled.finish else f"[{alias}] lasts {task_duration(task)} days",
         f"[{alias}] is colored in {role_color(role_for_task(task))}",
         f"[{alias}] is {max(0, min(task.progress, 100))}% completed",
     ]
@@ -822,9 +859,14 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
 
 
 def mapped_task_ids(story: StoryMap, tasks: dict[str, Task]) -> list[str]:
-    ids = list(story.replaced_by)
+    references = list(story.replaced_by)
     if story.state == "mixed":
-        ids.extend(story.residual_virtual_tasks)
+        references.extend(story.residual_virtual_tasks)
+    ids: list[str] = []
+    for reference in references:
+        if reference in tasks:
+            ids.append(reference)
+        ids.extend(task_id for task_id, task in tasks.items() if task.tracker_key == reference)
     if story.state == "virtual" and not ids:
         ids.extend(task_id for task_id, task in tasks.items() if story.story_id in task.related_stories)
     unique: list[str] = []
@@ -842,7 +884,7 @@ def story_progress(story: StoryMap, tasks: dict[str, Task]) -> int:
     weighted = 0
     for task_id in task_ids:
         task = tasks[task_id]
-        estimate = max(task.estimate, 1)
+        estimate = max(task.estimate, 1.0)
         total += estimate
         weighted += estimate * max(0, min(task.progress, 100))
     return round(weighted / total) if total else 0
@@ -889,7 +931,7 @@ def render_story(
     if not start:
         return [f"' Skip story without start date: {story.story_id}"], None
     alias = f"STORY_{to_alias(story.story_id)}"
-    label = f"PLAN {story_type(story, tasks)} {story.summary}"
+    label = plantuml_label(f"PLAN {story_type(story, tasks)} {story.summary}")
     progress = story_progress(story, tasks)
     color = "LightSteelBlue" if story.state == "virtual" else "Gainsboro"
     lines = [

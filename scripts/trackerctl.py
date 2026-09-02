@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 
-PROTOCOL = "targeted-tracker-v2"
-SCHEMA_VERSION = 7
+PROTOCOL = "targeted-tracker-v3"
+SCHEMA_VERSION = 8
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -37,12 +37,37 @@ SP_UNITS = {
     "чел день", "чел дни",
 }
 HISTORY_BATCH_SIZE = 8
+ESTIMATE_ROLES = ("AN", "BE", "FE", "QA")
 MERGED_FIELDS = (
     "summary", "issue_type", "status", "assignee", "estimate", "epic",
     "releases", "created_at", "updated_at",
 )
 RAW_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
 SBER_EXPORT_MAX_RESULTS = 50
+JIRA_SEARCH_MAX_RESULTS = 50
+JIRA_ESTIMATE_FIELDS = {
+    "customfield_15014": {"name": "Оценка разработки (Back-End)", "role": "BE", "unit": "person-days"},
+    "customfield_15015": {"name": "Оценка разработки (Front-End)", "role": "FE", "unit": "person-days"},
+    "customfield_15016": {"name": "Оценка дизайна", "role": None, "unit": "person-days"},
+    "customfield_15053": {"name": "Нагрузочное тестирование (наиболее вероятная)", "role": None, "unit": "person-days"},
+    "customfield_15062": {"name": "Оценка анализа (чел.д)", "role": "AN", "unit": "person-days"},
+    "customfield_15063": {"name": "Оценка разработки", "role": None, "unit": "person-days", "general": True},
+    "customfield_15064": {"name": "Оценка тестирования", "role": "QA", "unit": "person-days"},
+    "customfield_15065": {"name": "Оценка отчетности", "role": None, "unit": "person-days"},
+    "customfield_15066": {"name": "Оценка проектирования", "role": None, "unit": "person-days"},
+    "customfield_20408": {"name": "Оценка (в спринтах)", "role": None, "unit": "sprints"},
+    "customfield_14937": {"name": "Оценка", "role": None, "unit": "person-days", "general": True},
+    "customfield_12307": {"name": "Разработка, ч/д", "role": None, "unit": "person-days", "general": True},
+}
+JIRA_GENERAL_ESTIMATE_PRIORITY = (
+    "customfield_14937",
+    "customfield_12307",
+    "customfield_15063",
+)
+JIRA_QUERY_FIELDS = (
+    "key", "summary", "status", "issuetype", "priority", "assignee", "created", "updated",
+    "fixVersions", "issuelinks", *JIRA_ESTIMATE_FIELDS.keys(),
+)
 ISSUE_COLLECTION_KEYS = ("issues", "items", "results", "values", "units", "data")
 ISSUE_KEY_ALIASES = ("key", "issueKey", "issue_key", "unitKey", "unit_key")
 SUMMARY_ALIASES = ("summary", "name", "title")
@@ -291,6 +316,73 @@ def full_issue_records(payload: Any) -> tuple[list[dict], str]:
     return records, path
 
 
+def jira_page_metadata(payload: Any) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    folded = {str(key).casefold(): value for key, value in payload.items()}
+    total = folded.get("total")
+    start = folded.get("start_at", folded.get("startat"))
+    maximum = folded.get("max_results", folded.get("maxresults"))
+    if all(isinstance(value, int) and not isinstance(value, bool) for value in (total, start, maximum)):
+        return {"total": total, "start_at": start, "max_results": maximum}
+    return None
+
+
+def jira_issue_links(payload: Any) -> tuple[str, list[dict], str]:
+    candidates: list[tuple[str, dict]] = []
+
+    def walk(value: Any, path: str, depth: int = 0) -> None:
+        if depth > 12:
+            return
+        if isinstance(value, str):
+            decoded = decoded_json_string(value)
+            if decoded is not None:
+                walk(decoded, path + "<json>", depth + 1)
+            return
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, f"{path}[{index}]", depth + 1)
+            return
+        if not isinstance(value, dict):
+            return
+        found, links = alias_value(value, ("issuelinks", "issueLinks"))
+        if found and isinstance(links, list):
+            candidates.append((path, value))
+        for key, item in value.items():
+            walk(item, f"{path}.{key}", depth + 1)
+
+    walk(payload, "$")
+    if not candidates:
+        raise ValueError("В полном ответе Jira не найден массив issuelinks")
+    path, container = max(candidates, key=lambda item: len(alias_value(item[1], ("issuelinks", "issueLinks"))[1]))
+    found_key, raw_key = alias_value(container, ISSUE_KEY_ALIASES)
+    epic_key = object_text(raw_key) if found_key else None
+    if not epic_key or not ISSUE_KEY.fullmatch(epic_key.strip().upper()):
+        raise ValueError("Ответ Jira с issuelinks не содержит ключ исходного эпика")
+    _, links = alias_value(container, ("issuelinks", "issueLinks"))
+    if not all(isinstance(item, dict) for item in links):
+        raise ValueError("Jira issuelinks содержит запись неподдерживаемого формата")
+    return epic_key.strip().upper(), links, path + ".issuelinks"
+
+
+def jira_epic_child_keys(links: list[dict]) -> list[str]:
+    result: list[str] = []
+    for link in links:
+        link_type = link.get("type")
+        if not isinstance(link_type, dict) or str(link_type.get("name") or "").casefold() != "partof":
+            continue
+        inward = link.get("inward_issue") if "inward_issue" in link else link.get("inwardIssue")
+        if not isinstance(inward, dict):
+            continue
+        key_value = record_issue_key(inward)
+        if not key_value:
+            raise ValueError("Дочерняя PartOf-связь Jira не содержит корректный ключ inward_issue")
+        result.append(key_value)
+    if len(result) != len(set(result)):
+        raise ValueError("Jira issuelinks содержит повторяющиеся дочерние PartOf-ключи")
+    return sorted(result)
+
+
 def object_text(value: Any, aliases: tuple[str, ...] = ("code", "name", "value", "title", "key")) -> str | None:
     if isinstance(value, str):
         return value.strip() or None
@@ -310,7 +402,7 @@ def record_fields(record: dict) -> dict:
     return record
 
 
-def attribute_entries(record: dict) -> tuple[dict[str, Any], bool]:
+def attribute_records(record: dict) -> tuple[list[dict[str, Any]], bool]:
     sources = [record]
     unit = record.get("unit")
     if isinstance(unit, dict):
@@ -322,11 +414,14 @@ def attribute_entries(record: dict) -> tuple[dict[str, Any], bool]:
         found, raw = alias_value(source, ("attributes",))
         if not found:
             continue
-        result: dict[str, Any] = {}
+        result: list[dict[str, Any]] = []
         if isinstance(raw, dict):
-            return {str(key).casefold(): value for key, value in raw.items()}, True
+            return [
+                {"code": str(key), "name": str(key), "value": value}
+                for key, value in raw.items()
+            ], True
         if not isinstance(raw, list):
-            return {}, True
+            return [], True
         for entry in raw:
             if not isinstance(entry, dict):
                 continue
@@ -341,9 +436,21 @@ def attribute_entries(record: dict) -> tuple[dict[str, Any], bool]:
                 value = None
             if isinstance(value, list) and len(value) == 1:
                 value = value[0]
-            result[code_text.casefold()] = value
+            found_name, name = alias_value(entry, ("name", "title", "displayName", "display_name"))
+            if not found_name and isinstance(entry.get("attribute"), dict):
+                found_name, name = alias_value(entry["attribute"], ("name", "title", "displayName", "display_name"))
+            result.append({
+                "code": code_text,
+                "name": object_text(name) if found_name else code_text,
+                "value": value,
+            })
         return result, True
-    return {}, False
+    return [], False
+
+
+def attribute_entries(record: dict) -> tuple[dict[str, Any], bool]:
+    records, present = attribute_records(record)
+    return {item["code"].casefold(): item["value"] for item in records}, present
 
 
 def attribute_value(attributes: dict[str, Any], codes: tuple[str, ...]) -> tuple[bool, Any]:
@@ -399,6 +506,163 @@ def normalized_estimate(value: Any) -> dict | None:
     return {"value": number, "unit": "story-points"}
 
 
+def normalized_number(value: Any) -> float | None:
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, dict):
+        found, nested = alias_value(value, ("value", "amount", "estimate"))
+        value = nested if found else None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalized_estimate_text(value: str) -> str:
+    return " ".join(re.sub(r"[^0-9a-zа-яё]+", " ", value.casefold()).split())
+
+
+def normalized_role_marker(value: str) -> str | None:
+    token = re.sub(r"[^a-zа-яё]+", "", value.casefold())
+    aliases = {
+        "a": "AN", "an": "AN", "ан": "AN",
+        "b": "BE", "be": "BE", "бэ": "BE", "бе": "BE",
+        "f": "FE", "fe": "FE", "фэ": "FE", "фе": "FE",
+        "q": "QA", "qa": "QA", "тест": "QA",
+    }
+    visual = token.translate(str.maketrans({"а": "a", "в": "b", "е": "e"}))
+    return aliases.get(token) or aliases.get(visual)
+
+
+def role_from_summary_prefix(summary: str) -> str | None:
+    bracketed = re.findall(r"\[\s*([^\]]+)\s*\]", summary[:64])
+    if bracketed:
+        roles = {role for item in bracketed if (role := normalized_role_marker(item))}
+        return next(iter(roles)) if len(roles) == 1 else None
+    match = re.match(r"\s*([^\s:_/\-]+)(?=[\s:_/\-])", summary)
+    return normalized_role_marker(match.group(1)) if match else None
+
+
+def sber_estimate_definition(code: str, name: str) -> dict | None:
+    code_token = normalized_estimate_text(code)
+    name_token = normalized_estimate_text(name)
+    combined = f"{code_token} {name_token}"
+    if code.casefold() in {item.casefold() for item in SBER_ATTRIBUTE_CODES["estimate"]}:
+        return {"name": name, "role": None, "unit": "story-points", "general": True}
+    if any(marker in combined for marker in ("front end", "frontend", "разработк fe", "fe разработк")):
+        return {"name": name, "role": "FE", "unit": "person-days"}
+    if any(marker in combined for marker in ("back end", "backend", "разработк be", "be разработк")):
+        return {"name": name, "role": "BE", "unit": "person-days"}
+    if "анализ" in combined or "analysis" in combined:
+        return {"name": name, "role": "AN", "unit": "person-days"}
+    if "тестирован" in combined or "testing" in combined or re.search(r"\bqa\b", combined):
+        return {"name": name, "role": "QA", "unit": "person-days"}
+    if any(marker in combined for marker in ("общ", "чд", "чел д", "story point", "story points", "total estimate")):
+        return {"name": name, "role": None, "unit": "person-days", "general": True}
+    return None
+
+
+def source_estimates(record: dict, provider: str, summary: str) -> tuple[dict | None, str, dict[str, dict], dict[str, str], list[dict]]:
+    fields = record_fields(record)
+    estimate_fields: list[dict] = []
+    role_states = {role: "not-returned" for role in ESTIMATE_ROLES}
+    role_values: dict[str, dict] = {}
+    general_candidates: list[dict] = []
+
+    if provider == "jira":
+        for field_id, definition in JIRA_ESTIMATE_FIELDS.items():
+            found, raw = alias_value(fields, (field_id,))
+            role = definition.get("role")
+            if role and found:
+                role_states[role] = "absent"
+            number = normalized_number(raw) if found else None
+            if number is None:
+                continue
+            entry = {
+                "field_id": field_id,
+                "field_name": definition["name"],
+                "value": number,
+                "unit": definition["unit"],
+                "role": role,
+            }
+            estimate_fields.append(entry)
+            if role:
+                role_states[role] = "value"
+                role_values.setdefault(role, {
+                    "value": number,
+                    "unit": definition["unit"],
+                    "source_field": {"id": field_id, "name": definition["name"]},
+                    "inferred_from_general": False,
+                })
+            if definition.get("general"):
+                general_candidates.append(entry)
+    else:
+        records, attributes_present = attribute_records(record)
+        role_states = {role: "absent" if attributes_present else "not-returned" for role in ESTIMATE_ROLES}
+        for attribute in records:
+            definition = sber_estimate_definition(attribute["code"], attribute["name"])
+            if not definition:
+                continue
+            number = normalized_number(attribute["value"])
+            role = definition.get("role")
+            if number is None:
+                continue
+            entry = {
+                "field_id": attribute["code"],
+                "field_name": definition["name"],
+                "value": number,
+                "unit": definition["unit"],
+                "role": role,
+            }
+            estimate_fields.append(entry)
+            if role:
+                role_states[role] = "value"
+                role_values.setdefault(role, {
+                    "value": number,
+                    "unit": definition["unit"],
+                    "source_field": {"id": attribute["code"], "name": definition["name"]},
+                    "inferred_from_general": False,
+                })
+            if definition.get("general"):
+                general_candidates.append(entry)
+
+    general = None
+    general_state = "not-returned"
+    estimate_raw, legacy_state = optional_value(record, ESTIMATE_ALIASES, {}, ())
+    legacy = normalized_estimate(estimate_raw) if legacy_state == "value" else None
+    if legacy:
+        general = legacy
+        general_state = "value"
+    elif general_candidates:
+        if provider == "jira":
+            priorities = {field_id: index for index, field_id in enumerate(JIRA_GENERAL_ESTIMATE_PRIORITY)}
+            general_candidates.sort(key=lambda item: priorities.get(item["field_id"], len(priorities)))
+        candidate = general_candidates[0]
+        general = {"value": candidate["value"], "unit": candidate["unit"]}
+        general_state = "value"
+    elif provider == "jira":
+        general_state = "absent" if any(alias_value(fields, (field_id,))[0] for field_id, item in JIRA_ESTIMATE_FIELDS.items() if item.get("general")) else "not-returned"
+    else:
+        _, attributes_present = attribute_records(record)
+        general_state = "absent" if attributes_present else "not-returned"
+
+    if not role_values and general is not None:
+        inferred_role = role_from_summary_prefix(summary)
+        if inferred_role in {"AN", "BE", "FE"}:
+            source = general_candidates[0] if general_candidates else {
+                "field_id": "estimate",
+                "field_name": "Общая оценка",
+            }
+            role_values[inferred_role] = {
+                **general,
+                "source_field": {"id": source["field_id"], "name": source["field_name"]},
+                "inferred_from_general": True,
+            }
+            role_states[inferred_role] = "value"
+
+    return general, general_state, role_values, role_states, estimate_fields
+
+
 def normalized_epic(value: Any) -> dict | None:
     if isinstance(value, list):
         value = value[0] if value else None
@@ -441,19 +705,19 @@ def compact_issue_from_response(record: dict, provider: str, scope: dict) -> dic
     key_value = record_issue_key(record)
     if not key_value:
         raise ValueError("JSON-объект карточки не содержит ключ задачи")
+    summary = required_record_text(record, SUMMARY_ALIASES, "summary", key_value)
     attributes, _ = attribute_entries(record)
     assignee_raw, assignee_state = optional_value(record, ASSIGNEE_ALIASES, attributes, SBER_ATTRIBUTE_CODES["assignee"])
-    estimate_raw, estimate_state = optional_value(record, ESTIMATE_ALIASES, attributes, SBER_ATTRIBUTE_CODES["estimate"])
+    estimate, estimate_state, role_estimates, role_estimate_observations, estimate_fields = source_estimates(
+        record, provider, summary
+    )
     epic_raw, epic_state = optional_value(record, EPIC_ALIASES, attributes, SBER_ATTRIBUTE_CODES["epic"])
     releases_raw, releases_state = optional_value(record, RELEASE_ALIASES, attributes, SBER_ATTRIBUTE_CODES["releases"])
     assignee = normalized_person(assignee_raw)
-    estimate = normalized_estimate(estimate_raw)
     epic = normalized_epic(epic_raw)
     releases = normalized_releases(releases_raw) if releases_state == "value" else []
     if assignee_state == "value" and assignee is None:
         raise ValueError(f"Карточка {key_value}: исполнитель имеет неподдерживаемый формат")
-    if estimate_state == "value" and estimate is None:
-        raise ValueError(f"Карточка {key_value}: оценка имеет неподдерживаемый формат")
     if epic_state == "value" and epic is None:
         raise ValueError(f"Карточка {key_value}: эпик имеет неподдерживаемый формат")
     if provider == "sbertrek" and scope.get("provider") == "sbertrek" and scope.get("kind") == "epic":
@@ -477,11 +741,14 @@ def compact_issue_from_response(record: dict, provider: str, scope: dict) -> dic
         "key": key_value,
         "jira_key": jira_key,
         "jira_key_state": jira_key_state,
-        "summary": required_record_text(record, SUMMARY_ALIASES, "summary", key_value),
+        "summary": summary,
         "issue_type": required_record_text(record, TYPE_ALIASES, "issue_type", key_value),
         "status": required_record_text(record, STATUS_ALIASES, "status", key_value),
         "assignee": assignee,
         "estimate": estimate,
+        "role_estimates": role_estimates,
+        "role_estimate_observations": role_estimate_observations,
+        "estimate_fields": estimate_fields,
         "epic": epic,
         "releases": releases,
         "field_observations": observations,
@@ -783,20 +1050,20 @@ def jql_keys(keys: list[str]) -> str:
     return "key IN (" + ", ".join(f'"{item}"' for item in keys) + ")"
 
 
-def jql_epic(epic: str, method: str) -> str:
-    if method == "parent":
-        return f'parent = "{epic}"'
-    if method == "epic-link":
-        return f'"Epic Link" = "{epic}"'
-    raise ValueError(f"Неизвестный способ раскрытия Jira-эпика: {method}")
+def jira_epic_links_call(epic: str) -> str:
+    return f'jira_get_issue(issue_key="{epic}", fields="issuelinks")'
 
 
-def query_spec(provider: str, purpose: str, exact: str | None = None, *, method: str | None = None) -> dict:
+def query_spec(
+    provider: str, purpose: str, exact: str | None = None, *,
+    method: str | None = None, language: str | None = None,
+) -> dict:
     return {
         "state": "pending", "purpose": purpose,
-        "language": "TQL" if provider == "sbertrek" else "JQL",
+        "language": language or ("TQL" if provider == "sbertrek" else "JQL"),
         "exact": exact, "initial_exact": exact, "method": method,
         "pages": [], "keys": [], "requested_keys": [], "confirmed_absent": [],
+        "discovery": None,
         "unavailable_reason": None, "unavailable_evidence": None,
     }
 
@@ -808,7 +1075,10 @@ def primary_query(scope: dict) -> dict:
     if provider == "sbertrek":
         return query_spec(provider, "task-cards", tql_units(ids))
     if kind == "epic":
-        return query_spec(provider, "epic-members", jql_epic(ids[0], "parent"), method="parent")
+        return query_spec(
+            provider, "epic-links", jira_epic_links_call(ids[0]),
+            method="issuelinks", language="JIRA_API",
+        )
     return query_spec(provider, "task-cards", jql_keys(ids))
 
 
@@ -860,6 +1130,40 @@ def validate_issue_card(item: Any, provider: str) -> None:
         or not isinstance(estimate.get("unit"), str)
     ):
         raise ValueError(f"Карточка {key_value}: estimate должен содержать value и unit")
+    role_estimates = item.get("role_estimates")
+    if not isinstance(role_estimates, dict) or any(role not in ESTIMATE_ROLES for role in role_estimates):
+        raise ValueError(f"Карточка {key_value}: role_estimates имеет некорректные роли")
+    for role, role_estimate in role_estimates.items():
+        if (
+            not isinstance(role_estimate, dict)
+            or not isinstance(role_estimate.get("value"), (int, float))
+            or isinstance(role_estimate.get("value"), bool)
+            or not isinstance(role_estimate.get("unit"), str)
+            or not isinstance(role_estimate.get("source_field"), dict)
+            or not isinstance(role_estimate["source_field"].get("id"), str)
+            or not isinstance(role_estimate.get("inferred_from_general"), bool)
+        ):
+            raise ValueError(f"Карточка {key_value}: оценка роли {role} имеет неполную схему")
+    role_observations = item.get("role_estimate_observations")
+    if not isinstance(role_observations, dict) or set(role_observations) != set(ESTIMATE_ROLES):
+        raise ValueError(f"Карточка {key_value}: role_estimate_observations имеет неполную схему")
+    for role, state in role_observations.items():
+        if state not in OBSERVATION_STATES or ((state == "value") != (role in role_estimates)):
+            raise ValueError(f"Карточка {key_value}: состояние оценки {role} не соответствует значению")
+    estimate_fields = item.get("estimate_fields")
+    if not isinstance(estimate_fields, list):
+        raise ValueError(f"Карточка {key_value}: estimate_fields должен быть списком")
+    for field in estimate_fields:
+        if (
+            not isinstance(field, dict)
+            or not isinstance(field.get("field_id"), str)
+            or not isinstance(field.get("field_name"), str)
+            or not isinstance(field.get("value"), (int, float))
+            or isinstance(field.get("value"), bool)
+            or not isinstance(field.get("unit"), str)
+            or field.get("role") not in {*ESTIMATE_ROLES, None}
+        ):
+            raise ValueError(f"Карточка {key_value}: estimate_fields содержит некорректную запись")
     epic = item.get("epic")
     if epic is not None and (
         not isinstance(epic, dict)
@@ -939,6 +1243,37 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
         raise ValueError(f"Коллекция {provider} содержит некорректный requested_keys")
     if not isinstance(confirmed_absent, list):
         raise ValueError(f"Коллекция {provider} содержит некорректный confirmed_absent")
+    jira_epic_discovery = (
+        provider == "jira"
+        and snapshot.get("scope", {}).get("provider") == "jira"
+        and snapshot.get("scope", {}).get("kind") == "epic"
+    )
+    if jira_epic_discovery:
+        discovery = query.get("discovery")
+        expected_query = jira_epic_links_call(snapshot["scope"]["ids"][0])
+        if (
+            not isinstance(discovery, dict)
+            or discovery.get("method") != "issuelinks-PartOf-inward_issue"
+            or discovery.get("query") != expected_query
+            or discovery.get("child_keys") != unique_keys(discovery.get("child_keys") or [])
+            or not isinstance(discovery.get("link_count"), int)
+            or discovery["link_count"] < len(discovery["child_keys"])
+            or not re.fullmatch(r"[a-f0-9]{64}", str(discovery.get("response_sha256") or ""))
+        ):
+            raise ValueError("Коллекция Jira-эпика не содержит проверенный issuelinks discovery")
+        call = evidence(str(discovery.get("evidence") or ""), "jira")
+        details = require_logged_mcp(run_id, call, outcome="success")
+        if f"operation=epic-links; outcome=success; query_sha256={query_digest(expected_query)};" not in details:
+            raise ValueError("Evidence Jira issuelinks не совпадает с исходным эпиком")
+        require_tracker_command(
+            run_id, "jira-ingest-epic-links", provider="jira", evidence_value=call,
+            detail_markers=(f"record_sha256={object_sha256(discovery)}",),
+        )
+        if query.get("requested_keys") != discovery["child_keys"]:
+            raise ValueError("Jira epic JQL не соответствует PartOf inward_issue из issuelinks")
+        expected_exact = jql_keys(discovery["child_keys"]) if discovery["child_keys"] else None
+        if query.get("initial_exact") != expected_exact or query.get("exact") != expected_exact:
+            raise ValueError("Точный Jira epic JQL изменён после структурного разбора issuelinks")
     absent_keys: list[str] = []
     for item in confirmed_absent:
         if (
@@ -966,7 +1301,8 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
         and bool(requested_keys)
         and set(absent_keys) == set(requested_keys)
     )
-    if query["state"] == "complete" and not pages and not all_counterparts_absent:
+    empty_jira_epic = jira_epic_discovery and not query.get("requested_keys")
+    if query["state"] == "complete" and not pages and not all_counterparts_absent and not empty_jira_epic:
         raise ValueError(f"Коллекция {provider} помечена complete без зарегистрированной страницы MCP")
     if query["state"] in {"skipped", "unavailable"}:
         if pages or issues or query["keys"]:
@@ -996,13 +1332,14 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
                 raise ValueError(f"Коллекция {provider}: страница {expected_number} не содержит размер ответа")
             if page.get("returned_count") != len(keys):
                 raise ValueError(f"Коллекция {provider}: машинное число карточек страницы не совпадает с ключами")
-            if provider == "sbertrek" and page.get("requested_max_results") != SBER_EXPORT_MAX_RESULTS:
-                raise ValueError(f"Коллекция SberTrek должна быть запрошена с max_results={SBER_EXPORT_MAX_RESULTS}")
+            expected_max = SBER_EXPORT_MAX_RESULTS if provider == "sbertrek" else JIRA_SEARCH_MAX_RESULTS
+            if page.get("requested_max_results") != expected_max:
+                raise ValueError(f"Коллекция {provider} должна быть запрошена с max_results={expected_max}")
             if not re.fullmatch(r"[a-f0-9]{64}", str(page.get("cards_sha256") or "")):
                 raise ValueError(f"Коллекция {provider}: страница {expected_number} не содержит SHA-256 карточек")
             structural_pages.append(page)
-        elif provider == "sbertrek":
-            raise ValueError("SberTrek-страница должна быть записана только структурным импортом полного JSON")
+        elif provider in PROVIDERS:
+            raise ValueError(f"{provider}-страница должна быть записана только структурным импортом полного JSON")
         page_keys.extend(keys)
         for key_value in keys:
             page_evidence.setdefault(key_value, set()).add(call)
@@ -1056,20 +1393,12 @@ def validate_run_provenance(run_id: str, snapshots: dict[str, dict]) -> None:
             )
         if query["state"] == "complete":
             for page in query["pages"]:
-                command = "ingest-query-response" if provider == "sbertrek" else "query-page"
+                command = "ingest-query-response"
                 markers = [f"page_number={page['number']}"]
-                if provider == "jira":
-                    markers.append(f"record_sha256={object_sha256(page)}")
                 require_tracker_command(
                     run_id, command, provider=provider, evidence_value=page["evidence"],
                     detail_markers=tuple(markers),
                 )
-            if provider == "jira":
-                for item in snapshot["issues"]:
-                    require_tracker_command(
-                        run_id, "record-issue", provider=provider, evidence_value=item["evidence"],
-                        detail_markers=(f"key={item['key']}", f"record_sha256={cards_sha256([item])}"),
-                    )
         collection_path = job_path(run_id, f"collection-{provider}")
         if collection_path.is_file():
             require_tracker_command(run_id, "collector-complete", provider=provider)
@@ -1222,17 +1551,18 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
         "forbidden_operations": [
             "read-mcp-documentation", "probe-with-alternative-query",
             "search-by-title-or-description", "read-returned-issues-one-by-one",
-            "issue.search", "issue.getByKey", "link.list",
+            "issue.search", "link.list",
+            *([] if provider == "jira" and query.get("method") == "issuelinks" else ["issue.getByKey"]),
             "change-tracker-or-analytical-artifacts", "continue-to-next-job",
         ],
         "required_task_fields": [
             "key", "jira_key", "jira_key_state", "summary", "issue_type", "status", "assignee",
-            "estimate", "epic", "releases", "created_at", "updated_at",
+            "estimate", "role_estimates", "estimate_fields", "epic", "releases", "created_at", "updated_at",
         ],
         "response_contract": {
-            "full_json_required": provider == "sbertrek",
+            "full_json_required": True,
             "rendered_preview_is_not_data": True,
-            "structural_import_command": "ingest-query-response" if provider == "sbertrek" else None,
+            "structural_import_command": "ingest-query-response",
             "mcp_tool_contract": {
                 "required_capability": "exact-tql-bulk-json-export",
                 "preferred_operation": "issue.exportJson",
@@ -1240,11 +1570,18 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
                 "max_results_parameter": "max_results",
                 "max_results": SBER_EXPORT_MAX_RESULTS,
                 "forbidden_operations": ["issue.search", "issue.getByKey", "link.list"],
-            } if provider == "sbertrek" else None,
+            } if provider == "sbertrek" else {
+                "required_capability": "jira-exact-read",
+                "preferred_operation": "jira_get_issue" if query.get("method") == "issuelinks" else "jira_search",
+                "limit_parameter": "limit",
+                "max_results": JIRA_SEARCH_MAX_RESULTS,
+                "epic_links_fields": ["issuelinks"],
+            },
             "preferred_fields": [
                 "key", "summary", "suit", "status", "attributes", "epic",
                 "created_at", "updated_at",
-            ],
+            ] if provider == "sbertrek" else list(JIRA_QUERY_FIELDS),
+            "jira_estimate_fields": JIRA_ESTIMATE_FIELDS if provider == "jira" else None,
         },
         "created_at": now(),
         "completed_at": None,
@@ -1255,9 +1592,6 @@ def canonical_history_calls(job: dict) -> list[dict]:
     provider = job["provider"]
     job_id = job["job_id"]
     keys = unique_keys(job["keys"])
-    if provider == "jira":
-        evidence_value = f"mcp:jira:history-batch:{job_id}"
-        return [{"evidence": evidence_value, "keys": keys, "keys_sha256": keys_sha256(keys)}]
     return [
         {
             "evidence": f"mcp:{provider}:history:{key}",
@@ -1306,7 +1640,7 @@ def history_job(run_id: str, provider: str, number: int, keys: list[str]) -> dic
         "state": "pending",
         "provider": provider,
         "keys": keys,
-        "call_mode": "batch" if provider == "jira" else "per-key",
+        "call_mode": "per-key",
         "calls": [],
         "output": str(snapshot_path(run_id, provider)),
         "collector_contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-collector.md"),
@@ -1357,7 +1691,7 @@ def load_job(run_id: str, job_id: str) -> tuple[Path, dict]:
             raise ValueError("Контрольная сумма запроса collector-job не совпадает")
     elif job.get("kind") == "provider-history":
         keys = job.get("keys")
-        expected_mode = "batch" if job.get("provider") == "jira" else "per-key"
+        expected_mode = "per-key"
         if (
             not isinstance(keys, list)
             or keys != unique_keys(keys)
@@ -1426,7 +1760,7 @@ def next_query_payload(provider: str, query: dict) -> dict:
             "method": query.get("method"), "exact_query_required": True,
             "pagination_required": True,
         },
-        "required_sequence": ["MCP call", "mcp-log", "query-page"],
+        "required_sequence": ["MCP call", "ingest-query-response"],
     }
 
 
@@ -1456,6 +1790,90 @@ def canonical_estimate(value: Any) -> Any:
     normalized = " ".join(str(result.get("unit")).casefold().replace("-", " ").replace("_", " ").split())
     if normalized in SP_UNITS:
         result["unit"] = "story-points"
+    return result
+
+
+def canonical_role_estimate(value: Any) -> Any:
+    result = canonical_estimate(value)
+    return result if isinstance(result, dict) else value
+
+
+def merged_role_estimates(
+    sber: dict | None, jira: dict | None,
+) -> tuple[dict[str, dict], dict[str, str | None], list[dict]]:
+    result: dict[str, dict] = {}
+    sources: dict[str, str | None] = {}
+    conflicts: list[dict] = []
+    for role in ESTIMATE_ROLES:
+        svalue = canonical_role_estimate((sber or {}).get("role_estimates", {}).get(role))
+        jvalue = canonical_role_estimate((jira or {}).get("role_estimates", {}).get(role))
+        chosen, source = (svalue, "sbertrek") if svalue not in (None, {}, "") else (jvalue, "jira")
+        if chosen not in (None, {}, ""):
+            result[role] = {**chosen, "source": source}
+            sources[role] = source
+        else:
+            sources[role] = None
+        if svalue not in (None, {}, "") and jvalue not in (None, {}, ""):
+            comparable_sber = {key: svalue.get(key) for key in ("value", "unit")}
+            comparable_jira = {key: jvalue.get(key) for key in ("value", "unit")}
+            if comparable_sber != comparable_jira:
+                conflicts.append({
+                    "field": f"role_estimates.{role}",
+                    "sbertrek": svalue,
+                    "jira": jvalue,
+                    "resolution": "sbertrek-preserved",
+                })
+    return result, sources, conflicts
+
+
+def merged_estimate_fields(sber: dict | None, jira: dict | None) -> list[dict]:
+    result = []
+    for provider, item in (("sbertrek", sber), ("jira", jira)):
+        for field in (item or {}).get("estimate_fields", []):
+            result.append({**field, "provider": provider})
+    return result
+
+
+def prefixed_work_summary(role: str, summary: str) -> str:
+    value = summary
+    while True:
+        match = re.match(r"^\s*\[\s*([^\]]+)\s*\]\s*", value)
+        if not match or not normalized_role_marker(match.group(1)):
+            break
+        value = value[match.end():]
+    match = re.match(r"^\s*([^\s:_/\-]+)(?=[\s:_/\-])\s*[:_\-/]?\s*", value)
+    if match and normalized_role_marker(match.group(1)):
+        value = value[match.end():]
+    return f"{role} {value.strip() or summary.strip()}"
+
+
+def execution_work_items(issues: list[dict]) -> list[dict]:
+    result: list[dict] = []
+    for issue in issues:
+        if issue.get("development", {}).get("state") == "excluded":
+            continue
+        identity = issue.get("jira_key") or issue.get("sbertrek_key")
+        if not identity:
+            continue
+        assignee = issue.get("assignee") if isinstance(issue.get("assignee"), dict) else None
+        assignee_team_id = assignee.get("team_id") if assignee else None
+        for role in ESTIMATE_ROLES:
+            estimate = issue.get("role_estimates", {}).get(role)
+            if not isinstance(estimate, dict) or not isinstance(estimate.get("value"), (int, float)) or estimate["value"] <= 0:
+                continue
+            role_assignee = assignee if isinstance(assignee_team_id, str) and assignee_team_id.startswith(role) else None
+            result.append({
+                "work_item_id": f"{identity}/{role}",
+                "tracker_key": identity,
+                "sbertrek_key": issue.get("sbertrek_key"),
+                "jira_key": issue.get("jira_key"),
+                "role": role,
+                "summary": prefixed_work_summary(role, str(issue.get("summary") or identity)),
+                "estimate": canonical_role_estimate(estimate),
+                "assignee": role_assignee,
+                "status": issue.get("status"),
+                "development": issue.get("development"),
+            })
     return result
 
 
@@ -1511,7 +1929,10 @@ def merged_value(field: str, sber: dict | None, jira: dict | None) -> tuple[Any,
         svalue, jvalue = canonical_estimate(svalue), canonical_estimate(jvalue)
     chosen, source = (svalue, "sbertrek") if svalue not in (None, "", [], {}) else (jvalue, "jira")
     conflict = None
-    if svalue not in (None, "", [], {}) and jvalue not in (None, "", [], {}) and svalue != jvalue:
+    comparable_equal = svalue == jvalue
+    if field == "issue_type" and isinstance(svalue, str) and isinstance(jvalue, str):
+        comparable_equal = svalue.casefold() == jvalue.casefold()
+    if svalue not in (None, "", [], {}) and jvalue not in (None, "", [], {}) and not comparable_equal:
         conflict = {"field": field, "sbertrek": svalue, "jira": jvalue, "resolution": "sbertrek-preserved"}
     return chosen, source if chosen not in (None, "", [], {}) else None, conflict
 
@@ -1643,10 +2064,29 @@ def count_values(values: list[str]) -> dict[str, int]:
 
 def machine_summary(issues: list[dict], discrepancies: list[dict]) -> dict:
     story_points_total = 0.0
+    role_totals = {role: 0.0 for role in ESTIMATE_ROLES}
     unestimated = 0
     non_story_point_estimates = 0
+    inferred_general = 0
     for item in issues:
+        role_values = item.get("role_estimates", {})
+        role_total_used = False
+        for role in ESTIMATE_ROLES:
+            role_estimate = role_values.get(role) if isinstance(role_values, dict) else None
+            if not isinstance(role_estimate, dict):
+                continue
+            if role_estimate.get("unit") == "story-points" and isinstance(role_estimate.get("value"), (int, float)):
+                value = float(role_estimate["value"])
+                role_totals[role] += value
+                story_points_total += value
+                role_total_used = True
+                if role_estimate.get("inferred_from_general"):
+                    inferred_general += 1
+            else:
+                non_story_point_estimates += 1
         estimate = item.get("estimate")
+        if role_total_used:
+            continue
         if isinstance(estimate, dict) and estimate.get("unit") == "story-points" and isinstance(estimate.get("value"), (int, float)):
             story_points_total += float(estimate["value"])
         elif estimate in (None, {}, ""):
@@ -1667,6 +2107,9 @@ def machine_summary(issues: list[dict], discrepancies: list[dict]) -> dict:
     )
     return {
         "story_points_total": story_points_total,
+        "role_estimate_totals": role_totals,
+        "role_work_item_count": sum(1 for item in issues for role in ESTIMATE_ROLES if role in item.get("role_estimates", {})),
+        "general_estimate_role_inference_count": inferred_general,
         "unestimated_issue_count": unestimated,
         "non_story_point_estimate_count": non_story_point_estimates,
         "status_counts": count_values([str(item.get("status") or "unassigned") for item in issues]),
@@ -1711,6 +2154,13 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
                 conflicts.append(conflict)
                 discrepancies.append({"kind": "field-conflict", "sbertrek_key": sber_key, "jira_key": jira_key, **conflict})
         record["assignee"] = enrich_assignee(record.get("assignee"), sources.get("assignee"), config)
+        role_estimates, role_sources, role_conflicts = merged_role_estimates(sissue, jissue)
+        record["role_estimates"] = role_estimates
+        record["estimate_fields"] = merged_estimate_fields(sissue, jissue)
+        sources["role_estimates"] = role_sources
+        for conflict in role_conflicts:
+            conflicts.append(conflict)
+            discrepancies.append({"kind": "field-conflict", "sbertrek_key": sber_key, "jira_key": jira_key, **conflict})
         assigned_at, work_started_at = assignment_dates(sissue, jissue, config)
         record.update({
             "field_sources": sources,
@@ -1730,6 +2180,14 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
         for field in MERGED_FIELDS:
             record[field] = canonical_estimate(jissue.get(field)) if field == "estimate" else jissue.get(field)
         record["field_sources"] = {field: "jira" if record.get(field) not in (None, "", [], {}) else None for field in MERGED_FIELDS}
+        record["role_estimates"] = {
+            role: {**canonical_role_estimate(value), "source": "jira"}
+            for role, value in jissue.get("role_estimates", {}).items()
+        }
+        record["estimate_fields"] = merged_estimate_fields(None, jissue)
+        record["field_sources"]["role_estimates"] = {
+            role: "jira" if role in record["role_estimates"] else None for role in ESTIMATE_ROLES
+        }
         record["assignee"] = enrich_assignee(record.get("assignee"), "jira", config)
         record["assigned_at"], record["work_started_at"] = assignment_dates(None, jissue, config)
         record["development"] = development_state(None, jissue, config)
@@ -1751,12 +2209,24 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
             for page in snapshot["query"].get("pages", [])
         ):
             limitations.append(f"sbertrek-export-limit-reached:{SBER_EXPORT_MAX_RESULTS}")
+        if provider == "jira" and any(
+            page.get("returned_count") == JIRA_SEARCH_MAX_RESULTS and not page.get("page_metadata")
+            for page in snapshot["query"].get("pages", [])
+        ):
+            limitations.append(f"jira-search-limit-reached:{JIRA_SEARCH_MAX_RESULTS}")
+    limitations.extend(
+        f"general-estimate-role-unresolved:{item.get('jira_key') or item.get('sbertrek_key')}"
+        for item in merged
+        if item.get("estimate") not in (None, {}, "") and not item.get("role_estimates")
+    )
+    work_items = execution_work_items(merged)
     counts = {
         "sbertrek": len(sber_issues),
         "jira": len(jira_issues),
         "matched": len(paired_jira),
         "excluded": len(excluded),
         "merged": len(merged),
+        "work_items": len(work_items),
         "discrepancies": len(discrepancies),
     }
     groupings: dict[str, dict[str, list[str]]] = {"epics": {}, "releases": {}}
@@ -1780,6 +2250,7 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
         "counts": counts,
         "summary": summary,
         "issues": merged,
+        "work_items": work_items,
         "excluded_issues": excluded,
         "groupings": groupings,
         "discrepancies": discrepancies,
@@ -1790,11 +2261,13 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
 def render_report(result: dict) -> str:
     scope = result["scope"]
     lines = [f"# Сверка трекеров: {scope['label']}", "", "## Область", "", f"- Тип: `{scope['kind']}`", f"- Исходный трекер: `{scope['provider']}`", f"- Ключи: {', '.join(scope['ids'])}", "", "## Сводка", ""]
-    labels = {"sbertrek": "Задач SberTrek", "jira": "Задач Jira", "matched": "Склеено пар", "excluded": "Исключено SberTrek-задач", "merged": "Итоговых задач", "discrepancies": "Расхождений"}
+    labels = {"sbertrek": "Задач SberTrek", "jira": "Задач Jira", "matched": "Склеено пар", "excluded": "Исключено SberTrek-задач", "merged": "Итоговых задач", "work_items": "Ролевых полос", "discrepancies": "Расхождений"}
     lines += [f"- {labels[name]}: {value}" for name, value in result["counts"].items()]
     summary = result["summary"]
     lines += [
         f"- Суммарная оценка: {summary['story_points_total']} story-points",
+        "- По ролям: " + ", ".join(f"{role}={summary['role_estimate_totals'][role]}" for role in ESTIMATE_ROLES),
+        f"- Общих оценок распределено по префиксу: {summary['general_estimate_role_inference_count']}",
         f"- Без оценки: {summary['unestimated_issue_count']}",
         f"- Оценка в других единицах: {summary['non_story_point_estimate_count']}",
         "- Статусы: " + ", ".join(f"{name}={value}" for name, value in summary["status_counts"].items()),
@@ -1804,7 +2277,7 @@ def render_report(result: dict) -> str:
         "- Подтверждённо отсутствуют в Jira: " + (", ".join(summary["absent_jira_counterparts"]) or "нет"),
         "- Исключены задачи SberTrek: " + (", ".join(summary["excluded_sbertrek_issues"]) or "нет"),
     ]
-    lines += ["", "## Задачи", "", "| SberTrek | Jira | Название | Статус | Исполнитель | Оценка | В работе с | Состояние |", "|---|---|---|---|---|---|---|---|"]
+    lines += ["", "## Задачи", "", "| SberTrek | Jira | Название | Статус | Исполнитель | Общая оценка | AN | BE | FE | QA | В работе с | Состояние |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for item in result["issues"]:
         assignee, estimate = item.get("assignee") or {}, item.get("estimate") or {}
         if isinstance(assignee, dict):
@@ -1813,8 +2286,23 @@ def render_report(result: dict) -> str:
         else:
             assignee_text = str(assignee)
         estimate_text = f"{estimate.get('value')} {estimate.get('unit')}" if isinstance(estimate, dict) and estimate.get("value") is not None else "—"
-        cells = [item.get("sbertrek_key") or "—", item.get("jira_key") or "—", item.get("summary") or "—", item.get("status") or "—", assignee_text, estimate_text, item.get("work_started_at") or "—", item["development"]["state"]]
+        role_cells = []
+        for role in ESTIMATE_ROLES:
+            role_estimate = item.get("role_estimates", {}).get(role) or {}
+            role_cells.append(f"{role_estimate.get('value')} {role_estimate.get('unit')}" if role_estimate else "—")
+        cells = [item.get("sbertrek_key") or "—", item.get("jira_key") or "—", item.get("summary") or "—", item.get("status") or "—", assignee_text, estimate_text, *role_cells, item.get("work_started_at") or "—", item["development"]["state"]]
         lines.append("| " + " | ".join(str(cell).replace("|", "\\|") for cell in cells) + " |")
+    lines += ["", "## Ролевые полосы для Ганта", "", "| Work item | Задача | Роль | Название | Оценка | Исполнитель |", "|---|---|---|---|---:|---|"]
+    for item in result["work_items"]:
+        estimate = item["estimate"]
+        assignee = item.get("assignee") or {}
+        cells = [
+            item["work_item_id"], item["tracker_key"], item["role"], item["summary"],
+            f"{estimate.get('value')} {estimate.get('unit')}", assignee.get("team_id") or "—",
+        ]
+        lines.append("| " + " | ".join(str(cell).replace("|", "\\|") for cell in cells) + " |")
+    if not result["work_items"]:
+        lines.append("| — | — | — | — | — | — |")
     lines += ["", "## Ограничения", ""] + ([f"- {item}" for item in result["limitations"]] or ["- Нет"])
     lines += ["", "## Исключённые задачи", ""]
     lines += [
@@ -1921,9 +2409,96 @@ def begin_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def jira_ingest_epic_links_command(args: argparse.Namespace) -> int:
+    config = load_config()
+    current = current_query(args.run_id, config)
+    if not current or current[0] != "jira":
+        raise ValueError("Сейчас нет разрешённого запроса связей Jira-эпика")
+    path, snapshot = load_snapshot(args.run_id, "jira")
+    ensure_mutable(snapshot)
+    query = snapshot["query"]
+    job_path_value, job = load_job(args.run_id, "collection-jira")
+    if (
+        snapshot["scope"].get("provider") != "jira"
+        or snapshot["scope"].get("kind") != "epic"
+        or query.get("purpose") != "epic-links"
+        or query.get("method") != "issuelinks"
+        or job.get("state") not in {"pending", "running"}
+        or active_job(args.run_id) != job
+    ):
+        raise ValueError("Импорт issuelinks разрешён только активному Jira epic collector-job")
+    call = evidence(args.evidence, "jira")
+    if logged_mcp_details(args.run_id, call):
+        raise ValueError("Этот MCP-вызов уже записан в журнале")
+    _, payload, response_size, response_digest = response_json(args.response_file)
+    epic_key, links, links_path = jira_issue_links(payload)
+    expected_epic = snapshot["scope"]["ids"][0]
+    if epic_key != expected_epic:
+        raise ValueError(f"Ответ issuelinks относится к {epic_key}, ожидался {expected_epic}")
+    children = jira_epic_child_keys(links)
+    discovery_query = query["exact"]
+    details = (
+        f"operation=epic-links; outcome=success; query_sha256={query_digest(discovery_query)}; "
+        f"returned={len(links)}; child_count={len(children)}; response_sha256={response_digest}; "
+        f"response_bytes={response_size}; parser_path={links_path}; query={discovery_query}; "
+        "summary=Jira issuelinks structurally imported"
+    )
+    append_session_log(
+        args.run_id, source="mcp", event="call", provider="jira",
+        evidence_value=call, details=details,
+    )
+    query["discovery"] = {
+        "method": "issuelinks-PartOf-inward_issue",
+        "query": discovery_query,
+        "evidence": call,
+        "response_sha256": response_digest,
+        "response_bytes": response_size,
+        "records_path": links_path,
+        "link_count": len(links),
+        "child_keys": children,
+    }
+    if children:
+        exact = jql_keys(children)
+        query.update({
+            "purpose": "epic-members",
+            "language": "JQL",
+            "exact": exact,
+            "initial_exact": exact,
+            "requested_keys": children,
+            "state": "pending",
+        })
+        job["query"].update({"language": "JQL", "text": exact, "sha256": query_digest(exact)})
+        status = "jira-epic-members-query-ready"
+    else:
+        query.update({
+            "purpose": "epic-members",
+            "language": "JQL",
+            "exact": None,
+            "initial_exact": None,
+            "requested_keys": [],
+            "state": "complete",
+        })
+        status = "jira-epic-empty"
+    job["state"] = "running"
+    save_json(path, snapshot)
+    save_json(job_path_value, job)
+    args.record_sha256 = object_sha256(query["discovery"])
+    payload_out = {
+        "status": status,
+        "run_id": args.run_id,
+        "epic": epic_key,
+        "link_count": len(links),
+        "child_count": len(children),
+        "preferred_fields": list(JIRA_QUERY_FIELDS),
+        "allowed_next_action": "execute-returned-jql" if children else "collector-complete",
+    }
+    if children:
+        payload_out.update(next_query_payload("jira", query))
+    print(json.dumps(payload_out, ensure_ascii=False, indent=2))
+    return 0
+
+
 def ingest_query_response_command(args: argparse.Namespace) -> int:
-    if args.provider != "sbertrek":
-        raise ValueError("Структурный импорт полного ответа пока обязателен только для SberTrek")
     config = load_config()
     current = current_query(args.run_id, config)
     if not current or current[0] != args.provider:
@@ -1937,9 +2512,10 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
     exact_query = job["query"]["text"]
     if query["exact"] != exact_query:
         raise ValueError("Точный запрос снимка не совпадает с активным collector-job")
-    expected_max_results = job["response_contract"]["mcp_tool_contract"]["max_results"]
+    tool_contract = job["response_contract"]["mcp_tool_contract"]
+    expected_max_results = tool_contract["max_results"]
     if args.max_results != expected_max_results:
-        raise ValueError(f"SberTrek export должен использовать --max-results {expected_max_results}")
+        raise ValueError(f"Bulk-запрос {args.provider} должен использовать --max-results {expected_max_results}")
     expected_page = len(query["pages"]) + 1
     if args.page_number != expected_page:
         raise ValueError(f"Ожидалась страница {expected_page}")
@@ -1958,6 +2534,16 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
         raise ValueError("Для одной страницы точного bulk-запроса разрешён ровно один MCP-вызов")
     _, payload, response_size, response_digest = response_json(args.response_file)
     records, records_path = full_issue_records(payload)
+    page_metadata = jira_page_metadata(payload) if args.provider == "jira" else None
+    if page_metadata:
+        if page_metadata["max_results"] != args.max_results:
+            raise ValueError("Jira max_results в ответе не совпадает с запрошенным limit")
+        expected_last = page_metadata["start_at"] + len(records) >= page_metadata["total"]
+        if args.last_page != expected_last:
+            raise ValueError("Признак последней Jira-страницы не совпадает с total/start_at ответа")
+        expected_cursor = None if expected_last else str(page_metadata["start_at"] + len(records))
+        if args.next_cursor != expected_cursor:
+            raise ValueError("Jira next-cursor должен совпадать со следующим start_at из ответа")
     cards = [compact_issue_from_response(record, args.provider, snapshot["scope"]) for record in records]
     keys = [item["key"] for item in cards]
     existing_keys = set(query["keys"])
@@ -1991,6 +2577,7 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
         "returned_count": len(keys),
         "requested_max_results": args.max_results,
         "records_path": records_path,
+        "page_metadata": page_metadata,
         "cards_sha256": compact_digest,
     })
     query["keys"] = sorted(existing_keys | set(keys))
@@ -2017,11 +2604,11 @@ def mcp_log_command(args: argparse.Namespace) -> int:
     if not args.summary.strip() or len(args.summary) > 8000:
         raise ValueError("--summary должен содержать от 1 до 8000 символов")
     if args.operation in {"capability-discovery", "issue-detail"}:
-        raise ValueError("targeted-tracker-v2 запрещает exploratory и поштучные MCP-вызовы")
+        raise ValueError(f"{PROTOCOL} запрещает exploratory и поштучные MCP-вызовы")
     config = load_config()
     if args.operation == "query":
-        if args.provider == "sbertrek" and args.outcome == "success":
-            raise ValueError("Успешный SberTrek bulk-ответ регистрируется только через ingest-query-response")
+        if args.outcome == "success":
+            raise ValueError("Успешный bulk-ответ регистрируется только через ingest-query-response")
         current = current_query(args.run_id, config)
         if not current or current[0] != args.provider:
             raise ValueError("Сейчас нет разрешённого поискового запроса для этого провайдера")
@@ -2143,8 +2730,8 @@ def jira_record_absent_counterparts_command(args: argparse.Namespace) -> int:
 
 
 def query_page_command(args: argparse.Namespace) -> int:
-    if args.provider == "sbertrek":
-        raise ValueError("SberTrek-страница регистрируется только через ingest-query-response")
+    if args.provider in PROVIDERS:
+        raise ValueError(f"{args.provider}-страница регистрируется только через ingest-query-response")
     config = load_config()
     current = current_query(args.run_id, config)
     if not current or current[0] != args.provider:
@@ -2217,29 +2804,6 @@ def query_unavailable_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def jira_epic_fallback_command(args: argparse.Namespace) -> int:
-    config = load_config()
-    current = current_query(args.run_id, config)
-    if not current or current[0] != "jira":
-        raise ValueError("Fallback допустим только для текущего Jira-запроса")
-    path, snapshot = load_snapshot(args.run_id, "jira")
-    query, scope = snapshot["query"], snapshot["scope"]
-    if scope["provider"] != "jira" or scope["kind"] != "epic" or query.get("method") != "parent" or query["pages"]:
-        raise ValueError("Fallback допустим только после отказа начального parent-запроса Jira-эпика")
-    call = evidence(args.evidence, "jira")
-    require_logged_mcp(args.run_id, call, outcome="error")
-    query.update({"exact": jql_epic(scope["ids"][0], "epic-link"), "method": "epic-link", "state": "pending"})
-    save_json(path, snapshot)
-    job_file, job = load_job(args.run_id, "collection-jira")
-    job["query"].update({
-        "text": query["exact"],
-        "sha256": query_digest(query["exact"]),
-    })
-    save_json(job_file, job)
-    print(json.dumps({"status": "jira-epic-query-fallback-ready", **next_query_payload("jira", query)}, ensure_ascii=False, indent=2))
-    return 0
-
-
 def record_issue_command(args: argparse.Namespace) -> int:
     if args.provider == "sbertrek":
         raise ValueError("SberTrek-карточки создаются только структурным импортом полного JSON")
@@ -2277,6 +2841,16 @@ def record_issue_command(args: argparse.Namespace) -> int:
         "epic": {"key": issue_key(args.epic_key), "name": args.epic_name} if args.epic_key else None,
         "releases": [parse_release(item) for item in args.release],
     }
+    role_estimates: dict[str, dict] = {}
+    role_estimate_observations = {role: "absent" for role in ESTIMATE_ROLES}
+    inferred_role = role_from_summary_prefix(summary) if values["estimate"] else None
+    if inferred_role in {"AN", "BE", "FE"}:
+        role_estimates[inferred_role] = {
+            **values["estimate"],
+            "source_field": {"id": "estimate", "name": "Общая оценка"},
+            "inferred_from_general": True,
+        }
+        role_estimate_observations[inferred_role] = "value"
     observations = {"assignee": args.assignee_state, "estimate": args.estimate_state, "epic": args.epic_state, "releases": args.releases_state}
     for field, state in observations.items():
         if (state == "value") != (values[field] not in (None, [], {})):
@@ -2292,7 +2866,9 @@ def record_issue_command(args: argparse.Namespace) -> int:
     item = {
         "key": key_value, "jira_key": jira_key, "jira_key_state": jira_key_state, "evidence": call,
         "summary": summary, "issue_type": issue_type, "status": status,
-        **values, "field_observations": observations,
+        **values, "role_estimates": role_estimates,
+        "role_estimate_observations": role_estimate_observations,
+        "estimate_fields": [], "field_observations": observations,
         "created_at": args.created_at, "updated_at": args.updated_at,
         "history": {"state": "pending", "evidence": [], "events": [], "reason": None},
     }
@@ -2626,20 +3202,38 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                 "status, job_id и пути."
             )
         else:
-            prompt = (
-                run_guard +
-                f"Выполни в {job['provider']} ровно этот {language}-запрос без изменений:\n\n"
-                f"{query}\n\n"
-                "Не выполняй никаких других поисков и не заменяй запрос поиском по тексту, названию или смыслу. "
-                "Если точный Jira-запрос завершился только ошибками вида `An issue with key 'KEY' does not exist "
-                "for field 'key'`, запиши один ошибочный вызов через mcp-log, передав полный текст ошибки в "
-                "--summary, затем зарегистрируй все перечисленные ключи одной командой "
-                "jira-record-absent-counterparts. Выполни только новый точный JQL, который вернёт эта команда. "
-                "Не редактируй job, снимок, JQL или SHA-256 вручную. При любой другой ошибке остановись. "
-                f"Для записи компактного результата прочитай только {contract} и {path}. "
-                "Не создавай скрипты или другие вспомогательные файлы. После collector-complete немедленно "
-                "верни только status, job_id и пути."
-            )
+            fields = ",".join(job["response_contract"]["preferred_fields"])
+            if language == "JIRA_API":
+                prompt = (
+                    run_guard +
+                    f"Выполни в Jira ровно этот вызов без изменений:\n\n{query}\n\n"
+                    "Это единственный разрешённый поштучный вызов: он читает только поле issuelinks исходного эпика. "
+                    "Сохрани полный JSON-ответ без пересказа и передай файл команде jira-ingest-epic-links. Команда "
+                    "сама выберет только связи type.name=PartOf с inward_issue и вернёт точный JQL по всем дочерним "
+                    "ключам без фильтра по типу или статусу. Если JQL возвращён, выполни один jira_search с ним, "
+                    f"fields=\"{fields}\" и limit={JIRA_SEARCH_MAX_RESULTS}; сохрани полный JSON и передай его в "
+                    f"ingest-query-response --provider jira --max-results {JIRA_SEARCH_MAX_RESULTS}. Не вызывай "
+                    "jira_get_issue для дочерних задач и не фильтруй Done/Resolved/Closed. Если дочерних ключей нет, "
+                    "сразу выполни collector-complete. "
+                    f"Прочитай только {contract} и {path}. После collector-complete немедленно верни только status, "
+                    "job_id и пути."
+                )
+            else:
+                prompt = (
+                    run_guard +
+                    f"Выполни в Jira ровно этот {language}-запрос без изменений:\n\n{query}\n\n"
+                    f"Используй jira_search с fields=\"{fields}\" и limit={JIRA_SEARCH_MAX_RESULTS}. Не добавляй "
+                    "фильтр по статусу или типу и не выполняй поштучные jira_get_issue. Сохрани полный JSON-ответ "
+                    f"и передай его в ingest-query-response --provider jira --max-results {JIRA_SEARCH_MAX_RESULTS}; "
+                    "эта команда сама извлечёт карточки и все ролевые оценки. Для реальной пагинации продолжай тем же "
+                    "точным JQL и полученным cursor. Если точный counterpart-запрос завершился только ошибками вида "
+                    "`An issue with key 'KEY' does not exist for field 'key'`, запиши один ошибочный вызов через "
+                    "mcp-log, передав полный текст ошибки в --summary, затем зарегистрируй все перечисленные ключи "
+                    "одной командой jira-record-absent-counterparts. Выполни только новый JQL, который вернёт эта "
+                    "команда. При любой другой ошибке остановись. "
+                    f"Прочитай только {contract} и {path}. После collector-complete немедленно верни только status, "
+                    "job_id и пути."
+                )
     else:
         keys = ", ".join(job["keys"])
         calls = canonical_history_calls(job)
@@ -2653,9 +3247,15 @@ def collector_brief_command(args: argparse.Namespace) -> int:
             )
         else:
             call_list = "; ".join(f"{item['keys'][0]} -> {item['evidence']}" for item in calls)
+            exact_history = (
+                " Для Jira каждый вызов должен иметь вид jira_get_issue(issue_key=\"KEY\", "
+                "fields=\"key,status,assignee\", expand=\"changelog\"); сохрани только события assignee и status."
+                if job["provider"] == "jira" else ""
+            )
             history_instruction = (
                 f"Выполни в {job['provider']} ровно по одному запросу истории на каждый ключ: {keys}. "
-                f"Для mcp-log используй только эти соответствия ключа и evidence: {call_list}. "
+                f"Для mcp-log используй только эти соответствия ключа и evidence: {call_list}."
+                f"{exact_history} "
             )
         prompt = (
             run_guard + history_instruction +
@@ -2791,12 +3391,12 @@ def parser() -> argparse.ArgumentParser:
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config)
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
+    links = commands.add_parser("jira-ingest-epic-links"); links.add_argument("--run-id", required=True); links.add_argument("--evidence", required=True); links.add_argument("--response-file", required=True); links.set_defaults(handler=jira_ingest_epic_links_command, provider="jira")
     ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
     mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key", action="append", default=[]); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     absent = commands.add_parser("jira-record-absent-counterparts"); absent.add_argument("--run-id", required=True); absent.add_argument("--evidence", required=True); absent.add_argument("--key", action="append", default=[]); absent.set_defaults(handler=jira_record_absent_counterparts_command, provider="jira")
     page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)
     unavailable = commands.add_parser("query-unavailable"); unavailable.add_argument("--run-id", required=True); unavailable.add_argument("--provider", choices=PROVIDERS, required=True); unavailable.add_argument("--reason", required=True); unavailable.add_argument("--evidence", required=True); unavailable.set_defaults(handler=query_unavailable_command)
-    fallback = commands.add_parser("jira-epic-fallback"); fallback.add_argument("--run-id", required=True); fallback.add_argument("--evidence", required=True); fallback.set_defaults(handler=jira_epic_fallback_command)
     item = commands.add_parser("record-issue"); item.add_argument("--run-id", required=True); item.add_argument("--provider", choices=PROVIDERS, required=True); item.add_argument("--key", required=True); item.add_argument("--jira-key"); item.add_argument("--jira-key-state", choices=OBSERVATION_STATES); item.add_argument("--evidence", required=True); item.add_argument("--summary", required=True); item.add_argument("--issue-type", required=True); item.add_argument("--status", required=True); item.add_argument("--assignee-id"); item.add_argument("--assignee-name"); item.add_argument("--assignee-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--estimate", type=float); item.add_argument("--estimate-unit", default="story-points"); item.add_argument("--estimate-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--epic-key"); item.add_argument("--epic-name"); item.add_argument("--epic-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--release", action="append", default=[]); item.add_argument("--releases-state", choices=OBSERVATION_STATES, required=True); item.add_argument("--created-at"); item.add_argument("--updated-at"); item.set_defaults(handler=record_issue_command)
     collector_complete = commands.add_parser("collector-complete"); collector_complete.add_argument("--run-id", required=True); collector_complete.add_argument("--provider", choices=PROVIDERS, required=True); collector_complete.set_defaults(handler=collector_complete_command)
     event = commands.add_parser("history-event"); event.add_argument("--run-id", required=True); event.add_argument("--provider", choices=PROVIDERS, required=True); event.add_argument("--key", required=True); event.add_argument("--evidence", required=True); event.add_argument("--at", required=True); event.add_argument("--field", choices=("assignee", "status"), required=True); event.add_argument("--from-id"); event.add_argument("--from-name"); event.add_argument("--from-value"); event.add_argument("--to-id"); event.add_argument("--to-name"); event.add_argument("--to-value"); event.set_defaults(handler=history_event_command)

@@ -25,7 +25,7 @@ Avoid delegating:
   application. These remain coordinator/script responsibilities.
 
 Tracker collection is the required exception to the general critical-path rule.
-Under `targeted-tracker-v2`, every provider collection job and every bounded
+Under `targeted-tracker-v3`, every provider collection job and every bounded
 history job must run in a fresh isolated subagent. The coordinator keeps
 `config-status`, `begin`, `run_id`, `run-status`, `reconcile` and plan application;
 collectors keep MCP output out of the coordinator context and write only their

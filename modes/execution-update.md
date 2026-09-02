@@ -42,6 +42,14 @@ fills only missing values and contributes history. The read report groups the sa
 tasks independently by epic and by release. Applying selected facts to
 actual-progress is a separate, not-yet-authorized operation.
 
+Tracker estimates are applied per role. For every populated `AN / BE / FE / QA`
+estimate, create one row in `execution/tasks.md`; the same tracker key may repeat,
+but one `tracker key + role` pair may occur only once. The generator uses the
+internal id `<tracker-key>/<role>` and renders a separate bar whose summary starts
+with the role. If all role estimates are empty and only the general estimate is
+present, use it only for one unambiguous `AN`, `BE` or `FE` prefix. Do not split a
+general estimate between roles, and do not add it when any role estimate exists.
+
 ## Actual-progress scheduling rules
 
 - Do not hand-edit generated actual-progress PlantUML for task dates. Update execution markdown, then regenerate the gantt.
@@ -50,6 +58,8 @@ actual-progress is a separate, not-yet-authorized operation.
 - Inside a feature, not-started backend/API tasks lead frontend tasks. Frontend bars start no earlier than 3 open days after the earliest not-started backend/API bar in the same feature.
 - Not-started tasks must be capacity-scheduled by `documents/planning/team.md`: no resource lane above 100% on an open workday, and available resources should be used before pushing work later.
 - If executor is empty, `TBD_*`, or a non-roster lane, let the generator auto-assign by role/task prefix/summary. Valid explicit lanes such as `B2` are preserved, with dates shifted if needed to avoid overload.
+- An executor lane whose role conflicts with the work-item role is not preserved; the generator chooses a resource from the correct role roster.
+- Strip square brackets from generated PlantUML labels. In particular, tracker summary `[FE] Списковая форма` must render as `FE Списковая форма`, never as nested PlantUML brackets.
 - Actual started or completed tasks keep their actual dates, even when those dates are in the past.
 - Keep `PLAN ...` story bars visible; they are the commander-plan baseline, not a replacement for the execution task layer.
 - Never rewrite approved quarter or commander plans to absorb later scope. Render later work as task candidates or actual tasks.

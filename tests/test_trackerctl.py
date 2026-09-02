@@ -12,9 +12,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "trackerctl.py"
+JIRA_TEST_ESTIMATE_FIELDS = (
+    "customfield_15014", "customfield_15015", "customfield_15016", "customfield_15053",
+    "customfield_15062", "customfield_15063", "customfield_15064", "customfield_15065",
+    "customfield_15066", "customfield_20408", "customfield_14937", "customfield_12307",
+)
 
 
-class TrackerCtlV2Tests(unittest.TestCase):
+class TrackerCtlV3Tests(unittest.TestCase):
     def run_tool(self, state: Path, *args: str, expected: int = 0) -> dict:
         result = subprocess.run(
             (sys.executable, str(SCRIPT), *args), text=True, capture_output=True,
@@ -79,34 +84,6 @@ class TrackerCtlV2Tests(unittest.TestCase):
         ))
         return jobs[0] if jobs else None
 
-    def query_page(
-        self, state: Path, run_id: str, provider: str, keys: list[str], *,
-        page: int = 1, last: bool = True, cursor: str | None = None,
-        next_cursor: str | None = None,
-    ) -> tuple[dict, str]:
-        self.assertEqual(provider, "jira", "SberTrek pages must use structural JSON import")
-        query = self.snapshot(state, run_id, provider)["query"]["exact"]
-        evidence = f"mcp:{provider}:query:page-{page}"
-        self.run_tool(
-            state, "mcp-log", "--run-id", run_id, "--provider", provider,
-            "--operation", "query", "--outcome", "success", "--evidence", evidence,
-            "--summary", "targeted query", "--query", query,
-            "--page-number", str(page), "--returned-count", str(len(keys)),
-        )
-        args = [
-            "query-page", "--run-id", run_id, "--provider", provider,
-            "--query", query, "--page-number", str(page), "--evidence", evidence,
-        ]
-        if cursor:
-            args += ["--cursor", cursor]
-        if last:
-            args += ["--last-page"]
-        else:
-            args += ["--next-cursor", next_cursor or f"cursor-{page + 1}"]
-        for key in keys:
-            args += ["--key", key]
-        return self.run_tool(state, *args), evidence
-
     def record_absent_counterparts(
         self, state: Path, run_id: str, keys: list[str], *,
         evidence: str = "mcp:jira:query:absent-counterparts",
@@ -135,6 +112,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
         assignee_name: str | None = None,
         estimate: str | None = None, epic: str | None = None,
         summary: str | None = None, status: str = "active",
+        role_estimates: dict[str, float] | None = None,
         include_attributes: bool = True,
     ) -> dict:
         attributes = []
@@ -145,6 +123,15 @@ class TrackerCtlV2Tests(unittest.TestCase):
             })
         if estimate:
             attributes.append({"code": "story_points", "value": estimate})
+        sber_role_fields = {
+            "AN": ("analysis_estimate", "Анализ"),
+            "BE": ("backend_estimate", "Разработка BE"),
+            "FE": ("frontend_estimate", "Разработка FE"),
+            "QA": ("testing_estimate", "Тестирование"),
+        }
+        for role, value in (role_estimates or {}).items():
+            code, name = sber_role_fields[role]
+            attributes.append({"code": code, "name": name, "value": value})
         if jira_key:
             attributes.append({"code": "issue_key", "value": jira_key})
         if epic:
@@ -182,46 +169,76 @@ class TrackerCtlV2Tests(unittest.TestCase):
             args += ["--next-cursor", "cursor-2"]
         return self.run_tool(state, *args)
 
-    def issue_args(
-        self, run_id: str, provider: str, key: str, evidence: str, *,
-        jira_key: str | None = None, assignee: str | None = None,
+    def jira_response_issue(
+        self, key: str, *, assignee: str | None = None,
         estimate: str | None = None, epic: str | None = None,
         summary: str | None = None, status: str = "active",
-        jira_key_state: str | None = None,
-    ) -> list[str]:
-        args = [
-            "record-issue", "--run-id", run_id, "--provider", provider,
-            "--key", key, "--evidence", evidence,
-            "--summary", summary or f"Issue {key}",
-            "--issue-type", "story", "--status", status,
-            "--assignee-state", "value" if assignee else "absent",
-            "--estimate-state", "value" if estimate else "absent",
-            "--epic-state", "value" if epic else "absent", "--releases-state", "absent",
-            "--created-at", "2026-08-01T08:00:00+00:00",
-            "--updated-at", "2026-08-27T08:00:00+00:00",
-        ]
-        if provider == "sbertrek":
-            args += ["--jira-key-state", jira_key_state or ("value" if jira_key else "absent")]
-        if jira_key:
-            args += ["--jira-key", jira_key]
-        if assignee:
-            args += ["--assignee-id", assignee, "--assignee-name", assignee]
-        if estimate:
-            args += ["--estimate", estimate, "--estimate-unit", "person-days"]
+        role_estimates: dict[str, float] | None = None,
+        estimate_fields: dict[str, float] | None = None,
+    ) -> dict:
+        role_fields = {"AN": "customfield_15062", "BE": "customfield_15014", "FE": "customfield_15015", "QA": "customfield_15064"}
+        item = {
+            "key": key,
+            "summary": summary or f"Issue {key}",
+            "issue_type": {"name": "Story"},
+            "status": {"name": status},
+            "assignee": {"id": assignee, "display_name": assignee} if assignee else None,
+            "created": "2026-08-01T08:00:00+00:00",
+            "updated": "2026-08-27T08:00:00+00:00",
+            "fixVersions": [],
+            **{field_id: {"value": None} for field_id in JIRA_TEST_ESTIMATE_FIELDS},
+        }
+        if estimate is not None:
+            item["estimate"] = {"value": float(estimate)}
         if epic:
-            args += ["--epic-key", epic, "--epic-name", f"Epic {epic}"]
-        return args
+            item["epic"] = {"key": epic, "name": f"Epic {epic}"}
+        for role, value in (role_estimates or {}).items():
+            item[role_fields[role]] = {"value": value}
+        for field_id, value in (estimate_fields or {}).items():
+            item[field_id] = {"value": value}
+        return item
 
-    def add_issue(self, state: Path, run_id: str, provider: str, key: str, evidence: str, **kwargs) -> dict:
-        return self.run_tool(state, *self.issue_args(run_id, provider, key, evidence, **kwargs))
+    def ingest_jira_response(
+        self, state: Path, run_id: str, issues: list[tuple[str, dict]], *,
+        page: int = 1, start_at: int = 0, total: int | None = None,
+        last: bool = True,
+    ) -> dict:
+        records = [self.jira_response_issue(key, **values) for key, values in issues]
+        payload = {
+            "total": len(records) if total is None else total,
+            "start_at": start_at,
+            "max_results": 50,
+            "issues": records,
+        }
+        response = state / "mcp-responses" / f"{run_id}-jira-{page}.json"
+        self.write(response, payload)
+        args = [
+            "ingest-query-response", "--run-id", run_id, "--provider", "jira",
+            "--page-number", str(page), "--max-results", "50",
+            "--evidence", f"mcp:jira:query:page-{page}", "--response-file", str(response),
+        ]
+        if page > 1:
+            args += ["--cursor", str(start_at)]
+        if last:
+            args.append("--last-page")
+        else:
+            args += ["--next-cursor", str(start_at + len(records))]
+        return self.run_tool(state, *args)
+
+    def ingest_jira_epic_links(self, state: Path, run_id: str, links: list[dict]) -> dict:
+        response = state / "mcp-responses" / f"{run_id}-jira-epic-links.json"
+        epic = self.snapshot(state, run_id, "jira")["scope"]["ids"][0]
+        self.write(response, {"key": epic, "issuelinks": links})
+        return self.run_tool(
+            state, "jira-ingest-epic-links", "--run-id", run_id,
+            "--evidence", "mcp:jira:epic-links", "--response-file", str(response),
+        )
 
     def collect(self, state: Path, run_id: str, provider: str, issues: list[tuple[str, dict]]) -> dict:
         if provider == "sbertrek":
             self.ingest_sber_response(state, run_id, issues)
         else:
-            _, evidence = self.query_page(state, run_id, provider, [key for key, _ in issues])
-            for key, values in issues:
-                self.add_issue(state, run_id, provider, key, evidence, **values)
+            self.ingest_jira_response(state, run_id, issues)
         return self.run_tool(state, "collector-complete", "--run-id", run_id, "--provider", provider)
 
     def complete_history_job(self, state: Path, run_id: str, *, handoff_key: str | None = None) -> None:
@@ -230,10 +247,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
         assert job
         self.assertEqual(job["kind"], "provider-history")
         provider = job["provider"]
-        if job["call_mode"] == "batch":
-            calls = [(f"mcp:{provider}:history-batch:{job['job_id']}", job["keys"])]
-        else:
-            calls = [(f"mcp:{provider}:history:{key}", [key]) for key in job["keys"]]
+        calls = [(f"mcp:{provider}:history:{key}", [key]) for key in job["keys"]]
         evidence_by_key = {}
         for evidence, keys in calls:
             args = [
@@ -300,7 +314,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
     def test_begin_creates_isolated_collection_job(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); payload = self.begin(state, ids=("RSCON-6849", "RSCON-6848"))
-            self.assertEqual(payload["protocol"], "targeted-tracker-v2")
+            self.assertEqual(payload["protocol"], "targeted-tracker-v3")
             self.assertTrue(payload["delegation_required"])
             job = self.job(state, payload["run_id"], "collection-sbertrek")
             query = 'unit = "RSCON-6848" or unit = "RSCON-6849"'
@@ -374,7 +388,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
         cases = [
             ("sbertrek", "tasks", ("RSCON-6848", "RSCON-6849"), 'unit = "RSCON-6848" or unit = "RSCON-6849"'),
             ("jira", "tasks", ("RSCON-2905", "RSCON-2906"), 'key IN ("RSCON-2905", "RSCON-2906")'),
-            ("jira", "epic", ("RSCON-2911",), 'parent = "RSCON-2911"'),
+            ("jira", "epic", ("RSCON-2911",), 'jira_get_issue(issue_key="RSCON-2911", fields="issuelinks")'),
         ]
         for provider, kind, ids, exact in cases:
             with self.subTest(provider=provider, kind=kind), tempfile.TemporaryDirectory() as temp:
@@ -403,6 +417,95 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertEqual(snapshot["query"]["pages"][0]["recording_method"], "structural-json-import")
             self.assertEqual(snapshot["query"]["pages"][0]["requested_max_results"], 50)
             self.assertRegex(snapshot["query"]["pages"][0]["response_sha256"], r"^[a-f0-9]{64}$")
+
+    def test_sbertrek_reads_all_role_estimates_from_attributes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.ingest_sber_response(state, run_id, [
+                ("RSCON-6845", {"role_estimates": {"AN": 1, "BE": 2, "FE": 3, "QA": 4}}),
+            ])
+            issue = self.snapshot(state, run_id, "sbertrek")["issues"][0]
+            self.assertEqual(
+                {role: value["value"] for role, value in issue["role_estimates"].items()},
+                {"AN": 1.0, "BE": 2.0, "FE": 3.0, "QA": 4.0},
+            )
+
+    def test_general_estimate_is_inferred_only_for_one_unambiguous_prefix(self) -> None:
+        cases = [
+            ("[BE] Backend task", "BE"),
+            ("[FE] Frontend task", "FE"),
+            ("AN: Analysis task", "AN"),
+            ("[ВE] Mixed alphabet backend task", "BE"),
+        ]
+        for summary, role in cases:
+            with self.subTest(summary=summary), tempfile.TemporaryDirectory() as temp:
+                state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+                self.ingest_sber_response(state, run_id, [
+                    ("RSCON-6845", {"estimate": "3", "summary": summary}),
+                ])
+                issue = self.snapshot(state, run_id, "sbertrek")["issues"][0]
+                self.assertEqual(set(issue["role_estimates"]), {role})
+                self.assertTrue(issue["role_estimates"][role]["inferred_from_general"])
+
+    def test_general_estimate_is_not_inferred_for_multiple_prefixes_or_existing_role_estimate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(
+                state, ids=("RSCON-6845", "RSCON-6846", "RSCON-6847"), jira=False,
+            )["run_id"]
+            self.ingest_sber_response(state, run_id, [
+                ("RSCON-6845", {"estimate": "3", "summary": "[FE][BE] Shared task"}),
+                ("RSCON-6846", {"estimate": "5", "summary": "[BE] Backend task", "role_estimates": {"QA": 2}}),
+                ("RSCON-6847", {"estimate": "2", "summary": "[QA] Testing task"}),
+            ])
+            issues = {item["key"]: item for item in self.snapshot(state, run_id, "sbertrek")["issues"]}
+            self.assertEqual(issues["RSCON-6845"]["role_estimates"], {})
+            self.assertEqual(set(issues["RSCON-6846"]["role_estimates"]), {"QA"})
+            self.assertEqual(issues["RSCON-6847"]["role_estimates"], {})
+
+    def test_role_estimates_merge_per_role_with_sbertrek_priority(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-6845", {
+                    "jira_key": "RSCON-2902", "summary": "[FE] Feature task",
+                    "role_estimates": {"FE": 2},
+                }),
+            ])
+            self.collect(state, run_id, "jira", [
+                ("RSCON-2902", {"summary": "[FE] Feature task", "role_estimates": {"AN": 1, "FE": 3, "QA": 4}}),
+            ])
+            self.complete_all_histories(state, run_id)
+            self.run_tool(state, "reconcile", "--run-id", run_id)
+            result = json.loads((self.root(state, run_id) / "reconciled.json").read_text(encoding="utf-8"))
+            issue = result["issues"][0]
+            self.assertEqual(issue["role_estimates"]["FE"]["value"], 2.0)
+            self.assertEqual(issue["role_estimates"]["FE"]["source"], "sbertrek")
+            self.assertEqual(issue["role_estimates"]["AN"]["source"], "jira")
+            self.assertEqual(issue["role_estimates"]["QA"]["source"], "jira")
+            self.assertIn("role_estimates.FE", {item.get("field") for item in result["discrepancies"]})
+
+    def test_jira_role_estimates_create_separate_work_items_without_counting_general_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-6845", {"jira_key": "RSCON-2932", "summary": "Delivery task"}),
+            ])
+            self.collect(state, run_id, "jira", [
+                ("RSCON-2932", {
+                    "summary": "Delivery task",
+                    "role_estimates": {"AN": 1, "FE": 3, "QA": 12},
+                    "estimate_fields": {"customfield_12307": 4},
+                }),
+            ])
+            self.complete_all_histories(state, run_id)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["counts"]["work_items"], 3)
+            self.assertEqual(payload["summary"]["story_points_total"], 16.0)
+            self.assertEqual(payload["summary"]["role_estimate_totals"], {"AN": 1.0, "BE": 0.0, "FE": 3.0, "QA": 12.0})
+            self.assertEqual(
+                {item["work_item_id"] for item in json.loads((self.root(state, run_id) / "reconciled.json").read_text(encoding="utf-8"))["work_items"]},
+                {"RSCON-2932/AN", "RSCON-2932/FE", "RSCON-2932/QA"},
+            )
 
     def test_structural_import_rejects_non_maximum_sbertrek_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -582,7 +685,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
         cases = [
             ("sbertrek", "epic", ("RSCON-6607",), 'unit IN linkedUnitsOf("unit = \'RSCON-6607\'", "Состоит из")'),
             ("jira", "tasks", ("RSCON-2906", "RSCON-2905"), 'key IN ("RSCON-2905", "RSCON-2906")'),
-            ("jira", "epic", ("RSCON-2911",), 'parent = "RSCON-2911"'),
+            ("jira", "epic", ("RSCON-2911",), 'jira_get_issue(issue_key="RSCON-2911", fields="issuelinks")'),
         ]
         for provider, kind, ids, expected_query in cases:
             with self.subTest(provider=provider, kind=kind), tempfile.TemporaryDirectory() as temp:
@@ -602,58 +705,54 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertNotIn("issue_type", fields)
             self.assertNotIn("releases", fields)
 
-    def test_jira_epic_fallback_updates_job_hash(self) -> None:
+    def test_jira_epic_links_select_only_inward_partof_children(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state, provider="jira", kind="epic", ids=("RSCON-2911",))["run_id"]
-            query = self.snapshot(state, run_id, "jira")["query"]["exact"]
-            evidence = "mcp:jira:query:parent-error"
-            self.run_tool(state, "mcp-log", "--run-id", run_id, "--provider", "jira", "--operation", "query", "--outcome", "error", "--evidence", evidence, "--summary", "parent unsupported", "--query", query, "--page-number", "1", "--returned-count", "0")
-            self.run_tool(state, "jira-epic-fallback", "--run-id", run_id, "--evidence", evidence)
-            job = self.job(state, run_id, "collection-jira"); fallback = '"Epic Link" = "RSCON-2911"'
-            self.assertEqual(job["query"]["text"], fallback)
-            self.assertEqual(job["query"]["sha256"], hashlib.sha256(fallback.encode()).hexdigest())
+            links = [
+                {"type": {"name": "PartOf"}, "inward_issue": {"key": "RSCON-3001"}},
+                {"type": {"name": "PartOf"}, "outward_issue": {"key": "RSCON-3002"}},
+                {"type": {"name": "Cloners"}, "inward_issue": {"key": "RSCON-3003"}},
+            ]
+            payload = self.ingest_jira_epic_links(state, run_id, links)
+            expected = 'key IN ("RSCON-3001")'
+            self.assertEqual(payload["next_query"]["query"], expected)
+            self.assertEqual(self.job(state, run_id, "collection-jira")["query"]["text"], expected)
 
     def test_arbitrary_query_is_rejected_and_exploratory_commands_are_not_exposed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state, provider="jira")["run_id"]
             payload = self.run_tool(state, "mcp-log", "--run-id", run_id, "--provider", "jira", "--operation", "query", "--outcome", "success", "--evidence", "mcp:jira:query:wrong", "--summary", "wrong", "--query", "summary contains cohorts", "--page-number", "1", "--returned-count", "1", expected=2)
-            self.assertIn("точный JQL", payload["error"])
+            self.assertIn("только через ingest-query-response", payload["error"])
             help_text = subprocess.run((sys.executable, str(SCRIPT), "mcp-log", "--help"), text=True, capture_output=True, check=True).stdout
             self.assertNotIn("capability-discovery", help_text)
             self.assertNotIn("issue-detail", help_text)
 
-    def test_only_one_bulk_call_is_allowed_for_each_query_page(self) -> None:
+    def test_only_one_structural_import_is_allowed_for_each_query_page(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state, provider="jira")["run_id"]
-            query = self.snapshot(state, run_id, "jira")["query"]["exact"]
-            common = [
-                "--run-id", run_id, "--provider", "jira", "--operation", "query",
-                "--outcome", "success", "--summary", "targeted query", "--query", query,
-                "--page-number", "1", "--returned-count", "1",
-            ]
-            self.run_tool(state, "mcp-log", *common, "--evidence", "mcp:jira:query:first")
+            self.ingest_jira_response(state, run_id, [("RSCON-6845", {})], total=2, last=False)
             payload = self.run_tool(
-                state, "mcp-log", *common, "--evidence", "mcp:jira:query:second", expected=2,
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
+                "--page-number", "1", "--max-results", "50", "--last-page",
+                "--evidence", "mcp:jira:query:duplicate",
+                "--response-file", str(state / "mcp-responses" / f"{run_id}-jira-1.json"), expected=2,
             )
-            self.assertIn("ровно один MCP-вызов", payload["error"])
+            self.assertIn("Ожидалась страница 2", payload["error"])
 
-    def test_query_page_rejects_returned_count_mismatch(self) -> None:
+    def test_jira_structural_import_rejects_pagination_metadata_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state, provider="jira")["run_id"]
-            query = self.snapshot(state, run_id, "jira")["query"]["exact"]
-            evidence = "mcp:jira:query:count-mismatch"
-            self.run_tool(
-                state, "mcp-log", "--run-id", run_id, "--provider", "jira",
-                "--operation", "query", "--outcome", "success", "--evidence", evidence,
-                "--summary", "targeted query", "--query", query, "--page-number", "1",
-                "--returned-count", "2",
-            )
+            response = state / "jira-page.json"
+            self.write(response, {
+                "total": 2, "start_at": 0, "max_results": 50,
+                "issues": [self.jira_response_issue("RSCON-6845")],
+            })
             payload = self.run_tool(
-                state, "query-page", "--run-id", run_id, "--provider", "jira",
-                "--query", query, "--page-number", "1", "--last-page", "--evidence", evidence,
-                "--key", "RSCON-6845", expected=2,
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
+                "--page-number", "1", "--max-results", "50", "--last-page",
+                "--evidence", "mcp:jira:query:bad-pagination", "--response-file", str(response), expected=2,
             )
-            self.assertIn("числом возвращённых ключей", payload["error"])
+            self.assertIn("последней Jira-страницы", payload["error"])
 
     def test_collector_complete_requires_every_returned_card(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -706,7 +805,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             payload = self.run_tool(state, "reconcile", "--run-id", run_id)
             self.assertEqual(payload["counts"], {
                 "sbertrek": 3, "jira": 1, "matched": 1,
-                "excluded": 1, "merged": 2, "discrepancies": 2,
+                "excluded": 1, "merged": 2, "work_items": 0, "discrepancies": 2,
             })
             self.assertEqual(payload["summary"]["story_points_total"], 8.0)
             self.assertEqual(payload["summary"]["excluded_sbertrek_issues"], ["RSCON-2"])
@@ -772,8 +871,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             job = json.loads(job_path.read_text(encoding="utf-8"))
             job["query"].update({"text": narrowed, "sha256": hashlib.sha256(narrowed.encode()).hexdigest()})
             self.write(job_path, job)
-            _, evidence = self.query_page(state, run_id, "jira", ["RSCON-101"])
-            self.add_issue(state, run_id, "jira", "RSCON-101", evidence)
+            self.ingest_jira_response(state, run_id, [("RSCON-101", {})])
             payload = self.run_tool(
                 state, "collector-complete", "--run-id", run_id,
                 "--provider", "jira", expected=2,
@@ -856,7 +954,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             )
             self.assertIn("зарегистрированным каноническим вызовом", payload["error"])
 
-    def test_jira_history_rejects_relabelled_per_key_evidence_for_one_batch(self) -> None:
+    def test_jira_history_rejects_evidence_for_another_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
             run_id = self.begin(state, ids=("RSCON-6845", "RSCON-6846"))["run_id"]
@@ -868,26 +966,17 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.complete_history_job(state, run_id)
             job = self.active_job(state, run_id); assert job
             self.assertEqual(job["provider"], "jira")
-            self.assertEqual(job["call_mode"], "batch")
+            self.assertEqual(job["call_mode"], "per-key")
             payload = self.run_tool(
                 state, "mcp-log", "--run-id", run_id, "--provider", "jira",
                 "--operation", "history", "--outcome", "success",
                 "--evidence", "mcp:jira:history:RSCON-2902",
-                "--summary", "one batch relabelled as one key", "--key", "RSCON-2902",
+                "--summary", "wrong key for evidence", "--key", "RSCON-2903",
                 expected=2,
             )
             self.assertIn("канонический evidence", payload["error"])
 
-            canonical = f"mcp:jira:history-batch:{job['job_id']}"
-            payload = self.run_tool(
-                state, "mcp-log", "--run-id", run_id, "--provider", "jira",
-                "--operation", "history", "--outcome", "success",
-                "--evidence", canonical, "--summary", "incomplete batch key set",
-                "--key", "RSCON-2902", expected=2,
-            )
-            self.assertIn("точный набор ключей job", payload["error"])
-
-    def test_jira_history_job_records_one_canonical_batch_call(self) -> None:
+    def test_jira_history_job_records_one_canonical_call_per_key(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
             run_id = self.begin(state, ids=("RSCON-6845", "RSCON-6846"))["run_id"]
@@ -898,9 +987,12 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.collect(state, run_id, "jira", [("RSCON-2902", {}), ("RSCON-2903", {})])
             self.complete_all_histories(state, run_id)
             job = self.job(state, run_id, "history-jira-01")
-            self.assertEqual(len(job["calls"]), 1)
-            self.assertEqual(job["calls"][0]["keys"], ["RSCON-2902", "RSCON-2903"])
-            self.assertEqual(job["calls"][0]["evidence"], "mcp:jira:history-batch:history-jira-01")
+            self.assertEqual(len(job["calls"]), 2)
+            self.assertEqual([call["keys"] for call in job["calls"]], [["RSCON-2902"], ["RSCON-2903"]])
+            self.assertEqual(
+                [call["evidence"] for call in job["calls"]],
+                ["mcp:jira:history:RSCON-2902", "mcp:jira:history:RSCON-2903"],
+            )
 
     def test_reconcile_preserves_sbertrek_and_computes_dates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1088,7 +1180,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             snapshot["issues"][0]["summary"] = "Ручная подмена"
             self.write(path, snapshot)
             payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=2)
-            self.assertIn("record-issue", payload["error"])
+            self.assertIn("структурного импорта", payload["error"])
 
     def test_direct_history_event_edit_blocks_reconcile(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1149,7 +1241,7 @@ class TrackerCtlV2Tests(unittest.TestCase):
             self.assertTrue((root / "jobs").is_dir())
             self.assertTrue((root / "providers" / "sbertrek.json").is_file())
             self.assertFalse(payload["planning_application_allowed"])
-            self.assertEqual(payload["protocol"], "targeted-tracker-v2")
+            self.assertEqual(payload["protocol"], "targeted-tracker-v3")
             self.assertEqual(payload["summary"]["story_points_total"], 5.0)
             self.assertEqual(
                 sum(payload["summary"]["discrepancy_kind_counts"].values()),

@@ -11,6 +11,10 @@ Slice: `../slice.md`
 - `Kind` показывает, является ли execution item реальной Jira-задачей (`real`) или временной виртуальной задачей (`virtual`).
 - `Progress %` нужен для информативного actual-progress gantt.
 - `Role` хранит семантическую роль: `AN`, `BE`, `FE`, `QA`.
+- Одна реальная задача трекера может повторяться в таблице по одному разу для каждой заполненной ролевой оценки. Пара `Jira + Role` уникальна и создаёт отдельную полосу Ганта с внутренним идентификатором `<Jira>/<Role>`.
+- Если ролевых оценок нет, но есть общая оценка, перенеси её в роль только при одном однозначном префиксе задачи: `AN`, `BE` или `FE`. Для нескольких префиксов или отсутствующего префикса не распределяй общую оценку автоматически.
+- Общая оценка не создаёт дополнительную полосу и не прибавляется к сумме, когда заполнена хотя бы одна ролевая оценка.
+- Перед генерацией PlantUML квадратные скобки удаляются из видимого названия задачи и story: `[FE] Списковая форма` отображается как `FE Списковая форма`.
 - `Executor` хранит ресурсную дорожку из `planning/team.md`. По умолчанию: `A1-A3`, `B1-B3`, `F1-F2`, `Q1-Q3`.
 - Если роль известна, а конкретный ресурс нет, используем `TBD_A`, `TBD_B`, `TBD_F`, `TBD_Q`.
 - Допустимые алиасы для ввода нормализуются при генерации: `AN/A/analyst/аналитик`, `BE/B/back/backend/api/бэк/бек/бэкенд`, `FE/F/front/frontend/фронт/фронтенд/фронтендер`, `QA/Q/test/testing/тест/тестирование/тестировщик`.
@@ -23,7 +27,8 @@ Slice: `../slice.md`
 
 | Jira | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories | Details |
 |---|---|---|---|---:|---|---|---|---|---|---|---:|---|---|
-| BE-XXX-001 | <backend/api task> | virtual | BE | 3 | B1 | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 | STORY-XXX-001 |  |
-| FE-XXX-001 | <frontend task> | virtual | FE | 3 | F1 | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 | STORY-XXX-001 |  |
+| PROJECT-123 | AN <analysis part of task> | real | AN | 1 | A1 | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 | STORY-XXX-001 |  |
+| PROJECT-123 | BE <backend part of task> | real | BE | 3 | B1 | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 | STORY-XXX-001 |  |
+| PROJECT-123 | QA <testing part of task> | real | QA | 2 | Q1 | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 | STORY-XXX-001 |  |
 
 ## Notes

@@ -40,9 +40,10 @@ SberTrek collection-job выбери только операцию `issue.export
    `issue_key` и `fixversion`. Не подставляй эти коды вместо `attributes`, не
    передавай `fields=null` и не запрашивай все поля карточки.
 3. Для SberTrek выполни один export-вызов с `max_results: 50`; пагинацию и
-   альтернативное получение ключей не придумывай. Для Jira продолжай только
-   реальную пагинацию тем же запросом и полученным cursor.
-4. Для SberTrek используй полный JSON-файл, созданный самим MCP-инструментом. Не
+   альтернативное получение ключей не придумывай. Для Jira используй `limit: 50`
+   и продолжай только реальную пагинацию тем же запросом и полученным cursor.
+   Не добавляй фильтр по статусу или типу задачи.
+4. Для обоих провайдеров используй полный JSON-файл, созданный самим MCP-инструментом. Не
    открывай его через `read_file`, не анализируй preview и не переписывай увиденные
    элементы вручную: интерфейс может скрыть середину большого ответа. Передай
    исходный путь без копирования в `trackerctl.py ingest-query-response`. Команда
@@ -52,19 +53,23 @@ SberTrek collection-job выбери только операцию `issue.export
 
    ```bash
    python3 <HARNESS_ROOT>/scripts/trackerctl.py ingest-query-response \
-     --run-id <run-id> --provider sbertrek --page-number 1 --last-page \
+     --run-id <run-id> --provider <provider> --page-number 1 --last-page \
      --max-results 50 \
-     --evidence mcp:sbertrek:<unique-call-id> \
+     --evidence mcp:<provider>:<unique-call-id> \
      --response-file <absolute-mcp-json-path>
    ```
 
    Команда сама берёт точный запрос из активного job; не вставляй TQL в shell и
    не пытайся вручную экранировать его кавычки.
 
-5. Для Jira после каждого вызова сразу запиши evidence через `trackerctl.py mcp-log`,
-   затем страницу через `query-page`; для каждого ключа страницы запиши компактную
-   карточку через `record-issue`. Используй только данные bulk-ответа. Не вызывай
-   detail по каждой задаче.
+5. Для Jira-эпика сначала выполни единственный разрешённый detail-вызов
+   `jira_get_issue(issue_key="KEY", fields="issuelinks")` и передай полный JSON
+   команде `jira-ingest-epic-links`. Она сама выберет только `PartOf + inward_issue`
+   и вернёт точный `key IN (...)`. Затем выполни один `jira_search` по всем этим
+   ключам с полями из `response_contract.preferred_fields` и передай полный JSON в
+   `ingest-query-response`. Для обычной Jira-области сразу выполни такой bulk-поиск.
+   Не вызывай detail по дочерним задачам и не используй ручные `query-page` или
+   `record-issue`.
    Если точный Jira counterpart-запрос завершился ошибкой, которая явно состоит
    из сообщений `An issue with key 'KEY' does not exist for field 'key'`, передай
    полный текст ошибки в `mcp-log --outcome error --summary`, затем одной командой
@@ -74,8 +79,10 @@ SberTrek collection-job выбери только операцию `issue.export
    одного. Выполни только возвращённый JQL. Не редактируй job, provider JSON,
    текст запроса или SHA-256 вручную. При ошибке другого вида остановись.
 6. Не сохраняй описание, комментарии, вложения и полный ответ в tracker-run.
-7. Для `assignee`, `estimate`, `epic`, `releases` различай `value`, `absent` и
-   `not-returned`. Сохрани обязательные `created_at` и `updated_at`.
+7. Для `assignee`, общей оценки, каждой оценки `AN / BE / FE / QA`, `epic` и
+   `releases` различай `value`, `absent` и `not-returned`. Сохрани обязательные
+   `created_at` и `updated_at`. Не вычисляй роль общей оценки сам: это делает
+   `trackerctl.py` только по однозначному префиксу задачи.
 8. Для SberTrek извлеки Jira key только из атрибута с `code: issue_key` и передай
    `jira_key_state`: `value`, если ключ есть; `absent`, если список атрибутов
    возвращён и такого атрибута нет; `not-returned`, только если MCP не вернул
@@ -89,13 +96,11 @@ counterpart-провайдера можно зарегистрировать ч�
 
 ## History job
 
-Следуй `call_mode` и каноническим evidence из job:
-
-- для Jira `call_mode=batch`: выполни ровно один batch-вызов истории для полного
-  набора `keys`, зарегистрируй его одним `mcp-log` и передай каждый ключ отдельным
-  `--key`; нельзя переименовывать один batch-ответ в несколько evidence;
-- для SberTrek `call_mode=per-key`: выполни ровно один вызов на каждый ключ и
-  используй только канонический evidence этого ключа.
+Следуй `call_mode=per-key` и каноническим evidence из job. Для Jira каждый вызов
+имеет вид `jira_get_issue(issue_key="KEY", fields="key,status,assignee",
+expand="changelog")`. Для SberTrek также выполни ровно один history-вызов на
+каждый ключ. Используй только evidence соответствующего ключа: ответ одного
+вызова нельзя переименовать или зарегистрировать для нескольких задач.
 
 После разрешённого вызова:
 
