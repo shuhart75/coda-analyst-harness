@@ -1118,6 +1118,75 @@ class TrackerCtlV3Tests(unittest.TestCase):
             )
             self.assertIn("record_cards.py", payload["error"])
 
+    def test_integrity_error_is_terminal_even_after_unexpected_file_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            self.ingest_sber_response(state, run_id, [("RSCON-6845", {})])
+            helper = self.root(state, run_id) / "responses"
+            helper.mkdir()
+            failed = self.run_tool(
+                state, "collector-complete", "--run-id", run_id,
+                "--provider", "sbertrek", expected=2,
+            )
+            self.assertEqual(failed["status"], "tracker-read-failed")
+            self.assertEqual(failed["allowed_next_action"], "abandon-run")
+            self.assertFalse(failed["final_response_allowed"])
+
+            helper.rmdir()
+            retried = self.run_tool(
+                state, "collector-complete", "--run-id", run_id,
+                "--provider", "sbertrek", expected=2,
+            )
+            self.assertEqual(retried["status"], "tracker-read-failed")
+            self.assertEqual(retried["failure"], failed["failure"])
+            status = self.run_tool(state, "run-status", "--run-id", run_id, expected=2)
+            self.assertEqual(status["status"], "tracker-read-failed")
+
+            abandoned = self.run_tool(
+                state, "abandon-run", "--run-id", run_id, "--reason", "failed test run",
+            )
+            self.assertEqual(abandoned["status"], "tracker-read-abandoned")
+
+    def test_coordinator_can_mark_subagent_failure_without_retrying_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state)["run_id"]
+            failed = self.run_tool(
+                state, "fail-run", "--run-id", run_id,
+                "--reason", "collector runtime unavailable", expected=2,
+            )
+            self.assertEqual(failed["status"], "tracker-read-failed")
+            self.assertEqual(failed["failure"]["source"], "collector-subagent")
+            blocked = self.run_tool(state, "collector-brief", "--run-id", run_id, expected=2)
+            self.assertEqual(blocked["status"], "tracker-read-failed")
+
+    def test_history_brief_forbids_query_flags_and_any_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
+            prompt = self.run_tool(state, "collector-brief", "--run-id", run_id)["prompt"]
+            self.assertIn("--query, --page-number и --returned-count запрещены", prompt)
+            self.assertIn("не исправляй её и не повторяй job", prompt)
+            self.assertIn("не перемещай MCP-ответы", prompt)
+
+    def test_invalid_history_log_arguments_make_the_run_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
+            evidence = "mcp:sbertrek:history:RSCON-6845"
+            failed = self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "history", "--outcome", "success", "--evidence", evidence,
+                "--summary", "history", "--key", "RSCON-6845", "--query", "invalid",
+                "--page-number", "1", "--returned-count", "0", expected=2,
+            )
+            self.assertEqual(failed["status"], "tracker-read-failed")
+            retried = self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "history", "--outcome", "success", "--evidence", evidence,
+                "--summary", "history", "--key", "RSCON-6845", expected=2,
+            )
+            self.assertEqual(retried["status"], "tracker-read-failed")
+
     def test_history_is_split_into_bounded_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); ids = tuple(f"RSCON-{index}" for index in range(1, 18)); run_id = self.begin(state, ids=ids, jira=False)["run_id"]
@@ -1514,6 +1583,18 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.write(path, job)
             payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=2)
             self.assertIn("каноническому контракту", payload["error"])
+
+    def test_duplicate_history_mcp_evidence_blocks_reconcile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_sber_run(state)
+            log_path = root / "tracker-session-log.md"
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+            duplicate = next(line for line in lines if "| mcp | call |" in line and "operation=history" in line)
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(duplicate + "\n")
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=2)
+            self.assertEqual(payload["status"], "tracker-read-failed")
+            self.assertIn("более одного раза", payload["error"])
 
     def test_secondary_query_unavailable_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

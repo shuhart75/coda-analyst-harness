@@ -14,7 +14,7 @@ from typing import Any
 
 
 PROTOCOL = "targeted-tracker-v3"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -41,6 +41,12 @@ HISTORY_BATCH_SIZE = 8
 ESTIMATE_ROLES = ("AN", "BE", "FE", "QA")
 DEVELOPMENT_DECISION_STATES = ("completed", "in-progress", "not-started", "unknown")
 DEVELOPMENT_DECISION_CHOICES = ("sbertrek", "jira", "custom")
+FAIL_CLOSED_COMMANDS = {
+    "sbertrek-ingest-counterpart-epic", "ingest-query-response", "mcp-log",
+    "jira-record-absent-counterparts", "query-page", "query-unavailable",
+    "record-issue", "collector-complete", "history-event", "history-complete",
+    "history-job-complete", "collector-brief", "reconcile",
+}
 MERGED_FIELDS = (
     "summary", "issue_type", "status", "assignee", "estimate", "epic",
     "releases", "created_at", "updated_at",
@@ -921,16 +927,68 @@ def append_session_log(run_id: str, *, source: str, event: str, provider: str | 
         stream.write(row)
 
 
-def logged_mcp_details(run_id: str, call: str) -> str | None:
+def run_failure_path(run_id: str) -> Path:
+    return run_root(run_id) / "run-failure.json"
+
+
+def load_run_failure(run_id: str) -> dict | None:
+    path = run_failure_path(run_id)
+    return load_json(path) if path.is_file() else None
+
+
+def mark_run_failed(run_id: str, *, source: str, reason: str, command: str | None = None) -> dict:
+    existing = load_run_failure(run_id)
+    if existing:
+        return existing
+    failure = {
+        "protocol": PROTOCOL,
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "status": "tracker-read-failed",
+        "workflow_complete": False,
+        "final_response_allowed": False,
+        "planning_application_allowed": False,
+        "must_stop": True,
+        "gaps": [reason],
+        "allowed_next_action": "abandon-run",
+        "failure": {
+            "source": source,
+            "command": command,
+            "reason": reason,
+            "failed_at": now(),
+        },
+        "paths": {
+            "run_status": str(status_path(run_id)),
+            "session_log": str(session_log_path(run_id)),
+            "failure": str(run_failure_path(run_id)),
+        },
+    }
+    save_json(run_failure_path(run_id), failure)
+    save_json(status_path(run_id), failure)
+    append_session_log(
+        run_id, source="trackerctl", event="run-failed",
+        details=f"source={source}; command={command or '-'}; reason={reason}",
+    )
+    return failure
+
+
+def logged_mcp_entries(run_id: str, call: str) -> list[str]:
     path = session_log_path(run_id)
     if not path.is_file():
-        return None
+        return []
     provider = call.split(":", 2)[1] if call.startswith("mcp:") else ""
     marker = f"| mcp | call | {provider} | `{call}` |"
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if marker in line:
-            return line
-    return None
+    return [
+        line for line in path.read_text(encoding="utf-8").splitlines()
+        if marker in line
+    ]
+
+
+def logged_mcp_details(run_id: str, call: str) -> str | None:
+    entries = logged_mcp_entries(run_id, call)
+    if len(entries) > 1:
+        raise ValueError(f"Evidence MCP-вызова {call} записан в журнале более одного раза")
+    return entries[0] if entries else None
 
 
 def require_logged_mcp(run_id: str, call: str, *, outcome: str | None = None) -> str:
@@ -978,6 +1036,7 @@ def unexpected_run_artifacts(run_id: str) -> list[str]:
     allowed_root = {
         "scope.json", "tracker-session-log.md", "run-status.json",
         "completion-status.json", "reconciled.json", "report.md",
+        "run-failure.json",
         "pending-participant.json", "pending-development-decision.json",
         "development-decisions.json", "jobs", "providers",
     }
@@ -3392,10 +3451,14 @@ def run_status_command(args: argparse.Namespace) -> int:
     completion = run_root(args.run_id) / "completion-status.json"
     if completion.is_file():
         payload = load_json(completion)
-        if payload.get("protocol") != PROTOCOL:
+        if payload.get("protocol") != PROTOCOL or payload.get("schema_version") != SCHEMA_VERSION:
             raise ValueError("Completion-status создан старым протоколом")
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
+    current_status = load_json(status_path(args.run_id))
+    if current_status.get("status") in {"tracker-read-failed", "tracker-read-abandoned"}:
+        print(json.dumps(current_status, ensure_ascii=False, indent=2))
+        return 2 if current_status["status"] == "tracker-read-failed" else 0
     extra = next_job_payload(args.run_id)
     if extra:
         job_id = extra["next_job"]["job_id"]
@@ -3434,7 +3497,10 @@ def collector_brief_command(args: argparse.Namespace) -> int:
         f"Работай только в существующем run_id={args.run_id} и только с job_id={job['job_id']}. "
         "Не запускай begin, не создавай другой tracker-run и не меняй run_id или job path. "
         "Не редактируй scope.json, provider JSON, job JSON, run-status или tracker-session-log напрямую; "
-        "записывай результат только командами trackerctl из контракта. "
+        "записывай результат только командами trackerctl из контракта. Не создавай, не копируй и не перемещай "
+        "MCP-ответы или вспомогательные файлы внутрь каталога tracker-run; передавай исходный внешний путь MCP "
+        "напрямую. Не удаляй, не переименовывай и не выноси неожиданные файлы, чтобы повторить проверку. Любая "
+        "ошибка команды, инструмента или runtime завершает этот job: не исправляй её и не повторяй job. "
     )
     if job["kind"] == "provider-collection":
         language = job["query"]["language"]
@@ -3531,7 +3597,9 @@ def collector_brief_command(args: argparse.Namespace) -> int:
         prompt = (
             run_guard + history_instruction +
             f"Для записи результата прочитай только {contract} и {path}. Не придумывай evidence, не ищи "
-            "другие задачи, не создавай скрипты или вспомогательные файлы. После history-job-complete "
+            "другие задачи, не создавай скрипты или вспомогательные файлы. Для mcp-log --operation history "
+            "передавай только --key, --outcome, --evidence и --summary; параметры --query, --page-number и "
+            "--returned-count запрещены. После history-job-complete "
             "немедленно верни только status, job_id и пути."
         )
     print(json.dumps({
@@ -3648,6 +3716,20 @@ def abandon_run_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def fail_run_command(args: argparse.Namespace) -> int:
+    current = active_run_id()
+    if current != args.run_id:
+        raise ValueError("Зафиксировать сбой можно только для текущего незавершённого tracker-run")
+    if (run_root(args.run_id) / "completion-status.json").is_file():
+        raise ValueError("Завершённый tracker-run нельзя пометить failed")
+    reason = args.reason.strip()
+    if not reason:
+        raise ValueError("fail-run требует непустую причину")
+    payload = mark_run_failed(args.run_id, source="collector-subagent", reason=reason)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 2
+
+
 def reconcile_command(args: argparse.Namespace) -> int:
     config = load_config()
     unexpected = unexpected_run_artifacts(args.run_id)
@@ -3732,7 +3814,11 @@ def result_status_command(args: argparse.Namespace) -> int:
     if not path.is_file():
         raise ValueError("У tracker-run ещё нет официального completion-status")
     payload = load_json(path)
-    if payload.get("protocol") != PROTOCOL or payload.get("status") != "tracker-read-reconciled":
+    if (
+        payload.get("protocol") != PROTOCOL
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("status") != "tracker-read-reconciled"
+    ):
         raise ValueError("Completion-status создан старым или незавершённым протоколом")
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
@@ -3765,6 +3851,7 @@ def parser() -> argparse.ArgumentParser:
     participant_parser = commands.add_parser("set-participant"); participant_parser.add_argument("--run-id", required=True); participant_parser.add_argument("--provider", choices=PROVIDERS, required=True); participant_parser.add_argument("--account-id", required=True); participant_parser.add_argument("--team-id", required=True); participant_parser.set_defaults(handler=set_participant_command)
     decision_parser = commands.add_parser("set-development-decision"); decision_parser.add_argument("--run-id", required=True); decision_parser.add_argument("--key", required=True); decision_parser.add_argument("--choice", choices=DEVELOPMENT_DECISION_CHOICES, required=True); decision_parser.add_argument("--state", choices=DEVELOPMENT_DECISION_STATES); decision_parser.add_argument("--apply-to-all", action="store_true"); decision_parser.set_defaults(handler=set_development_decision_command)
     abandon = commands.add_parser("abandon-run"); abandon.add_argument("--run-id", required=True); abandon.add_argument("--reason", required=True); abandon.set_defaults(handler=abandon_run_command)
+    fail = commands.add_parser("fail-run"); fail.add_argument("--run-id", required=True); fail.add_argument("--reason", required=True); fail.set_defaults(handler=fail_run_command)
     reconcile = commands.add_parser("reconcile"); reconcile.add_argument("--run-id", required=True); reconcile.set_defaults(handler=reconcile_command)
     result = commands.add_parser("result-status"); result.add_argument("--run-id", required=True); result.set_defaults(handler=result_status_command)
     return root
@@ -3776,6 +3863,10 @@ def main() -> int:
         run_id = getattr(args, "run_id", None)
         if run_id and not session_log_path(run_id).is_file():
             raise ValueError("Tracker-run не содержит обязательный tracker-session-log.md; начни новый run")
+        failure = load_run_failure(run_id) if run_id else None
+        if failure and args.command not in {"run-status", "abandon-run"}:
+            print(json.dumps(failure, ensure_ascii=False, indent=2))
+            return 2
         result = args.handler(args)
         run_id = getattr(args, "run_id", None)
         if run_id:
@@ -3790,7 +3881,18 @@ def main() -> int:
         run_id = getattr(args, "run_id", None)
         if run_id and session_log_path(run_id).is_file():
             append_session_log(run_id, source="trackerctl", event="error", provider=getattr(args, "provider", None), evidence_value=getattr(args, "evidence", None), details=f"command={args.command}; error={exc}")
-        payload = {"status": "tracker-read-blocked", "run_id": run_id, "error": str(exc), "must_stop": True, "workflow_complete": False, "final_response_allowed": False, "allowed_next_action": "fix-reported-gap", "required_success_status": "tracker-read-reconciled"}
+        if (
+            run_id
+            and session_log_path(run_id).is_file()
+            and not (run_root(run_id) / "completion-status.json").is_file()
+            and args.command in FAIL_CLOSED_COMMANDS
+        ):
+            payload = mark_run_failed(
+                run_id, source="trackerctl-integrity-error", reason=str(exc), command=args.command,
+            )
+            payload = {**payload, "error": str(exc)}
+        else:
+            payload = {"status": "tracker-read-blocked", "run_id": run_id, "error": str(exc), "must_stop": True, "workflow_complete": False, "final_response_allowed": False, "allowed_next_action": "fix-reported-gap", "required_success_status": "tracker-read-reconciled"}
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
