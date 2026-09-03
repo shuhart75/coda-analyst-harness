@@ -112,6 +112,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
         assignee_name: str | None = None,
         estimate: str | None = None, epic: str | None = None,
         summary: str | None = None, status: str = "active",
+        issue_type: str = "story",
         role_estimates: dict[str, float] | None = None,
         include_attributes: bool = True,
     ) -> dict:
@@ -139,7 +140,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
         issue = {
             "key": key,
             "summary": summary or f"Issue {key}",
-            "issue_type": {"code": "story", "name": "Story"},
+            "issue_type": {"code": issue_type, "name": issue_type.title()},
             "status": {"code": status, "name": status},
             "created_at": "2026-08-01T08:00:00+00:00",
             "updated_at": "2026-08-27T08:00:00+00:00",
@@ -234,6 +235,18 @@ class TrackerCtlV3Tests(unittest.TestCase):
             "--evidence", "mcp:jira:epic-links", "--response-file", str(response),
         )
 
+    def ingest_sbertrek_counterpart_epic(
+        self, state: Path, run_id: str, issue: tuple[str, dict] | None,
+    ) -> dict:
+        records = [self.sber_response_issue(issue[0], **issue[1])] if issue else []
+        response = state / "mcp-responses" / f"{run_id}-sbertrek-counterpart-epic.json"
+        self.write(response, {"issues": records})
+        return self.run_tool(
+            state, "sbertrek-ingest-counterpart-epic", "--run-id", run_id,
+            "--evidence", "mcp:sbertrek:counterpart-epic",
+            "--response-file", str(response), "--max-results", "50",
+        )
+
     def collect(self, state: Path, run_id: str, provider: str, issues: list[tuple[str, dict]]) -> dict:
         if provider == "sbertrek":
             self.ingest_sber_response(state, run_id, issues)
@@ -304,6 +317,20 @@ class TrackerCtlV3Tests(unittest.TestCase):
         self.complete_all_histories(state, run_id, handoff_key="RSCON-6845" if handoff else None)
         return run_id, self.root(state, run_id)
 
+    def complete_conflicting_run(self, state: Path, *, count: int = 2) -> tuple[str, Path]:
+        sber_keys = tuple(f"RSCON-{6845 + index}" for index in range(count))
+        jira_keys = tuple(f"RSCON-{2902 + index}" for index in range(count))
+        run_id = self.begin(state, ids=sber_keys)["run_id"]
+        self.collect(state, run_id, "sbertrek", [
+            (sber_key, {"jira_key": jira_key, "assignee": "s-qa"})
+            for sber_key, jira_key in zip(sber_keys, jira_keys)
+        ])
+        self.collect(state, run_id, "jira", [
+            (jira_key, {"assignee": "j-dev"}) for jira_key in jira_keys
+        ])
+        self.complete_all_histories(state, run_id)
+        return run_id, self.root(state, run_id)
+
     def test_config_stop_gate_asks_exactly_one_question(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
@@ -321,8 +348,8 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertEqual(job["query"]["text"], query)
             self.assertEqual(job["query"]["sha256"], hashlib.sha256(query.encode()).hexdigest())
             self.assertNotIn("role", job)
-            self.assertNotIn("purpose", job["query"])
-            self.assertNotIn("method", job["query"])
+            self.assertEqual(job["query"]["purpose"], "task-cards")
+            self.assertIsNone(job["query"]["method"])
             self.assertIn("read-mcp-documentation", job["forbidden_operations"])
             self.assertIn("read-returned-issues-one-by-one", job["forbidden_operations"])
             self.assertEqual(
@@ -368,7 +395,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertNotIn("Когорты", payload["prompt"])
             self.assertNotIn("эпик", payload["prompt"].casefold())
             self.assertIn("не заменяй запрос поиском по тексту", payload["prompt"].casefold())
-            self.assertIn("полный исходный JSON-ответ", payload["prompt"])
+            self.assertIn("полный исходный JSON-файл", payload["prompt"])
             self.assertIn("не передавай fields=null", payload["prompt"].casefold())
             self.assertIn("поле attributes обязательно", payload["prompt"])
             self.assertIn("ingest-query-response", payload["prompt"])
@@ -379,7 +406,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertIn("Не используй issue.search", payload["prompt"])
             self.assertIn("issue.getByKey", payload["prompt"])
             self.assertIn("link.list", payload["prompt"])
-            self.assertIn("верни ошибку и немедленно остановись", payload["prompt"])
+            self.assertIn("ошибку исходного SberTrek-запроса зарегистрируй и остановись", payload["prompt"])
             self.assertIn(f"run_id={begin['run_id']}", payload["prompt"])
             self.assertIn("Не запускай begin", payload["prompt"])
             self.assertIn("Не редактируй scope.json", payload["prompt"])
@@ -756,6 +783,105 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertEqual(payload["next_query"]["query"], expected)
             self.assertEqual(self.job(state, run_id, "collection-jira")["query"]["text"], expected)
 
+    def test_jira_epic_reverse_path_finds_sbertrek_epic_then_reads_its_members(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, provider="jira", kind="epic", ids=("RSCON-2911",),
+            )["run_id"]
+            self.ingest_jira_epic_links(state, run_id, [
+                {"type": {"name": "PartOf"}, "inward_issue": {"key": "RSCON-2902"}},
+                {"type": {"name": "PartOf"}, "inward_issue": {"key": "RSCON-2903"}},
+            ])
+            self.collect(state, run_id, "jira", [
+                ("RSCON-2902", {}), ("RSCON-2903", {}),
+            ])
+            job = self.job(state, run_id, "collection-sbertrek")
+            self.assertEqual(job["query"]["text"], 'issue_key = "RSCON-2911"')
+            self.assertEqual(job["query"]["method"], "jira-epic-counterpart")
+            discovery = self.ingest_sbertrek_counterpart_epic(state, run_id, (
+                "RSCON-6854", {
+                    "jira_key": "RSCON-2911", "issue_type": "epic",
+                    "summary": "SberTrek epic",
+                },
+            ))
+            expected_members = 'unit IN linkedUnitsOf("unit = \'RSCON-6854\'", "Состоит из")'
+            self.assertEqual(discovery["next_query"]["query"], expected_members)
+            self.assertEqual(self.job(state, run_id, "collection-sbertrek")["query"]["text"], expected_members)
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-6845", {"jira_key": "RSCON-2902"}),
+                ("RSCON-6846", {}),
+            ])
+            sber = self.snapshot(state, run_id, "sbertrek")
+            self.assertEqual({item["key"] for item in sber["issues"]}, {"RSCON-6845", "RSCON-6846"})
+            self.assertEqual({item["epic"]["key"] for item in sber["issues"]}, {"RSCON-6854"})
+            jira = self.snapshot(state, run_id, "jira")
+            self.assertEqual({item["epic"]["key"] for item in jira["issues"]}, {"RSCON-2911"})
+
+    def test_jira_epic_without_sbertrek_counterpart_keeps_jira_members(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, provider="jira", kind="epic", ids=("RSCON-2911",),
+            )["run_id"]
+            self.ingest_jira_epic_links(state, run_id, [
+                {"type": {"name": "PartOf"}, "inward_issue": {"key": "RSCON-2902"}},
+            ])
+            self.collect(state, run_id, "jira", [("RSCON-2902", {})])
+            discovery = self.ingest_sbertrek_counterpart_epic(state, run_id, None)
+            self.assertEqual(discovery["status"], "sbertrek-counterpart-epic-not-found")
+            self.run_tool(
+                state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek",
+            )
+            self.assertEqual(self.snapshot(state, run_id, "sbertrek")["issues"], [])
+            self.assertEqual((self.active_job(state, run_id) or {})["kind"], "provider-history")
+
+    def test_jira_epic_sbertrek_counterpart_query_unavailable_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, provider="jira", kind="epic", ids=("RSCON-2911",),
+            )["run_id"]
+            self.ingest_jira_epic_links(state, run_id, [
+                {"type": {"name": "PartOf"}, "inward_issue": {"key": "RSCON-2902"}},
+            ])
+            self.collect(state, run_id, "jira", [("RSCON-2902", {})])
+            query = self.snapshot(state, run_id, "sbertrek")["query"]["exact"]
+            evidence = "mcp:sbertrek:counterpart-epic:unavailable"
+            self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "query", "--outcome", "error", "--evidence", evidence,
+                "--summary", "unavailable", "--query", query,
+                "--page-number", "1", "--returned-count", "0",
+            )
+            self.run_tool(
+                state, "query-unavailable", "--run-id", run_id, "--provider", "sbertrek",
+                "--reason", "no access", "--evidence", evidence,
+            )
+            self.run_tool(
+                state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek",
+            )
+            self.complete_all_histories(state, run_id)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertIn("sbertrek-targeted-query-unavailable", payload["limitations"])
+
+    def test_jira_task_scope_still_searches_sbertrek_by_each_task_issue_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, provider="jira", kind="tasks", ids=("RSCON-2902", "RSCON-2903"),
+            )["run_id"]
+            self.collect(state, run_id, "jira", [
+                ("RSCON-2902", {}), ("RSCON-2903", {}),
+            ])
+            job = self.job(state, run_id, "collection-sbertrek")
+            self.assertEqual(
+                job["query"]["text"],
+                'issue_key = "RSCON-2902" or issue_key = "RSCON-2903"',
+            )
+            self.assertEqual(job["query"]["purpose"], "counterparts")
+            self.assertIsNone(job["query"]["method"])
+
     def test_arbitrary_query_is_rejected_and_exploratory_commands_are_not_exposed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state, provider="jira")["run_id"]
@@ -1035,6 +1161,12 @@ class TrackerCtlV3Tests(unittest.TestCase):
     def test_reconcile_preserves_sbertrek_and_computes_dates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id, root = self.complete_sber_run(state, handoff=True)
+            blocked = self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            self.assertIn("Приоритет SberTrek только для этой задачи", blocked["next_question"])
+            self.run_tool(
+                state, "set-development-decision", "--run-id", run_id,
+                "--key", "RSCON-6845", "--choice", "sbertrek",
+            )
             payload = self.run_tool(state, "reconcile", "--run-id", run_id)
             self.assertEqual(payload["counts"]["matched"], 1)
             item = json.loads((root / "reconciled.json").read_text())["issues"][0]
@@ -1043,7 +1175,9 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertEqual(item["assignee"]["team_id"], "QA1")
             self.assertEqual(item["assigned_at"], "2026-08-10T10:00:00+00:00")
             self.assertEqual(item["work_started_at"], "2026-08-10T10:00:00+00:00")
-            self.assertEqual(item["development"]["basis"], "developer-handoff")
+            self.assertEqual(item["development"]["basis"], "user-decision")
+            self.assertEqual(item["development"]["state"], "completed")
+            self.assertEqual(item["development"]["choice"], "sbertrek")
             self.assertEqual({entry["field"] for entry in item["conflicts"]}, {"summary", "assignee", "estimate", "epic"})
             result = json.loads((root / "reconciled.json").read_text(encoding="utf-8"))
             self.assertEqual(result["groupings"]["epics"]["RSCON-6854"], ["RSCON-6845"])
@@ -1166,6 +1300,109 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.complete_all_histories(state, run_id)
             payload = self.run_tool(state, "reconcile", "--run-id", run_id)
             self.assertEqual(payload["counts"]["matched"], 0)
+
+    def test_development_conflicts_are_asked_one_task_at_a_time_with_all_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, _ = self.complete_conflicting_run(state)
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            question = payload["next_question"]
+            self.assertIn("RSCON-6845 / RSCON-2902", question)
+            self.assertNotIn("RSCON-6846 / RSCON-2903", question)
+            self.assertIn("1. Приоритет SberTrek только для этой задачи.", question)
+            self.assertIn("2. Приоритет SberTrek для этой и всех последующих", question)
+            self.assertIn("3. Приоритет Jira только для этой задачи.", question)
+            self.assertIn("4. Приоритет Jira для этой и всех последующих", question)
+            self.assertIn("5. Свой вариант:", question)
+            self.assertEqual(question, payload["response_contract"]["text"])
+
+    def test_single_development_decision_advances_to_next_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, _ = self.complete_conflicting_run(state)
+            self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            self.run_tool(
+                state, "set-development-decision", "--run-id", run_id,
+                "--key", "RSCON-6845", "--choice", "sbertrek",
+            )
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            self.assertIn("RSCON-6846 / RSCON-2903", payload["next_question"])
+            self.assertNotIn("RSCON-6845 / RSCON-2902", payload["next_question"])
+
+    def test_apply_to_all_uses_provider_for_remaining_conflicts_in_current_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_conflicting_run(state)
+            self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            self.run_tool(
+                state, "set-development-decision", "--run-id", run_id,
+                "--key", "RSCON-6845", "--choice", "sbertrek", "--apply-to-all",
+            )
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertTrue(payload["workflow_complete"])
+            issues = json.loads((root / "reconciled.json").read_text(encoding="utf-8"))["issues"]
+            self.assertEqual([item["development"]["state"] for item in issues], ["unknown", "unknown"])
+            self.assertFalse(issues[0]["development"]["inherited_run_default"])
+            self.assertTrue(issues[1]["development"]["inherited_run_default"])
+
+    def test_jira_development_decision_uses_jira_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_conflicting_run(state, count=1)
+            self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            self.run_tool(
+                state, "set-development-decision", "--run-id", run_id,
+                "--key", "RSCON-6845", "--choice", "jira",
+            )
+            self.run_tool(state, "reconcile", "--run-id", run_id)
+            issue = json.loads((root / "reconciled.json").read_text(encoding="utf-8"))["issues"][0]
+            self.assertEqual(issue["development"]["state"], "in-progress")
+            self.assertEqual(issue["development"]["choice"], "jira")
+
+    def test_custom_development_decision_uses_explicit_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_conflicting_run(state, count=1)
+            self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            self.run_tool(
+                state, "set-development-decision", "--run-id", run_id,
+                "--key", "RSCON-6845", "--choice", "custom", "--state", "completed",
+            )
+            self.run_tool(state, "reconcile", "--run-id", run_id)
+            issue = json.loads((root / "reconciled.json").read_text(encoding="utf-8"))["issues"][0]
+            self.assertEqual(issue["development"]["state"], "completed")
+            self.assertEqual(issue["development"]["choice"], "custom")
+
+    def test_invalid_or_wrong_task_development_decisions_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, _ = self.complete_conflicting_run(state, count=1)
+            self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            wrong = self.run_tool(
+                state, "set-development-decision", "--run-id", run_id,
+                "--key", "RSCON-9999", "--choice", "jira", expected=2,
+            )
+            self.assertIn("текущий вопрос", wrong["error"])
+            missing = self.run_tool(
+                state, "set-development-decision", "--run-id", run_id,
+                "--key", "RSCON-6845", "--choice", "custom", expected=2,
+            )
+            self.assertIn("требует --state", missing["error"])
+            mass_custom = self.run_tool(
+                state, "set-development-decision", "--run-id", run_id,
+                "--key", "RSCON-6845", "--choice", "custom", "--state", "unknown",
+                "--apply-to-all", expected=2,
+            )
+            self.assertIn("нельзя применять ко всем", mass_custom["error"])
+
+    def test_tampered_development_decision_blocks_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_conflicting_run(state, count=1)
+            self.run_tool(state, "reconcile", "--run-id", run_id, expected=3)
+            self.run_tool(
+                state, "set-development-decision", "--run-id", run_id,
+                "--key", "RSCON-6845", "--choice", "sbertrek",
+            )
+            path = root / "development-decisions.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["decisions"][0]["state"] = "completed"
+            self.write(path, payload)
+            blocked = self.run_tool(state, "reconcile", "--run-id", run_id, expected=2)
+            self.assertIn("Повреждена запись решения", blocked["error"])
 
     def test_unknown_participants_are_asked_one_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

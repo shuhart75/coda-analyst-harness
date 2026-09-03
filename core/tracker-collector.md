@@ -78,6 +78,15 @@ SberTrek collection-job выбери только операцию `issue.export
    для оставшихся ключей либо разрешит `collector-complete`, если не осталось ни
    одного. Выполни только возвращённый JQL. Не редактируй job, provider JSON,
    текст запроса или SHA-256 вручную. При ошибке другого вида остановись.
+   Для обратного SberTrek-job исходного Jira-эпика выполни точный bulk-запрос
+   `issue_key = "<Jira epic key>"` и передай полный JSON команде
+   `sbertrek-ingest-counterpart-epic`. Она требует ноль или один результат,
+   проверяет тип Epic и соответствие `issue_key`, а затем возвращает точный
+   `linkedUnitsOf` по собственному ключу найденного SberTrek-эпика. Только после
+   этого выполни второй bulk export состава и передай его в
+   `ingest-query-response`. Если counterpart-эпик не найден, сразу выполни
+   разрешённый `collector-complete`. Не ищи SberTrek по `issue_key` каждой
+   дочерней Jira-задачи: такой запрос допустим только для исходной области tasks.
 6. Не сохраняй описание, комментарии, вложения и полный ответ в tracker-run.
 7. Для `assignee`, общей оценки, каждой оценки `AN / BE / FE / QA`, `epic` и
    `releases` различай `value`, `absent` и `not-returned`. Сохрани обязательные

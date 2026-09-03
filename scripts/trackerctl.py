@@ -39,6 +39,8 @@ SP_UNITS = {
 }
 HISTORY_BATCH_SIZE = 8
 ESTIMATE_ROLES = ("AN", "BE", "FE", "QA")
+DEVELOPMENT_DECISION_STATES = ("completed", "in-progress", "not-started", "unknown")
+DEVELOPMENT_DECISION_CHOICES = ("sbertrek", "jira", "custom")
 MERGED_FIELDS = (
     "summary", "issue_type", "status", "assignee", "estimate", "epic",
     "releases", "created_at", "updated_at",
@@ -737,7 +739,7 @@ def compact_issue_from_response(record: dict, provider: str, scope: dict) -> dic
         raise ValueError(f"Карточка {key_value}: исполнитель имеет неподдерживаемый формат")
     if epic_state == "value" and epic is None:
         raise ValueError(f"Карточка {key_value}: эпик имеет неподдерживаемый формат")
-    if provider == "sbertrek" and scope.get("provider") == "sbertrek" and scope.get("kind") == "epic":
+    if provider == scope.get("provider") and scope.get("kind") == "epic":
         epic = {"key": scope["ids"][0], "name": scope["ids"][0]}
         epic_state = "value"
     if provider == "sbertrek":
@@ -1031,7 +1033,8 @@ def unexpected_run_artifacts(run_id: str) -> list[str]:
     allowed_root = {
         "scope.json", "tracker-session-log.md", "run-status.json",
         "completion-status.json", "reconciled.json", "report.md",
-        "pending-participant.json", "jobs", "providers",
+        "pending-participant.json", "pending-development-decision.json",
+        "development-decisions.json", "jobs", "providers",
     }
     unexpected: list[str] = []
     for path in root.iterdir():
@@ -1291,6 +1294,52 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
         expected_exact = jql_keys(discovery["child_keys"]) if discovery["child_keys"] else None
         if query.get("initial_exact") != expected_exact or query.get("exact") != expected_exact:
             raise ValueError("Точный Jira epic JQL изменён после структурного разбора issuelinks")
+    sbertrek_counterpart_epic_discovery = (
+        provider == "sbertrek"
+        and snapshot.get("scope", {}).get("provider") == "jira"
+        and snapshot.get("scope", {}).get("kind") == "epic"
+    )
+    if sbertrek_counterpart_epic_discovery and query["state"] != "unavailable":
+        discovery = query.get("discovery")
+        jira_epic_key = snapshot["scope"]["ids"][0]
+        expected_lookup = tql_jira_keys([jira_epic_key])
+        sbertrek_epic_key = discovery.get("sbertrek_epic_key") if isinstance(discovery, dict) else None
+        if (
+            not isinstance(discovery, dict)
+            or discovery.get("method") != "issue_key-to-sbertrek-epic"
+            or discovery.get("query") != expected_lookup
+            or discovery.get("jira_epic_key") != jira_epic_key
+            or discovery.get("returned_count") not in {0, 1}
+            or (sbertrek_epic_key is not None and (
+                not isinstance(sbertrek_epic_key, str)
+                or not ISSUE_KEY.fullmatch(sbertrek_epic_key)
+                or discovery["returned_count"] != 1
+            ))
+            or (sbertrek_epic_key is None and discovery.get("returned_count") != 0)
+            or not re.fullmatch(r"[a-f0-9]{64}", str(discovery.get("response_sha256") or ""))
+        ):
+            raise ValueError("Коллекция Jira-эпика не содержит проверенный поиск SberTrek-эпика")
+        call = evidence(str(discovery.get("evidence") or ""), "sbertrek")
+        details = require_logged_mcp(run_id, call, outcome="success")
+        if f"operation=counterpart-epic; outcome=success; query_sha256={query_digest(expected_lookup)};" not in details:
+            raise ValueError("Evidence поиска SberTrek-эпика не совпадает с исходным Jira-эпиком")
+        require_tracker_command(
+            run_id, "sbertrek-ingest-counterpart-epic", provider="sbertrek", evidence_value=call,
+            detail_markers=(f"record_sha256={object_sha256(discovery)}",),
+        )
+        job = load_job(run_id, "collection-sbertrek")[1]
+        if job["query"].get("initial_text") != expected_lookup:
+            raise ValueError("Исходный поиск SberTrek-эпика изменён после создания")
+        expected_exact = tql_epic(sbertrek_epic_key) if sbertrek_epic_key else None
+        if (
+            query.get("purpose") != "epic-members"
+            or query.get("method") != "linkedUnitsOf"
+            or query.get("requested_keys") != []
+            or query.get("initial_exact") != expected_exact
+            or query.get("exact") != expected_exact
+            or (expected_exact is not None and job["query"].get("text") != expected_exact)
+        ):
+            raise ValueError("TQL состава SberTrek-эпика изменён после структурного поиска контрпары")
     absent_keys: list[str] = []
     for item in confirmed_absent:
         if (
@@ -1319,7 +1368,18 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
         and set(absent_keys) == set(requested_keys)
     )
     empty_jira_epic = jira_epic_discovery and not query.get("requested_keys")
-    if query["state"] == "complete" and not pages and not all_counterparts_absent and not empty_jira_epic:
+    empty_sbertrek_counterpart_epic = (
+        sbertrek_counterpart_epic_discovery
+        and isinstance(query.get("discovery"), dict)
+        and query["discovery"].get("sbertrek_epic_key") is None
+    )
+    if (
+        query["state"] == "complete"
+        and not pages
+        and not all_counterparts_absent
+        and not empty_jira_epic
+        and not empty_sbertrek_counterpart_epic
+    ):
         raise ValueError(f"Коллекция {provider} помечена complete без зарегистрированной страницы MCP")
     if query["state"] in {"skipped", "unavailable"}:
         if pages or issues or query["keys"]:
@@ -1550,6 +1610,8 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
         "provider": provider,
         "query": {
             "language": query["language"],
+            "purpose": query["purpose"],
+            "method": query.get("method"),
             "text": exact,
             "sha256": query_digest(exact),
             "initial_text": initial_exact,
@@ -1563,6 +1625,8 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
             "record-bounded-call", "structurally-import-full-json-response",
             "record-page", "record-compact-card",
             *(["record-confirmed-absent-counterparts"] if provider == "jira" else []),
+            *(["record-counterpart-epic-discovery"] if query.get("method") == "jira-epic-counterpart" else []),
+            *(["record-query-unavailable"] if query.get("purpose") in {"counterparts", "counterpart-epic"} else []),
             "complete-job",
         ],
         "forbidden_operations": [
@@ -1990,6 +2054,42 @@ def enrich_assignee(value: Any, source: str | None, config: dict) -> Any:
     return {**value, "team_id": member["team_id"], "role": team_role(member["team_id"])}
 
 
+def provider_development_state(item: dict, provider: str, config: dict) -> dict:
+    if str(item.get("issue_type") or "").casefold() not in {value.casefold() for value in config["development_issue_types"]}:
+        return {"state": "not-development-unit", "basis": "issue-type"}
+    status = str(item.get("status") or "")
+    if status.casefold() in normalized_status_set(config, provider, "excluded"):
+        return {"state": "excluded", "basis": f"{provider}-status", "status": status}
+    if status.casefold() in normalized_status_set(config, provider, "completed"):
+        return {"state": "completed", "basis": f"{provider}-status", "status": status}
+    assignee_events = [
+        {**event, "source": provider}
+        for event in item["history"]["events"]
+        if event["field"] == "assignee"
+    ]
+    latest_handoff = None
+    for event in assignee_events:
+        before = participant_role(config, event["source"], event.get("from"))
+        after = participant_role(config, event["source"], event.get("to"))
+        if after == "developer":
+            latest_handoff = None
+        if before == "developer" and after and after != "developer":
+            latest_handoff = event
+    if latest_handoff:
+        return {"state": "completed", "basis": "developer-handoff", "at": latest_handoff["at"]}
+    current_assignee = item.get("assignee")
+    if participant_role(config, provider, current_assignee) == "developer":
+        return {"state": "in-progress", "basis": f"{provider}-developer-assignee"}
+    if any(
+        participant_role(config, event["source"], event.get("to")) == "developer"
+        for event in assignee_events
+    ):
+        return {"state": "in-progress", "basis": "developer-assignment-history"}
+    if current_assignee is None and item["history"]["state"] == "complete":
+        return {"state": "not-started", "basis": "complete-history-without-developer-assignment"}
+    return {"state": "unknown", "basis": "insufficient-development-evidence"}
+
+
 def development_state(sber: dict | None, jira: dict | None, config: dict) -> dict:
     item = sber or jira or {}
     provider = "sbertrek" if sber else "jira"
@@ -2019,10 +2119,52 @@ def development_state(sber: dict | None, jira: dict | None, config: dict) -> dic
         for event in assignee_events
     ):
         return {"state": "in-progress", "basis": "developer-assignment-history"}
-    histories = [item["history"]["state"] for item in (sber, jira) if item]
+    histories = [candidate["history"]["state"] for candidate in (sber, jira) if candidate]
     if current_assignee is None and histories and all(state == "complete" for state in histories):
         return {"state": "not-started", "basis": "complete-history-without-developer-assignment"}
     return {"state": "unknown", "basis": "insufficient-development-evidence"}
+
+
+def development_conflicts(snapshots: dict[str, dict], config: dict) -> list[dict]:
+    jira = snapshots.get("jira")
+    if not jira:
+        return []
+    jira_issues = {item["key"]: item for item in jira["issues"]}
+    excluded_sber = excluded_sbertrek_keys(snapshots)
+    development_types = {value.casefold() for value in config["development_issue_types"]}
+    result = []
+    for sber in sorted(snapshots["sbertrek"]["issues"], key=lambda item: item["key"]):
+        if sber["key"] in excluded_sber:
+            continue
+        jira_key = sber.get("jira_key")
+        jira_issue = jira_issues.get(jira_key) if jira_key else None
+        if not jira_issue or str(sber.get("issue_type") or "").casefold() not in development_types:
+            continue
+        primary_status = str(sber.get("status") or "").casefold()
+        if primary_status in normalized_status_set(config, "sbertrek", "excluded") | normalized_status_set(config, "sbertrek", "completed"):
+            continue
+        sber_role = participant_role(config, "sbertrek", sber.get("assignee"))
+        jira_role = participant_role(config, "jira", jira_issue.get("assignee"))
+        if not sber_role or not jira_role or (sber_role == "developer") == (jira_role == "developer"):
+            continue
+        sber_development = provider_development_state(sber, "sbertrek", config)
+        jira_development = provider_development_state(jira_issue, "jira", config)
+        if (
+            sber_development["state"] == jira_development["state"]
+            or sber_development["state"] not in DEVELOPMENT_DECISION_STATES
+            or jira_development["state"] not in DEVELOPMENT_DECISION_STATES
+        ):
+            continue
+        result.append({
+            "sbertrek_key": sber["key"],
+            "jira_key": jira_issue["key"],
+            "summary": sber.get("summary") or jira_issue.get("summary") or sber["key"],
+            "sbertrek_assignee": enrich_assignee(sber.get("assignee"), "sbertrek", config),
+            "jira_assignee": enrich_assignee(jira_issue.get("assignee"), "jira", config),
+            "sbertrek_state": sber_development["state"],
+            "jira_state": jira_development["state"],
+        })
+    return result
 
 
 def first_unknown_participant(snapshots: dict[str, dict], config: dict) -> dict | None:
@@ -2055,6 +2197,131 @@ def first_unknown_participant(snapshots: dict[str, dict], config: dict) -> dict 
 
 def pending_participant_path(run_id: str) -> Path:
     return run_root(run_id) / "pending-participant.json"
+
+
+def pending_development_decision_path(run_id: str) -> Path:
+    return run_root(run_id) / "pending-development-decision.json"
+
+
+def development_decisions_path(run_id: str) -> Path:
+    return run_root(run_id) / "development-decisions.json"
+
+
+def empty_development_decisions(run_id: str) -> dict:
+    return {
+        "protocol": PROTOCOL,
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "default_choice": None,
+        "decisions": [],
+    }
+
+
+def load_development_decisions(run_id: str) -> dict:
+    path = development_decisions_path(run_id)
+    payload = load_json(path) if path.is_file() else empty_development_decisions(run_id)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("protocol") != PROTOCOL
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("run_id") != run_id
+        or payload.get("default_choice") not in (None, "sbertrek", "jira")
+        or not isinstance(payload.get("decisions"), list)
+    ):
+        raise ValueError("Повреждён development-decisions.json")
+    keys: set[str] = set()
+    all_choices = []
+    for item in payload["decisions"]:
+        if not isinstance(item, dict):
+            raise ValueError("Повреждена запись решения по ЖЦ")
+        core = {name: item.get(name) for name in (
+            "sbertrek_key", "jira_key", "choice", "state", "apply_to_all",
+            "sbertrek_state", "jira_state",
+        )}
+        key_value = core["sbertrek_key"]
+        if (
+            not isinstance(key_value, str)
+            or not ISSUE_KEY.fullmatch(key_value)
+            or key_value in keys
+            or not isinstance(core["jira_key"], str)
+            or not ISSUE_KEY.fullmatch(core["jira_key"])
+            or core["choice"] not in DEVELOPMENT_DECISION_CHOICES
+            or core["state"] not in DEVELOPMENT_DECISION_STATES
+            or not isinstance(core["apply_to_all"], bool)
+            or core["sbertrek_state"] not in DEVELOPMENT_DECISION_STATES
+            or core["jira_state"] not in DEVELOPMENT_DECISION_STATES
+            or item.get("record_sha256") != object_sha256(core)
+        ):
+            raise ValueError("Повреждена запись решения по ЖЦ")
+        if core["apply_to_all"]:
+            if core["choice"] not in {"sbertrek", "jira"}:
+                raise ValueError("Массовое решение по ЖЦ допустимо только для приоритета трекера")
+            all_choices.append(core["choice"])
+        require_tracker_command(
+            run_id, "set-development-decision",
+            detail_markers=(f"key={key_value}", f"record_sha256={item['record_sha256']}"),
+        )
+        keys.add(key_value)
+    expected_default = all_choices[-1] if all_choices else None
+    if payload["default_choice"] != expected_default or len(set(all_choices)) > 1:
+        raise ValueError("Массовая политика решений по ЖЦ противоречива")
+    return payload
+
+
+def validate_development_decisions(conflicts: list[dict], payload: dict) -> dict[str, dict]:
+    conflicts_by_key = {item["sbertrek_key"]: item for item in conflicts}
+    applied: dict[str, dict] = {}
+    for decision in payload["decisions"]:
+        conflict = conflicts_by_key.get(decision["sbertrek_key"])
+        if not conflict:
+            raise ValueError("Решение по ЖЦ не соответствует текущим конфликтам tracker-run")
+        if any(decision[name] != conflict[name] for name in ("jira_key", "sbertrek_state", "jira_state")):
+            raise ValueError("Решение по ЖЦ не соответствует сохранённым данным трекеров")
+        if decision["choice"] in {"sbertrek", "jira"}:
+            expected_state = conflict[f"{decision['choice']}_state"]
+            if decision["state"] != expected_state:
+                raise ValueError("Решение по ЖЦ не соответствует выбранному приоритету трекера")
+        elif decision["apply_to_all"]:
+            raise ValueError("Пользовательский вариант ЖЦ нельзя применять ко всем задачам")
+        applied[decision["sbertrek_key"]] = decision
+    default_choice = payload["default_choice"]
+    if default_choice:
+        for conflict in conflicts:
+            if conflict["sbertrek_key"] in applied:
+                continue
+            applied[conflict["sbertrek_key"]] = {
+                "sbertrek_key": conflict["sbertrek_key"],
+                "jira_key": conflict["jira_key"],
+                "choice": default_choice,
+                "state": conflict[f"{default_choice}_state"],
+                "apply_to_all": True,
+                "sbertrek_state": conflict["sbertrek_state"],
+                "jira_state": conflict["jira_state"],
+                "inherited_run_default": True,
+            }
+    return applied
+
+
+def development_assignee_label(value: dict) -> str:
+    return (
+        f"{value.get('name') or value['id']} "
+        f"(account {value['id']}, team_id {value['team_id']}, role {value['role']})"
+    )
+
+
+def development_decision_question(conflict: dict) -> str:
+    return (
+        f"По задаче {conflict['sbertrek_key']} / {conflict['jira_key']} расходится состояние разработки. "
+        f"SberTrek: {development_assignee_label(conflict['sbertrek_assignee'])}, "
+        f"состояние {conflict['sbertrek_state']}. "
+        f"Jira: {development_assignee_label(conflict['jira_assignee'])}, "
+        f"состояние {conflict['jira_state']}. Как разрешить конфликт?\n"
+        "1. Приоритет SberTrek только для этой задачи.\n"
+        "2. Приоритет SberTrek для этой и всех последующих конфликтующих задач текущей сверки.\n"
+        "3. Приоритет Jira только для этой задачи.\n"
+        "4. Приоритет Jira для этой и всех последующих конфликтующих задач текущей сверки.\n"
+        "5. Свой вариант: completed, in-progress, not-started или unknown."
+    )
 
 
 def snapshot_gaps(snapshot: dict, excluded_keys: set[str] | None = None) -> list[str]:
@@ -2139,7 +2406,8 @@ def machine_summary(issues: list[dict], discrepancies: list[dict]) -> dict:
     }
 
 
-def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
+def reconcile_data(snapshots: dict[str, dict], config: dict, development_decisions: dict[str, dict] | None = None) -> dict:
+    development_decisions = development_decisions or {}
     sber = snapshots["sbertrek"]
     jira = snapshots.get("jira")
     sber_issues = {item["key"]: item for item in sber["issues"]}
@@ -2179,13 +2447,25 @@ def reconcile_data(snapshots: dict[str, dict], config: dict) -> dict:
             conflicts.append(conflict)
             discrepancies.append({"kind": "field-conflict", "sbertrek_key": sber_key, "jira_key": jira_key, **conflict})
         assigned_at, work_started_at = assignment_dates(sissue, jissue, config)
+        development = development_state(sissue, jissue, config)
+        if sber_key in development_decisions:
+            decision = development_decisions[sber_key]
+            development = {
+                "state": decision["state"],
+                "basis": "user-decision",
+                "choice": decision["choice"],
+                "apply_to_all": decision["apply_to_all"],
+                "inherited_run_default": decision.get("inherited_run_default", False),
+                "sbertrek_state": decision["sbertrek_state"],
+                "jira_state": decision["jira_state"],
+            }
         record.update({
             "field_sources": sources,
             "conflicts": conflicts,
             "history": merged_history(sissue, jissue),
             "assigned_at": assigned_at,
             "work_started_at": work_started_at,
-            "development": development_state(sissue, jissue, config),
+            "development": development,
         })
         merged.append(record)
         if jira_key and not jissue:
@@ -2515,6 +2795,109 @@ def jira_ingest_epic_links_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def sbertrek_ingest_counterpart_epic_command(args: argparse.Namespace) -> int:
+    config = load_config()
+    current = current_query(args.run_id, config)
+    if not current or current[0] != "sbertrek":
+        raise ValueError("Сейчас нет разрешённого поиска SberTrek-эпика")
+    path, snapshot = load_snapshot(args.run_id, "sbertrek")
+    ensure_mutable(snapshot)
+    query = snapshot["query"]
+    job_path_value, job = load_job(args.run_id, "collection-sbertrek")
+    if (
+        snapshot["scope"].get("provider") != "jira"
+        or snapshot["scope"].get("kind") != "epic"
+        or query.get("purpose") != "counterpart-epic"
+        or query.get("method") != "jira-epic-counterpart"
+        or job.get("state") not in {"pending", "running"}
+        or active_job(args.run_id) != job
+    ):
+        raise ValueError("Поиск SberTrek-эпика разрешён только активному counterpart epic collector-job")
+    if args.max_results != SBER_EXPORT_MAX_RESULTS:
+        raise ValueError(f"Поиск SberTrek-эпика должен использовать --max-results {SBER_EXPORT_MAX_RESULTS}")
+    call = evidence(args.evidence, "sbertrek")
+    if logged_mcp_details(args.run_id, call):
+        raise ValueError("Этот MCP-вызов уже записан в журнале")
+    _, payload, response_size, response_digest = response_json(args.response_file)
+    records, records_path = full_issue_records(payload)
+    if len(records) > 1:
+        raise ValueError("Одному Jira-эпику соответствует несколько SberTrek-эпиков")
+    cards = [compact_issue_from_response(record, "sbertrek", snapshot["scope"]) for record in records]
+    jira_epic_key = snapshot["scope"]["ids"][0]
+    sbertrek_epic_key = None
+    if cards:
+        card = cards[0]
+        if str(card["issue_type"]).casefold() != "epic":
+            raise ValueError("Объект SberTrek, найденный по Jira-эпику, не является эпиком")
+        if card.get("jira_key_state") != "value" or card.get("jira_key") != jira_epic_key:
+            raise ValueError("Найденный SberTrek-эпик не подтверждает Объект Jira исходного эпика")
+        sbertrek_epic_key = card["key"]
+    discovery_query = query["exact"]
+    details = (
+        f"operation=counterpart-epic; outcome=success; query_sha256={query_digest(discovery_query)}; "
+        f"returned={len(cards)}; max_results={args.max_results}; response_sha256={response_digest}; "
+        f"response_bytes={response_size}; parser_path={records_path}; query={discovery_query}; "
+        "summary=SberTrek counterpart epic structurally imported"
+    )
+    append_session_log(
+        args.run_id, source="mcp", event="call", provider="sbertrek",
+        evidence_value=call, details=details,
+    )
+    query["discovery"] = {
+        "method": "issue_key-to-sbertrek-epic",
+        "query": discovery_query,
+        "evidence": call,
+        "response_sha256": response_digest,
+        "response_bytes": response_size,
+        "records_path": records_path,
+        "returned_count": len(cards),
+        "jira_epic_key": jira_epic_key,
+        "sbertrek_epic_key": sbertrek_epic_key,
+    }
+    if sbertrek_epic_key:
+        exact = tql_epic(sbertrek_epic_key)
+        query.update({
+            "purpose": "epic-members",
+            "language": "TQL",
+            "exact": exact,
+            "initial_exact": exact,
+            "method": "linkedUnitsOf",
+            "requested_keys": [],
+            "state": "pending",
+        })
+        job["query"].update({
+            "language": "TQL", "purpose": "epic-members", "method": "linkedUnitsOf",
+            "text": exact, "sha256": query_digest(exact),
+        })
+        status = "sbertrek-counterpart-epic-members-query-ready"
+    else:
+        query.update({
+            "purpose": "epic-members",
+            "language": "TQL",
+            "exact": None,
+            "initial_exact": None,
+            "method": "linkedUnitsOf",
+            "requested_keys": [],
+            "state": "complete",
+        })
+        status = "sbertrek-counterpart-epic-not-found"
+    job["state"] = "running"
+    save_json(path, snapshot)
+    save_json(job_path_value, job)
+    args.record_sha256 = object_sha256(query["discovery"])
+    payload_out = {
+        "status": status,
+        "run_id": args.run_id,
+        "jira_epic": jira_epic_key,
+        "sbertrek_epic": sbertrek_epic_key,
+        "allowed_next_action": "execute-returned-tql" if sbertrek_epic_key else "collector-complete",
+    }
+    if sbertrek_epic_key:
+        payload_out.update(next_query_payload("sbertrek", query))
+    print(json.dumps(payload_out, ensure_ascii=False, indent=2))
+    return 0
+
+
 def ingest_query_response_command(args: argparse.Namespace) -> int:
     config = load_config()
     current = current_query(args.run_id, config)
@@ -2562,6 +2945,15 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
         if args.next_cursor != expected_cursor:
             raise ValueError("Jira next-cursor должен совпадать со следующим start_at из ответа")
     cards = [compact_issue_from_response(record, args.provider, snapshot["scope"]) for record in records]
+    discovered_sbertrek_epic = (
+        query.get("discovery", {}).get("sbertrek_epic_key")
+        if args.provider == "sbertrek" and isinstance(query.get("discovery"), dict)
+        else None
+    )
+    if discovered_sbertrek_epic:
+        for card in cards:
+            card["epic"] = {"key": discovered_sbertrek_epic, "name": discovered_sbertrek_epic}
+            card["field_observations"]["epic"] = "value"
     keys = [item["key"] for item in cards]
     existing_keys = set(query["keys"])
     repeated = sorted(existing_keys & set(keys))
@@ -2932,17 +3324,32 @@ def advance_after_collection(run_id: str) -> dict:
         raise ValueError("Не записаны карточки исходного запроса: " + ", ".join(missing))
     secondary_provider = "jira" if primary_provider == "sbertrek" else "sbertrek"
     secondary = snapshots.get(secondary_provider)
-    if secondary and secondary["query"].get("initial_exact") is None:
+    if (
+        secondary
+        and secondary["query"].get("initial_exact") is None
+        and secondary["query"].get("discovery") is None
+    ):
         if primary_provider == "sbertrek":
             ids = sorted({item["jira_key"] for item in primary["issues"] if item.get("jira_key")})
             exact = jql_keys(ids) if ids else None
+            purpose = "counterparts"
+            method = None
+        elif scope["kind"] == "epic":
+            ids = [scope["ids"][0]]
+            exact = tql_jira_keys(ids)
+            purpose = "counterpart-epic"
+            method = "jira-epic-counterpart"
         else:
             ids = list(primary["query"]["keys"])
             exact = tql_jira_keys(ids) if ids else None
+            purpose = "counterparts"
+            method = None
         if exact:
             secondary["query"].update({
+                "purpose": purpose,
                 "exact": exact,
                 "initial_exact": exact,
+                "method": method,
                 "requested_keys": ids,
                 "confirmed_absent": [],
                 "state": "pending",
@@ -2971,9 +3378,10 @@ def advance_after_collection(run_id: str) -> dict:
             raise ValueError("Не записаны карточки counterpart-запроса: " + ", ".join(missing))
         if secondary_provider == "sbertrek":
             allowed_jira = set(primary["query"]["keys"])
-            invalid = [f"{item['key']}={item['jira_key']}" for item in secondary["issues"] if item.get("jira_key") not in allowed_jira]
-            if invalid:
-                raise ValueError("SberTrek Объект Jira вне исходной Jira-области: " + ", ".join(invalid))
+            if scope["kind"] == "tasks":
+                invalid = [f"{item['key']}={item['jira_key']}" for item in secondary["issues"] if item.get("jira_key") not in allowed_jira]
+                if invalid:
+                    raise ValueError("SberTrek Объект Jira вне исходной Jira-области: " + ", ".join(invalid))
     for provider, snapshot in snapshots.items():
         snapshot["collection_complete"] = True
         save_json(snapshot_path(run_id, provider), snapshot)
@@ -3198,26 +3606,44 @@ def collector_brief_command(args: argparse.Namespace) -> int:
         language = job["query"]["language"]
         query = job["query"]["text"]
         if job["provider"] == "sbertrek":
-            prompt = (
-                run_guard +
-                f"Выполни в sbertrek ровно этот {language}-запрос без изменений:\n\n{query}\n\n"
+            export_contract = (
                 "Выбери только MCP-операцию issue.exportJson либо эквивалентную операцию bulk JSON export, "
                 "которая принимает точный TQL в параметре query и возвращает полный JSON как файл. Имя MCP-сервера "
-                f"может отличаться. Передай max_results={SBER_EXPORT_MAX_RESULTS}; другое значение запрещено. "
-                "Не используй issue.search, параметр text, issue.getByKey или link.list; "
-                "не проверяй ими доступность TQL и не выполняй обходных запросов. "
-                "Запроси только поля из response_contract.preferred_fields, если MCP-инструмент поддерживает "
-                "проекцию полей; поле attributes обязательно содержит пользовательские атрибуты assigned_to, "
-                "story_points, issue_key и fixversion, поэтому не заменяй его этими кодами. Не передавай "
-                "fields=null. Получи полный исходный JSON-ответ как файл. "
-                "Не читай и не пересказывай отображённый или усечённый preview ответа. Передай путь полного "
-                f"JSON в trackerctl.py ingest-query-response с --max-results {SBER_EXPORT_MAX_RESULTS}: эта команда сама структурно извлечёт все карточки "
-                "и посчитает их. Не выполняй других поисков, detail-вызовов или ручного record-issue. "
-                "Не заменяй запрос поиском по тексту, названию или смыслу. Если подходящей export-операции нет, "
-                "не вызывай никакой другой MCP-инструмент: верни ошибку и немедленно остановись. "
-                f"Прочитай только {contract} и {path}. После collector-complete немедленно верни только "
-                "status, job_id и пути."
+                f"может отличаться. Для каждого export передай max_results={SBER_EXPORT_MAX_RESULTS}; другое значение "
+                "запрещено. Не используй issue.search, параметр text, issue.getByKey или link.list. Запроси только "
+                "поля из response_contract.preferred_fields, если MCP-инструмент поддерживает проекцию; поле "
+                "attributes обязательно. Не передавай fields=null и не читай отображённый preview. "
             )
+            if job["query"].get("method") == "jira-epic-counterpart":
+                prompt = (
+                    run_guard +
+                    f"Выполни в sbertrek ровно этот {language}-запрос без изменений:\n\n{query}\n\n" +
+                    export_contract +
+                    "Этот первый bulk-запрос ищет только SberTrek-эпик, связанный с исходным Jira-эпиком. Передай "
+                    "полный исходный JSON-файл команде sbertrek-ingest-counterpart-epic с "
+                    f"--max-results {SBER_EXPORT_MAX_RESULTS}. Только эта команда проверит единственность и тип эпика "
+                    "и, если он найден, вернёт точный TQL linkedUnitsOf по его SberTrek-ключу. Выполни возвращённый "
+                    "TQL вторым bulk export без изменений и передай его полный JSON в ingest-query-response "
+                    f"--provider sbertrek --max-results {SBER_EXPORT_MAX_RESULTS}. Если эпик не найден и команда "
+                    "разрешила collector-complete, не выполняй второй запрос. Не ищи SberTrek-контрпары отдельно "
+                    "по ключам дочерних Jira-задач. При ошибке реального MCP-вызова сначала зарегистрируй её через "
+                    "mcp-log, затем выполни query-unavailable; не повторяй и не изменяй запрос. "
+                    f"Прочитай только {contract} и {path}. После collector-complete немедленно верни только "
+                    "status, job_id и пути."
+                )
+            else:
+                prompt = (
+                    run_guard +
+                    f"Выполни в sbertrek ровно этот {language}-запрос без изменений:\n\n{query}\n\n" +
+                    export_contract +
+                    "Полученный полный исходный JSON-файл передай в trackerctl.py ingest-query-response с "
+                    f"--max-results {SBER_EXPORT_MAX_RESULTS}: команда сама структурно извлечёт все карточки. "
+                    "Не выполняй других поисков, detail-вызовов или ручного record-issue. Не заменяй запрос поиском "
+                    "по тексту, названию или смыслу. При ошибке counterpart-вызова зарегистрируй её через mcp-log "
+                    "и query-unavailable; ошибку исходного SberTrek-запроса зарегистрируй и остановись. "
+                    f"Прочитай только {contract} и {path}. После collector-complete немедленно верни только "
+                    "status, job_id и пути."
+                )
         else:
             fields = ",".join(job["response_contract"]["preferred_fields"])
             if language == "JIRA_API":
@@ -3308,6 +3734,74 @@ def set_participant_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def set_development_decision_command(args: argparse.Namespace) -> int:
+    pending_path = pending_development_decision_path(args.run_id)
+    if not pending_path.is_file():
+        raise ValueError("Нет ожидающего вопроса о конфликте ЖЦ")
+    pending = load_json(pending_path)
+    conflict = pending.get("conflict") if isinstance(pending, dict) else None
+    if (
+        not isinstance(conflict, dict)
+        or pending.get("protocol") != PROTOCOL
+        or pending.get("schema_version") != SCHEMA_VERSION
+        or pending.get("run_id") != args.run_id
+        or pending.get("conflict_sha256") != object_sha256(conflict)
+        or pending.get("question") != development_decision_question(conflict)
+    ):
+        raise ValueError("Повреждён pending-development-decision.json")
+    if args.key != conflict.get("sbertrek_key"):
+        raise ValueError("Разрешено ответить только на текущий вопрос о конфликте ЖЦ")
+    config = load_config()
+    snapshots = all_snapshots(args.run_id, config)
+    for provider, snapshot in snapshots.items():
+        validate_collection_integrity(args.run_id, snapshot, provider)
+    validate_run_provenance(args.run_id, snapshots)
+    decisions = load_development_decisions(args.run_id)
+    conflicts = development_conflicts(snapshots, config)
+    applied = validate_development_decisions(conflicts, decisions)
+    unresolved = [item for item in conflicts if item["sbertrek_key"] not in applied]
+    if not unresolved or unresolved[0] != conflict:
+        raise ValueError("Текущий вопрос о конфликте ЖЦ не соответствует данным tracker-run")
+    if args.choice == "custom":
+        if args.state is None:
+            raise ValueError("Пользовательский вариант требует --state")
+        if args.apply_to_all:
+            raise ValueError("Пользовательский вариант нельзя применять ко всем задачам")
+        state = args.state
+    else:
+        if args.state is not None:
+            raise ValueError("При выборе приоритета трекера --state не указывается")
+        state = conflict[f"{args.choice}_state"]
+    core = {
+        "sbertrek_key": conflict["sbertrek_key"],
+        "jira_key": conflict["jira_key"],
+        "choice": args.choice,
+        "state": state,
+        "apply_to_all": args.apply_to_all,
+        "sbertrek_state": conflict["sbertrek_state"],
+        "jira_state": conflict["jira_state"],
+    }
+    digest = object_sha256(core)
+    decisions["decisions"].append({**core, "record_sha256": digest})
+    if args.apply_to_all:
+        decisions["default_choice"] = args.choice
+    save_json(development_decisions_path(args.run_id), decisions)
+    pending_path.unlink()
+    args.record_sha256 = digest
+    print(json.dumps({
+        "status": "tracker-development-decision-saved",
+        "run_id": args.run_id,
+        "sbertrek_key": conflict["sbertrek_key"],
+        "jira_key": conflict["jira_key"],
+        "choice": args.choice,
+        "state": state,
+        "apply_to_all": args.apply_to_all,
+        "default_scope": "current-run" if args.apply_to_all else None,
+        "allowed_next_action": "reconcile",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def abandon_run_command(args: argparse.Namespace) -> int:
     current = active_run_id()
     if current != args.run_id:
@@ -3354,11 +3848,30 @@ def reconcile_command(args: argparse.Namespace) -> int:
         payload = stop_payload(question, status="tracker-reconcile-blocked", run_id=args.run_id)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return STOP_EXIT
+    decisions = load_development_decisions(args.run_id)
+    conflicts = development_conflicts(snapshots, config)
+    applied_decisions = validate_development_decisions(conflicts, decisions)
+    unresolved = [item for item in conflicts if item["sbertrek_key"] not in applied_decisions]
+    if unresolved:
+        conflict = unresolved[0]
+        question = development_decision_question(conflict)
+        pending_payload = {
+            "protocol": PROTOCOL,
+            "schema_version": SCHEMA_VERSION,
+            "run_id": args.run_id,
+            "conflict": conflict,
+            "conflict_sha256": object_sha256(conflict),
+            "question": question,
+        }
+        save_json(pending_development_decision_path(args.run_id), pending_payload)
+        payload = stop_payload(question, status="tracker-reconcile-blocked", run_id=args.run_id)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return STOP_EXIT
     for provider, snapshot in snapshots.items():
         if not snapshot.get("captured_at"):
             snapshot["captured_at"] = now()
             save_json(snapshot_path(args.run_id, provider), snapshot)
-    result = reconcile_data(snapshots, config)
+    result = reconcile_data(snapshots, config, applied_decisions)
     root = run_root(args.run_id)
     save_json(root / "reconciled.json", result)
     (root / "report.md").write_text(render_report(result), encoding="utf-8")
@@ -3409,6 +3922,7 @@ def parser() -> argparse.ArgumentParser:
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
     links = commands.add_parser("jira-ingest-epic-links"); links.add_argument("--run-id", required=True); links.add_argument("--evidence", required=True); links.add_argument("--response-file", required=True); links.set_defaults(handler=jira_ingest_epic_links_command, provider="jira")
+    sber_epic = commands.add_parser("sbertrek-ingest-counterpart-epic"); sber_epic.add_argument("--run-id", required=True); sber_epic.add_argument("--evidence", required=True); sber_epic.add_argument("--response-file", required=True); sber_epic.add_argument("--max-results", type=int, required=True); sber_epic.set_defaults(handler=sbertrek_ingest_counterpart_epic_command, provider="sbertrek")
     ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
     mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key", action="append", default=[]); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     absent = commands.add_parser("jira-record-absent-counterparts"); absent.add_argument("--run-id", required=True); absent.add_argument("--evidence", required=True); absent.add_argument("--key", action="append", default=[]); absent.set_defaults(handler=jira_record_absent_counterparts_command, provider="jira")
@@ -3422,6 +3936,7 @@ def parser() -> argparse.ArgumentParser:
     run_status = commands.add_parser("run-status"); run_status.add_argument("--run-id", required=True); run_status.set_defaults(handler=run_status_command)
     collector_brief = commands.add_parser("collector-brief"); collector_brief.add_argument("--run-id", required=True); collector_brief.set_defaults(handler=collector_brief_command)
     participant_parser = commands.add_parser("set-participant"); participant_parser.add_argument("--run-id", required=True); participant_parser.add_argument("--provider", choices=PROVIDERS, required=True); participant_parser.add_argument("--account-id", required=True); participant_parser.add_argument("--team-id", required=True); participant_parser.set_defaults(handler=set_participant_command)
+    decision_parser = commands.add_parser("set-development-decision"); decision_parser.add_argument("--run-id", required=True); decision_parser.add_argument("--key", required=True); decision_parser.add_argument("--choice", choices=DEVELOPMENT_DECISION_CHOICES, required=True); decision_parser.add_argument("--state", choices=DEVELOPMENT_DECISION_STATES); decision_parser.add_argument("--apply-to-all", action="store_true"); decision_parser.set_defaults(handler=set_development_decision_command)
     abandon = commands.add_parser("abandon-run"); abandon.add_argument("--run-id", required=True); abandon.add_argument("--reason", required=True); abandon.set_defaults(handler=abandon_run_command)
     reconcile = commands.add_parser("reconcile"); reconcile.add_argument("--run-id", required=True); reconcile.set_defaults(handler=reconcile_command)
     result = commands.add_parser("result-status"); result.add_argument("--run-id", required=True); result.set_defaults(handler=result_status_command)
