@@ -260,10 +260,13 @@ class TrackerCtlV3Tests(unittest.TestCase):
         calls = [(f"mcp:{provider}:history:{key}", [key]) for key in job["keys"]]
         evidence_by_key = {}
         for evidence, keys in calls:
+            relevant_event_count = 2 if handoff_key in keys else 0
             args = [
                 "mcp-log", "--run-id", run_id, "--provider", provider,
                 "--operation", "history", "--outcome", "success", "--evidence", evidence,
                 "--summary", "bounded history",
+                "--history-item-count", str(relevant_event_count),
+                "--relevant-event-count", str(relevant_event_count),
             ]
             for key in keys:
                 args += ["--key", key]
@@ -1246,8 +1249,43 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
             prompt = self.run_tool(state, "collector-brief", "--run-id", run_id)["prompt"]
             self.assertIn("--query, --page-number и --returned-count запрещены", prompt)
+            self.assertIn("--history-item-count", prompt)
+            self.assertIn("--relevant-event-count", prompt)
+            self.assertIn("Пустая история требует оба счётчика 0", prompt)
             self.assertIn("не исправляй её и не повторяй job", prompt)
             self.assertIn("не перемещай MCP-ответы", prompt)
+
+    def test_successful_history_log_requires_structural_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
+            payload = self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "history", "--outcome", "success",
+                "--evidence", "mcp:sbertrek:history:RSCON-6845",
+                "--summary", "history call ok", "--key", "RSCON-6845", expected=2,
+            )
+            self.assertEqual(payload["status"], "tracker-read-failed")
+            self.assertIn("--history-item-count", payload["error"])
+
+    def test_history_completion_rejects_missing_relevant_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
+            evidence = "mcp:sbertrek:history:RSCON-6845"
+            self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "history", "--outcome", "success", "--evidence", evidence,
+                "--summary", "one relevant change", "--key", "RSCON-6845",
+                "--history-item-count", "1", "--relevant-event-count", "1",
+            )
+            payload = self.run_tool(
+                state, "history-complete", "--run-id", run_id, "--provider", "sbertrek",
+                "--key", "RSCON-6845", "--state", "complete", "--evidence", evidence,
+                expected=2,
+            )
+            self.assertEqual(payload["status"], "tracker-read-failed")
+            self.assertIn("не совпадает", payload["error"])
 
     def test_invalid_history_log_arguments_make_the_run_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1281,7 +1319,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.collect(state, run_id, "sbertrek", [(key, {}) for key in ids])
             active = self.active_job(state, run_id); assert active
             outside = next(key for key in ids if key not in active["keys"])
-            payload = self.run_tool(state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek", "--operation", "history", "--outcome", "success", "--evidence", f"mcp:sbertrek:history:{outside}", "--summary", "outside", "--key", outside, expected=2)
+            payload = self.run_tool(state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek", "--operation", "history", "--outcome", "success", "--evidence", f"mcp:sbertrek:history:{outside}", "--summary", "outside", "--key", outside, "--history-item-count", "0", "--relevant-event-count", "0", expected=2)
             self.assertIn("точный набор ключей job", payload["error"])
 
     def test_history_event_requires_prior_real_call_evidence(self) -> None:
@@ -1314,6 +1352,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
                 "--operation", "history", "--outcome", "success",
                 "--evidence", "mcp:jira:history:RSCON-2902",
                 "--summary", "wrong key for evidence", "--key", "RSCON-2903",
+                "--history-item-count", "0", "--relevant-event-count", "0",
                 expected=2,
             )
             self.assertIn("канонический evidence", payload["error"])
@@ -1389,6 +1428,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
                 state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
                 "--operation", "history", "--outcome", "success", "--evidence", evidence,
                 "--summary", "bounded history", "--key", "RSCON-6845",
+                "--history-item-count", "1", "--relevant-event-count", "1",
             )
             self.run_tool(
                 state, "history-event", "--run-id", run_id, "--provider", "sbertrek",
@@ -1435,6 +1475,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
                 state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
                 "--operation", "history", "--outcome", "success", "--evidence", evidence,
                 "--summary", "bounded history", "--key", "RSCON-6845",
+                "--history-item-count", "3", "--relevant-event-count", "3",
             )
             events = [
                 ("2026-08-10T10:00:00+00:00", None, "s-dev"),
@@ -1713,7 +1754,26 @@ class TrackerCtlV3Tests(unittest.TestCase):
                 payload["counts"]["discrepancies"],
             )
             self.assertIn("Суммарная оценка: 5.0 story-points", (root / "report.md").read_text(encoding="utf-8"))
-            self.assertTrue(self.run_tool(state, "result-status", "--run-id", run_id)["final_response_allowed"])
+            official = self.run_tool(state, "result-status", "--run-id", run_id)
+            self.assertTrue(official["final_response_allowed"])
+            self.assertEqual(official["response_contract"]["mode"], "emit-verbatim")
+            self.assertFalse(official["response_contract"]["additional_commentary_allowed"])
+            self.assertIn("| RSCON-6845 | RSCON-2902 | Sber title |", official["response_contract"]["text"])
+            self.assertEqual(
+                hashlib.sha256(official["response_contract"]["text"].encode("utf-8")).hexdigest(),
+                official["response_contract"]["text_sha256"],
+            )
+
+    def test_result_status_rejects_tampered_official_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id, root = self.complete_sber_run(state)
+            self.run_tool(state, "reconcile", "--run-id", run_id)
+            completion_path = root / "completion-status.json"
+            completion = json.loads(completion_path.read_text(encoding="utf-8"))
+            completion["response_contract"]["text"] += "\nОжидаемые конфликты."
+            self.write(completion_path, completion)
+            payload = self.run_tool(state, "result-status", "--run-id", run_id, expected=2)
+            self.assertIn("изменён после reconciliation", payload["error"])
 
     def test_update_planning_intent_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

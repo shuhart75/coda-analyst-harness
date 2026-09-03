@@ -122,18 +122,25 @@ expand="changelog")`. Для SberTrek также выполни ровно од�
 
 После разрешённого вызова:
 
-1. запиши его через `mcp-log --operation history`;
-2. сохрани только события полей `assignee` и `status` через `history-event`;
-3. отметь ключ через `history-complete` как `complete` либо `unavailable`;
-4. после всех ключей выполни `history-job-complete --job-id ...`.
+1. посчитай все возвращённые элементы history/changelog и отдельно все изменения
+   полей `assignee` и `status`;
+2. запиши вызов через `mcp-log --operation history`, передав для успешного ответа
+   оба точных числа как `--history-item-count` и `--relevant-event-count`;
+3. сохрани через `history-event` ровно `relevant-event-count` событий полей
+   `assignee` и `status`;
+4. отметь ключ через `history-complete` как `complete` либо `unavailable`;
+5. после всех ключей выполни `history-job-complete --job-id ...`.
 
 Для `mcp-log --operation history` передавай только `--run-id`, `--provider`,
-`--operation`, `--outcome`, `--evidence`, `--summary` и точный `--key`.
+`--operation`, `--outcome`, `--evidence`, `--summary`, точный `--key` и, при
+успехе, оба обязательных числовых параметра `--history-item-count` и
+`--relevant-event-count`. Для полного пустого ответа передай оба значения `0`.
 `--query`, `--page-number` и `--returned-count` относятся только к query и здесь
 запрещены.
 
 Не придумывай и не переименовывай evidence. `trackerctl.py` сверяет точный набор
-ключей, SHA-256 набора, режим вызова и журнал MCP с полем `calls` в job.
+ключей, SHA-256 набора, режим вызова, оба счётчика и число реально записанных
+релевантных событий с полем `calls` в job и журналом MCP.
 Не сохраняй историю описания, комментариев, оценок, ссылок или вложений.
 
 ## Запрещено

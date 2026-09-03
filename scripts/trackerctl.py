@@ -14,7 +14,7 @@ from typing import Any
 
 
 PROTOCOL = "targeted-tracker-v3"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -1738,6 +1738,11 @@ def validate_history_job_calls(run_id: str, job: dict, *, require_complete: bool
             f"keys_sha256={call['keys_sha256']};",
             f"keys={','.join(call['keys'])};",
         )
+        if call["outcome"] == "success":
+            markers += (
+                f"history_items={call['history_item_count']};",
+                f"relevant_events={call['relevant_event_count']};",
+            )
         if not all(marker in details for marker in markers):
             raise ValueError("History-job не совпадает с машинным журналом MCP-вызовов")
 
@@ -1820,12 +1825,24 @@ def load_job(run_id: str, job_id: str) -> tuple[Path, dict]:
                 raise ValueError("History-job содержит повреждённые или повторные вызовы")
             seen.add(call["evidence"])
             expected = next((item for item in expected_calls if item["evidence"] == call.get("evidence")), None)
+            allowed_fields = {"evidence", "keys", "keys_sha256", "outcome"}
+            if call.get("outcome") == "success":
+                allowed_fields |= {"history_item_count", "relevant_event_count"}
             if (
                 expected is None
                 or call.get("keys") != expected["keys"]
                 or call.get("keys_sha256") != expected["keys_sha256"]
                 or call.get("outcome") not in {"success", "error"}
-                or set(call) != {"evidence", "keys", "keys_sha256", "outcome"}
+                or set(call) != allowed_fields
+                or (
+                    call.get("outcome") == "success"
+                    and (
+                        not isinstance(call.get("history_item_count"), int)
+                        or call["history_item_count"] < 0
+                        or not isinstance(call.get("relevant_event_count"), int)
+                        or call["relevant_event_count"] < 0
+                    )
+                )
             ):
                 raise ValueError("History-job содержит вызов, не соответствующий каноническому контракту")
     return path, job
@@ -2652,6 +2669,121 @@ def render_report(result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def official_response_text(result: dict, run_id: str, report_path: Path) -> str:
+    counts = result["counts"]
+    summary = result["summary"]
+    lines = [
+        "Сверка трекеров завершена.",
+        "",
+        f"Run ID: `{run_id}`",
+        "",
+        "Счётчики:",
+        *[f"- `{name}`: {value}" for name, value in counts.items()],
+        "",
+        "Сводка:",
+        f"- Суммарная оценка: {summary['story_points_total']} story-points",
+        "- По ролям: " + ", ".join(
+            f"{role}={summary['role_estimate_totals'][role]}" for role in ESTIMATE_ROLES
+        ),
+        f"- Общих оценок распределено по префиксу: {summary['general_estimate_role_inference_count']}",
+        f"- Без оценки: {summary['unestimated_issue_count']}",
+        f"- Оценка в других единицах: {summary['non_story_point_estimate_count']}",
+        "- Статусы: " + (", ".join(
+            f"{name}={value}" for name, value in summary["status_counts"].items()
+        ) or "нет"),
+        "- Состояния разработки: " + (", ".join(
+            f"{name}={value}" for name, value in summary["development_state_counts"].items()
+        ) or "нет"),
+        "- Виды расхождений: " + (", ".join(
+            f"{name}={value}" for name, value in summary["discrepancy_kind_counts"].items()
+        ) or "нет"),
+        "- Не найдены в Jira: " + (", ".join(summary["missing_jira_counterparts"]) or "нет"),
+        "- Подтверждённо отсутствуют в Jira: " + (
+            ", ".join(summary["absent_jira_counterparts"]) or "нет"
+        ),
+        "- Исключены задачи SberTrek: " + (", ".join(summary["excluded_sbertrek_issues"]) or "нет"),
+        "",
+        "Задачи:",
+        "",
+        "| SberTrek | Jira | Название | Статус | Исполнитель | Ролевые оценки | Состояние |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for item in result["issues"]:
+        assignee = item.get("assignee") or {}
+        if isinstance(assignee, dict):
+            team_id, name = assignee.get("team_id"), assignee.get("name")
+            assignee_text = f"{team_id} ({name})" if team_id and name else team_id or name or assignee.get("id") or "—"
+        else:
+            assignee_text = str(assignee)
+        role_text = ", ".join(
+            f"{role}={estimate.get('value')} {estimate.get('unit')}"
+            for role in ESTIMATE_ROLES
+            if isinstance((estimate := item.get("role_estimates", {}).get(role)), dict)
+        ) or "—"
+        cells = [
+            item.get("sbertrek_key") or "—",
+            item.get("jira_key") or "—",
+            item.get("summary") or "—",
+            item.get("status") or "—",
+            assignee_text,
+            role_text,
+            item["development"]["state"],
+        ]
+        lines.append("| " + " | ".join(str(cell).replace("|", "\\|").replace("\n", " ") for cell in cells) + " |")
+    lines += [
+        "",
+        "Ограничения:",
+        *([f"- {item}" for item in result["limitations"]] or ["- Нет"]),
+        "",
+        f"Подробный детерминированный отчёт: `{report_path}`",
+    ]
+    return "\n".join(lines)
+
+
+def completion_response_contract(result: dict, run_id: str, report_path: Path) -> dict:
+    response_text = official_response_text(result, run_id, report_path)
+    return {
+        "mode": "emit-verbatim",
+        "text": response_text,
+        "text_sha256": hashlib.sha256(response_text.encode("utf-8")).hexdigest(),
+        "additional_commentary_allowed": False,
+    }
+
+
+def validate_completion_status(run_id: str, payload: dict) -> None:
+    root = run_root(run_id)
+    reconciled_path = root / "reconciled.json"
+    report_path = root / "report.md"
+    if (
+        not isinstance(payload, dict)
+        or payload.get("protocol") != PROTOCOL
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("run_id") != run_id
+        or payload.get("status") != "tracker-read-reconciled"
+        or payload.get("workflow_complete") is not True
+        or payload.get("final_response_allowed") is not True
+        or not reconciled_path.is_file()
+        or not report_path.is_file()
+    ):
+        raise ValueError("Completion-status создан старым, повреждённым или незавершённым протоколом")
+    result = load_json(reconciled_path)
+    if (
+        result.get("protocol") != PROTOCOL
+        or result.get("schema_version") != SCHEMA_VERSION
+        or result.get("status") != "tracker-read-reconciled"
+        or payload.get("counts") != result.get("counts")
+        or payload.get("summary") != result.get("summary")
+        or payload.get("limitations") != result.get("limitations")
+        or payload.get("planning_application_allowed")
+        != (result.get("scope", {}).get("intent") == "update-planning")
+        or payload.get("reconciled_sha256") != file_sha256(reconciled_path)
+        or payload.get("report_sha256") != file_sha256(report_path)
+        or report_path.read_text(encoding="utf-8") != render_report(result)
+        or payload.get("response_contract") != completion_response_contract(result, run_id, report_path)
+    ):
+        raise ValueError("Официальный completion-status или его результат изменён после reconciliation")
+
+
 def init_config_command(args: argparse.Namespace) -> int:
     path = config_path()
     if path.exists() and not args.force:
@@ -3004,8 +3136,24 @@ def mcp_log_command(args: argparse.Namespace) -> int:
             raise ValueError("History MCP-вызов должен использовать канонический evidence и точный набор ключей job")
         if any(item["evidence"] == call or set(item["keys"]) & set(keys) for item in job["calls"]):
             raise ValueError("Для каждого канонического набора ключей разрешён ровно один history MCP-вызов")
-        job["calls"].append({**expected_call, "outcome": args.outcome})
+        history_counts = {}
+        if args.outcome == "success":
+            if args.history_item_count is None or args.relevant_event_count is None:
+                raise ValueError(
+                    "Успешный history-вызов требует --history-item-count и --relevant-event-count"
+                )
+            if args.history_item_count < 0 or args.relevant_event_count < 0:
+                raise ValueError("Счётчики history-вызова не могут быть отрицательными")
+            history_counts = {
+                "history_item_count": args.history_item_count,
+                "relevant_event_count": args.relevant_event_count,
+            }
+        elif args.history_item_count is not None or args.relevant_event_count is not None:
+            raise ValueError("Счётчики history-вызова допустимы только при outcome=success")
+        job["calls"].append({**expected_call, "outcome": args.outcome, **history_counts})
         save_json(job_path(args.run_id, job["job_id"]), job)
+    elif args.history_item_count is not None or args.relevant_event_count is not None:
+        raise ValueError("Счётчики history-вызова допустимы только для operation=history")
     parts = [f"operation={args.operation}", f"outcome={args.outcome}"]
     if args.query is not None:
         parts.append(f"query_sha256={query_digest(args.query)}")
@@ -3017,6 +3165,10 @@ def mcp_log_command(args: argparse.Namespace) -> int:
         parts.append(f"keys={','.join(normalized_keys)}")
     if args.returned_count is not None:
         parts.append(f"returned={args.returned_count}")
+    if args.history_item_count is not None:
+        parts.append(f"history_items={args.history_item_count}")
+    if args.relevant_event_count is not None:
+        parts.append(f"relevant_events={args.relevant_event_count}")
     if args.query is not None:
         parts.append(f"query={args.query}")
     parts.append(f"summary={args.summary}")
@@ -3459,8 +3611,18 @@ def history_complete_command(args: argparse.Namespace) -> int:
         raise ValueError("Недоступная история требует --reason")
     call = evidence(args.evidence, args.provider)
     outcome = "success" if args.state == "complete" else "error"
-    history_call_for_key(job, item["key"], call, outcome)
+    history_call = history_call_for_key(job, item["key"], call, outcome)
     require_logged_mcp(args.run_id, call, outcome=outcome)
+    relevant_events = sum(
+        1 for event in item["history"]["events"]
+        if event.get("evidence") == call and event.get("field") in {"assignee", "status"}
+    )
+    if outcome == "success" and relevant_events != history_call["relevant_event_count"]:
+        raise ValueError(
+            "Число записанных событий assignee/status не совпадает с --relevant-event-count"
+        )
+    if outcome == "error" and relevant_events:
+        raise ValueError("Недоступная история не может содержать записанные события")
     item["history"].update({"state": args.state, "evidence": [call], "reason": args.reason})
     save_json(path, snapshot)
     args.record_sha256 = object_sha256({name: item["history"][name] for name in ("state", "evidence", "reason")})
@@ -3515,8 +3677,7 @@ def run_status_command(args: argparse.Namespace) -> int:
     completion = run_root(args.run_id) / "completion-status.json"
     if completion.is_file():
         payload = load_json(completion)
-        if payload.get("protocol") != PROTOCOL or payload.get("schema_version") != SCHEMA_VERSION:
-            raise ValueError("Completion-status создан старым протоколом")
+        validate_completion_status(args.run_id, payload)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
     current_status = load_json(status_path(args.run_id))
@@ -3667,9 +3828,11 @@ def collector_brief_command(args: argparse.Namespace) -> int:
         prompt = (
             run_guard + history_instruction +
             f"Для записи результата прочитай только {contract} и {path}. Не придумывай evidence, не ищи "
-            "другие задачи, не создавай скрипты или вспомогательные файлы. Для mcp-log --operation history "
-            "передавай только --key, --outcome, --evidence и --summary; параметры --query, --page-number и "
-            "--returned-count запрещены. После history-job-complete "
+            "другие задачи, не создавай скрипты или вспомогательные файлы. Для каждого успешного ответа посчитай "
+            "все возвращённые элементы истории и отдельно все изменения полей assignee/status. Передай оба числа "
+            "в mcp-log --operation history через --history-item-count и --relevant-event-count; затем запиши ровно "
+            "relevant-event-count событий через history-event. Пустая история требует оба счётчика 0. Параметры "
+            "--query, --page-number и --returned-count запрещены. После history-job-complete "
             "немедленно верни только status, job_id и пути."
         )
     print(json.dumps({
@@ -3872,6 +4035,11 @@ def reconcile_command(args: argparse.Namespace) -> int:
             "completion_status": str(root / "completion-status.json"),
         },
     }
+    completion["reconciled_sha256"] = file_sha256(root / "reconciled.json")
+    completion["report_sha256"] = file_sha256(root / "report.md")
+    completion["response_contract"] = completion_response_contract(
+        result, args.run_id, root / "report.md",
+    )
     save_json(root / "completion-status.json", completion)
     save_json(status_path(args.run_id), completion)
     release_active_run(args.run_id)
@@ -3884,12 +4052,7 @@ def result_status_command(args: argparse.Namespace) -> int:
     if not path.is_file():
         raise ValueError("У tracker-run ещё нет официального completion-status")
     payload = load_json(path)
-    if (
-        payload.get("protocol") != PROTOCOL
-        or payload.get("schema_version") != SCHEMA_VERSION
-        or payload.get("status") != "tracker-read-reconciled"
-    ):
-        raise ValueError("Completion-status создан старым или незавершённым протоколом")
+    validate_completion_status(args.run_id, payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
@@ -3907,7 +4070,7 @@ def parser() -> argparse.ArgumentParser:
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
     sber_epic = commands.add_parser("sbertrek-ingest-counterpart-epic"); sber_epic.add_argument("--run-id", required=True); sber_epic.add_argument("--evidence", required=True); sber_epic.add_argument("--response-file", required=True); sber_epic.add_argument("--max-results", type=int, required=True); sber_epic.set_defaults(handler=sbertrek_ingest_counterpart_epic_command, provider="sbertrek")
     ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
-    mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key", action="append", default=[]); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
+    mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key", action="append", default=[]); mcp.add_argument("--returned-count", type=int); mcp.add_argument("--history-item-count", type=int); mcp.add_argument("--relevant-event-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     absent = commands.add_parser("jira-record-absent-counterparts"); absent.add_argument("--run-id", required=True); absent.add_argument("--evidence", required=True); absent.add_argument("--key", action="append", default=[]); absent.set_defaults(handler=jira_record_absent_counterparts_command, provider="jira")
     page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)
     unavailable = commands.add_parser("query-unavailable"); unavailable.add_argument("--run-id", required=True); unavailable.add_argument("--provider", choices=PROVIDERS, required=True); unavailable.add_argument("--reason", required=True); unavailable.add_argument("--evidence", required=True); unavailable.set_defaults(handler=query_unavailable_command)
