@@ -1332,10 +1332,18 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
             or discovery.get("query") != expected_lookup
             or discovery.get("jira_epic_key") != jira_epic_key
             or discovery.get("returned_count") not in {0, 1}
+            or discovery.get("response_source") not in RESPONSE_SOURCES
+            or not isinstance(discovery.get("response_bytes"), int)
+            or discovery["response_bytes"] <= 0
             or (sbertrek_epic_key is not None and (
                 not isinstance(sbertrek_epic_key, str)
                 or not ISSUE_KEY.fullmatch(sbertrek_epic_key)
                 or discovery["returned_count"] != 1
+                or discovery.get("issue_type_state") not in {"value", "not-returned"}
+                or (
+                    discovery.get("issue_type_state") == "value"
+                    and str(discovery.get("issue_type") or "").casefold() != "epic"
+                )
             ))
             or (sbertrek_epic_key is None and discovery.get("returned_count") != 0)
             or not re.fullmatch(r"[a-f0-9]{64}", str(discovery.get("response_sha256") or ""))
@@ -1343,7 +1351,10 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
             raise ValueError("Коллекция Jira-эпика не содержит проверенный поиск SberTrek-эпика")
         call = evidence(str(discovery.get("evidence") or ""), "sbertrek")
         details = require_logged_mcp(run_id, call, outcome="success")
-        if f"operation=counterpart-epic; outcome=success; query_sha256={query_digest(expected_lookup)};" not in details:
+        if (
+            f"operation=counterpart-epic; outcome=success; query_sha256={query_digest(expected_lookup)};" not in details
+            or f"response_source={discovery['response_source']};" not in details
+        ):
             raise ValueError("Evidence поиска SberTrek-эпика не совпадает с исходным Jira-эпиком")
         require_tracker_command(
             run_id, "sbertrek-ingest-counterpart-epic", provider="sbertrek", evidence_value=call,
@@ -1426,8 +1437,6 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
             response_source = page.get("response_source")
             if response_source not in RESPONSE_SOURCES:
                 raise ValueError(f"Коллекция {provider}: страница {expected_number} не содержит источник ответа")
-            if provider == "sbertrek" and response_source != "mcp-file":
-                raise ValueError("SberTrek допускает только MCP-файл ответа")
             if f"response_source={response_source};" not in details:
                 raise ValueError(f"Коллекция {provider}: источник ответа страницы {expected_number} не совпадает с evidence")
             if not re.fullmatch(r"[a-f0-9]{64}", str(page.get("response_sha256") or "")):
@@ -1649,7 +1658,7 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
         "allowed_operations": [
             "select-runtime-json-export-tool" if provider == "sbertrek" else "select-runtime-query-tool",
             "execute-exact-query", "paginate",
-            *(["capture-verbatim-inline-json-outside-run"] if provider == "jira" else []),
+            "capture-verbatim-inline-json-outside-run",
             "record-bounded-call", "structurally-import-full-json-response",
             "record-page", "record-compact-card",
             *(["record-confirmed-absent-counterparts"] if provider == "jira" and query.get("purpose") == "counterparts" else []),
@@ -1671,9 +1680,9 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
             "full_json_required": True,
             "rendered_preview_is_not_data": True,
             "structural_import_command": "ingest-query-response",
-            "allowed_response_sources": ["mcp-file"] if provider == "sbertrek" else list(RESPONSE_SOURCES),
+            "allowed_response_sources": list(RESPONSE_SOURCES),
             "response_file_must_be_external": True,
-            "inline_capture_must_be_verbatim": provider == "jira",
+            "inline_capture_must_be_verbatim": True,
             "failure_return": {
                 "allowed_fields": ["status", "job_id", "run_id", "reason", "paths"],
                 "partial_task_facts_forbidden": True,
@@ -2561,11 +2570,22 @@ def reconcile_data(snapshots: dict[str, dict], config: dict, development_decisio
             for page in snapshot["query"].get("pages", [])
         ):
             limitations.append(f"jira-search-limit-reached:{JIRA_SEARCH_MAX_RESULTS}")
-        if provider == "jira" and any(
+        inline_response_captured = any(
             page.get("response_source") == "inline-json-capture"
             for page in snapshot["query"].get("pages", [])
+        ) or (
+            provider == "sbertrek"
+            and isinstance(snapshot["query"].get("discovery"), dict)
+            and snapshot["query"]["discovery"].get("response_source") == "inline-json-capture"
+        )
+        if inline_response_captured:
+            limitations.append(f"{provider}-inline-response-captured")
+        if (
+            provider == "sbertrek"
+            and isinstance(snapshot["query"].get("discovery"), dict)
+            and snapshot["query"]["discovery"].get("issue_type_state") == "not-returned"
         ):
-            limitations.append("jira-inline-response-captured")
+            limitations.append("sbertrek-counterpart-epic-type-not-returned")
     limitations.extend(
         f"general-estimate-role-unresolved:{item.get('jira_key') or item.get('sbertrek_key')}"
         for item in merged
@@ -2904,20 +2924,34 @@ def sbertrek_ingest_counterpart_epic_command(args: argparse.Namespace) -> int:
     records, records_path = full_issue_records(payload)
     if len(records) > 1:
         raise ValueError("Одному Jira-эпику соответствует несколько SberTrek-эпиков")
-    cards = [compact_issue_from_response(record, "sbertrek", snapshot["scope"]) for record in records]
     jira_epic_key = snapshot["scope"]["ids"][0]
     sbertrek_epic_key = None
-    if cards:
-        card = cards[0]
-        if str(card["issue_type"]).casefold() != "epic":
+    counterpart_issue_type = None
+    counterpart_issue_type_state = None
+    if records:
+        record = records[0]
+        sbertrek_epic_key = record_issue_key(record)
+        if not sbertrek_epic_key:
+            raise ValueError("JSON-объект counterpart-эпика не содержит ключ")
+        fields = record_fields(record)
+        type_found, type_raw = alias_value(fields, TYPE_ALIASES)
+        counterpart_issue_type = object_text(type_raw, ("code", "name", "value")) if type_found else None
+        counterpart_issue_type_state = "value" if counterpart_issue_type else "not-returned"
+        if counterpart_issue_type and counterpart_issue_type.casefold() != "epic":
             raise ValueError("Объект SberTrek, найденный по Jira-эпику, не является эпиком")
-        if card.get("jira_key_state") != "value" or card.get("jira_key") != jira_epic_key:
+        attributes, _ = attribute_entries(record)
+        jira_raw, jira_key_state = optional_value(
+            record, ("issue_key",), attributes, SBER_ATTRIBUTE_CODES["jira_key"],
+        )
+        jira_text = object_text(jira_raw, ("key", "code", "value", "name")) if jira_key_state == "value" else None
+        jira_key = issue_key(jira_text, "Объект Jira") if jira_text else None
+        if jira_key_state != "value" or jira_key != jira_epic_key:
             raise ValueError("Найденный SberTrek-эпик не подтверждает Объект Jira исходного эпика")
-        sbertrek_epic_key = card["key"]
     discovery_query = query["exact"]
     details = (
         f"operation=counterpart-epic; outcome=success; query_sha256={query_digest(discovery_query)}; "
-        f"returned={len(cards)}; max_results={args.max_results}; response_sha256={response_digest}; "
+        f"returned={len(records)}; max_results={args.max_results}; response_source={args.response_source}; "
+        f"response_sha256={response_digest}; "
         f"response_bytes={response_size}; parser_path={records_path}; query={discovery_query}; "
         "summary=SberTrek counterpart epic structurally imported"
     )
@@ -2929,13 +2963,15 @@ def sbertrek_ingest_counterpart_epic_command(args: argparse.Namespace) -> int:
         "method": "issue_key-to-sbertrek-epic",
         "query": discovery_query,
         "evidence": call,
-        "response_source": "mcp-file",
+        "response_source": args.response_source,
         "response_sha256": response_digest,
         "response_bytes": response_size,
         "records_path": records_path,
-        "returned_count": len(cards),
+        "returned_count": len(records),
         "jira_epic_key": jira_epic_key,
         "sbertrek_epic_key": sbertrek_epic_key,
+        "issue_type": counterpart_issue_type,
+        "issue_type_state": counterpart_issue_type_state,
     }
     if sbertrek_epic_key:
         exact = tql_epic(sbertrek_epic_key)
@@ -2999,8 +3035,6 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
     expected_max_results = tool_contract["max_results"]
     if args.max_results != expected_max_results:
         raise ValueError(f"Bulk-запрос {args.provider} должен использовать --max-results {expected_max_results}")
-    if args.provider == "sbertrek" and args.response_source != "mcp-file":
-        raise ValueError("SberTrek разрешает только --response-source mcp-file")
     expected_page = len(query["pages"]) + 1
     if args.page_number != expected_page:
         raise ValueError(f"Ожидалась страница {expected_page}")
@@ -3733,11 +3767,14 @@ def collector_brief_command(args: argparse.Namespace) -> int:
         if job["provider"] == "sbertrek":
             export_contract = (
                 "Выбери только MCP-операцию issue.exportJson либо эквивалентную операцию bulk JSON export, "
-                "которая принимает точный TQL в параметре query и возвращает полный JSON как файл. Имя MCP-сервера "
+                "которая принимает точный TQL в параметре query и возвращает полный структурированный JSON. Имя MCP-сервера "
                 f"может отличаться. Для каждого export передай max_results={SBER_EXPORT_MAX_RESULTS}; другое значение "
                 "запрещено. Не используй issue.search, параметр text, issue.getByKey или link.list. Запроси только "
                 "поля из response_contract.preferred_fields, если MCP-инструмент поддерживает проекцию; поле "
-                "attributes обязательно. Не передавай fields=null и не читай отображённый preview. "
+                "attributes обязательно. Не передавай fields=null и не читай отображённый preview. Если MCP создал "
+                "полный JSON-файл, передай его с --response-source mcp-file. Если полный JSON вернулся только inline, "
+                "дословно сохрани весь ответ в один новый внешний временный JSON-файл и передай его с "
+                "--response-source inline-json-capture. Не извлекай и не преобразовывай карточки. "
             )
             if job["query"].get("method") == "jira-epic-counterpart":
                 prompt = (
@@ -3745,11 +3782,12 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                     f"Выполни в sbertrek ровно этот {language}-запрос без изменений:\n\n{query}\n\n" +
                     export_contract +
                     "Этот первый bulk-запрос ищет только SberTrek-эпик, связанный с исходным Jira-эпиком. Передай "
-                    "полный исходный JSON-файл команде sbertrek-ingest-counterpart-epic с "
+                    "полный исходный JSON команде sbertrek-ingest-counterpart-epic с соответствующим "
+                    "--response-source и "
                     f"--max-results {SBER_EXPORT_MAX_RESULTS}. Только эта команда проверит единственность и тип эпика "
                     "и, если он найден, вернёт точный TQL linkedUnitsOf по его SberTrek-ключу. Выполни возвращённый "
                     "TQL вторым bulk export без изменений и передай его полный JSON в ingest-query-response "
-                    f"--provider sbertrek --response-source mcp-file --max-results {SBER_EXPORT_MAX_RESULTS}. "
+                    f"--provider sbertrek с соответствующим --response-source и --max-results {SBER_EXPORT_MAX_RESULTS}. "
                     "Если эпик не найден и команда "
                     "разрешила collector-complete, не выполняй второй запрос. Не ищи SberTrek-контрпары отдельно "
                     "по ключам дочерних Jira-задач. При ошибке реального MCP-вызова сначала зарегистрируй её через "
@@ -3762,8 +3800,8 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                     run_guard +
                     f"Выполни в sbertrek ровно этот {language}-запрос без изменений:\n\n{query}\n\n" +
                     export_contract +
-                    "Полученный полный исходный JSON-файл передай в trackerctl.py ingest-query-response с "
-                    f"--response-source mcp-file --max-results {SBER_EXPORT_MAX_RESULTS}: команда сама структурно "
+                    "Полученный полный исходный JSON передай в trackerctl.py ingest-query-response с соответствующим "
+                    f"--response-source и --max-results {SBER_EXPORT_MAX_RESULTS}: команда сама структурно "
                     "извлечёт все карточки. "
                     "Не выполняй других поисков, detail-вызовов или ручного record-issue. Не заменяй запрос поиском "
                     "по тексту, названию или смыслу. При ошибке counterpart-вызова зарегистрируй её через mcp-log "
@@ -4068,7 +4106,7 @@ def parser() -> argparse.ArgumentParser:
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config)
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
-    sber_epic = commands.add_parser("sbertrek-ingest-counterpart-epic"); sber_epic.add_argument("--run-id", required=True); sber_epic.add_argument("--evidence", required=True); sber_epic.add_argument("--response-file", required=True); sber_epic.add_argument("--max-results", type=int, required=True); sber_epic.set_defaults(handler=sbertrek_ingest_counterpart_epic_command, provider="sbertrek")
+    sber_epic = commands.add_parser("sbertrek-ingest-counterpart-epic"); sber_epic.add_argument("--run-id", required=True); sber_epic.add_argument("--evidence", required=True); sber_epic.add_argument("--response-file", required=True); sber_epic.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); sber_epic.add_argument("--max-results", type=int, required=True); sber_epic.set_defaults(handler=sbertrek_ingest_counterpart_epic_command, provider="sbertrek")
     ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
     mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key", action="append", default=[]); mcp.add_argument("--returned-count", type=int); mcp.add_argument("--history-item-count", type=int); mcp.add_argument("--relevant-event-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     absent = commands.add_parser("jira-record-absent-counterparts"); absent.add_argument("--run-id", required=True); absent.add_argument("--evidence", required=True); absent.add_argument("--key", action="append", default=[]); absent.set_defaults(handler=jira_record_absent_counterparts_command, provider="jira")

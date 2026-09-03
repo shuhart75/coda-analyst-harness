@@ -151,7 +151,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
 
     def ingest_sber_response(
         self, state: Path, run_id: str, issues: list[tuple[str, dict]], *,
-        wrapper: bool = False, last: bool = True,
+        wrapper: bool = False, last: bool = True, response_source: str = "mcp-file",
     ) -> dict:
         records = [self.sber_response_issue(key, **values) for key, values in issues]
         payload: object = {"issues": records}
@@ -162,7 +162,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
         args = [
             "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
             "--page-number", "1", "--max-results", "50",
-            "--response-source", "mcp-file",
+            "--response-source", response_source,
             "--evidence", "mcp:sbertrek:query:page-1", "--response-file", str(response),
         ]
         if last:
@@ -233,7 +233,8 @@ class TrackerCtlV3Tests(unittest.TestCase):
         return self.run_tool(state, *args)
 
     def ingest_sbertrek_counterpart_epic(
-        self, state: Path, run_id: str, issue: tuple[str, dict] | None,
+        self, state: Path, run_id: str, issue: tuple[str, dict] | None, *,
+        response_source: str = "mcp-file", expected: int = 0,
     ) -> dict:
         records = [self.sber_response_issue(issue[0], **issue[1])] if issue else []
         response = state / "mcp-responses" / f"{run_id}-sbertrek-counterpart-epic.json"
@@ -241,7 +242,9 @@ class TrackerCtlV3Tests(unittest.TestCase):
         return self.run_tool(
             state, "sbertrek-ingest-counterpart-epic", "--run-id", run_id,
             "--evidence", "mcp:sbertrek:counterpart-epic",
-            "--response-file", str(response), "--max-results", "50",
+            "--response-file", str(response), "--response-source", response_source,
+            "--max-results", "50",
+            expected=expected,
         )
 
     def collect(self, state: Path, run_id: str, provider: str, issues: list[tuple[str, dict]]) -> dict:
@@ -468,20 +471,20 @@ class TrackerCtlV3Tests(unittest.TestCase):
             result = self.run_tool(state, "reconcile", "--run-id", run_id)
             self.assertIn("jira-inline-response-captured", result["limitations"])
 
-    def test_sbertrek_rejects_inline_json_capture(self) -> None:
+    def test_sbertrek_inline_json_capture_is_imported_with_visible_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
             run_id = self.begin(state, jira=False)["run_id"]
-            response = state / "sbertrek-inline.json"
-            self.write(response, {"issues": [self.sber_response_issue("RSCON-6845")]})
-            payload = self.run_tool(
-                state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
-                "--page-number", "1", "--max-results", "50", "--last-page",
-                "--response-source", "inline-json-capture",
-                "--evidence", "mcp:sbertrek:query:inline", "--response-file", str(response),
-                expected=2,
+            self.ingest_sber_response(
+                state, run_id, [("RSCON-6845", {})],
+                response_source="inline-json-capture",
             )
-            self.assertIn("только --response-source mcp-file", payload["error"])
+            page = self.snapshot(state, run_id, "sbertrek")["query"]["pages"][0]
+            self.assertEqual(page["response_source"], "inline-json-capture")
+            self.run_tool(state, "collector-complete", "--run-id", run_id, "--provider", "sbertrek")
+            self.complete_all_histories(state, run_id)
+            result = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertIn("sbertrek-inline-response-captured", result["limitations"])
 
     def test_response_file_inside_tracker_run_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -831,6 +834,12 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertNotIn("issue_key", fields)
             self.assertNotIn("issue_type", fields)
             self.assertNotIn("releases", fields)
+            self.assertEqual(
+                self.job(state, run_id, "collection-sbertrek")["response_contract"]["allowed_response_sources"],
+                ["mcp-file", "inline-json-capture"],
+            )
+            brief = self.run_tool(state, "collector-brief", "--run-id", run_id)["prompt"]
+            self.assertIn("--response-source inline-json-capture", brief)
 
     def test_jira_epic_job_uses_direct_epic_link_search_with_all_estimate_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -929,6 +938,61 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertEqual({item["epic"]["key"] for item in sber["issues"]}, {"RSCON-6854"})
             jira = self.snapshot(state, run_id, "jira")
             self.assertEqual({item["epic"]["key"] for item in jira["issues"]}, {"RSCON-2911"})
+
+    def test_jira_epic_reverse_path_accepts_minimal_inline_sbertrek_export(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, provider="jira", kind="epic", ids=("RSCON-2911",),
+            )["run_id"]
+            self.collect(state, run_id, "jira", [("RSCON-2902", {})])
+            response = state / "mcp-responses" / "sbertrek-counterpart-inline.json"
+            self.write(response, [{
+                "key": "RSCON-6854",
+                "summary": "Когорты в АС КОДА",
+                "status": "created",
+                "attributes": [{
+                    "code": "issue_key", "name": "Объект Jira",
+                    "type": "issue_key", "value": "RSCON-2911",
+                }],
+            }])
+            payload = self.run_tool(
+                state, "sbertrek-ingest-counterpart-epic", "--run-id", run_id,
+                "--evidence", "mcp:sbertrek:counterpart-epic-inline",
+                "--response-file", str(response),
+                "--response-source", "inline-json-capture", "--max-results", "50",
+            )
+            self.assertEqual(payload["sbertrek_epic"], "RSCON-6854")
+            discovery = self.snapshot(state, run_id, "sbertrek")["query"]["discovery"]
+            self.assertEqual(discovery["response_source"], "inline-json-capture")
+            self.assertEqual(discovery["issue_type_state"], "not-returned")
+            self.assertEqual(
+                payload["next_query"]["query"],
+                'unit IN linkedUnitsOf("unit = \'RSCON-6854\'", "Состоит из")',
+            )
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-6845", {"jira_key": "RSCON-2902"}),
+            ])
+            self.complete_all_histories(state, run_id)
+            result = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertIn("sbertrek-inline-response-captured", result["limitations"])
+            self.assertIn("sbertrek-counterpart-epic-type-not-returned", result["limitations"])
+
+    def test_jira_epic_reverse_path_rejects_explicit_non_epic_type(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, provider="jira", kind="epic", ids=("RSCON-2911",),
+            )["run_id"]
+            self.collect(state, run_id, "jira", [("RSCON-2902", {})])
+            payload = self.ingest_sbertrek_counterpart_epic(state, run_id, (
+                "RSCON-6854", {
+                    "jira_key": "RSCON-2911", "issue_type": "story",
+                    "summary": "Not an epic",
+                },
+            ), expected=2)
+            self.assertEqual(payload["status"], "tracker-read-failed")
+            self.assertIn("не является эпиком", payload["error"])
 
     def test_jira_epic_without_sbertrek_counterpart_keeps_jira_members(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
