@@ -162,6 +162,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
         args = [
             "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
             "--page-number", "1", "--max-results", "50",
+            "--response-source", "mcp-file",
             "--evidence", "mcp:sbertrek:query:page-1", "--response-file", str(response),
         ]
         if last:
@@ -202,7 +203,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
     def ingest_jira_response(
         self, state: Path, run_id: str, issues: list[tuple[str, dict]], *,
         page: int = 1, start_at: int = 0, total: int | None = None,
-        last: bool = True,
+        last: bool = True, response_source: str = "mcp-file",
     ) -> dict:
         records = [self.jira_response_issue(key, **values) for key, values in issues]
         payload = {
@@ -211,11 +212,16 @@ class TrackerCtlV3Tests(unittest.TestCase):
             "max_results": 50,
             "issues": records,
         }
+        if response_source == "inline-json-capture":
+            payload = {
+                "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+            }
         response = state / "mcp-responses" / f"{run_id}-jira-{page}.json"
         self.write(response, payload)
         args = [
             "ingest-query-response", "--run-id", run_id, "--provider", "jira",
             "--page-number", str(page), "--max-results", "50",
+            "--response-source", response_source,
             "--evidence", f"mcp:jira:query:page-{page}", "--response-file", str(response),
         ]
         if page > 1:
@@ -433,8 +439,64 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertEqual(len(snapshot["issues"]), 22)
             self.assertEqual(len(snapshot["query"]["keys"]), 22)
             self.assertEqual(snapshot["query"]["pages"][0]["recording_method"], "structural-json-import")
+            self.assertEqual(snapshot["query"]["pages"][0]["response_source"], "mcp-file")
             self.assertEqual(snapshot["query"]["pages"][0]["requested_max_results"], 50)
             self.assertRegex(snapshot["query"]["pages"][0]["response_sha256"], r"^[a-f0-9]{64}$")
+
+    def test_jira_inline_json_capture_is_imported_with_visible_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state)["run_id"]
+            self.collect(state, run_id, "sbertrek", [
+                ("RSCON-6845", {"jira_key": "RSCON-2902"}),
+            ])
+            self.ingest_jira_response(
+                state, run_id, [("RSCON-2902", {})],
+                response_source="inline-json-capture",
+            )
+            page = self.snapshot(state, run_id, "jira")["query"]["pages"][0]
+            self.assertEqual(page["response_source"], "inline-json-capture")
+            self.assertEqual(
+                page["page_metadata"],
+                {"total": 1, "start_at": 0, "max_results": 50},
+            )
+            self.run_tool(state, "collector-complete", "--run-id", run_id, "--provider", "jira")
+            self.complete_all_histories(state, run_id)
+            result = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertIn("jira-inline-response-captured", result["limitations"])
+
+    def test_sbertrek_rejects_inline_json_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state, jira=False)["run_id"]
+            response = state / "sbertrek-inline.json"
+            self.write(response, {"issues": [self.sber_response_issue("RSCON-6845")]})
+            payload = self.run_tool(
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
+                "--page-number", "1", "--max-results", "50", "--last-page",
+                "--response-source", "inline-json-capture",
+                "--evidence", "mcp:sbertrek:query:inline", "--response-file", str(response),
+                expected=2,
+            )
+            self.assertIn("только --response-source mcp-file", payload["error"])
+
+    def test_response_file_inside_tracker_run_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state, provider="jira", ids=("RSCON-2902",))["run_id"]
+            response = self.root(state, run_id) / "inline.json"
+            self.write(response, {
+                "total": 1, "start_at": 0, "max_results": 50,
+                "issues": [self.jira_response_issue("RSCON-2902")],
+            })
+            payload = self.run_tool(
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
+                "--page-number", "1", "--max-results", "50", "--last-page",
+                "--response-source", "inline-json-capture",
+                "--evidence", "mcp:jira:query:inline", "--response-file", str(response),
+                expected=2,
+            )
+            self.assertIn("вне каталога tracker-run", payload["error"])
 
     def test_sbertrek_reads_all_role_estimates_from_attributes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -534,6 +596,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
                 "--page-number", "1", "--max-results", "10", "--last-page",
+                "--response-source", "mcp-file",
                 "--evidence", "mcp:sbertrek:query:limited", "--response-file", str(response),
                 expected=2,
             )
@@ -582,6 +645,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
                 "--page-number", "1", "--max-results", "50", "--last-page", "--evidence", "mcp:sbertrek:query:projected",
+                "--response-source", "mcp-file",
                 "--response-file", str(response),
             )
             self.assertEqual(payload["returned_count"], 1)
@@ -624,6 +688,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
                 "--page-number", "1", "--max-results", "50", "--last-page", "--evidence", "mcp:sbertrek:query:real-shape",
+                "--response-source", "mcp-file",
                 "--response-file", str(response),
             )
             self.assertEqual(payload["returned_count"], 1)
@@ -649,6 +714,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
                 "--page-number", "1", "--max-results", "50", "--last-page",
+                "--response-source", "mcp-file",
                 "--evidence", "mcp:jira:query:unassigned", "--response-file", str(response),
             )
             self.assertEqual(payload["returned_count"], 1)
@@ -669,6 +735,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
                 "--page-number", "1", "--max-results", "50", "--last-page",
+                "--response-source", "mcp-file",
                 "--evidence", "mcp:jira:query:unsupported-assignee", "--response-file", str(response),
                 expected=2,
             )
@@ -701,6 +768,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
                 "--page-number", "1", "--max-results", "50", "--last-page", "--evidence", "mcp:sbertrek:query:empty",
+                "--response-source", "mcp-file",
                 "--response-file", str(response),
             )
             self.assertEqual(payload["returned_count"], 0)
@@ -769,6 +837,10 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertEqual(job["query"]["purpose"], "epic-members")
             self.assertEqual(job["query"]["method"], "epic-link")
             self.assertEqual(job["response_contract"]["mcp_tool_contract"]["preferred_operation"], "jira_search")
+            self.assertEqual(
+                job["response_contract"]["allowed_response_sources"],
+                ["mcp-file", "inline-json-capture"],
+            )
             self.assertIn("issue.getByKey", job["forbidden_operations"])
             self.assertNotIn("record-confirmed-absent-counterparts", job["allowed_operations"])
             fields = job["response_contract"]["preferred_fields"]
@@ -782,6 +854,9 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertIn("не читай issuelinks", brief)
             self.assertIn("не заменяй его промежуточным key IN (...)", brief)
             self.assertIn("Даже пустой результат", brief)
+            self.assertIn("--response-source inline-json-capture", brief)
+            self.assertIn("дословно сохрани весь ответ", brief)
+            self.assertIn("не извлекай, не сокращай, не переформатируй", brief)
 
     def test_jira_epic_cannot_complete_before_importing_a_search_page(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -926,6 +1001,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
                 "--page-number", "1", "--max-results", "50", "--last-page",
+                "--response-source", "mcp-file",
                 "--evidence", "mcp:jira:query:duplicate",
                 "--response-file", str(state / "mcp-responses" / f"{run_id}-jira-1.json"), expected=2,
             )
@@ -942,6 +1018,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
                 "--page-number", "1", "--max-results", "50", "--last-page",
+                "--response-source", "mcp-file",
                 "--evidence", "mcp:jira:query:bad-pagination", "--response-file", str(response), expected=2,
             )
             self.assertIn("последней Jira-страницы", payload["error"])
@@ -1094,6 +1171,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
                 "--page-number", "1", "--max-results", "50", "--last-page", "--evidence", "mcp:sbertrek:query:missing-fields",
+                "--response-source", "mcp-file",
                 "--response-file", str(response),
             )
             payload = self.run_tool(
@@ -1106,7 +1184,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             state = Path(temp); run_id = self.begin(state)["run_id"]
             response = state / "placeholder.json"
             self.write(response, {"issues": [self.sber_response_issue("RSCON-6845", summary="RSCON-6845")]})
-            payload = self.run_tool(state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek", "--page-number", "1", "--max-results", "50", "--last-page", "--evidence", "mcp:sbertrek:query:placeholder", "--response-file", str(response), expected=2)
+            payload = self.run_tool(state, "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek", "--page-number", "1", "--max-results", "50", "--last-page", "--response-source", "mcp-file", "--evidence", "mcp:sbertrek:query:placeholder", "--response-file", str(response), expected=2)
             self.assertIn("placeholder", payload["error"])
 
         with tempfile.TemporaryDirectory() as temp:
@@ -1156,6 +1234,9 @@ class TrackerCtlV3Tests(unittest.TestCase):
             )
             self.assertEqual(failed["status"], "tracker-read-failed")
             self.assertEqual(failed["failure"]["source"], "collector-subagent")
+            self.assertFalse(failed["final_response_allowed"])
+            for forbidden in ("counts", "summary", "limitations"):
+                self.assertNotIn(forbidden, failed)
             blocked = self.run_tool(state, "collector-brief", "--run-id", run_id, expected=2)
             self.assertEqual(blocked["status"], "tracker-read-failed")
 

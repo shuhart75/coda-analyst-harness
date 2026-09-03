@@ -14,7 +14,7 @@ from typing import Any
 
 
 PROTOCOL = "targeted-tracker-v3"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -54,6 +54,7 @@ MERGED_FIELDS = (
 RAW_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
 SBER_EXPORT_MAX_RESULTS = 50
 JIRA_SEARCH_MAX_RESULTS = 50
+RESPONSE_SOURCES = ("mcp-file", "inline-json-capture")
 JIRA_ESTIMATE_FIELDS = {
     "customfield_15014": {"name": "Оценка разработки (Back-End)", "role": "BE", "unit": "person-days"},
     "customfield_15015": {"name": "Оценка разработки (Front-End)", "role": "FE", "unit": "person-days"},
@@ -236,6 +237,14 @@ def response_json(path_value: str) -> tuple[Path, Any, int, str]:
     return path, payload, size, file_sha256(path)
 
 
+def ensure_external_response_file(run_id: str, path: Path) -> None:
+    try:
+        path.relative_to(run_root(run_id))
+    except ValueError:
+        return
+    raise ValueError("JSON-ответ должен находиться вне каталога tracker-run")
+
+
 def decoded_json_string(value: str) -> Any | None:
     text = value.strip()
     if text.startswith("```json") and text.endswith("```"):
@@ -326,15 +335,42 @@ def full_issue_records(payload: Any) -> tuple[list[dict], str]:
 
 
 def jira_page_metadata(payload: Any) -> dict | None:
-    if not isinstance(payload, dict):
+    candidates: set[tuple[int, int, int]] = set()
+    visited_strings: set[str] = set()
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if depth > 20:
+            return
+        if isinstance(value, str):
+            if value in visited_strings:
+                return
+            decoded = decoded_json_string(value)
+            if decoded is not None:
+                visited_strings.add(value)
+                walk(decoded, depth + 1)
+            return
+        if isinstance(value, list):
+            for item in value:
+                walk(item, depth + 1)
+            return
+        if not isinstance(value, dict):
+            return
+        folded = {str(key).casefold(): item for key, item in value.items()}
+        total = folded.get("total")
+        start = folded.get("start_at", folded.get("startat"))
+        maximum = folded.get("max_results", folded.get("maxresults"))
+        if all(isinstance(item, int) and not isinstance(item, bool) for item in (total, start, maximum)):
+            candidates.add((total, start, maximum))
+        for item in value.values():
+            walk(item, depth + 1)
+
+    walk(payload)
+    if len(candidates) > 1:
+        raise ValueError("Jira JSON-ответ содержит неоднозначные metadata пагинации")
+    if not candidates:
         return None
-    folded = {str(key).casefold(): value for key, value in payload.items()}
-    total = folded.get("total")
-    start = folded.get("start_at", folded.get("startat"))
-    maximum = folded.get("max_results", folded.get("maxresults"))
-    if all(isinstance(value, int) and not isinstance(value, bool) for value in (total, start, maximum)):
-        return {"total": total, "start_at": start, "max_results": maximum}
-    return None
+    total, start, maximum = next(iter(candidates))
+    return {"total": total, "start_at": start, "max_results": maximum}
 
 
 def object_text(value: Any, aliases: tuple[str, ...] = ("code", "name", "value", "title", "key")) -> str | None:
@@ -1387,6 +1423,13 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
         if expected_details not in details:
             raise ValueError(f"Коллекция {provider}: evidence страницы {expected_number} не совпадает с bulk-запросом")
         if page.get("recording_method") == "structural-json-import":
+            response_source = page.get("response_source")
+            if response_source not in RESPONSE_SOURCES:
+                raise ValueError(f"Коллекция {provider}: страница {expected_number} не содержит источник ответа")
+            if provider == "sbertrek" and response_source != "mcp-file":
+                raise ValueError("SberTrek допускает только MCP-файл ответа")
+            if f"response_source={response_source};" not in details:
+                raise ValueError(f"Коллекция {provider}: источник ответа страницы {expected_number} не совпадает с evidence")
             if not re.fullmatch(r"[a-f0-9]{64}", str(page.get("response_sha256") or "")):
                 raise ValueError(f"Коллекция {provider}: страница {expected_number} не содержит SHA-256 ответа")
             if not isinstance(page.get("response_bytes"), int) or page["response_bytes"] <= 0:
@@ -1606,6 +1649,7 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
         "allowed_operations": [
             "select-runtime-json-export-tool" if provider == "sbertrek" else "select-runtime-query-tool",
             "execute-exact-query", "paginate",
+            *(["capture-verbatim-inline-json-outside-run"] if provider == "jira" else []),
             "record-bounded-call", "structurally-import-full-json-response",
             "record-page", "record-compact-card",
             *(["record-confirmed-absent-counterparts"] if provider == "jira" and query.get("purpose") == "counterparts" else []),
@@ -1627,6 +1671,13 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
             "full_json_required": True,
             "rendered_preview_is_not_data": True,
             "structural_import_command": "ingest-query-response",
+            "allowed_response_sources": ["mcp-file"] if provider == "sbertrek" else list(RESPONSE_SOURCES),
+            "response_file_must_be_external": True,
+            "inline_capture_must_be_verbatim": provider == "jira",
+            "failure_return": {
+                "allowed_fields": ["status", "job_id", "run_id", "reason", "paths"],
+                "partial_task_facts_forbidden": True,
+            },
             "mcp_tool_contract": {
                 "required_capability": "exact-tql-bulk-json-export",
                 "preferred_operation": "issue.exportJson",
@@ -2493,6 +2544,11 @@ def reconcile_data(snapshots: dict[str, dict], config: dict, development_decisio
             for page in snapshot["query"].get("pages", [])
         ):
             limitations.append(f"jira-search-limit-reached:{JIRA_SEARCH_MAX_RESULTS}")
+        if provider == "jira" and any(
+            page.get("response_source") == "inline-json-capture"
+            for page in snapshot["query"].get("pages", [])
+        ):
+            limitations.append("jira-inline-response-captured")
     limitations.extend(
         f"general-estimate-role-unresolved:{item.get('jira_key') or item.get('sbertrek_key')}"
         for item in merged
@@ -2711,7 +2767,8 @@ def sbertrek_ingest_counterpart_epic_command(args: argparse.Namespace) -> int:
     call = evidence(args.evidence, "sbertrek")
     if logged_mcp_details(args.run_id, call):
         raise ValueError("Этот MCP-вызов уже записан в журнале")
-    _, payload, response_size, response_digest = response_json(args.response_file)
+    response_path, payload, response_size, response_digest = response_json(args.response_file)
+    ensure_external_response_file(args.run_id, response_path)
     records, records_path = full_issue_records(payload)
     if len(records) > 1:
         raise ValueError("Одному Jira-эпику соответствует несколько SberTrek-эпиков")
@@ -2740,6 +2797,7 @@ def sbertrek_ingest_counterpart_epic_command(args: argparse.Namespace) -> int:
         "method": "issue_key-to-sbertrek-epic",
         "query": discovery_query,
         "evidence": call,
+        "response_source": "mcp-file",
         "response_sha256": response_digest,
         "response_bytes": response_size,
         "records_path": records_path,
@@ -2809,6 +2867,8 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
     expected_max_results = tool_contract["max_results"]
     if args.max_results != expected_max_results:
         raise ValueError(f"Bulk-запрос {args.provider} должен использовать --max-results {expected_max_results}")
+    if args.provider == "sbertrek" and args.response_source != "mcp-file":
+        raise ValueError("SberTrek разрешает только --response-source mcp-file")
     expected_page = len(query["pages"]) + 1
     if args.page_number != expected_page:
         raise ValueError(f"Ожидалась страница {expected_page}")
@@ -2825,7 +2885,8 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
         raise ValueError("Этот MCP-вызов уже записан в журнале")
     if logged_query_calls(args.run_id, args.provider, exact_query, args.page_number):
         raise ValueError("Для одной страницы точного bulk-запроса разрешён ровно один MCP-вызов")
-    _, payload, response_size, response_digest = response_json(args.response_file)
+    response_path, payload, response_size, response_digest = response_json(args.response_file)
+    ensure_external_response_file(args.run_id, response_path)
     records, records_path = full_issue_records(payload)
     page_metadata = jira_page_metadata(payload) if args.provider == "jira" else None
     if page_metadata:
@@ -2855,7 +2916,8 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
     details = (
         f"operation=query; outcome=success; query_sha256={query_digest(exact_query)}; "
         f"page={args.page_number}; returned={len(keys)}; max_results={args.max_results}; response_sha256={response_digest}; "
-        f"response_bytes={response_size}; parser_path={records_path}; query={exact_query}; "
+        f"response_bytes={response_size}; response_source={args.response_source}; "
+        f"parser_path={records_path}; query={exact_query}; "
         "summary=full JSON structurally imported"
     )
     append_session_log(
@@ -2874,6 +2936,7 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
         "evidence": call,
         "keys": keys,
         "recording_method": "structural-json-import",
+        "response_source": args.response_source,
         "response_sha256": response_digest,
         "response_bytes": response_size,
         "returned_count": len(keys),
@@ -2895,6 +2958,7 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
         "query_state": query["state"],
         "returned_count": len(keys),
         "response_sha256": response_digest,
+        "response_source": args.response_source,
     }, ensure_ascii=False, indent=2))
     return 0
 
@@ -3524,7 +3588,8 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                     f"--max-results {SBER_EXPORT_MAX_RESULTS}. Только эта команда проверит единственность и тип эпика "
                     "и, если он найден, вернёт точный TQL linkedUnitsOf по его SberTrek-ключу. Выполни возвращённый "
                     "TQL вторым bulk export без изменений и передай его полный JSON в ingest-query-response "
-                    f"--provider sbertrek --max-results {SBER_EXPORT_MAX_RESULTS}. Если эпик не найден и команда "
+                    f"--provider sbertrek --response-source mcp-file --max-results {SBER_EXPORT_MAX_RESULTS}. "
+                    "Если эпик не найден и команда "
                     "разрешила collector-complete, не выполняй второй запрос. Не ищи SberTrek-контрпары отдельно "
                     "по ключам дочерних Jira-задач. При ошибке реального MCP-вызова сначала зарегистрируй её через "
                     "mcp-log, затем выполни query-unavailable; не повторяй и не изменяй запрос. "
@@ -3537,7 +3602,8 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                     f"Выполни в sbertrek ровно этот {language}-запрос без изменений:\n\n{query}\n\n" +
                     export_contract +
                     "Полученный полный исходный JSON-файл передай в trackerctl.py ingest-query-response с "
-                    f"--max-results {SBER_EXPORT_MAX_RESULTS}: команда сама структурно извлечёт все карточки. "
+                    f"--response-source mcp-file --max-results {SBER_EXPORT_MAX_RESULTS}: команда сама структурно "
+                    "извлечёт все карточки. "
                     "Не выполняй других поисков, detail-вызовов или ручного record-issue. Не заменяй запрос поиском "
                     "по тексту, названию или смыслу. При ошибке counterpart-вызова зарегистрируй её через mcp-log "
                     "и query-unavailable; ошибку исходного SberTrek-запроса зарегистрируй и остановись. "
@@ -3561,8 +3627,12 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                 f"Выполни в Jira ровно этот {language}-запрос без изменений:\n\n{query}\n\n" +
                 epic_guard +
                 f"Используй jira_search с fields=\"{fields}\" и limit={JIRA_SEARCH_MAX_RESULTS}. Не добавляй "
-                "фильтр по статусу или типу и не выполняй поштучные jira_get_issue. Сохрани полный JSON-ответ "
-                f"и передай его в ingest-query-response --provider jira --max-results {JIRA_SEARCH_MAX_RESULTS}; "
+                "фильтр по статусу или типу и не выполняй поштучные jira_get_issue. Если MCP создал полный JSON-файл, "
+                "передай его без изменений с --response-source mcp-file. Если полный структурированный JSON вернулся "
+                "только непосредственно в ответе инструмента, дословно сохрани весь ответ в один новый временный "
+                "JSON-файл вне каталога tracker-run и передай его с --response-source inline-json-capture. Никогда "
+                "не извлекай, не сокращай, не переформатируй и не восстанавливай карточки вручную. Вызови "
+                f"ingest-query-response --provider jira --max-results {JIRA_SEARCH_MAX_RESULTS}; "
                 "эта команда сама извлечёт карточки и все ролевые оценки. Даже пустой результат передай как полный "
                 "исходный JSON и импортируй структурно до collector-complete. Для реальной пагинации продолжай тем же "
                 "точным JQL только по полученному из ответа cursor или start_at. " +
@@ -3836,7 +3906,7 @@ def parser() -> argparse.ArgumentParser:
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
     sber_epic = commands.add_parser("sbertrek-ingest-counterpart-epic"); sber_epic.add_argument("--run-id", required=True); sber_epic.add_argument("--evidence", required=True); sber_epic.add_argument("--response-file", required=True); sber_epic.add_argument("--max-results", type=int, required=True); sber_epic.set_defaults(handler=sbertrek_ingest_counterpart_epic_command, provider="sbertrek")
-    ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
+    ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
     mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key", action="append", default=[]); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     absent = commands.add_parser("jira-record-absent-counterparts"); absent.add_argument("--run-id", required=True); absent.add_argument("--evidence", required=True); absent.add_argument("--key", action="append", default=[]); absent.set_defaults(handler=jira_record_absent_counterparts_command, provider="jira")
     page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)
