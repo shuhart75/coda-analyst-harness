@@ -331,8 +331,9 @@ def jira_page_metadata(payload: Any) -> dict | None:
     return None
 
 
-def jira_issue_links(payload: Any) -> tuple[str, list[dict], str]:
+def jira_issue_links(payload: Any, expected_epic: str | None = None) -> tuple[str, list[dict], str]:
     candidates: list[tuple[str, dict]] = []
+    issue_identities: list[tuple[str, str]] = []
 
     def walk(value: Any, path: str, depth: int = 0) -> None:
         if depth > 12:
@@ -348,6 +349,10 @@ def jira_issue_links(payload: Any) -> tuple[str, list[dict], str]:
             return
         if not isinstance(value, dict):
             return
+        found_key, raw_key = alias_value(value, ISSUE_KEY_ALIASES)
+        candidate_key = object_text(raw_key) if found_key else None
+        if candidate_key and ISSUE_KEY.fullmatch(candidate_key.strip().upper()):
+            issue_identities.append((path, candidate_key.strip().upper()))
         found, links = alias_value(value, ("issuelinks", "issueLinks"))
         if found and isinstance(links, list):
             candidates.append((path, value))
@@ -356,6 +361,10 @@ def jira_issue_links(payload: Any) -> tuple[str, list[dict], str]:
 
     walk(payload, "$")
     if not candidates:
+        expected = expected_epic.strip().upper() if expected_epic else None
+        matching_paths = [path for path, key_value in issue_identities if key_value == expected]
+        if expected and matching_paths:
+            return expected, [], matching_paths[0] + ".issuelinks<omitted-empty>"
         raise ValueError("В полном ответе Jira не найден массив issuelinks")
     path, container = max(candidates, key=lambda item: len(alias_value(item[1], ("issuelinks", "issueLinks"))[1]))
     found_key, raw_key = alias_value(container, ISSUE_KEY_ALIASES)
@@ -2728,8 +2737,8 @@ def jira_ingest_epic_links_command(args: argparse.Namespace) -> int:
     if logged_mcp_details(args.run_id, call):
         raise ValueError("Этот MCP-вызов уже записан в журнале")
     _, payload, response_size, response_digest = response_json(args.response_file)
-    epic_key, links, links_path = jira_issue_links(payload)
     expected_epic = snapshot["scope"]["ids"][0]
+    epic_key, links, links_path = jira_issue_links(payload, expected_epic)
     if epic_key != expected_epic:
         raise ValueError(f"Ответ issuelinks относится к {epic_key}, ожидался {expected_epic}")
     children = jira_epic_child_keys(links)

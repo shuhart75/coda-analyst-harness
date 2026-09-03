@@ -70,6 +70,9 @@ SberTrek collection-job выбери только операцию `issue.export
    `ingest-query-response`. Для обычной Jira-области сразу выполни такой bulk-поиск.
    Не вызывай detail по дочерним задачам и не используй ручные `query-page` или
    `record-issue`.
+   Если Jira вернула совпадающие `id` и `key` эпика, но опустила явно запрошенное
+   пустое поле `issuelinks`, всё равно передай этот полный исходный JSON той же
+   команде: только она зарегистрирует доказанный пустой состав эпика.
    Если точный Jira counterpart-запрос завершился ошибкой, которая явно состоит
    из сообщений `An issue with key 'KEY' does not exist for field 'key'`, передай
    полный текст ошибки в `mcp-log --outcome error --summary`, затем одной командой

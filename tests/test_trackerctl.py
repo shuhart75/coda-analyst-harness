@@ -783,6 +783,42 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertEqual(payload["next_query"]["query"], expected)
             self.assertEqual(self.job(state, run_id, "collection-jira")["query"]["text"], expected)
 
+    def test_jira_epic_omitted_empty_issuelinks_is_a_proven_empty_member_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, provider="jira", kind="epic", ids=("RSCON-2901",),
+            )["run_id"]
+            response = state / "mcp-responses" / f"{run_id}-jira-epic-links.json"
+            self.write(response, {"id": "21292194", "key": "RSCON-2901"})
+            payload = self.run_tool(
+                state, "jira-ingest-epic-links", "--run-id", run_id,
+                "--evidence", "mcp:jira:epic-links", "--response-file", str(response),
+            )
+            self.assertEqual(payload["status"], "jira-epic-empty")
+            self.assertEqual(payload["child_count"], 0)
+            self.assertEqual(payload["allowed_next_action"], "collector-complete")
+            self.run_tool(state, "collector-complete", "--run-id", run_id, "--provider", "jira")
+            self.assertEqual(
+                self.job(state, run_id, "collection-sbertrek")["query"]["text"],
+                'issue_key = "RSCON-2901"',
+            )
+
+    def test_jira_epic_omitted_issuelinks_requires_matching_issue_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(
+                state, provider="jira", kind="epic", ids=("RSCON-2901",),
+            )["run_id"]
+            response = state / "mcp-responses" / f"{run_id}-jira-epic-links.json"
+            self.write(response, {"id": "21292195", "key": "RSCON-2902"})
+            payload = self.run_tool(
+                state, "jira-ingest-epic-links", "--run-id", run_id,
+                "--evidence", "mcp:jira:epic-links", "--response-file", str(response),
+                expected=2,
+            )
+            self.assertIn("не найден массив issuelinks", payload["error"])
+
     def test_jira_epic_reverse_path_finds_sbertrek_epic_then_reads_its_members(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
