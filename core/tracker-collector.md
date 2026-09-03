@@ -62,17 +62,15 @@ SberTrek collection-job выбери только операцию `issue.export
    Команда сама берёт точный запрос из активного job; не вставляй TQL в shell и
    не пытайся вручную экранировать его кавычки.
 
-5. Для Jira-эпика сначала выполни единственный разрешённый detail-вызов
-   `jira_get_issue(issue_key="KEY", fields="issuelinks")` и передай полный JSON
-   команде `jira-ingest-epic-links`. Она сама выберет только `PartOf + inward_issue`
-   и вернёт точный `key IN (...)`. Затем выполни один `jira_search` по всем этим
-   ключам с полями из `response_contract.preferred_fields` и передай полный JSON в
-   `ingest-query-response`. Для обычной Jira-области сразу выполни такой bulk-поиск.
-   Не вызывай detail по дочерним задачам и не используй ручные `query-page` или
-   `record-issue`.
-   Если Jira вернула совпадающие `id` и `key` эпика, но опустила явно запрошенное
-   пустое поле `issuelinks`, всё равно передай этот полный исходный JSON той же
-   команде: только она зарегистрирует доказанный пустой состав эпика.
+5. Для Jira-эпика выполни один прямой `jira_search` с точным JQL
+   `"Epic Link" = "<Jira epic key>"`, всеми полями из
+   `response_contract.preferred_fields` и `limit=50`. Не вызывай `jira_get_issue`,
+   не читай `issuelinks` и не заменяй исходный JQL промежуточным `key IN (...)`.
+   Для обычной Jira-области также выполни один bulk-поиск по точному JQL из job.
+   Передай полный JSON в `ingest-query-response`; не используй ручные `query-page`
+   или `record-issue`. Даже пустой ответ Jira-эпика импортируй структурно: только
+   реальная пустая страница доказывает нулевой состав и разрешает
+   `collector-complete`.
    Если точный Jira counterpart-запрос завершился ошибкой, которая явно состоит
    из сообщений `An issue with key 'KEY' does not exist for field 'key'`, передай
    полный текст ошибки в `mcp-log --outcome error --summary`, затем одной командой

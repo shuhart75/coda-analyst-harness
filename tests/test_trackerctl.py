@@ -226,15 +226,6 @@ class TrackerCtlV3Tests(unittest.TestCase):
             args += ["--next-cursor", str(start_at + len(records))]
         return self.run_tool(state, *args)
 
-    def ingest_jira_epic_links(self, state: Path, run_id: str, links: list[dict]) -> dict:
-        response = state / "mcp-responses" / f"{run_id}-jira-epic-links.json"
-        epic = self.snapshot(state, run_id, "jira")["scope"]["ids"][0]
-        self.write(response, {"key": epic, "issuelinks": links})
-        return self.run_tool(
-            state, "jira-ingest-epic-links", "--run-id", run_id,
-            "--evidence", "mcp:jira:epic-links", "--response-file", str(response),
-        )
-
     def ingest_sbertrek_counterpart_epic(
         self, state: Path, run_id: str, issue: tuple[str, dict] | None,
     ) -> dict:
@@ -415,7 +406,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
         cases = [
             ("sbertrek", "tasks", ("RSCON-6848", "RSCON-6849"), 'unit = "RSCON-6848" or unit = "RSCON-6849"'),
             ("jira", "tasks", ("RSCON-2905", "RSCON-2906"), 'key IN ("RSCON-2905", "RSCON-2906")'),
-            ("jira", "epic", ("RSCON-2911",), 'jira_get_issue(issue_key="RSCON-2911", fields="issuelinks")'),
+            ("jira", "epic", ("RSCON-2911",), '"Epic Link" = "RSCON-2911"'),
         ]
         for provider, kind, ids, exact in cases:
             with self.subTest(provider=provider, kind=kind), tempfile.TemporaryDirectory() as temp:
@@ -750,7 +741,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
         cases = [
             ("sbertrek", "epic", ("RSCON-6607",), 'unit IN linkedUnitsOf("unit = \'RSCON-6607\'", "Состоит из")'),
             ("jira", "tasks", ("RSCON-2906", "RSCON-2905"), 'key IN ("RSCON-2905", "RSCON-2906")'),
-            ("jira", "epic", ("RSCON-2911",), 'jira_get_issue(issue_key="RSCON-2911", fields="issuelinks")'),
+            ("jira", "epic", ("RSCON-2911",), '"Epic Link" = "RSCON-2911"'),
         ]
         for provider, kind, ids, expected_query in cases:
             with self.subTest(provider=provider, kind=kind), tempfile.TemporaryDirectory() as temp:
@@ -770,54 +761,65 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertNotIn("issue_type", fields)
             self.assertNotIn("releases", fields)
 
-    def test_jira_epic_links_select_only_inward_partof_children(self) -> None:
+    def test_jira_epic_job_uses_direct_epic_link_search_with_all_estimate_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state, provider="jira", kind="epic", ids=("RSCON-2911",))["run_id"]
-            links = [
-                {"type": {"name": "PartOf"}, "inward_issue": {"key": "RSCON-3001"}},
-                {"type": {"name": "PartOf"}, "outward_issue": {"key": "RSCON-3002"}},
-                {"type": {"name": "Cloners"}, "inward_issue": {"key": "RSCON-3003"}},
-            ]
-            payload = self.ingest_jira_epic_links(state, run_id, links)
-            expected = 'key IN ("RSCON-3001")'
-            self.assertEqual(payload["next_query"]["query"], expected)
-            self.assertEqual(self.job(state, run_id, "collection-jira")["query"]["text"], expected)
+            job = self.job(state, run_id, "collection-jira")
+            self.assertEqual(job["query"]["text"], '"Epic Link" = "RSCON-2911"')
+            self.assertEqual(job["query"]["purpose"], "epic-members")
+            self.assertEqual(job["query"]["method"], "epic-link")
+            self.assertEqual(job["response_contract"]["mcp_tool_contract"]["preferred_operation"], "jira_search")
+            self.assertIn("issue.getByKey", job["forbidden_operations"])
+            self.assertNotIn("record-confirmed-absent-counterparts", job["allowed_operations"])
+            fields = job["response_contract"]["preferred_fields"]
+            for field_id in JIRA_TEST_ESTIMATE_FIELDS:
+                self.assertIn(field_id, fields)
+            self.assertNotIn("issuelinks", fields)
+            brief = self.run_tool(state, "collector-brief", "--run-id", run_id)["prompt"]
+            self.assertIn('ровно этот JQL-запрос без изменений:\n\n"Epic Link" = "RSCON-2911"', brief)
+            self.assertIn("Используй jira_search", brief)
+            self.assertIn("Это прямой запрос состава Jira-эпика", brief)
+            self.assertIn("не читай issuelinks", brief)
+            self.assertIn("не заменяй его промежуточным key IN (...)", brief)
+            self.assertIn("Даже пустой результат", brief)
 
-    def test_jira_epic_omitted_empty_issuelinks_is_a_proven_empty_member_list(self) -> None:
+    def test_jira_epic_cannot_complete_before_importing_a_search_page(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
-            run_id = self.begin(
-                state, provider="jira", kind="epic", ids=("RSCON-2901",),
-            )["run_id"]
-            response = state / "mcp-responses" / f"{run_id}-jira-epic-links.json"
-            self.write(response, {"id": "21292194", "key": "RSCON-2901"})
+            run_id = self.begin(state, provider="jira", kind="epic", ids=("RSCON-2901",))["run_id"]
             payload = self.run_tool(
-                state, "jira-ingest-epic-links", "--run-id", run_id,
-                "--evidence", "mcp:jira:epic-links", "--response-file", str(response),
+                state, "collector-complete", "--run-id", run_id, "--provider", "jira", expected=2,
             )
-            self.assertEqual(payload["status"], "jira-epic-empty")
-            self.assertEqual(payload["child_count"], 0)
-            self.assertEqual(payload["allowed_next_action"], "collector-complete")
+            self.assertIn("Точный запрос collector-job не завершён", payload["error"])
+
+    def test_jira_epic_empty_search_page_is_a_proven_empty_member_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            run_id = self.begin(state, provider="jira", kind="epic", ids=("RSCON-2901",))["run_id"]
+            self.ingest_jira_response(state, run_id, [], total=0)
             self.run_tool(state, "collector-complete", "--run-id", run_id, "--provider", "jira")
+            jira = self.snapshot(state, run_id, "jira")
+            self.assertEqual(jira["query"]["keys"], [])
+            self.assertEqual(len(jira["query"]["pages"]), 1)
             self.assertEqual(
                 self.job(state, run_id, "collection-sbertrek")["query"]["text"],
                 'issue_key = "RSCON-2901"',
             )
 
-    def test_jira_epic_omitted_issuelinks_requires_matching_issue_identity(self) -> None:
+    def test_jira_epic_imports_all_18_members_and_assigns_source_epic(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
-            run_id = self.begin(
-                state, provider="jira", kind="epic", ids=("RSCON-2901",),
-            )["run_id"]
-            response = state / "mcp-responses" / f"{run_id}-jira-epic-links.json"
-            self.write(response, {"id": "21292195", "key": "RSCON-2902"})
-            payload = self.run_tool(
-                state, "jira-ingest-epic-links", "--run-id", run_id,
-                "--evidence", "mcp:jira:epic-links", "--response-file", str(response),
-                expected=2,
-            )
-            self.assertIn("не найден массив issuelinks", payload["error"])
+            run_id = self.begin(state, provider="jira", kind="epic", ids=("RSCON-2901",))["run_id"]
+            issues = [(f"RSCON-{number}", {}) for number in (
+                2916, 2918, 2919, 2920, 2921, 2922, 2923, 2924, 2925,
+                2926, 2928, 2929, 2930, 2931, 2932, 2933, 2935, 2945,
+            )]
+            self.ingest_jira_response(state, run_id, issues, total=18)
+            self.run_tool(state, "collector-complete", "--run-id", run_id, "--provider", "jira")
+            jira = self.snapshot(state, run_id, "jira")
+            self.assertEqual(len(jira["issues"]), 18)
+            self.assertEqual({item["epic"]["key"] for item in jira["issues"]}, {"RSCON-2901"})
+            self.assertEqual(self.job(state, run_id, "collection-sbertrek")["query"]["text"], 'issue_key = "RSCON-2901"')
 
     def test_jira_epic_reverse_path_finds_sbertrek_epic_then_reads_its_members(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -825,10 +827,6 @@ class TrackerCtlV3Tests(unittest.TestCase):
             run_id = self.begin(
                 state, provider="jira", kind="epic", ids=("RSCON-2911",),
             )["run_id"]
-            self.ingest_jira_epic_links(state, run_id, [
-                {"type": {"name": "PartOf"}, "inward_issue": {"key": "RSCON-2902"}},
-                {"type": {"name": "PartOf"}, "inward_issue": {"key": "RSCON-2903"}},
-            ])
             self.collect(state, run_id, "jira", [
                 ("RSCON-2902", {}), ("RSCON-2903", {}),
             ])
@@ -860,9 +858,6 @@ class TrackerCtlV3Tests(unittest.TestCase):
             run_id = self.begin(
                 state, provider="jira", kind="epic", ids=("RSCON-2911",),
             )["run_id"]
-            self.ingest_jira_epic_links(state, run_id, [
-                {"type": {"name": "PartOf"}, "inward_issue": {"key": "RSCON-2902"}},
-            ])
             self.collect(state, run_id, "jira", [("RSCON-2902", {})])
             discovery = self.ingest_sbertrek_counterpart_epic(state, run_id, None)
             self.assertEqual(discovery["status"], "sbertrek-counterpart-epic-not-found")
@@ -878,9 +873,6 @@ class TrackerCtlV3Tests(unittest.TestCase):
             run_id = self.begin(
                 state, provider="jira", kind="epic", ids=("RSCON-2911",),
             )["run_id"]
-            self.ingest_jira_epic_links(state, run_id, [
-                {"type": {"name": "PartOf"}, "inward_issue": {"key": "RSCON-2902"}},
-            ])
             self.collect(state, run_id, "jira", [("RSCON-2902", {})])
             query = self.snapshot(state, run_id, "sbertrek")["query"]["exact"]
             evidence = "mcp:sbertrek:counterpart-epic:unavailable"

@@ -14,7 +14,7 @@ from typing import Any
 
 
 PROTOCOL = "targeted-tracker-v3"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 CONFIG_SCHEMA_VERSION = 4
 STOP_EXIT = 3
 PROVIDERS = ("sbertrek", "jira")
@@ -69,7 +69,7 @@ JIRA_GENERAL_ESTIMATE_PRIORITY = (
 )
 JIRA_QUERY_FIELDS = (
     "key", "summary", "status", "issuetype", "priority", "assignee", "created", "updated",
-    "fixVersions", "issuelinks", *JIRA_ESTIMATE_FIELDS.keys(),
+    "fixVersions", *JIRA_ESTIMATE_FIELDS.keys(),
 )
 ISSUE_COLLECTION_KEYS = ("issues", "items", "results", "values", "units", "data")
 ISSUE_KEY_ALIASES = ("key", "issueKey", "issue_key", "unitKey", "unit_key")
@@ -329,70 +329,6 @@ def jira_page_metadata(payload: Any) -> dict | None:
     if all(isinstance(value, int) and not isinstance(value, bool) for value in (total, start, maximum)):
         return {"total": total, "start_at": start, "max_results": maximum}
     return None
-
-
-def jira_issue_links(payload: Any, expected_epic: str | None = None) -> tuple[str, list[dict], str]:
-    candidates: list[tuple[str, dict]] = []
-    issue_identities: list[tuple[str, str]] = []
-
-    def walk(value: Any, path: str, depth: int = 0) -> None:
-        if depth > 12:
-            return
-        if isinstance(value, str):
-            decoded = decoded_json_string(value)
-            if decoded is not None:
-                walk(decoded, path + "<json>", depth + 1)
-            return
-        if isinstance(value, list):
-            for index, item in enumerate(value):
-                walk(item, f"{path}[{index}]", depth + 1)
-            return
-        if not isinstance(value, dict):
-            return
-        found_key, raw_key = alias_value(value, ISSUE_KEY_ALIASES)
-        candidate_key = object_text(raw_key) if found_key else None
-        if candidate_key and ISSUE_KEY.fullmatch(candidate_key.strip().upper()):
-            issue_identities.append((path, candidate_key.strip().upper()))
-        found, links = alias_value(value, ("issuelinks", "issueLinks"))
-        if found and isinstance(links, list):
-            candidates.append((path, value))
-        for key, item in value.items():
-            walk(item, f"{path}.{key}", depth + 1)
-
-    walk(payload, "$")
-    if not candidates:
-        expected = expected_epic.strip().upper() if expected_epic else None
-        matching_paths = [path for path, key_value in issue_identities if key_value == expected]
-        if expected and matching_paths:
-            return expected, [], matching_paths[0] + ".issuelinks<omitted-empty>"
-        raise ValueError("В полном ответе Jira не найден массив issuelinks")
-    path, container = max(candidates, key=lambda item: len(alias_value(item[1], ("issuelinks", "issueLinks"))[1]))
-    found_key, raw_key = alias_value(container, ISSUE_KEY_ALIASES)
-    epic_key = object_text(raw_key) if found_key else None
-    if not epic_key or not ISSUE_KEY.fullmatch(epic_key.strip().upper()):
-        raise ValueError("Ответ Jira с issuelinks не содержит ключ исходного эпика")
-    _, links = alias_value(container, ("issuelinks", "issueLinks"))
-    if not all(isinstance(item, dict) for item in links):
-        raise ValueError("Jira issuelinks содержит запись неподдерживаемого формата")
-    return epic_key.strip().upper(), links, path + ".issuelinks"
-
-
-def jira_epic_child_keys(links: list[dict]) -> list[str]:
-    result: list[str] = []
-    for link in links:
-        link_type = link.get("type")
-        if not isinstance(link_type, dict) or str(link_type.get("name") or "").casefold() != "partof":
-            continue
-        inward = link.get("inward_issue") if "inward_issue" in link else link.get("inwardIssue")
-        if not isinstance(inward, dict):
-            continue
-        key_value = record_issue_key(inward)
-        if not key_value:
-            raise ValueError("Дочерняя PartOf-связь Jira не содержит корректный ключ inward_issue")
-        result.append(key_value)
-    if len(result) != len(set(result)):
-        raise ValueError("Jira issuelinks содержит повторяющиеся дочерние PartOf-ключи")
-    return sorted(result)
 
 
 def object_text(value: Any, aliases: tuple[str, ...] = ("code", "name", "value", "title", "key")) -> str | None:
@@ -1079,8 +1015,8 @@ def jql_keys(keys: list[str]) -> str:
     return "key IN (" + ", ".join(f'"{item}"' for item in keys) + ")"
 
 
-def jira_epic_links_call(epic: str) -> str:
-    return f'jira_get_issue(issue_key="{epic}", fields="issuelinks")'
+def jql_epic(epic: str) -> str:
+    return f'"Epic Link" = "{epic}"'
 
 
 def query_spec(
@@ -1104,10 +1040,7 @@ def primary_query(scope: dict) -> dict:
     if provider == "sbertrek":
         return query_spec(provider, "task-cards", tql_units(ids))
     if kind == "epic":
-        return query_spec(
-            provider, "epic-links", jira_epic_links_call(ids[0]),
-            method="issuelinks", language="JIRA_API",
-        )
+        return query_spec(provider, "epic-members", jql_epic(ids[0]), method="epic-link")
     return query_spec(provider, "task-cards", jql_keys(ids))
 
 
@@ -1278,31 +1211,16 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
         and snapshot.get("scope", {}).get("kind") == "epic"
     )
     if jira_epic_discovery:
-        discovery = query.get("discovery")
-        expected_query = jira_epic_links_call(snapshot["scope"]["ids"][0])
+        expected_query = jql_epic(snapshot["scope"]["ids"][0])
         if (
-            not isinstance(discovery, dict)
-            or discovery.get("method") != "issuelinks-PartOf-inward_issue"
-            or discovery.get("query") != expected_query
-            or discovery.get("child_keys") != unique_keys(discovery.get("child_keys") or [])
-            or not isinstance(discovery.get("link_count"), int)
-            or discovery["link_count"] < len(discovery["child_keys"])
-            or not re.fullmatch(r"[a-f0-9]{64}", str(discovery.get("response_sha256") or ""))
+            query.get("purpose") != "epic-members"
+            or query.get("method") != "epic-link"
+            or query.get("initial_exact") != expected_query
+            or query.get("exact") != expected_query
+            or query.get("requested_keys") != []
+            or query.get("discovery") is not None
         ):
-            raise ValueError("Коллекция Jira-эпика не содержит проверенный issuelinks discovery")
-        call = evidence(str(discovery.get("evidence") or ""), "jira")
-        details = require_logged_mcp(run_id, call, outcome="success")
-        if f"operation=epic-links; outcome=success; query_sha256={query_digest(expected_query)};" not in details:
-            raise ValueError("Evidence Jira issuelinks не совпадает с исходным эпиком")
-        require_tracker_command(
-            run_id, "jira-ingest-epic-links", provider="jira", evidence_value=call,
-            detail_markers=(f"record_sha256={object_sha256(discovery)}",),
-        )
-        if query.get("requested_keys") != discovery["child_keys"]:
-            raise ValueError("Jira epic JQL не соответствует PartOf inward_issue из issuelinks")
-        expected_exact = jql_keys(discovery["child_keys"]) if discovery["child_keys"] else None
-        if query.get("initial_exact") != expected_exact or query.get("exact") != expected_exact:
-            raise ValueError("Точный Jira epic JQL изменён после структурного разбора issuelinks")
+            raise ValueError("Коллекция Jira-эпика не соответствует исходному Epic Link JQL")
     sbertrek_counterpart_epic_discovery = (
         provider == "sbertrek"
         and snapshot.get("scope", {}).get("provider") == "jira"
@@ -1376,7 +1294,6 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
         and bool(requested_keys)
         and set(absent_keys) == set(requested_keys)
     )
-    empty_jira_epic = jira_epic_discovery and not query.get("requested_keys")
     empty_sbertrek_counterpart_epic = (
         sbertrek_counterpart_epic_discovery
         and isinstance(query.get("discovery"), dict)
@@ -1386,7 +1303,6 @@ def validate_collection_integrity(run_id: str, snapshot: dict, provider: str) ->
         query["state"] == "complete"
         and not pages
         and not all_counterparts_absent
-        and not empty_jira_epic
         and not empty_sbertrek_counterpart_epic
     ):
         raise ValueError(f"Коллекция {provider} помечена complete без зарегистрированной страницы MCP")
@@ -1633,7 +1549,7 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
             "execute-exact-query", "paginate",
             "record-bounded-call", "structurally-import-full-json-response",
             "record-page", "record-compact-card",
-            *(["record-confirmed-absent-counterparts"] if provider == "jira" else []),
+            *(["record-confirmed-absent-counterparts"] if provider == "jira" and query.get("purpose") == "counterparts" else []),
             *(["record-counterpart-epic-discovery"] if query.get("method") == "jira-epic-counterpart" else []),
             *(["record-query-unavailable"] if query.get("purpose") in {"counterparts", "counterpart-epic"} else []),
             "complete-job",
@@ -1641,8 +1557,7 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
         "forbidden_operations": [
             "read-mcp-documentation", "probe-with-alternative-query",
             "search-by-title-or-description", "read-returned-issues-one-by-one",
-            "issue.search", "link.list",
-            *([] if provider == "jira" and query.get("method") == "issuelinks" else ["issue.getByKey"]),
+            "issue.search", "issue.getByKey", "link.list",
             "change-tracker-or-analytical-artifacts", "continue-to-next-job",
         ],
         "required_task_fields": [
@@ -1662,10 +1577,9 @@ def collection_job(run_id: str, provider: str, query: dict) -> dict:
                 "forbidden_operations": ["issue.search", "issue.getByKey", "link.list"],
             } if provider == "sbertrek" else {
                 "required_capability": "jira-exact-read",
-                "preferred_operation": "jira_get_issue" if query.get("method") == "issuelinks" else "jira_search",
+                "preferred_operation": "jira_search",
                 "limit_parameter": "limit",
                 "max_results": JIRA_SEARCH_MAX_RESULTS,
-                "epic_links_fields": ["issuelinks"],
             },
             "preferred_fields": [
                 "key", "summary", "suit", "status", "attributes", "epic",
@@ -2715,95 +2629,6 @@ def begin_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def jira_ingest_epic_links_command(args: argparse.Namespace) -> int:
-    config = load_config()
-    current = current_query(args.run_id, config)
-    if not current or current[0] != "jira":
-        raise ValueError("Сейчас нет разрешённого запроса связей Jira-эпика")
-    path, snapshot = load_snapshot(args.run_id, "jira")
-    ensure_mutable(snapshot)
-    query = snapshot["query"]
-    job_path_value, job = load_job(args.run_id, "collection-jira")
-    if (
-        snapshot["scope"].get("provider") != "jira"
-        or snapshot["scope"].get("kind") != "epic"
-        or query.get("purpose") != "epic-links"
-        or query.get("method") != "issuelinks"
-        or job.get("state") not in {"pending", "running"}
-        or active_job(args.run_id) != job
-    ):
-        raise ValueError("Импорт issuelinks разрешён только активному Jira epic collector-job")
-    call = evidence(args.evidence, "jira")
-    if logged_mcp_details(args.run_id, call):
-        raise ValueError("Этот MCP-вызов уже записан в журнале")
-    _, payload, response_size, response_digest = response_json(args.response_file)
-    expected_epic = snapshot["scope"]["ids"][0]
-    epic_key, links, links_path = jira_issue_links(payload, expected_epic)
-    if epic_key != expected_epic:
-        raise ValueError(f"Ответ issuelinks относится к {epic_key}, ожидался {expected_epic}")
-    children = jira_epic_child_keys(links)
-    discovery_query = query["exact"]
-    details = (
-        f"operation=epic-links; outcome=success; query_sha256={query_digest(discovery_query)}; "
-        f"returned={len(links)}; child_count={len(children)}; response_sha256={response_digest}; "
-        f"response_bytes={response_size}; parser_path={links_path}; query={discovery_query}; "
-        "summary=Jira issuelinks structurally imported"
-    )
-    append_session_log(
-        args.run_id, source="mcp", event="call", provider="jira",
-        evidence_value=call, details=details,
-    )
-    query["discovery"] = {
-        "method": "issuelinks-PartOf-inward_issue",
-        "query": discovery_query,
-        "evidence": call,
-        "response_sha256": response_digest,
-        "response_bytes": response_size,
-        "records_path": links_path,
-        "link_count": len(links),
-        "child_keys": children,
-    }
-    if children:
-        exact = jql_keys(children)
-        query.update({
-            "purpose": "epic-members",
-            "language": "JQL",
-            "exact": exact,
-            "initial_exact": exact,
-            "requested_keys": children,
-            "state": "pending",
-        })
-        job["query"].update({"language": "JQL", "text": exact, "sha256": query_digest(exact)})
-        status = "jira-epic-members-query-ready"
-    else:
-        query.update({
-            "purpose": "epic-members",
-            "language": "JQL",
-            "exact": None,
-            "initial_exact": None,
-            "requested_keys": [],
-            "state": "complete",
-        })
-        status = "jira-epic-empty"
-    job["state"] = "running"
-    save_json(path, snapshot)
-    save_json(job_path_value, job)
-    args.record_sha256 = object_sha256(query["discovery"])
-    payload_out = {
-        "status": status,
-        "run_id": args.run_id,
-        "epic": epic_key,
-        "link_count": len(links),
-        "child_count": len(children),
-        "preferred_fields": list(JIRA_QUERY_FIELDS),
-        "allowed_next_action": "execute-returned-jql" if children else "collector-complete",
-    }
-    if children:
-        payload_out.update(next_query_payload("jira", query))
-    print(json.dumps(payload_out, ensure_ascii=False, indent=2))
-    return 0
-
-
 def sbertrek_ingest_counterpart_epic_command(args: argparse.Namespace) -> int:
     config = load_config()
     current = current_query(args.run_id, config)
@@ -3655,37 +3480,31 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                 )
         else:
             fields = ",".join(job["response_contract"]["preferred_fields"])
-            if language == "JIRA_API":
-                prompt = (
-                    run_guard +
-                    f"Выполни в Jira ровно этот вызов без изменений:\n\n{query}\n\n"
-                    "Это единственный разрешённый поштучный вызов: он читает только поле issuelinks исходного эпика. "
-                    "Сохрани полный JSON-ответ без пересказа и передай файл команде jira-ingest-epic-links. Команда "
-                    "сама выберет только связи type.name=PartOf с inward_issue и вернёт точный JQL по всем дочерним "
-                    "ключам без фильтра по типу или статусу. Если JQL возвращён, выполни один jira_search с ним, "
-                    f"fields=\"{fields}\" и limit={JIRA_SEARCH_MAX_RESULTS}; сохрани полный JSON и передай его в "
-                    f"ingest-query-response --provider jira --max-results {JIRA_SEARCH_MAX_RESULTS}. Не вызывай "
-                    "jira_get_issue для дочерних задач и не фильтруй Done/Resolved/Closed. Если дочерних ключей нет, "
-                    "сразу выполни collector-complete. "
-                    f"Прочитай только {contract} и {path}. После collector-complete немедленно верни только status, "
-                    "job_id и пути."
-                )
-            else:
-                prompt = (
-                    run_guard +
-                    f"Выполни в Jira ровно этот {language}-запрос без изменений:\n\n{query}\n\n"
-                    f"Используй jira_search с fields=\"{fields}\" и limit={JIRA_SEARCH_MAX_RESULTS}. Не добавляй "
-                    "фильтр по статусу или типу и не выполняй поштучные jira_get_issue. Сохрани полный JSON-ответ "
-                    f"и передай его в ingest-query-response --provider jira --max-results {JIRA_SEARCH_MAX_RESULTS}; "
-                    "эта команда сама извлечёт карточки и все ролевые оценки. Для реальной пагинации продолжай тем же "
-                    "точным JQL и полученным cursor. Если точный counterpart-запрос завершился только ошибками вида "
-                    "`An issue with key 'KEY' does not exist for field 'key'`, запиши один ошибочный вызов через "
-                    "mcp-log, передав полный текст ошибки в --summary, затем зарегистрируй все перечисленные ключи "
-                    "одной командой jira-record-absent-counterparts. Выполни только новый JQL, который вернёт эта "
-                    "команда. При любой другой ошибке остановись. "
-                    f"Прочитай только {contract} и {path}. После collector-complete немедленно верни только status, "
-                    "job_id и пути."
-                )
+            counterpart_error = (
+                "Если точный counterpart-запрос завершился только ошибками вида `An issue with key 'KEY' does not "
+                "exist for field 'key'`, запиши один ошибочный вызов через mcp-log, передав полный текст ошибки в "
+                "--summary, затем зарегистрируй все перечисленные ключи одной командой "
+                "jira-record-absent-counterparts. Выполни только новый JQL, который вернёт эта команда. "
+            ) if job["query"].get("purpose") == "counterparts" else ""
+            epic_guard = (
+                "Это прямой запрос состава Jira-эпика. Не вызывай jira_get_issue, не читай issuelinks и не заменяй "
+                "его промежуточным key IN (...). "
+            ) if job["query"].get("method") == "epic-link" else ""
+            prompt = (
+                run_guard +
+                f"Выполни в Jira ровно этот {language}-запрос без изменений:\n\n{query}\n\n" +
+                epic_guard +
+                f"Используй jira_search с fields=\"{fields}\" и limit={JIRA_SEARCH_MAX_RESULTS}. Не добавляй "
+                "фильтр по статусу или типу и не выполняй поштучные jira_get_issue. Сохрани полный JSON-ответ "
+                f"и передай его в ingest-query-response --provider jira --max-results {JIRA_SEARCH_MAX_RESULTS}; "
+                "эта команда сама извлечёт карточки и все ролевые оценки. Даже пустой результат передай как полный "
+                "исходный JSON и импортируй структурно до collector-complete. Для реальной пагинации продолжай тем же "
+                "точным JQL только по полученному из ответа cursor или start_at. " +
+                counterpart_error +
+                "При любой другой ошибке остановись. "
+                f"Прочитай только {contract} и {path}. После collector-complete немедленно верни только status, "
+                "job_id и пути."
+            )
     else:
         keys = ", ".join(job["keys"])
         calls = canonical_history_calls(job)
@@ -3930,7 +3749,6 @@ def parser() -> argparse.ArgumentParser:
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config)
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
-    links = commands.add_parser("jira-ingest-epic-links"); links.add_argument("--run-id", required=True); links.add_argument("--evidence", required=True); links.add_argument("--response-file", required=True); links.set_defaults(handler=jira_ingest_epic_links_command, provider="jira")
     sber_epic = commands.add_parser("sbertrek-ingest-counterpart-epic"); sber_epic.add_argument("--run-id", required=True); sber_epic.add_argument("--evidence", required=True); sber_epic.add_argument("--response-file", required=True); sber_epic.add_argument("--max-results", type=int, required=True); sber_epic.set_defaults(handler=sbertrek_ingest_counterpart_epic_command, provider="sbertrek")
     ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
     mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key", action="append", default=[]); mcp.add_argument("--returned-count", type=int); mcp.set_defaults(handler=mcp_log_command)
