@@ -139,6 +139,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             self.assertEqual(paired["role_estimates"]["FE"]["value"], 5)
             self.assertEqual(paired["role_estimates"]["QA"]["value"], 3)
             self.assertEqual(paired["role_estimates"]["QA"]["source"], "jira")
+            self.assertEqual(result["summary"]["story_points_total"], 10)
             self.assertIn("role_estimates.FE", {item["field"] for item in result["discrepancies"]})
             summaries = {item["summary"] for item in result["work_items"]}
             self.assertIn("FE Form", summaries)
@@ -221,6 +222,20 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             _, result = self.reconcile(state, current)
             self.assertEqual(result["counts"]["discrepancies"], 0)
             self.assertEqual(result["issues"][0]["assignee"]["id"], "1")
+
+    def test_jira_business_marker_does_not_create_assignee_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
+            sber = self.sber_issue("RSCON-7001", jira_key="RSCON-3001")
+            sber["attributes"].append({"code": "assigned_to", "name": "Исполнитель", "value": {"externalId": "1", "fullName": "Иван Иванов"}})
+            current = self.ingest(state, current, {"issues": [sber]}, name="sber")
+            jira = self.jira_issue("RSCON-3001")
+            jira["fields"]["assignee"] = {"accountId": "other", "displayName": "Иван Иванов [B]"}
+            current = self.ingest(state, current, {"issues": [jira]}, name="jira")
+            _, result = self.reconcile(state, current)
+            self.assertEqual(result["counts"]["discrepancies"], 0)
+            self.assertEqual(result["issues"][0]["assignee"]["name"], "Иван Иванов")
 
     def test_sbertrek_tasks_route_uses_only_explicit_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -361,6 +376,20 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
                 "--scope-id", "RSCON-7001", "--label", "Retry", "--scope-source", "unit-test", "--intent", "read-only",
             )
             self.assertEqual(resumed["run_id"], current["run_id"])
+
+    def test_begin_removes_orphaned_active_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            self.configure(state)
+            orphaned_run = "20260901T100946Z-1e1af32a"
+            self.write(state / "tracker-active-run.json", {"run_id": orphaned_run})
+            started = self.run_tool(
+                state, "begin", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
+                "--scope-id", "RSCON-7001", "--label", "Test", "--scope-source", "unit-test", "--intent", "read-only",
+            )
+            self.assertNotEqual(started["run_id"], orphaned_run)
+            marker = json.loads((state / "tracker-active-run.json").read_text(encoding="utf-8"))
+            self.assertEqual(marker["run_id"], started["run_id"])
 
     def test_failed_ingest_is_transactional_and_retry_recovers_same_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

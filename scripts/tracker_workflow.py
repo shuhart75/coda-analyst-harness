@@ -260,6 +260,9 @@ def active_run_id() -> str | None:
     run_id = payload.get("run_id") if isinstance(payload, dict) else None
     if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
         raise ValueError("Повреждён tracker-active-run.json")
+    if not run_root(run_id).exists():
+        path.unlink()
+        return None
     if (run_root(run_id) / "completion-status.json").is_file():
         path.unlink()
         return None
@@ -1042,6 +1045,7 @@ def comparable_person(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
     name = " ".join(str(value.get("name") or "").casefold().split())
+    name = re.sub(r"\s*\[b\]\s*$", "", name).strip()
     return ("name", name) if name else ("id", str(value.get("id") or "").casefold())
 
 
@@ -1247,14 +1251,18 @@ def reconcile_data(run: dict) -> dict:
         issues.append(issue)
     issues.sort(key=lambda item: (item.get("sbertrek_key") or "", item.get("jira_key") or ""))
     role_totals = {role: 0.0 for role in ROLES}
-    general_total = 0.0
+    overall_total = 0.0
     for issue in issues:
-        estimate = issue.get("estimate")
-        if isinstance(estimate, dict) and estimate.get("unit") == "story-points":
-            general_total += float(estimate["value"])
+        has_role_estimate = False
         for role, estimate in issue.get("role_estimates", {}).items():
             if estimate.get("unit") in {"story-points", "person-days"}:
-                role_totals[role] += float(estimate["value"])
+                value = float(estimate["value"])
+                role_totals[role] += value
+                overall_total += value
+                has_role_estimate = True
+        estimate = issue.get("estimate")
+        if not has_role_estimate and isinstance(estimate, dict) and estimate.get("unit") == "story-points":
+            overall_total += float(estimate["value"])
     limitations = sorted(set(run["limitations"] + ["history-not-collected"] + [
         f"general-estimate-role-unresolved:{item.get('jira_key') or item.get('sbertrek_key')}"
         for item in issues if item.get("estimate") and not item.get("role_estimates")
@@ -1269,7 +1277,7 @@ def reconcile_data(run: dict) -> dict:
         "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": run["run_id"],
         "scope": run["scope"], "issues": issues, "work_items": role_work_items,
         "excluded": excluded, "discrepancies": discrepancies, "counts": counts,
-        "summary": {"story_points_total": general_total, "role_totals_person_days": role_totals},
+        "summary": {"story_points_total": overall_total, "role_totals_person_days": role_totals},
         "limitations": limitations,
     }
 
