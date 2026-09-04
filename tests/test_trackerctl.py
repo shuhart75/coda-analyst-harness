@@ -367,17 +367,20 @@ class TrackerCtlV3Tests(unittest.TestCase):
                 },
             )
 
-    def test_begin_rejects_second_active_run_until_abandoned(self) -> None:
+    def test_begin_reuses_same_active_scope_and_rejects_different_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
             first = self.begin(state)
+            repeated = self.begin(state)
+            self.assertEqual(repeated["run_id"], first["run_id"])
+            self.assertEqual(len(list((state / "tracker-runs").iterdir())), 1)
             payload = self.run_tool(
                 state, "begin", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
                 "--scope-id", "RSCON-6846", "--label", "Second",
                 "--scope-source", "Запрос аналитика", expected=2,
             )
             self.assertIn(first["run_id"], payload["error"])
-            self.assertIn("новый begin запрещён", payload["error"])
+            self.assertIn("для другой области", payload["error"])
             self.run_tool(
                 state, "abandon-run", "--run-id", first["run_id"],
                 "--reason", "Явно начат новый сеанс",
@@ -935,6 +938,13 @@ class TrackerCtlV3Tests(unittest.TestCase):
             expected_members = 'unit IN linkedUnitsOf("unit = \'RSCON-6854\'", "Состоит из")'
             self.assertEqual(discovery["next_query"]["query"], expected_members)
             self.assertEqual(self.job(state, run_id, "collection-sbertrek")["query"]["text"], expected_members)
+            repeated_discovery = self.ingest_sbertrek_counterpart_epic(state, run_id, (
+                "RSCON-6854", {
+                    "jira_key": "RSCON-2911", "issue_type": "epic",
+                    "summary": "SberTrek epic",
+                },
+            ))
+            self.assertEqual(repeated_discovery["status"], "tracker-query-response-already-imported")
             self.collect(state, run_id, "sbertrek", [
                 ("RSCON-6845", {"jira_key": "RSCON-2902"}),
                 ("RSCON-6846", {}),
@@ -942,6 +952,10 @@ class TrackerCtlV3Tests(unittest.TestCase):
             sber = self.snapshot(state, run_id, "sbertrek")
             self.assertEqual({item["key"] for item in sber["issues"]}, {"RSCON-6845", "RSCON-6846"})
             self.assertEqual({item["epic"]["key"] for item in sber["issues"]}, {"RSCON-6854"})
+            self.assertNotEqual(
+                sber["query"]["discovery"]["evidence"],
+                sber["query"]["pages"][0]["evidence"],
+            )
             jira = self.snapshot(state, run_id, "jira")
             self.assertEqual({item["epic"]["key"] for item in jira["issues"]}, {"RSCON-2911"})
 
@@ -1071,14 +1085,44 @@ class TrackerCtlV3Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state, provider="jira")["run_id"]
             self.ingest_jira_response(state, run_id, [("RSCON-6845", {})], total=2, last=False)
+            different_response = state / "mcp-responses" / f"{run_id}-jira-different.json"
+            self.write(different_response, {
+                "total": 2, "start_at": 1, "max_results": 50,
+                "issues": [self.jira_response_issue("RSCON-6846")],
+            })
             payload = self.run_tool(
                 state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
                 "--page-number", "1", "--max-results", "50", "--last-page",
                 "--response-source", "mcp-file",
                 "--evidence", "mcp:jira:query:duplicate",
-                "--response-file", str(state / "mcp-responses" / f"{run_id}-jira-1.json"), expected=2,
+                "--response-file", str(different_response), expected=2,
             )
             self.assertIn("Ожидалась страница 2, получена 1", payload["error"])
+
+    def test_identical_structural_import_is_an_idempotent_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, provider="jira")["run_id"]
+            first = self.ingest_jira_response(state, run_id, [("RSCON-6845", {})])
+            response = state / "mcp-responses" / f"{run_id}-jira-1.json"
+            repeated = self.run_tool(
+                state, "ingest-query-response", "--run-id", run_id, "--provider", "jira",
+                "--max-results", "50", "--last-page", "--response-source", "mcp-file",
+                "--response-file", str(response),
+            )
+            self.assertEqual(first["response_sha256"], repeated["response_sha256"])
+            self.assertEqual(repeated["status"], "tracker-query-response-already-imported")
+            self.assertEqual(len(self.snapshot(state, run_id, "jira")["issues"]), 1)
+
+    def test_collection_evidence_is_derived_from_query_and_response(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, provider="jira")["run_id"]
+            self.ingest_jira_response(state, run_id, [("RSCON-6845", {})])
+            page = self.snapshot(state, run_id, "jira")["query"]["pages"][0]
+            self.assertRegex(
+                page["evidence"],
+                r"^mcp:jira:query:task-cards-page-1:[a-f0-9]{64}:[a-f0-9]{64}$",
+            )
+            self.assertNotEqual(page["evidence"], "mcp:jira:query:page-1")
 
     def test_jira_structural_import_rejects_pagination_metadata_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1802,12 +1846,46 @@ class TrackerCtlV3Tests(unittest.TestCase):
             payload = self.run_tool(state, "reconcile", "--run-id", run_id)
             self.assertIn("jira-targeted-query-unavailable", payload["limitations"])
 
-    def test_reconcile_is_blocked_until_all_jobs_finish(self) -> None:
+    def test_reconcile_returns_pending_collection_without_failing_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["status"], "tracker-read-awaiting-collector")
+            self.assertEqual(payload["next_job"]["job_id"], "collection-sbertrek")
+            self.assertFalse((self.root(state, run_id) / "run-failure.json").exists())
+
+    def test_reconcile_skips_pending_history_with_explicit_limitations(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
             self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
-            payload = self.run_tool(state, "reconcile", "--run-id", run_id, expected=2)
-            self.assertIn("history-sbertrek-01", payload["error"])
+            status = self.run_tool(state, "run-status", "--run-id", run_id)
+            self.assertEqual(status["allowed_next_action"], "delegate-history-or-reconcile-current-fields")
+            self.assertTrue(status["reconcile_current_fields_allowed"])
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["status"], "tracker-read-reconciled")
+            self.assertIn("sbertrek-history-not-collected:RSCON-6845", payload["limitations"])
+            self.assertEqual(payload["summary"]["development_state_counts"], {"unknown": 1})
+            self.assertEqual(self.job(state, run_id, "history-sbertrek-01")["state"], "skipped")
+
+    def test_reconcile_recovers_when_history_items_finished_but_job_was_not_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp); run_id = self.begin(state, jira=False)["run_id"]
+            self.collect(state, run_id, "sbertrek", [("RSCON-6845", {})])
+            evidence = "mcp:sbertrek:history:RSCON-6845"
+            self.run_tool(
+                state, "mcp-log", "--run-id", run_id, "--provider", "sbertrek",
+                "--operation", "history", "--outcome", "success", "--evidence", evidence,
+                "--summary", "empty history", "--key", "RSCON-6845",
+                "--history-item-count", "0", "--relevant-event-count", "0",
+            )
+            self.run_tool(
+                state, "history-complete", "--run-id", run_id, "--provider", "sbertrek",
+                "--key", "RSCON-6845", "--state", "complete", "--evidence", evidence,
+            )
+            payload = self.run_tool(state, "reconcile", "--run-id", run_id)
+            self.assertEqual(payload["status"], "tracker-read-reconciled")
+            self.assertNotIn("sbertrek-history-not-collected:RSCON-6845", payload["limitations"])
+            self.assertEqual(payload["summary"]["development_state_counts"], {"not-started": 1})
 
     def test_success_creates_all_v2_files_and_read_only_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

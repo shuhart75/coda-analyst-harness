@@ -787,6 +787,14 @@ def evidence(value: str, provider: str) -> str:
     return value
 
 
+def collection_evidence(provider: str, stage: str, query: str, response_digest: str) -> str:
+    normalized_stage = re.sub(r"[^a-z0-9-]+", "-", stage.casefold()).strip("-") or "query"
+    return (
+        f"mcp:{provider}:query:{normalized_stage}:"
+        f"{query_digest(query)}:{response_digest}"
+    )
+
+
 def normalized_team_id(value: str) -> str:
     match = TEAM_ID.fullmatch(value.strip())
     if not match:
@@ -1255,7 +1263,7 @@ def validate_issue_card(item: Any, provider: str) -> None:
     elif jira_key_value is not None or jira_state != "absent":
         raise ValueError(f"Карточка {key_value}: Jira-карточка не должна содержать Объект Jira")
     history = item.get("history")
-    if not isinstance(history, dict) or history.get("state") not in {"pending", "complete", "unavailable"}:
+    if not isinstance(history, dict) or history.get("state") not in {"pending", "complete", "unavailable", "skipped"}:
         raise ValueError(f"Карточка {key_value}: некорректное состояние истории")
     if not isinstance(history.get("events"), list) or not isinstance(history.get("evidence"), list):
         raise ValueError(f"Карточка {key_value}: история имеет неполную схему")
@@ -1538,20 +1546,37 @@ def validate_run_provenance(run_id: str, snapshots: dict[str, dict]) -> None:
             if len(all_event_commands) != len(item["history"]["events"]):
                 raise ValueError(f"История {provider}:{item['key']} не совпадает с журналом trackerctl")
             history = item["history"]
-            if history["state"] not in {"complete", "unavailable"} or len(history["evidence"]) != 1:
-                raise ValueError(f"История {provider}:{item['key']} не имеет завершённого provenance")
-            call = evidence(history["evidence"][0], provider)
-            require_logged_mcp(run_id, call, outcome="success" if history["state"] == "complete" else "error")
-            require_tracker_command(
-                run_id, "history-complete", provider=provider, evidence_value=call,
-                detail_markers=(
-                    f"key={item['key']}", f"state={history['state']}",
-                    "record_sha256=" + object_sha256({name: history[name] for name in ("state", "evidence", "reason")}),
-                ),
-            )
+            if history["state"] == "skipped":
+                if history["evidence"] or history.get("reason") != "not-collected-before-reconciliation":
+                    raise ValueError(f"Пропущенная история {provider}:{item['key']} имеет некорректный provenance")
+                require_tracker_command(
+                    run_id, "history-skipped", provider=provider,
+                    detail_markers=(f"key={item['key']}",),
+                )
+            else:
+                if history["state"] not in {"complete", "unavailable"} or len(history["evidence"]) != 1:
+                    raise ValueError(f"История {provider}:{item['key']} не имеет завершённого provenance")
+                call = evidence(history["evidence"][0], provider)
+                require_logged_mcp(run_id, call, outcome="success" if history["state"] == "complete" else "error")
+                require_tracker_command(
+                    run_id, "history-complete", provider=provider, evidence_value=call,
+                    detail_markers=(
+                        f"key={item['key']}", f"state={history['state']}",
+                        "record_sha256=" + object_sha256({name: history[name] for name in ("state", "evidence", "reason")}),
+                    ),
+                )
     for job in all_jobs(run_id):
-        if job.get("state") != "complete":
+        if job.get("state") not in {"complete", "skipped"}:
             raise ValueError(f"Job {job.get('job_id')} не завершён")
+        if job.get("state") == "skipped":
+            if job.get("kind") != "provider-history":
+                raise ValueError("Пропуск допустим только для history-job")
+            validate_history_job_calls(run_id, job, require_complete=False)
+            require_tracker_command(
+                run_id, "history-skipped", provider=job["provider"],
+                detail_markers=(f"job_id={job['job_id']}",),
+            )
+            continue
         if job.get("kind") == "provider-history":
             validate_history_job_calls(run_id, job, require_complete=True)
         command = "collector-complete" if job["kind"] == "provider-collection" else "history-job-complete"
@@ -1805,7 +1830,7 @@ def load_job(run_id: str, job_id: str) -> tuple[Path, dict]:
         or job.get("job_id") != job_id
     ):
         raise ValueError("Collector-job создан старым или повреждённым протоколом")
-    if job.get("state") not in {"pending", "running", "complete"}:
+    if job.get("state") not in {"pending", "running", "complete", "skipped"}:
         raise ValueError("Collector-job содержит некорректное состояние")
     if job.get("kind") == "provider-collection":
         query = job.get("query")
@@ -1878,9 +1903,13 @@ def next_job_payload(run_id: str) -> dict:
     job = active_job(run_id)
     if not job:
         return {}
-    return {
-        "allowed_next_action": "delegate-collector-job",
-        "delegation_required": True,
+    history_optional = job["kind"] == "provider-history"
+    payload = {
+        "allowed_next_action": (
+            "delegate-history-or-reconcile-current-fields"
+            if history_optional else "delegate-collector-job"
+        ),
+        "delegation_required": not history_optional,
         "next_job": {
             "job_id": job["job_id"],
             "kind": job["kind"],
@@ -1890,6 +1919,9 @@ def next_job_payload(run_id: str) -> dict:
             "return_contract": "status-and-paths-only",
         },
     }
+    if history_optional:
+        payload["reconcile_current_fields_allowed"] = True
+    return payload
 
 
 def next_query_payload(provider: str, query: dict) -> dict:
@@ -2081,7 +2113,7 @@ def merged_history(sber: dict | None, jira: dict | None) -> list[dict]:
     seen: set[str] = set()
     result = []
     for provider, item in (("sbertrek", sber), ("jira", jira)):
-        if not item:
+        if not item or item["history"]["state"] != "complete":
             continue
         for event in item["history"]["events"]:
             fingerprint = json.dumps({name: event.get(name) for name in ("at", "field", "from", "to")}, ensure_ascii=False, sort_keys=True)
@@ -2123,7 +2155,7 @@ def provider_development_state(item: dict, provider: str, config: dict) -> dict:
         return {"state": "completed", "basis": f"{provider}-status", "status": status}
     assignee_events = [
         {**event, "source": provider}
-        for event in item["history"]["events"]
+        for event in item["history"]["events"] if item["history"]["state"] == "complete"
         if event["field"] == "assignee"
     ]
     latest_handoff = None
@@ -2239,9 +2271,10 @@ def first_unknown_participant(snapshots: dict[str, dict], config: dict) -> dict 
             if str(item.get("issue_type") or "").casefold() not in development_types:
                 continue
             values = [item.get("assignee")]
-            for event in item["history"]["events"]:
-                if event["field"] == "assignee":
-                    values.extend((event.get("from"), event.get("to")))
+            if item["history"]["state"] == "complete":
+                for event in item["history"]["events"]:
+                    if event["field"] == "assignee":
+                        values.extend((event.get("from"), event.get("to")))
             for value in values:
                 if isinstance(value, dict) and value.get("id") and value["id"] not in config["participants"][provider]:
                     name = value.get("name") or value["id"]
@@ -2560,6 +2593,8 @@ def reconcile_data(snapshots: dict[str, dict], config: dict, development_decisio
         for item in snapshot["issues"]:
             if item["history"]["state"] == "unavailable":
                 limitations.append(f"{provider}-history-unavailable:{item['key']}")
+            elif item["history"]["state"] == "skipped":
+                limitations.append(f"{provider}-history-not-collected:{item['key']}")
         if provider == "sbertrek" and any(
             page.get("returned_count") == SBER_EXPORT_MAX_RESULTS
             for page in snapshot["query"].get("pages", [])
@@ -2854,12 +2889,6 @@ def begin_command(args: argparse.Namespace) -> int:
         payload = config_status(config)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return STOP_EXIT
-    existing_run = active_run_id()
-    if existing_run:
-        raise ValueError(
-            f"Уже существует незавершённый tracker-run {existing_run}; "
-            "новый begin запрещён. Продолжай существующий run через run-status"
-        )
     ids = unique_keys(args.scope_id)
     if args.scope_kind == "epic" and len(ids) != 1:
         raise ValueError("Для scope-kind=epic требуется ровно один --scope-id")
@@ -2875,6 +2904,24 @@ def begin_command(args: argparse.Namespace) -> int:
     }
     if not scope["label"] or not scope["source"]:
         raise ValueError("--label и --scope-source не могут быть пустыми")
+    existing_run = active_run_id()
+    if existing_run:
+        existing_meta = load_json(run_meta_path(existing_run))
+        existing_scope = existing_meta.get("scope") if isinstance(existing_meta, dict) else None
+        comparable_fields = ("kind", "provider", "ids", "intent")
+        if not isinstance(existing_scope, dict) or any(
+            existing_scope.get(field) != scope.get(field) for field in comparable_fields
+        ):
+            raise ValueError(
+                f"Уже существует незавершённый tracker-run {existing_run} для другой области; "
+                "сначала продолжи или явно закрой его"
+            )
+        args.run_id = existing_run
+        append_session_log(
+            existing_run, source="trackerctl", event="run-reused",
+            details="command=begin; same_scope=true",
+        )
+        return run_status_command(args)
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
     providers = list(enabled_providers(config))
     save_json(run_meta_path(run_id), {"protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": run_id, "scope": scope, "created_at": now()})
@@ -2898,13 +2945,30 @@ def begin_command(args: argparse.Namespace) -> int:
 
 def sbertrek_ingest_counterpart_epic_command(args: argparse.Namespace) -> int:
     config = load_config()
-    current = current_query(args.run_id, config)
-    if not current or current[0] != "sbertrek":
-        raise ValueError("Сейчас нет разрешённого поиска SberTrek-эпика")
     path, snapshot = load_snapshot(args.run_id, "sbertrek")
     ensure_mutable(snapshot)
     query = snapshot["query"]
     job_path_value, job = load_job(args.run_id, "collection-sbertrek")
+    if args.max_results != SBER_EXPORT_MAX_RESULTS:
+        raise ValueError(f"Поиск SberTrek-эпика должен использовать --max-results {SBER_EXPORT_MAX_RESULTS}")
+    response_path, payload, response_size, response_digest = response_json(args.response_file)
+    ensure_external_response_file(args.run_id, response_path)
+    previous_discovery = query.get("discovery")
+    if isinstance(previous_discovery, dict):
+        if previous_discovery.get("response_sha256") != response_digest:
+            raise ValueError("Counterpart-эпик уже импортирован из другого полного JSON-ответа")
+        args.evidence = previous_discovery["evidence"]
+        args.record_sha256 = object_sha256(previous_discovery)
+        print(json.dumps({
+            "status": "tracker-query-response-already-imported",
+            "provider": "sbertrek",
+            "stage": "counterpart-epic",
+            "response_sha256": response_digest,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    current = current_query(args.run_id, config)
+    if not current or current[0] != "sbertrek":
+        raise ValueError("Сейчас нет разрешённого поиска SberTrek-эпика")
     if (
         snapshot["scope"].get("provider") != "jira"
         or snapshot["scope"].get("kind") != "epic"
@@ -2914,13 +2978,8 @@ def sbertrek_ingest_counterpart_epic_command(args: argparse.Namespace) -> int:
         or active_job(args.run_id) != job
     ):
         raise ValueError("Поиск SberTrek-эпика разрешён только активному counterpart epic collector-job")
-    if args.max_results != SBER_EXPORT_MAX_RESULTS:
-        raise ValueError(f"Поиск SberTrek-эпика должен использовать --max-results {SBER_EXPORT_MAX_RESULTS}")
-    call = evidence(args.evidence, "sbertrek")
-    if logged_mcp_details(args.run_id, call):
-        raise ValueError("Этот MCP-вызов уже записан в журнале")
-    response_path, payload, response_size, response_digest = response_json(args.response_file)
-    ensure_external_response_file(args.run_id, response_path)
+    call = collection_evidence("sbertrek", "counterpart-epic", query["exact"], response_digest)
+    args.evidence = call
     records, records_path = full_issue_records(payload)
     if len(records) > 1:
         raise ValueError("Одному Jira-эпику соответствует несколько SberTrek-эпиков")
@@ -3019,22 +3078,47 @@ def sbertrek_ingest_counterpart_epic_command(args: argparse.Namespace) -> int:
 
 def ingest_query_response_command(args: argparse.Namespace) -> int:
     config = load_config()
-    current = current_query(args.run_id, config)
-    if not current or current[0] != args.provider:
-        raise ValueError("Сейчас нет разрешённого поискового запроса для этого провайдера")
     path, snapshot = load_snapshot(args.run_id, args.provider)
     ensure_mutable(snapshot)
     job_path_value, job = load_job(args.run_id, f"collection-{args.provider}")
-    if job.get("state") not in {"pending", "running"} or active_job(args.run_id) != job:
-        raise ValueError("JSON-ответ разрешено импортировать только активному collector-job")
     query = snapshot["query"]
     exact_query = job["query"]["text"]
-    if query["exact"] != exact_query:
-        raise ValueError("Точный запрос снимка не совпадает с активным collector-job")
     tool_contract = job["response_contract"]["mcp_tool_contract"]
     expected_max_results = tool_contract["max_results"]
     if args.max_results != expected_max_results:
         raise ValueError(f"Bulk-запрос {args.provider} должен использовать --max-results {expected_max_results}")
+    response_path, payload, response_size, response_digest = response_json(args.response_file)
+    ensure_external_response_file(args.run_id, response_path)
+    if (
+        args.provider == "sbertrek"
+        and isinstance(query.get("discovery"), dict)
+        and query["discovery"].get("response_sha256") == response_digest
+    ):
+        raise ValueError("Ответ поиска counterpart-эпика нельзя импортировать как состав эпика")
+    previous_page = next((
+        page for page in query.get("pages", [])
+        if page.get("response_sha256") == response_digest
+    ), None)
+    if previous_page:
+        args.page_number = previous_page["number"]
+        args.evidence = previous_page["evidence"]
+        print(json.dumps({
+            "status": "tracker-query-response-already-imported",
+            "provider": args.provider,
+            "page": previous_page["number"],
+            "query_state": query["state"],
+            "returned_count": previous_page["returned_count"],
+            "response_sha256": response_digest,
+            "response_source": previous_page["response_source"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    current = current_query(args.run_id, config)
+    if not current or current[0] != args.provider:
+        raise ValueError("Сейчас нет разрешённого поискового запроса для этого провайдера")
+    if job.get("state") not in {"pending", "running"} or active_job(args.run_id) != job:
+        raise ValueError("JSON-ответ разрешено импортировать только активному collector-job")
+    if query["exact"] != exact_query:
+        raise ValueError("Точный запрос снимка не совпадает с активным collector-job")
     expected_page = len(query["pages"]) + 1
     if args.page_number is not None and args.page_number != expected_page:
         raise ValueError(
@@ -3050,13 +3134,13 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
         raise ValueError("--cursor должен совпадать с next_cursor предыдущей страницы")
     if not query["pages"] and args.cursor:
         raise ValueError("Первая страница не может иметь --cursor")
-    call = evidence(args.evidence, args.provider)
-    if logged_mcp_details(args.run_id, call):
-        raise ValueError("Этот MCP-вызов уже записан в журнале")
     if logged_query_calls(args.run_id, args.provider, exact_query, args.page_number):
         raise ValueError("Для одной страницы точного bulk-запроса разрешён ровно один MCP-вызов")
-    response_path, payload, response_size, response_digest = response_json(args.response_file)
-    ensure_external_response_file(args.run_id, response_path)
+    call = collection_evidence(
+        args.provider, f"{query['purpose']}-page-{args.page_number}",
+        exact_query, response_digest,
+    )
+    args.evidence = call
     records, records_path = full_issue_records(payload)
     page_metadata = jira_page_metadata(payload) if args.provider == "jira" else None
     if page_metadata:
@@ -3457,6 +3541,48 @@ def create_history_jobs(run_id: str, snapshots: dict[str, dict]) -> list[dict]:
     return created
 
 
+def skip_pending_history_jobs(run_id: str) -> list[str]:
+    skipped_jobs: list[str] = []
+    snapshots: dict[str, tuple[Path, dict]] = {}
+    for job in all_jobs(run_id):
+        if job.get("kind") != "provider-history" or job.get("state") not in {"pending", "running"}:
+            continue
+        provider = job["provider"]
+        if provider not in snapshots:
+            snapshots[provider] = load_snapshot(run_id, provider)
+        _, snapshot = snapshots[provider]
+        for key in job["keys"]:
+            item = issue_by_key(snapshot, key)
+            if not item or item["history"]["state"] != "pending":
+                continue
+            item["history"].update({
+                "state": "skipped",
+                "evidence": [],
+                "reason": "not-collected-before-reconciliation",
+            })
+            append_session_log(
+                run_id, source="trackerctl", event="command", provider=provider,
+                details=(
+                    f"command=history-skipped; exit=0; job_id={job['job_id']}; "
+                    f"key={key}; reason=not-collected-before-reconciliation"
+                ),
+            )
+        append_session_log(
+            run_id, source="trackerctl", event="command", provider=provider,
+            details=(
+                f"command=history-skipped; exit=0; job_id={job['job_id']}; "
+                "reason=reconciliation-requested-before-job-completion"
+            ),
+        )
+        job["state"] = "skipped"
+        job["skipped_at"] = now()
+        save_json(job_path(run_id, job["job_id"]), job)
+        skipped_jobs.append(job["job_id"])
+    for path, snapshot in snapshots.values():
+        save_json(path, snapshot)
+    return skipped_jobs
+
+
 def advance_after_collection(run_id: str) -> dict:
     config = load_config()
     snapshots = all_snapshots(run_id, config)
@@ -3780,6 +3906,7 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                 "дословно сохрани весь ответ в один новый внешний временный JSON-файл и передай его с "
                 "--response-source inline-json-capture. Не извлекай и не преобразовывай карточки. "
                 "Не передавай --page-number: trackerctl сам зафиксирует единственный SberTrek-ответ как страницу 1. "
+                "Не передавай --evidence: trackerctl сам выведет его из точного запроса и SHA-256 полного ответа. "
                 "Успешный bulk-вызов не регистрируй через mcp-log: команда импорта сама атомарно запишет вызов и evidence. "
             )
             if job["query"].get("method") == "jira-epic-counterpart":
@@ -3840,7 +3967,8 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                 f"ingest-query-response --provider jira --max-results {JIRA_SEARCH_MAX_RESULTS}; "
                 "не передавай --page-number: trackerctl сам присваивает следующую порядковую страницу, а Jira "
                 "start_at используется только как cursor при реальном продолжении. Успешный bulk-вызов не "
-                "регистрируй через mcp-log: ingest-query-response сам атомарно запишет вызов и evidence. "
+                "регистрируй через mcp-log и не передавай --evidence: ingest-query-response сам выведет evidence "
+                "из точного запроса и SHA-256 полного ответа и атомарно запишет вызов. "
                 "Эта команда сама извлечёт карточки и все ролевые оценки. Даже пустой результат передай как полный "
                 "исходный JSON и импортируй структурно до collector-complete. Для реальной пагинации продолжай тем же "
                 "точным JQL только по полученному из ответа cursor или start_at. " +
@@ -4015,9 +4143,24 @@ def reconcile_command(args: argparse.Namespace) -> int:
     unexpected = unexpected_run_artifacts(args.run_id)
     if unexpected:
         raise ValueError("Tracker-run содержит незарегистрированные вспомогательные файлы: " + ", ".join(unexpected))
-    pending_jobs = [job["job_id"] for job in all_jobs(args.run_id) if job.get("state") in {"pending", "running"}]
-    if pending_jobs:
-        raise ValueError("Collector-jobs не завершены: " + ", ".join(pending_jobs))
+    pending_jobs = [job for job in all_jobs(args.run_id) if job.get("state") in {"pending", "running"}]
+    pending_collection = [job for job in pending_jobs if job.get("kind") == "provider-collection"]
+    if pending_collection:
+        payload = write_status(
+            args.run_id,
+            "tracker-read-awaiting-collector",
+            gaps=[f"{job['job_id']}.pending" for job in pending_collection],
+            allowed="delegate-collector-job",
+            extra=next_job_payload(args.run_id),
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    skipped_history_jobs = skip_pending_history_jobs(args.run_id)
+    if skipped_history_jobs:
+        append_session_log(
+            args.run_id, source="trackerctl", event="history-supplement-skipped",
+            details="jobs=" + ",".join(skipped_history_jobs),
+        )
     snapshots = all_snapshots(args.run_id, config)
     for provider, snapshot in snapshots.items():
         validate_collection_integrity(args.run_id, snapshot, provider)
@@ -4115,8 +4258,8 @@ def parser() -> argparse.ArgumentParser:
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config)
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
-    sber_epic = commands.add_parser("sbertrek-ingest-counterpart-epic"); sber_epic.add_argument("--run-id", required=True); sber_epic.add_argument("--evidence", required=True); sber_epic.add_argument("--response-file", required=True); sber_epic.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); sber_epic.add_argument("--max-results", type=int, required=True); sber_epic.set_defaults(handler=sbertrek_ingest_counterpart_epic_command, provider="sbertrek")
-    ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
+    sber_epic = commands.add_parser("sbertrek-ingest-counterpart-epic"); sber_epic.add_argument("--run-id", required=True); sber_epic.add_argument("--evidence"); sber_epic.add_argument("--response-file", required=True); sber_epic.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); sber_epic.add_argument("--max-results", type=int, required=True); sber_epic.set_defaults(handler=sbertrek_ingest_counterpart_epic_command, provider="sbertrek")
+    ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence"); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
     mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key", action="append", default=[]); mcp.add_argument("--returned-count", type=int); mcp.add_argument("--history-item-count", type=int); mcp.add_argument("--relevant-event-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     absent = commands.add_parser("jira-record-absent-counterparts"); absent.add_argument("--run-id", required=True); absent.add_argument("--evidence", required=True); absent.add_argument("--key", action="append", default=[]); absent.set_defaults(handler=jira_record_absent_counterparts_command, provider="jira")
     page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)
