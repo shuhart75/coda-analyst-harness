@@ -986,7 +986,7 @@ def mark_run_failed(run_id: str, *, source: str, reason: str, command: str | Non
         "planning_application_allowed": False,
         "must_stop": True,
         "gaps": [reason],
-        "allowed_next_action": "abandon-run",
+        "allowed_next_action": "stop-and-report-failure",
         "failure": {
             "source": source,
             "command": command,
@@ -3036,8 +3036,12 @@ def ingest_query_response_command(args: argparse.Namespace) -> int:
     if args.max_results != expected_max_results:
         raise ValueError(f"Bulk-запрос {args.provider} должен использовать --max-results {expected_max_results}")
     expected_page = len(query["pages"]) + 1
-    if args.page_number != expected_page:
-        raise ValueError(f"Ожидалась страница {expected_page}")
+    if args.page_number is not None and args.page_number != expected_page:
+        raise ValueError(
+            f"Ожидалась страница {expected_page}, получена {args.page_number}; "
+            "не используй Jira start_at как порядковый номер страницы"
+        )
+    args.page_number = expected_page
     if args.last_page and args.next_cursor:
         raise ValueError("Последняя страница не может иметь --next-cursor")
     if not args.last_page and not args.next_cursor:
@@ -3772,9 +3776,11 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                 "запрещено. Не используй issue.search, параметр text, issue.getByKey или link.list. Запроси только "
                 "поля из response_contract.preferred_fields, если MCP-инструмент поддерживает проекцию; поле "
                 "attributes обязательно. Не передавай fields=null и не читай отображённый preview. Если MCP создал "
-                "полный JSON-файл, передай его с --response-source mcp-file. Если полный JSON вернулся только inline, "
+                "полный исходный JSON-файл, передай его с --response-source mcp-file. Если полный JSON вернулся только inline, "
                 "дословно сохрани весь ответ в один новый внешний временный JSON-файл и передай его с "
                 "--response-source inline-json-capture. Не извлекай и не преобразовывай карточки. "
+                "Не передавай --page-number: trackerctl сам зафиксирует единственный SberTrek-ответ как страницу 1. "
+                "Успешный bulk-вызов не регистрируй через mcp-log: команда импорта сама атомарно запишет вызов и evidence. "
             )
             if job["query"].get("method") == "jira-epic-counterpart":
                 prompt = (
@@ -3832,7 +3838,10 @@ def collector_brief_command(args: argparse.Namespace) -> int:
                 "JSON-файл вне каталога tracker-run и передай его с --response-source inline-json-capture. Никогда "
                 "не извлекай, не сокращай, не переформатируй и не восстанавливай карточки вручную. Вызови "
                 f"ingest-query-response --provider jira --max-results {JIRA_SEARCH_MAX_RESULTS}; "
-                "эта команда сама извлечёт карточки и все ролевые оценки. Даже пустой результат передай как полный "
+                "не передавай --page-number: trackerctl сам присваивает следующую порядковую страницу, а Jira "
+                "start_at используется только как cursor при реальном продолжении. Успешный bulk-вызов не "
+                "регистрируй через mcp-log: ingest-query-response сам атомарно запишет вызов и evidence. "
+                "Эта команда сама извлечёт карточки и все ролевые оценки. Даже пустой результат передай как полный "
                 "исходный JSON и импортируй структурно до collector-complete. Для реальной пагинации продолжай тем же "
                 "точным JQL только по полученному из ответа cursor или start_at. " +
                 counterpart_error +
@@ -4107,7 +4116,7 @@ def parser() -> argparse.ArgumentParser:
     complete = commands.add_parser("complete-config"); complete.set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
     sber_epic = commands.add_parser("sbertrek-ingest-counterpart-epic"); sber_epic.add_argument("--run-id", required=True); sber_epic.add_argument("--evidence", required=True); sber_epic.add_argument("--response-file", required=True); sber_epic.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); sber_epic.add_argument("--max-results", type=int, required=True); sber_epic.set_defaults(handler=sbertrek_ingest_counterpart_epic_command, provider="sbertrek")
-    ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int, required=True); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
+    ingest = commands.add_parser("ingest-query-response"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--provider", choices=PROVIDERS, required=True); ingest.add_argument("--page-number", type=int); ingest.add_argument("--cursor"); ingest.add_argument("--next-cursor"); ingest.add_argument("--last-page", action="store_true"); ingest.add_argument("--evidence", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.add_argument("--max-results", type=int, required=True); ingest.set_defaults(handler=ingest_query_response_command)
     mcp = commands.add_parser("mcp-log"); mcp.add_argument("--run-id", required=True); mcp.add_argument("--provider", choices=PROVIDERS, required=True); mcp.add_argument("--operation", choices=("query", "history"), required=True); mcp.add_argument("--outcome", choices=("success", "error"), required=True); mcp.add_argument("--evidence", required=True); mcp.add_argument("--summary", required=True); mcp.add_argument("--query"); mcp.add_argument("--page-number", type=int); mcp.add_argument("--key", action="append", default=[]); mcp.add_argument("--returned-count", type=int); mcp.add_argument("--history-item-count", type=int); mcp.add_argument("--relevant-event-count", type=int); mcp.set_defaults(handler=mcp_log_command)
     absent = commands.add_parser("jira-record-absent-counterparts"); absent.add_argument("--run-id", required=True); absent.add_argument("--evidence", required=True); absent.add_argument("--key", action="append", default=[]); absent.set_defaults(handler=jira_record_absent_counterparts_command, provider="jira")
     page = commands.add_parser("query-page"); page.add_argument("--run-id", required=True); page.add_argument("--provider", choices=PROVIDERS, required=True); page.add_argument("--query", required=True); page.add_argument("--page-number", type=int, required=True); page.add_argument("--cursor"); page.add_argument("--next-cursor"); page.add_argument("--last-page", action="store_true"); page.add_argument("--evidence", required=True); page.add_argument("--key", action="append", default=[]); page.set_defaults(handler=query_page_command)

@@ -161,7 +161,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
         self.write(response, payload)
         args = [
             "ingest-query-response", "--run-id", run_id, "--provider", "sbertrek",
-            "--page-number", "1", "--max-results", "50",
+            "--max-results", "50",
             "--response-source", response_source,
             "--evidence", "mcp:sbertrek:query:page-1", "--response-file", str(response),
         ]
@@ -220,7 +220,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
         self.write(response, payload)
         args = [
             "ingest-query-response", "--run-id", run_id, "--provider", "jira",
-            "--page-number", str(page), "--max-results", "50",
+            "--max-results", "50",
             "--response-source", response_source,
             "--evidence", f"mcp:jira:query:page-{page}", "--response-file", str(response),
         ]
@@ -406,6 +406,8 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertIn("параметре query", payload["prompt"])
             self.assertIn("max_results=50", payload["prompt"])
             self.assertIn("--max-results 50", payload["prompt"])
+            self.assertIn("Не передавай --page-number", payload["prompt"])
+            self.assertIn("не регистрируй через mcp-log", payload["prompt"])
             self.assertIn("Не используй issue.search", payload["prompt"])
             self.assertIn("issue.getByKey", payload["prompt"])
             self.assertIn("link.list", payload["prompt"])
@@ -426,6 +428,9 @@ class TrackerCtlV3Tests(unittest.TestCase):
                 payload = self.run_tool(state, "collector-brief", "--run-id", begin["run_id"])
                 self.assertIn(exact, payload["prompt"])
                 self.assertNotIn("Когорты", payload["prompt"])
+                if provider == "jira":
+                    self.assertIn("не передавай --page-number", payload["prompt"])
+                    self.assertIn("start_at используется только как cursor", payload["prompt"])
 
     def test_structural_import_reads_all_22_cards_from_full_response(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -462,6 +467,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             )
             page = self.snapshot(state, run_id, "jira")["query"]["pages"][0]
             self.assertEqual(page["response_source"], "inline-json-capture")
+            self.assertEqual(page["number"], 1)
             self.assertEqual(
                 page["page_metadata"],
                 {"total": 1, "start_at": 0, "max_results": 50},
@@ -1072,7 +1078,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
                 "--evidence", "mcp:jira:query:duplicate",
                 "--response-file", str(state / "mcp-responses" / f"{run_id}-jira-1.json"), expected=2,
             )
-            self.assertIn("Ожидалась страница 2", payload["error"])
+            self.assertIn("Ожидалась страница 2, получена 1", payload["error"])
 
     def test_jira_structural_import_rejects_pagination_metadata_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1274,7 +1280,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
                 "--provider", "sbertrek", expected=2,
             )
             self.assertEqual(failed["status"], "tracker-read-failed")
-            self.assertEqual(failed["allowed_next_action"], "abandon-run")
+            self.assertEqual(failed["allowed_next_action"], "stop-and-report-failure")
             self.assertFalse(failed["final_response_allowed"])
 
             helper.rmdir()
@@ -1286,6 +1292,7 @@ class TrackerCtlV3Tests(unittest.TestCase):
             self.assertEqual(retried["failure"], failed["failure"])
             status = self.run_tool(state, "run-status", "--run-id", run_id, expected=2)
             self.assertEqual(status["status"], "tracker-read-failed")
+            self.assertEqual(status["allowed_next_action"], "stop-and-report-failure")
 
             abandoned = self.run_tool(
                 state, "abandon-run", "--run-id", run_id, "--reason", "failed test run",

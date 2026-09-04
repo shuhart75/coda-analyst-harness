@@ -234,6 +234,9 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - An `update-planning` application creates one execution row and one Gantt bar for each populated role estimate. Rows may share the same tracker key; their unique work-item ids are `<tracker-key>/<role>`, and a base-key actualization reference expands to all role rows.
 - Tracker collection writes only ignored `.workspace-state/tracker-runs/` jobs, compact provider evidence and reconciliation outputs. A `read-only` run never changes a tracker, analytical artifact, repository branch or Git index. An `update-planning` run may be applied by the main agent only after `planning_application_allowed: true`; collectors never apply it.
 
+- `ingest-query-response` derives the next internal page ordinal from saved run state. A collector must not pass `--page-number` or reinterpret Jira `start_at` as that ordinal; `start_at` is only a continuation cursor. SberTrek remains a single non-paginated export recorded internally as page 1. Successful collection calls are recorded only by structural import, never by a preceding `mcp-log`.
+- A terminal tracker failure returns `allowed_next_action: stop-and-report-failure`. The coordinator must end that read request without retrying, creating a replacement run or calling MCP directly. A later `abandon-run` requires a separate explicit analyst decision.
+
 ## Fast consistency sweep for requirement edits
 
 When a requirement change replaces one variant with another, remove stale tails in the same turn instead of leaving conflicting old wording behind.

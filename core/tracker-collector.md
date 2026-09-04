@@ -59,7 +59,7 @@ SberTrek collection-job выбери только операцию `issue.export
 
    ```bash
    python3 <HARNESS_ROOT>/scripts/trackerctl.py ingest-query-response \
-     --run-id <run-id> --provider <provider> --page-number 1 --last-page \
+     --run-id <run-id> --provider <provider> --last-page \
      --max-results 50 \
      --evidence mcp:<provider>:<unique-call-id> \
      --response-source <mcp-file-or-inline-json-capture> \
@@ -67,7 +67,12 @@ SberTrek collection-job выбери только операцию `issue.export
    ```
 
    Команда сама берёт точный запрос из активного job; не вставляй TQL в shell и
-   не пытайся вручную экранировать его кавычки.
+   не пытайся вручную экранировать его кавычки. Не передавай `--page-number`:
+   `trackerctl.py` сам присваивает следующую порядковую страницу. Jira `start_at`
+   является курсором продолжения, а не номером страницы. Для SberTrek всегда
+   регистрируется единственный ответ как страница 1, без пагинации. Успешный
+   collection-вызов не записывай через `mcp-log`: `ingest-query-response` сам
+   атомарно регистрирует вызов и evidence.
 
 5. Для Jira-эпика выполни один прямой `jira_search` с точным JQL
    `"Epic Link" = "<Jira epic key>"`, всеми полями из
