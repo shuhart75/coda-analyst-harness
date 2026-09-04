@@ -120,6 +120,14 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             self.assertEqual(current["next_action"]["provider"], "jira")
             self.assertEqual(current["next_action"]["arguments"]["jql"], 'key IN ("RSCON-3001")')
             current = self.ingest(state, current, {"issues": [self.jira_issue("RSCON-3001", roles={"FE": 8, "QA": 3})]}, name="jira")
+            blocked = self.run_tool(state, "reconcile", "--run-id", current["run_id"], expected=3)
+            self.assertEqual(blocked["allowed_next_action"], "resolve-conflict")
+            self.assertEqual(blocked["next_action"]["task"]["sbertrek_key"], "RSCON-7001")
+            self.assertIn("Приоритет SberTrek для этой и всех последующих", blocked["next_question"])
+            current = self.run_tool(
+                state, "resolve-conflict", "--run-id", current["run_id"],
+                "--task-key", "RSCON-7001", "--choice", "sbertrek",
+            )
             reconciliation, result = self.reconcile(state, current)
             self.assertFalse(reconciliation["final_response_allowed"])
             self.assertEqual(reconciliation["allowed_next_action"], "result-status")
@@ -142,6 +150,75 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             status = self.run_tool(state, "run-status", "--run-id", current["run_id"])
             self.assertEqual(status["allowed_next_action"], "result-status")
             self.assertFalse(status["final_response_allowed"])
+
+    def test_conflicts_are_asked_one_task_at_a_time_and_default_applies_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001", "RSCON-7002", "RSCON-7003")
+            current = self.ingest(state, current, {"issues": [
+                self.sber_issue("RSCON-7001", jira_key="RSCON-3001", summary="[FE] First", roles={"FE": 5}),
+                self.sber_issue("RSCON-7002", jira_key="RSCON-3002", summary="[FE] Second", roles={"FE": 6}),
+                self.sber_issue("RSCON-7003", jira_key="RSCON-3003", summary="[FE] Third", roles={"FE": 7}),
+            ]}, name="sber")
+            current = self.ingest(state, current, {"issues": [
+                self.jira_issue("RSCON-3001", summary="[FE] First", roles={"FE": 4}),
+                self.jira_issue("RSCON-3002", summary="[FE] Second", roles={"FE": 4}),
+                self.jira_issue("RSCON-3003", summary="[FE] Third", roles={"FE": 4}),
+            ]}, name="jira")
+            blocked = self.run_tool(state, "reconcile", "--run-id", current["run_id"], expected=3)
+            self.assertEqual(blocked["next_action"]["task"]["sbertrek_key"], "RSCON-7001")
+            blocked = self.run_tool(
+                state, "resolve-conflict", "--run-id", current["run_id"],
+                "--task-key", "RSCON-7001", "--choice", "jira", expected=3,
+            )
+            self.assertEqual(blocked["next_action"]["task"]["sbertrek_key"], "RSCON-7002")
+            current = self.run_tool(
+                state, "resolve-conflict", "--run-id", current["run_id"],
+                "--task-key", "RSCON-7002", "--choice", "sbertrek", "--apply-to-following",
+            )
+            _, result = self.reconcile(state, current)
+            values = {item["sbertrek_key"]: item["role_estimates"]["FE"]["value"] for item in result["issues"]}
+            self.assertEqual(values, {"RSCON-7001": 4, "RSCON-7002": 6, "RSCON-7003": 7})
+
+    def test_custom_resolution_can_mix_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
+            sber = self.sber_issue("RSCON-7001", jira_key="RSCON-3001", summary="[FE] Form", roles={"FE": 5})
+            sber["attributes"].append({"code": "assigned_to", "name": "Исполнитель", "value": {"externalId": "1", "fullName": "Иван Иванов"}})
+            current = self.ingest(state, current, {"issues": [sber]}, name="sber")
+            jira = self.jira_issue("RSCON-3001", summary="[FE] Form", roles={"FE": 4})
+            jira["fields"]["assignee"] = {"accountId": "other", "displayName": "Пётр Петров"}
+            current = self.ingest(state, current, {"issues": [jira]}, name="jira")
+            blocked = self.run_tool(state, "reconcile", "--run-id", current["run_id"], expected=3)
+            fields = {item["field"] for item in blocked["next_action"]["task"]["conflicts"]}
+            self.assertEqual(fields, {"assignee", "role_estimates.FE"})
+            custom = self.write(state / "responses" / "custom.json", {
+                "assignee": "jira", "role_estimates.FE": "sbertrek",
+            })
+            current = self.run_tool(
+                state, "resolve-conflict", "--run-id", current["run_id"],
+                "--task-key", "RSCON-7001", "--choice", "custom", "--custom-file", str(custom),
+            )
+            _, result = self.reconcile(state, current)
+            issue = result["issues"][0]
+            self.assertEqual(issue["assignee"]["name"], "Пётр Петров")
+            self.assertEqual(issue["role_estimates"]["FE"]["value"], 5)
+            self.assertEqual(issue["role_estimate_sources"]["FE"], "sbertrek")
+
+    def test_equal_assignee_names_ignore_provider_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
+            sber = self.sber_issue("RSCON-7001", jira_key="RSCON-3001")
+            sber["attributes"].append({"code": "assigned_to", "name": "Исполнитель", "value": {"externalId": "1", "fullName": "Иван Иванов"}})
+            current = self.ingest(state, current, {"issues": [sber]}, name="sber")
+            jira = self.jira_issue("RSCON-3001")
+            jira["fields"]["assignee"] = {"accountId": "other", "displayName": "Иван Иванов"}
+            current = self.ingest(state, current, {"issues": [jira]}, name="jira")
+            _, result = self.reconcile(state, current)
+            self.assertEqual(result["counts"]["discrepancies"], 0)
+            self.assertEqual(result["issues"][0]["assignee"]["id"], "1")
 
     def test_sbertrek_tasks_route_uses_only_explicit_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

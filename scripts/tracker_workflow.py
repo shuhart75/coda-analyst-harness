@@ -23,6 +23,8 @@ PROVIDERS = ("sbertrek", "jira")
 SCOPE_KINDS = ("epic", "tasks")
 RESPONSE_SOURCES = ("mcp-file", "inline-json-capture")
 ROLES = ("AN", "BE", "FE", "QA")
+RESOLUTION_CHOICES = ("sbertrek", "jira", "custom")
+ACTIONABLE_CONFLICT_FIELDS = {"assignee", "estimate"}
 ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9_]*-[1-9][0-9]*$")
 RUN_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$")
 MISSING_SENTINELS = {"not-returned", "not returned", "unknown", "none", "null", "-", "—"}
@@ -368,6 +370,27 @@ def next_action(run: dict) -> dict:
     step = pending_step(run)
     ctl = str(Path(__file__).with_name("trackerctl.py"))
     if not step:
+        if run["status"] == "tracker-read-needs-resolution":
+            conflict = first_unresolved_conflict(reconcile_data(run))
+            if conflict is None:
+                return {"type": "reconcile", "command": [sys.executable, ctl, "reconcile", "--run-id", run["run_id"]]}
+            task_key = conflict["sbertrek_key"]
+            base = [sys.executable, ctl, "resolve-conflict", "--run-id", run["run_id"], "--task-key", task_key]
+            return {
+                "type": "resolve-conflict", "task": conflict,
+                "next_question": conflict_question(conflict),
+                "custom_file_contract": {
+                    "format": "json-object", "required_fields": [item["field"] for item in conflict["conflicts"]],
+                    "allowed_field_values": ["sbertrek", "jira", "explicit-normalized-value"],
+                },
+                "commands": {
+                    "sbertrek": [*base, "--choice", "sbertrek"],
+                    "sbertrek_for_following": [*base, "--choice", "sbertrek", "--apply-to-following"],
+                    "jira": [*base, "--choice", "jira"],
+                    "jira_for_following": [*base, "--choice", "jira", "--apply-to-following"],
+                    "custom": [*base, "--choice", "custom", "--custom-file", "<resolution-json-path>"],
+                },
+            }
         if run["status"] == "tracker-read-ready":
             return {"type": "reconcile", "command": [sys.executable, ctl, "reconcile", "--run-id", run["run_id"]]}
         if run["status"] == "tracker-read-reconciled":
@@ -387,14 +410,22 @@ def next_action(run: dict) -> dict:
 
 def status_payload(run: dict) -> dict:
     action = next_action(run)
-    return {
+    payload = {
         "protocol": PROTOCOL, "run_id": run["run_id"], "status": run["status"],
         "workflow_complete": run["status"] == "tracker-read-reconciled",
         "final_response_allowed": False,
+        "must_stop": action["type"] == "resolve-conflict",
         "allowed_next_action": action["type"], "next_action": action,
         "limitations": sorted(set(run["limitations"])),
         "paths": {"scope": str(run_root(run["run_id"]) / "scope.json"), "run_status": str(run_root(run["run_id"]) / "run-status.json"), "providers": str(run_root(run["run_id"]) / "providers")},
     }
+    if action["type"] == "resolve-conflict":
+        payload["next_question"] = action["next_question"]
+        payload["response_contract"] = {
+            "type": "ask-one", "text": action["next_question"],
+            "additional_commentary_allowed": False,
+        }
+    return payload
 
 
 def write_provider_snapshots(run: dict) -> None:
@@ -978,16 +1009,26 @@ def canonical_estimate(value: Any) -> Any:
     return result
 
 
+def comparable_person(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    name = " ".join(str(value.get("name") or "").casefold().split())
+    return ("name", name) if name else ("id", str(value.get("id") or "").casefold())
+
+
 def merged_value(field: str, sber: dict | None, jira: dict | None) -> tuple[Any, str | None, dict | None]:
     svalue = sber.get(field) if sber else None
     jvalue = jira.get(field) if jira else None
     if field == "estimate":
         svalue, jvalue = canonical_estimate(svalue), canonical_estimate(jvalue)
     chosen, source = (svalue, "sbertrek") if svalue not in (None, "", [], {}) else (jvalue, "jira")
-    equal = svalue == jvalue or (field == "issue_type" and isinstance(svalue, str) and isinstance(jvalue, str) and svalue.casefold() == jvalue.casefold())
+    if field == "assignee":
+        equal = comparable_person(svalue) == comparable_person(jvalue)
+    else:
+        equal = svalue == jvalue or (field == "issue_type" and isinstance(svalue, str) and isinstance(jvalue, str) and svalue.casefold() == jvalue.casefold())
     conflict = None
-    if svalue not in (None, "", [], {}) and jvalue not in (None, "", [], {}) and not equal:
-        conflict = {"field": field, "sbertrek": svalue, "jira": jvalue, "resolution": "sbertrek-preserved"}
+    if field in ACTIONABLE_CONFLICT_FIELDS and svalue not in (None, "", [], {}) and jvalue not in (None, "", [], {}) and not equal:
+        conflict = {"field": field, "sbertrek": svalue, "jira": jvalue, "resolution": "unresolved"}
     return chosen, source if chosen not in (None, "", [], {}) else None, conflict
 
 
@@ -1001,8 +1042,75 @@ def merged_roles(sber: dict | None, jira: dict | None) -> tuple[dict, dict, list
             values[role] = {**chosen, "source": source}
         sources[role] = source if chosen not in (None, {}, "") else None
         if svalue not in (None, {}, "") and jvalue not in (None, {}, "") and {key: svalue.get(key) for key in ("value", "unit")} != {key: jvalue.get(key) for key in ("value", "unit")}:
-            conflicts.append({"field": f"role_estimates.{role}", "sbertrek": svalue, "jira": jvalue, "resolution": "sbertrek-preserved"})
+            conflicts.append({"field": f"role_estimates.{role}", "sbertrek": svalue, "jira": jvalue, "resolution": "unresolved"})
     return values, sources, conflicts
+
+
+def resolution_for(run: dict, task_key: str, field: str, conflict: dict) -> tuple[Any, str | None, str]:
+    resolution = run.get("conflict_resolutions", {}).get(task_key)
+    choice = resolution.get("choice") if isinstance(resolution, dict) else None
+    if choice is None:
+        choice = run.get("following_conflict_choice")
+    if choice in PROVIDERS:
+        return conflict[choice], choice, choice
+    if choice != "custom" or not isinstance(resolution, dict):
+        return conflict["sbertrek"], "sbertrek", "unresolved"
+    custom = resolution.get("values", {}).get(field)
+    if custom in PROVIDERS:
+        return conflict[custom], custom, f"custom:{custom}"
+    return custom, "custom", "custom"
+
+
+def display_conflict_value(field: str, value: Any) -> str:
+    if field == "assignee" and isinstance(value, dict):
+        return str(value.get("name") or value.get("id") or "-")
+    if isinstance(value, dict) and isinstance(value.get("value"), (int, float)):
+        return f"{value['value']} {value.get('unit') or ''}".strip()
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def conflict_field_label(field: str) -> str:
+    if field == "assignee":
+        return "исполнитель"
+    if field == "estimate":
+        return "общая оценка"
+    if field.startswith("role_estimates."):
+        return f"оценка {field.split('.', 1)[1]}"
+    return field
+
+
+def first_unresolved_conflict(result: dict) -> dict | None:
+    grouped: dict[str, dict] = {}
+    for item in result["discrepancies"]:
+        if item.get("resolution") != "unresolved":
+            continue
+        key = item["sbertrek_key"]
+        grouped.setdefault(key, {
+            "sbertrek_key": key, "jira_key": item.get("jira_key"), "conflicts": [],
+        })["conflicts"].append({
+            field: item[field] for field in ("field", "sbertrek", "jira")
+        })
+    return next(iter(grouped.values()), None)
+
+
+def conflict_question(task: dict) -> str:
+    lines = [
+        f"В задаче SberTrek {task['sbertrek_key']} / Jira {task.get('jira_key') or '-'} обнаружены разные заполненные значения:",
+    ]
+    for item in task["conflicts"]:
+        lines.append(
+            f"- {conflict_field_label(item['field'])}: SberTrek = {display_conflict_value(item['field'], item['sbertrek'])}; "
+            f"Jira = {display_conflict_value(item['field'], item['jira'])}."
+        )
+    lines.extend([
+        "Выберите один вариант:",
+        "1. Приоритет SberTrek для этой задачи.",
+        "2. Приоритет SberTrek для этой и всех последующих конфликтующих задач текущего run.",
+        "3. Приоритет Jira для этой задачи.",
+        "4. Приоритет Jira для этой и всех последующих конфликтующих задач текущего run.",
+        "5. Свой вариант по перечисленным полям.",
+    ])
+    return "\n".join(lines)
 
 
 def development_state(sber: dict | None, jira: dict | None, config: dict) -> dict:
@@ -1070,8 +1178,23 @@ def reconcile_data(run: dict) -> dict:
         for field in MERGED_FIELDS:
             merged[field], sources[field], conflict = merged_value(field, sber, jira)
             if conflict:
+                value, source, resolution = resolution_for(run, sber["key"], field, conflict)
+                conflict["resolution"] = resolution
+                if resolution != "unresolved":
+                    merged[field], sources[field] = value, source
                 local.append(conflict)
         roles, role_sources, role_conflicts = merged_roles(sber, jira)
+        for conflict in role_conflicts:
+            role = conflict["field"].split(".", 1)[1]
+            value, source, resolution = resolution_for(run, sber["key"], conflict["field"], conflict)
+            conflict["resolution"] = resolution
+            if resolution != "unresolved":
+                if value in (None, "", {}):
+                    roles.pop(role, None)
+                    role_sources[role] = None
+                else:
+                    roles[role] = {**value, "source": source}
+                    role_sources[role] = source
         local.extend(role_conflicts)
         for conflict in local:
             discrepancies.append({"type": "field-conflict", "sbertrek_key": sber["key"], "jira_key": jira_key, **conflict})
@@ -1173,6 +1296,30 @@ def official_text(result: dict) -> str:
     return "\n".join(lines)
 
 
+def validated_custom_resolution(task: dict, path_value: str) -> dict:
+    payload = load_json(Path(path_value).expanduser().resolve())
+    if not isinstance(payload, dict):
+        raise ValueError("Пользовательский вариант должен быть JSON-объектом")
+    expected = {item["field"] for item in task["conflicts"]}
+    if set(payload) != expected:
+        raise ValueError("Пользовательский вариант должен задавать ровно все поля текущего конфликта")
+    result = {}
+    for field, value in payload.items():
+        if value in PROVIDERS:
+            result[field] = value
+            continue
+        if field == "assignee":
+            person = normalized_person(value)
+            if person is None:
+                raise ValueError("Пользовательский исполнитель должен содержать имя или идентификатор")
+            result[field] = person
+            continue
+        if not isinstance(value, dict) or not isinstance(value.get("value"), (int, float)) or not isinstance(value.get("unit"), str):
+            raise ValueError(f"Пользовательская оценка {field} должна содержать числовые value и строковый unit")
+        result[field] = canonical_estimate(value)
+    return result
+
+
 def init_config_command(args: argparse.Namespace) -> int:
     path = config_path()
     if path.exists() and not args.force:
@@ -1234,8 +1381,9 @@ def begin_command(args: argparse.Namespace) -> int:
         existing = load_run(active)
         identity_fields = ("kind", "provider", "ids", "intent")
         if all(existing["scope"].get(field) == scope[field] for field in identity_fields):
-            print(json.dumps(status_payload(existing), ensure_ascii=False, indent=2))
-            return 0
+            payload = status_payload(existing)
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return STOP_EXIT if payload.get("must_stop") else 0
         raise ValueError(f"Уже есть незавершённый tracker-run {active}; сначала явно abandon-run")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     run = {
@@ -1243,6 +1391,7 @@ def begin_command(args: argparse.Namespace) -> int:
         "created_at": now(), "status": "tracker-read-collecting", "scope": scope,
         "config": config, "steps": [primary_step(scope)], "cards": {provider: [] for provider in PROVIDERS},
         "absent_jira_keys": [], "limitations": [], "failure": None,
+        "conflict_resolutions": {}, "following_conflict_choice": None,
     }
     root = run_root(run_id)
     root.mkdir(parents=True)
@@ -1254,8 +1403,9 @@ def begin_command(args: argparse.Namespace) -> int:
 
 
 def run_status_command(args: argparse.Namespace) -> int:
-    print(json.dumps(status_payload(load_run(args.run_id)), ensure_ascii=False, indent=2))
-    return 0
+    payload = status_payload(load_run(args.run_id))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return STOP_EXIT if payload.get("must_stop") else 0
 
 
 def abandon_command(args: argparse.Namespace) -> int:
@@ -1290,6 +1440,11 @@ def reconcile_command(args: argparse.Namespace) -> int:
         print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
         return 2
     result = reconcile_data(run)
+    if first_unresolved_conflict(result):
+        run["status"] = "tracker-read-needs-resolution"
+        save_run(run)
+        print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
+        return STOP_EXIT
     root = run_root(args.run_id)
     save_json(root / "reconciled.json", result)
     (root / "report.md").write_text(render_report(result), encoding="utf-8")
@@ -1309,6 +1464,35 @@ def reconcile_command(args: argparse.Namespace) -> int:
     release_active(args.run_id)
     print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
     return 0
+
+
+def resolve_conflict_command(args: argparse.Namespace) -> int:
+    run = load_run(args.run_id)
+    if run["status"] != "tracker-read-needs-resolution":
+        raise ValueError("Tracker-run не ожидает решения конфликта")
+    task = first_unresolved_conflict(reconcile_data(run))
+    if task is None or args.task_key != task["sbertrek_key"]:
+        raise ValueError("Решение относится не к текущей конфликтующей задаче")
+    if args.apply_to_following and args.choice == "custom":
+        raise ValueError("Пользовательский вариант нельзя автоматически применять к последующим задачам")
+    if args.choice == "custom":
+        if not args.custom_file:
+            raise ValueError("Для пользовательского варианта требуется --custom-file")
+        values = validated_custom_resolution(task, args.custom_file)
+    else:
+        if args.custom_file:
+            raise ValueError("--custom-file допустим только для пользовательского варианта")
+        values = {}
+    run.setdefault("conflict_resolutions", {})[args.task_key] = {
+        "choice": args.choice, "values": values, "resolved_at": now(),
+    }
+    if args.apply_to_following:
+        run["following_conflict_choice"] = args.choice
+    run["status"] = "tracker-read-needs-resolution" if first_unresolved_conflict(reconcile_data(run)) else "tracker-read-ready"
+    save_run(run)
+    payload = status_payload(run)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return STOP_EXIT if payload.get("must_stop") else 0
 
 
 def result_status_command(args: argparse.Namespace) -> int:
@@ -1340,6 +1524,7 @@ def parser() -> argparse.ArgumentParser:
     ingest = commands.add_parser("ingest"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--step-id", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.set_defaults(handler=ingest_command)
     error = commands.add_parser("ingest-error"); error.add_argument("--run-id", required=True); error.add_argument("--step-id", required=True); error.add_argument("--error-file", required=True); error.set_defaults(handler=ingest_error_command)
     reconcile = commands.add_parser("reconcile"); reconcile.add_argument("--run-id", required=True); reconcile.set_defaults(handler=reconcile_command)
+    resolve = commands.add_parser("resolve-conflict"); resolve.add_argument("--run-id", required=True); resolve.add_argument("--task-key", required=True); resolve.add_argument("--choice", choices=RESOLUTION_CHOICES, required=True); resolve.add_argument("--apply-to-following", action="store_true"); resolve.add_argument("--custom-file"); resolve.set_defaults(handler=resolve_conflict_command)
     result = commands.add_parser("result-status"); result.add_argument("--run-id", required=True); result.set_defaults(handler=result_status_command)
     abandon = commands.add_parser("abandon-run"); abandon.add_argument("--run-id", required=True); abandon.add_argument("--reason", required=True); abandon.set_defaults(handler=abandon_command)
     return root
