@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -796,6 +797,14 @@ def required_text(record: dict, aliases: tuple[str, ...], label: str, key: str) 
     return text
 
 
+def optional_text(record: dict, aliases: tuple[str, ...]) -> tuple[str | None, str]:
+    value, state = optional_value(record, aliases, {}, ())
+    text = object_text(value, ("code", "name", "value", "title", "key")) if state == "value" else None
+    if not text or text.casefold() in MISSING_SENTINELS:
+        return None, "absent" if state == "value" else state
+    return text, "value"
+
+
 def compact_issue(record: dict, provider: str, *, forced_epic: str | None = None) -> dict:
     key = record_issue_key(record)
     if not key:
@@ -821,6 +830,8 @@ def compact_issue(record: dict, provider: str, *, forced_epic: str | None = None
         jira_key = normalize_key(jira_text, "Объект Jira") if jira_text else None
     else:
         jira_key, jira_state = None, "absent"
+    created_at, created_state = optional_text(record, CREATED_ALIASES)
+    updated_at, updated_state = optional_text(record, UPDATED_ALIASES)
     return {
         "key": key, "jira_key": jira_key, "jira_key_state": jira_state,
         "summary": summary, "issue_type": required_text(record, TYPE_ALIASES, "issue_type", key),
@@ -828,9 +839,12 @@ def compact_issue(record: dict, provider: str, *, forced_epic: str | None = None
         "assignee": assignee, "estimate": estimate, "role_estimates": role_values,
         "role_estimate_observations": role_states, "estimate_fields": estimate_fields,
         "epic": epic, "releases": releases,
-        "field_observations": {"assignee": assignee_state, "estimate": estimate_state, "epic": epic_state, "releases": releases_state},
-        "created_at": required_text(record, CREATED_ALIASES, "created_at", key),
-        "updated_at": required_text(record, UPDATED_ALIASES, "updated_at", key),
+        "field_observations": {
+            "assignee": assignee_state, "estimate": estimate_state, "epic": epic_state,
+            "releases": releases_state, "created_at": created_state, "updated_at": updated_state,
+        },
+        "created_at": created_at,
+        "updated_at": updated_at,
         "attributes_returned": attributes_present if provider == "sbertrek" else None,
     }
 
@@ -888,7 +902,8 @@ def append_cards(run: dict, provider: str, cards: list[dict]) -> None:
 
 def ingest_command(args: argparse.Namespace) -> int:
     run = load_run(args.run_id)
-    step = next((item for item in run["steps"] if item["step_id"] == args.step_id), None)
+    working = copy.deepcopy(run)
+    step = next((item for item in working["steps"] if item["step_id"] == args.step_id), None)
     if not step:
         raise ValueError("step_id не принадлежит tracker-run")
     try:
@@ -896,10 +911,15 @@ def ingest_command(args: argparse.Namespace) -> int:
         response_sha = digest_bytes(raw)
         if step["state"] == "complete":
             if step.get("response_sha256") == response_sha:
-                print(json.dumps({**status_payload(run), "ingest": "idempotent-no-op"}, ensure_ascii=False, indent=2))
+                if working["status"] == "tracker-read-failed":
+                    working["status"] = "tracker-read-collecting"
+                    working["failure"] = None
+                    advance(working)
+                    save_run(working)
+                print(json.dumps({**status_payload(working), "ingest": "idempotent-no-op"}, ensure_ascii=False, indent=2))
                 return 0
             raise ValueError("Для уже завершённого шага передан другой ответ")
-        if step is not pending_step(run):
+        if step is not pending_step(working):
             raise ValueError("Можно импортировать только ответ текущего next_action")
         records, record_path = full_issue_records(payload)
         if step["stage"] == "sbertrek-epic-discovery":
@@ -919,7 +939,7 @@ def ingest_command(args: argparse.Namespace) -> int:
                     raise ValueError("SberTrek counterpart исходного Jira-эпика не является эпиком")
             step["counterpart_epic"] = counterpart
             if counterpart is None:
-                run["limitations"].append(f"sbertrek-counterpart-epic-not-found:{step['requested_keys'][0]}")
+                working["limitations"].append(f"sbertrek-counterpart-epic-not-found:{step['requested_keys'][0]}")
             cards: list[dict] = []
         else:
             cards = [compact_issue(record, step["provider"], forced_epic=step.get("epic_key")) for record in records]
@@ -927,26 +947,32 @@ def ingest_command(args: argparse.Namespace) -> int:
             for card in cards:
                 card["evidence"] = evidence
             validate_records_for_step(step, cards)
-            append_cards(run, step["provider"], cards)
+            append_cards(working, step["provider"], cards)
+            for card in cards:
+                for field in ("created_at", "updated_at"):
+                    if card["field_observations"][field] != "value":
+                        working["limitations"].append(f"{step['provider']}-{field.replace('_', '-')}-not-returned:{card['key']}")
             returned = {item["key"] for item in cards}
             if step["requested_keys"] and step["provider"] == "jira":
-                missing = sorted(set(step["requested_keys"]) - returned - set(run["absent_jira_keys"]))
-                run["limitations"].extend(f"jira-key-not-returned:{key}" for key in missing)
+                missing = sorted(set(step["requested_keys"]) - returned - set(working["absent_jira_keys"]))
+                working["limitations"].extend(f"jira-key-not-returned:{key}" for key in missing)
             if step["requested_keys"] and step["stage"].endswith("source-tasks") and step["provider"] == "sbertrek":
                 missing = sorted(set(step["requested_keys"]) - returned)
-                run["limitations"].extend(f"sbertrek-key-not-returned:{key}" for key in missing)
+                working["limitations"].extend(f"sbertrek-key-not-returned:{key}" for key in missing)
         step.update({"state": "complete", "response_source": args.response_source, "response_path": str(path), "response_sha256": response_sha, "response_bytes": len(raw), "record_path": record_path, "returned_count": len(records), "completed_at": now()})
         if len(records) == MAX_RESULTS:
-            run["limitations"].append(f"{step['provider']}-result-limit-reached:{MAX_RESULTS}")
+            working["limitations"].append(f"{step['provider']}-result-limit-reached:{MAX_RESULTS}")
         metadata = jira_metadata(payload) if step["provider"] == "jira" else None
         if metadata and metadata["total"] > metadata["start_at"] + len(records):
-            run["limitations"].append(f"jira-result-incomplete:{len(records)}-of-{metadata['total']}")
-        advance(run)
-        save_run(run)
+            working["limitations"].append(f"jira-result-incomplete:{len(records)}-of-{metadata['total']}")
+        working["status"] = "tracker-read-collecting"
+        working["failure"] = None
+        advance(working)
+        save_run(working)
     except Exception as error:
         fail_run(run, str(error))
         raise
-    print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
+    print(json.dumps(status_payload(working), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -962,8 +988,9 @@ def all_text(value: Any) -> str:
 
 def ingest_error_command(args: argparse.Namespace) -> int:
     run = load_run(args.run_id)
-    step = next((item for item in run["steps"] if item["step_id"] == args.step_id), None)
-    if not step or step is not pending_step(run):
+    working = copy.deepcopy(run)
+    step = next((item for item in working["steps"] if item["step_id"] == args.step_id), None)
+    if not step or step is not pending_step(working):
         raise ValueError("Ошибка относится не к текущему next_action")
     try:
         _, raw, _ = response_file(args.error_file, args.run_id, require_json=False)
@@ -981,7 +1008,7 @@ def ingest_error_command(args: argparse.Namespace) -> int:
         if not absent or not set(absent).issubset(set(step["requested_keys"])):
             raise ValueError("Jira-ошибка не подтверждает отсутствие запрошенных counterpart-ключей")
         step["attempt_errors"].append({"sha256": response_sha, "bytes": len(raw), "absent_keys": absent, "at": now()})
-        run["absent_jira_keys"] = sorted(set(run["absent_jira_keys"]) | set(absent))
+        working["absent_jira_keys"] = sorted(set(working["absent_jira_keys"]) | set(absent))
         remaining = sorted(set(step["requested_keys"]) - set(absent))
         if remaining:
             step["query"] = jql_keys(remaining)
@@ -990,12 +1017,14 @@ def ingest_error_command(args: argparse.Namespace) -> int:
             step["state"] = "complete"
             step["returned_count"] = 0
             step["completed_at"] = now()
-            advance(run)
-        save_run(run)
+        working["status"] = "tracker-read-collecting"
+        working["failure"] = None
+        advance(working)
+        save_run(working)
     except Exception as error:
         fail_run(run, str(error))
         raise
-    print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
+    print(json.dumps(status_payload(working), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1234,9 +1263,11 @@ def reconcile_data(run: dict) -> dict:
         "sbertrek": len(sber_items), "jira": len(jira_items), "matched": len(paired_jira),
         "issues": len(issues), "excluded": len(excluded), "discrepancies": len(discrepancies),
     }
+    role_work_items = work_items(issues)
+    counts["work_items"] = len(role_work_items)
     return {
         "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": run["run_id"],
-        "scope": run["scope"], "issues": issues, "work_items": work_items(issues),
+        "scope": run["scope"], "issues": issues, "work_items": role_work_items,
         "excluded": excluded, "discrepancies": discrepancies, "counts": counts,
         "summary": {"story_points_total": general_total, "role_totals_person_days": role_totals},
         "limitations": limitations,
@@ -1257,6 +1288,13 @@ def render_report(result: dict) -> str:
         assignee = (item.get("assignee") or {}).get("name") or "—"
         values = [str(item.get("role_estimates", {}).get(role, {}).get("value", "—")) for role in ROLES]
         lines.append(f"| {item.get('sbertrek_key') or '—'} | {item.get('jira_key') or '—'} | {item['summary']} | {item['status']} | {assignee} | {' | '.join(values)} |")
+    lines.extend(["", f"## Ролевые задачи ({result['counts']['work_items']})", ""])
+    for item in result["work_items"]:
+        assignee = (item.get("assignee") or {}).get("name") or "—"
+        lines.append(
+            f"- `{item['work_item_id']}` — {item['summary']}; "
+            f"{item['estimate']['value']} {item['estimate']['unit']}; исполнитель: {assignee}."
+        )
     lines.extend(["", "## Ограничения", ""])
     lines.extend(f"- {item}" for item in result["limitations"])
     return "\n".join(lines) + "\n"
@@ -1266,7 +1304,7 @@ def official_text(result: dict) -> str:
     counts, totals = result["counts"], result["summary"]["role_totals_person_days"]
     lines = [
         f"Сверка завершена. Run ID: {result['run_id']}",
-        f"SberTrek: {counts['sbertrek']}; Jira: {counts['jira']}; склеено: {counts['matched']}; итоговых задач: {counts['issues']}; исключено: {counts['excluded']}; расхождений: {counts['discrepancies']}.",
+        f"SberTrek: {counts['sbertrek']}; Jira: {counts['jira']}; склеено: {counts['matched']}; исходных задач: {counts['issues']}; ролевых задач: {counts['work_items']}; исключено: {counts['excluded']}; расхождений: {counts['discrepancies']}.",
         f"Общая оценка: {result['summary']['story_points_total']} SP. Ролевые оценки: AN {totals['AN']}, BE {totals['BE']}, FE {totals['FE']}, QA {totals['QA']} человекодней.",
         "Задачи:",
     ]
@@ -1283,6 +1321,13 @@ def official_text(result: dict) -> str:
         lines.append(
             f"- SberTrek {sbertrek_key}; Jira {jira_key}; {summary}; "
             f"статус: {status}; исполнитель: {assignee}; оценки: {estimates}."
+        )
+    lines.append("Ролевые задачи:")
+    for item in result["work_items"]:
+        assignee = " ".join(str((item.get("assignee") or {}).get("name") or "-").split())
+        lines.append(
+            f"- {item['work_item_id']}; {item['summary']}; оценка: "
+            f"{item['estimate']['value']} {item['estimate']['unit']}; исполнитель: {assignee}."
         )
     if result["excluded"]:
         lines.append("Исключены:")
@@ -1409,6 +1454,8 @@ def run_status_command(args: argparse.Namespace) -> int:
 
 
 def abandon_command(args: argparse.Namespace) -> int:
+    if not args.analyst_confirmed:
+        raise ValueError("abandon-run требует явного подтверждения аналитика через --analyst-confirmed")
     root = run_root(args.run_id)
     if run_path(args.run_id).is_file():
         try:
@@ -1526,7 +1573,7 @@ def parser() -> argparse.ArgumentParser:
     reconcile = commands.add_parser("reconcile"); reconcile.add_argument("--run-id", required=True); reconcile.set_defaults(handler=reconcile_command)
     resolve = commands.add_parser("resolve-conflict"); resolve.add_argument("--run-id", required=True); resolve.add_argument("--task-key", required=True); resolve.add_argument("--choice", choices=RESOLUTION_CHOICES, required=True); resolve.add_argument("--apply-to-following", action="store_true"); resolve.add_argument("--custom-file"); resolve.set_defaults(handler=resolve_conflict_command)
     result = commands.add_parser("result-status"); result.add_argument("--run-id", required=True); result.set_defaults(handler=result_status_command)
-    abandon = commands.add_parser("abandon-run"); abandon.add_argument("--run-id", required=True); abandon.add_argument("--reason", required=True); abandon.set_defaults(handler=abandon_command)
+    abandon = commands.add_parser("abandon-run"); abandon.add_argument("--run-id", required=True); abandon.add_argument("--reason", required=True); abandon.add_argument("--analyst-confirmed", action="store_true"); abandon.set_defaults(handler=abandon_command)
     return root
 
 

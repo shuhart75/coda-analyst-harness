@@ -147,6 +147,8 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             self.assertIn("Задачи:", official)
             self.assertIn("SberTrek RSCON-7001; Jira RSCON-3001; [FE] Form", official)
             self.assertIn("оценки: AN -, BE -, FE 5.0, QA 3.0", official)
+            self.assertIn("RSCON-3001/FE; FE Form; оценка: 5.0", official)
+            self.assertIn("RSCON-3001/QA; QA Form; оценка: 3.0", official)
             status = self.run_tool(state, "run-status", "--run-id", current["run_id"])
             self.assertEqual(status["allowed_next_action"], "result-status")
             self.assertFalse(status["final_response_allowed"])
@@ -331,7 +333,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             })
             self.write(state / "tracker-active-run.json", {"run_id": run_id})
             abandoned = self.run_tool(
-                state, "abandon-run", "--run-id", run_id, "--reason", "start-clean",
+                state, "abandon-run", "--run-id", run_id, "--reason", "start-clean", "--analyst-confirmed",
             )
             self.assertEqual(abandoned["allowed_next_action"], "begin")
             marker = json.loads(
@@ -344,6 +346,66 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
                 "--scope-id", "RSCON-7001", "--label", "Test", "--scope-source", "unit-test",
             )
             self.assertEqual(started["protocol"], "direct-tracker-v1")
+
+    def test_abandon_requires_analyst_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
+            rejected = self.run_tool(
+                state, "abandon-run", "--run-id", current["run_id"], "--reason", "retry", expected=2,
+            )
+            self.assertIn("явного подтверждения аналитика", rejected["error"])
+            self.assertTrue((state / "tracker-active-run.json").is_file())
+            resumed = self.run_tool(
+                state, "begin", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
+                "--scope-id", "RSCON-7001", "--label", "Retry", "--scope-source", "unit-test", "--intent", "read-only",
+            )
+            self.assertEqual(resumed["run_id"], current["run_id"])
+
+    def test_failed_ingest_is_transactional_and_retry_recovers_same_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001", "RSCON-7002")
+            malformed = self.sber_issue("RSCON-7002")
+            malformed.pop("summary")
+            self.ingest(
+                state, current, {"issues": [self.sber_issue("RSCON-7001"), malformed]},
+                name="malformed", expected=2,
+            )
+            failed_run = json.loads(
+                (state / "tracker-runs" / current["run_id"] / "run.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(failed_run["status"], "tracker-read-failed")
+            self.assertEqual(failed_run["cards"]["sbertrek"], [])
+            self.assertEqual(failed_run["steps"][0]["state"], "pending")
+            retried = self.ingest(state, current, {"issues": [
+                self.sber_issue("RSCON-7001"), self.sber_issue("RSCON-7002"),
+            ]}, name="corrected")
+            self.assertEqual(retried["run_id"], current["run_id"])
+            self.assertEqual(retried["status"], "tracker-read-ready")
+            recovered_run = json.loads(
+                (state / "tracker-runs" / current["run_id"] / "run.json").read_text(encoding="utf-8")
+            )
+            self.assertIsNone(recovered_run["failure"])
+
+    def test_missing_service_dates_are_visible_but_do_not_block(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
+            issue = self.sber_issue("RSCON-7001")
+            issue.pop("created_at")
+            issue["updated_at"] = None
+            current = self.ingest(state, current, {"issues": [issue]}, name="without-dates")
+            self.assertEqual(current["status"], "tracker-read-ready")
+            self.assertIn("sbertrek-created-at-not-returned:RSCON-7001", current["limitations"])
+            self.assertIn("sbertrek-updated-at-not-returned:RSCON-7001", current["limitations"])
+            stored = json.loads(
+                (state / "tracker-runs" / current["run_id"] / "providers" / "sbertrek.json").read_text(encoding="utf-8")
+            )["issues"][0]
+            self.assertIsNone(stored["created_at"])
+            self.assertIsNone(stored["updated_at"])
+            self.assertEqual(stored["field_observations"]["created_at"], "absent")
+            self.assertEqual(stored["field_observations"]["updated_at"], "absent")
 
     def test_corrupt_json_fails_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
