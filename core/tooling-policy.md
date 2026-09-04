@@ -10,9 +10,9 @@ Prefer the simplest tool that preserves auditability.
 - Keep transient MCP task-tracker snapshots under ignored
   `.workspace-state/tracker-runs/`; do not copy them into project source materials
   during the read-only tracker phase.
-- Keep the generated `tracker-session-log.md` in the same ignored tracker-run
-  directory. It may contain bounded diagnostic metadata, but never credentials,
-  fixed MCP server names or complete provider response bodies.
+- Keep complete provider responses outside tracker-run directories. Runtime state
+  stores only normalized cards, response provenance and checksums; it must never
+  contain credentials or complete provider response bodies.
 
 ## Validation discipline
 

@@ -21,15 +21,11 @@ Avoid delegating:
 - baseline promotion decisions;
 - cross-feature semantic reconciliation that requires one coherent judgment;
 - the exact next step when the main agent is blocked on that answer.
-- tracker scope selection, job creation, cross-provider reconciliation or plan
-  application. These remain coordinator/script responsibilities.
+- tracker reading, MCP calls, response import and cross-provider reconciliation.
 
-Tracker collection is the required exception to the general critical-path rule.
-Under `targeted-tracker-v3`, every provider collection job and every bounded
-history job must run in a fresh isolated subagent. The coordinator keeps
-`config-status`, `begin`, `run_id`, `run-status`, `reconcile` and plan application;
-collectors keep MCP output out of the coordinator context and write only their
-owned runtime provider file.
+Tracker work is never delegated. Under `direct-tracker-v1` the main agent follows
+the single machine-returned `next_action` from `trackerctl.py`. This avoids a
+second orchestration state and guarantees that one user request owns one run.
 
 ## Ownership rules
 
