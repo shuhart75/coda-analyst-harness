@@ -720,6 +720,7 @@ def _sync_command(args: argparse.Namespace, collaboration_finish: dict | None = 
         "identical": "fully-synchronized",
         "reverse-diff-pending": "analytics-synchronized-reverse-diff-pending",
         "source-unavailable": "analytics-synchronized-source-unavailable",
+        "source-import-pending": "source-import-pending",
     }.get(source_analytics_state, "synchronized-state-unknown")
     print(json.dumps({
         "status": status,

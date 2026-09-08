@@ -275,6 +275,9 @@ class RequirementsExchangeTests(unittest.TestCase):
             environment["CODA_ANALYST_STATE_ROOT"] = str(root / "state")
             result = self.prepare(project, "--code-root", str(code), env=environment)
             self.assertEqual(result["destination_role"], "code")
+            self.assertEqual(result["status"], "awaiting-merge")
+            self.assertFalse(result["publication_confirmed"])
+            self.assertEqual(result["target_branch"], "main")
             self.assertEqual(result["repository_path"], "requirements-exchange/demo")
             self.assertEqual(
                 result["requirements_repository_path"],
@@ -289,6 +292,8 @@ class RequirementsExchangeTests(unittest.TestCase):
             inspect = root / "inspect"
             clone = run("git", "clone", "--quiet", str(remote), str(inspect))
             self.assertEqual(clone.returncode, 0, clone.stdout + clone.stderr)
+            self.assertFalse((inspect / "requirements-exchange/demo").exists())
+            self.git(inspect, "switch", result["request_branch"])
             self.assertTrue((inspect / "requirements-exchange/demo/revisions/001/requirements.md").is_file())
             self.assertTrue((inspect / "requirements-exchange/receipt.template.json").is_file())
 
@@ -636,6 +641,148 @@ class RequirementsExchangeTests(unittest.TestCase):
             )
             self.assertEqual(all_result.returncode, 0, all_result.stdout + all_result.stderr)
             self.assertEqual(json.loads(all_result.stdout)["scope"], "all")
+
+
+    def result_review_fixture(self, root: Path) -> tuple[Path, dict, Path, dict]:
+        project, _ = self.prepare_project(root)
+        prepared = self.prepare(project)
+        self.write_receipt(prepared)
+        returns = Path(prepared["requirements"]).parent / "returns"
+        (returns / "tasks.md").write_text("# Tasks\n", encoding="utf-8")
+        (returns / "summary.md").write_text("# Summary\nREQ-DEMO-001: partial, verified, differs.\n", encoding="utf-8")
+        scanned = self.command("scan", str(project), "--analyst", "ivan")
+        return_id = next(item["return_id"] for item in scanned["items"][0]["new_returns"] if item["path"].endswith("summary.md"))
+        manifest = json.loads(Path(prepared["manifest"]).read_text(encoding="utf-8"))
+        for relative in ("releases/demo/release.md", "planning/intake/residual.md"):
+            path = project / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# Analyst decision and evidence\n", encoding="utf-8")
+        review = {
+            "schema_version": 1,
+            "return_id": return_id,
+            "requirements_sha256": manifest["revisions"][0]["sha256"],
+            "items": [{
+                "requirement": "REQ-DEMO-001", "implementation": "partial", "conformity": "differs",
+                "verification": "passed", "evidence": ["test report at deployed commit"],
+                "actual_behavior": "Only the first scenario works with a changed message",
+                "differences": "Changed message", "accepted_behavior": "First scenario with changed message",
+                "acceptance": "accepted-with-deviation", "reason": "Analyst accepted the first useful delivery",
+                "baseline": {"action": "record-deployed", "release_path": "releases/demo/release.md", "deployment_evidence": ["release demo, prod, deployment record"]},
+                "follow_up": {"action": "backlog", "kind": "product", "path": "planning/intake/residual.md", "reason": "Remaining scenario is still needed"},
+            }],
+        }
+        return project, prepared, root / "review.json", review
+
+    def record_review(self, project: Path, path: Path, review: dict) -> subprocess.CompletedProcess[str]:
+        path.write_text(json.dumps(review), encoding="utf-8")
+        return run(sys.executable, str(SCRIPT), "record-processed", str(project), "demo", "--return-id", review["return_id"], "--decision", "reviewed", "--review-file", str(path), "--analyst", "ivan")
+
+    def test_review_accepts_deployed_deviation_with_product_backlog(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, prepared, path, review = self.result_review_fixture(Path(temp))
+            originals = {source: source.read_bytes() for source in project.rglob("*") if source.is_file()}
+            result = self.record_review(project, path, review)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            state = json.loads((project / "features/demo/development-results-state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["processed"][0]["review"], review)
+            for source, content in originals.items():
+                self.assertEqual(source.read_bytes(), content, str(source))
+            self.assertEqual(len(json.loads(Path(prepared["manifest"]).read_text(encoding="utf-8"))["revisions"]), 1)
+
+    def test_review_allows_archiving_confirmed_nonimplementation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _, path, review = self.result_review_fixture(Path(temp))
+            item = review["items"][0]
+            item.update(implementation="none", conformity="not-applicable", verification="not-applicable", acceptance="no-delivery", accepted_behavior="", baseline={"action": "none"})
+            item["follow_up"]["action"] = "archive"
+            result = self.record_review(project, path, review)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_review_rejects_missing_coverage_evidence_and_unsupported_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _, path, valid = self.result_review_fixture(Path(temp))
+            variants = []
+            for field, value in (("items", []), ("requirements_sha256", "0" * 64)):
+                variant = json.loads(json.dumps(valid))
+                variant[field] = value
+                variants.append(variant)
+            for field, value in (("requirement", "REQ-OTHER-001"), ("acceptance", "pending"), ("evidence", []), ("verification", "unknown"), ("baseline", {"action": "record-deployed"}), ("follow_up", {"action": "none"})):
+                variant = json.loads(json.dumps(valid))
+                variant["items"][0][field] = value
+                variants.append(variant)
+            duplicate = json.loads(json.dumps(valid))
+            duplicate["items"].append(duplicate["items"][0])
+            variants.append(duplicate)
+            for variant in variants:
+                with self.subTest(variant=variant):
+                    result = self.record_review(project, path, variant)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertNotIn("Traceback", result.stderr)
+                    self.assertFalse((project / "features/demo/development-results-state.json").exists())
+
+    def test_review_accepts_complete_result_before_deployment_against_sent_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _, path, review = self.result_review_fixture(Path(temp))
+            (project / "features/demo/requirements.md").write_text("# Next cycle\n### REQ-DEMO-002\n", encoding="utf-8")
+            review["items"][0].update(implementation="full", conformity="matches", acceptance="accepted", baseline={"action": "none"}, follow_up={"action": "none"})
+            result = self.record_review(project, path, review)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_review_records_rejected_deployed_behavior_with_defect(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _, path, review = self.result_review_fixture(Path(temp))
+            review["items"][0].update(acceptance="rejected", accepted_behavior="", verification="failed")
+            review["items"][0]["follow_up"]["kind"] = "defect"
+            result = self.record_review(project, path, review)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_review_can_resolve_investigation_without_overwriting_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, _, path, final_review = self.result_review_fixture(Path(temp))
+            initial_review = json.loads(json.dumps(final_review))
+            item = initial_review["items"][0]
+            item.update(implementation="unknown", conformity="unknown", verification="unknown", acceptance="no-delivery", accepted_behavior="", evidence=[], baseline={"action": "none"})
+            item["follow_up"]["action"] = "investigate"
+            for review in (initial_review, final_review):
+                result = self.record_review(project, path, review)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = self.record_review(project, path, final_review)
+            self.assertNotEqual(result.returncode, 0)
+            state = json.loads((project / "features/demo/development-results-state.json").read_text(encoding="utf-8"))
+            self.assertEqual([entry["review"] for entry in state["processed"]], [initial_review, final_review])
+
+    def test_review_rejects_paths_outside_project_or_release_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project, _, path, review = self.result_review_fixture(root)
+            external = root / "external.md"
+            external.write_text("# External\n", encoding="utf-8")
+            (project / "releases/escape.md").symlink_to(external)
+            variants = [
+                ("baseline", "release_path", "releases/../planning/intake/residual.md"),
+                ("baseline", "release_path", "releases/escape.md"),
+                ("follow_up", "path", str(external)),
+                ("follow_up", "path", "../external.md"),
+                ("follow_up", "path", "planning/missing.md"),
+            ]
+            for section, field, value in variants:
+                with self.subTest(value=value):
+                    invalid = json.loads(json.dumps(review))
+                    invalid["items"][0][section][field] = value
+                    result = self.record_review(project, path, invalid)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertFalse((project / "features/demo/development-results-state.json").exists())
+
+    def test_review_rejects_stale_return_and_coarse_summary_processing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project, prepared, path, review = self.result_review_fixture(Path(temp))
+            result = run(sys.executable, str(SCRIPT), "record-processed", str(project), "demo", "--return-id", review["return_id"], "--decision", "baseline-updated", "--analyst", "ivan")
+            self.assertNotEqual(result.returncode, 0)
+            summary = Path(prepared["requirements"]).parent / "returns/summary.md"
+            summary.write_text(summary.read_text(encoding="utf-8") + "New result\n", encoding="utf-8")
+            result = self.record_review(project, path, review)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((project / "features/demo/development-results-state.json").exists())
 
 
 if __name__ == "__main__":

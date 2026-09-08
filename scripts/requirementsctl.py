@@ -435,6 +435,10 @@ def mark_published_command(args: argparse.Namespace) -> int:
         raise ValueError("Нет подтверждённого аудита текущей редакции требований")
     manifest_path = Path(args.manifest).expanduser().resolve()
     manifest = load_json(manifest_path)
+    if args.destination_role == "code":
+        publication = manifest.get("publication")
+        if not isinstance(publication, dict) or publication.get("state") != "merged" or not publication.get("target_commit"):
+            raise ValueError("Передача в code ожидает принятия PR/MR; повтори prepare после слияния")
     if manifest.get("feature") != args.feature or manifest.get("active_revision") != args.revision:
         raise ValueError("Манифест не соответствует функциональности или редакции")
     entries = [

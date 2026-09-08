@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from commit_message_policy import require_valid_commit_message
+from workspace import install_commit_message_hook
 
 
 EXCHANGE_DIR = "requirements-exchange"
@@ -227,7 +228,7 @@ def run_requirement_guards(project: Path, feature: str) -> None:
             raise ValueError(f"{label} требований не пройдена: {details}")
 
 
-def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> None:
+def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> str:
     state_path = project / "features" / feature / "requirements-state.json"
     if not state_path.is_file():
         raise ValueError(
@@ -267,6 +268,7 @@ def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> 
         raise ValueError(
             "Публикация запрещена: аудит текущей редакции требований не подтверждён аналитиком"
         )
+    return current_hash
 
 
 def requested_returns_contract(schema_version: int = 2) -> dict[str, Any]:
@@ -503,14 +505,20 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
     return errors
 
 
+def require_plain_exchange(exchange: Path) -> None:
+    if exchange.is_symlink() or any(path.is_symlink() for path in exchange.rglob("*")):
+        raise ValueError("requirements-exchange не должен содержать символические ссылки")
+
+
 def prepare_in_exchange(
     exchange: Path,
     project: Path,
     feature: str,
-    requirements: Path,
+    requirements_bytes: bytes,
     requirements_text: str,
     analyst: str,
 ) -> dict[str, Any]:
+    require_plain_exchange(exchange)
     install_root_contract(exchange)
     feature_exchange = exchange / feature
     manifest_path = feature_exchange / "manifest.json"
@@ -535,7 +543,7 @@ def prepare_in_exchange(
     existing_errors = validate_manifest(manifest, feature_exchange) if revisions else []
     if existing_errors:
         raise ValueError("; ".join(existing_errors))
-    current_hash = sha256(requirements)
+    current_hash = hashlib.sha256(requirements_bytes).hexdigest()
     active = manifest.get("active_revision")
     active_entry = next(
         (item for item in revisions if isinstance(item, dict) and item.get("revision") == active),
@@ -568,7 +576,7 @@ def prepare_in_exchange(
         raise ValueError(f"Каталог редакции уже существует: {revision_root}")
     revision_root.mkdir(parents=True)
     target_requirements = revision_root / "requirements.md"
-    target_requirements.write_bytes(requirements.read_bytes())
+    target_requirements.write_bytes(requirements_bytes)
     for item in revisions:
         if isinstance(item, dict) and item.get("state") in {"sent", "in-progress", "paused"}:
             item["state"] = "superseded"
@@ -631,10 +639,13 @@ def code_snapshot(code_root: Path) -> dict[str, str] | None:
     }
 
 
-def cache_manifest(feature: str, revision: int, manifest: Path) -> Path:
-    target = state_root() / "exchange-publications" / feature / f"{revision:03d}" / "manifest.json"
+def cache_manifest(feature: str, revision: int, manifest: Path, publication: dict[str, Any]) -> Path:
+    scope = hashlib.sha256((publication["repository_url"] + "\n" + publication["target_branch"]).encode()).hexdigest()
+    target = state_root() / "exchange-publications" / scope / feature / f"{revision:03d}" / "manifest.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(manifest.read_bytes())
+    payload = load_json(manifest)
+    payload["publication"] = publication
+    save_json(target, payload)
     return target
 
 
@@ -662,105 +673,190 @@ def assert_exchange_only(repository: Path) -> list[str]:
     return cached
 
 
+def remote_heads(remote: str, pattern: str) -> dict[str, str]:
+    result = subprocess.run(("git", "ls-remote", "--heads", remote, pattern), text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise ValueError("Не удалось проверить удалённые ветки; повтори передачу без резервной публикации")
+    return {line.split()[1]: line.split()[0] for line in result.stdout.splitlines() if len(line.split()) == 2}
+
+
+def delivery_target(remote: str, explicit: str | None) -> str:
+    target = explicit
+    if not target:
+        result = subprocess.run(("git", "ls-remote", "--symref", remote, "HEAD"), text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            raise CodeDestinationUnavailable("нет доступа на чтение удалённой роли code")
+        target = next((line.split()[1].removeprefix("refs/heads/") for line in result.stdout.splitlines() if line.startswith("ref: refs/heads/")), None)
+    if not target or subprocess.run(("git", "check-ref-format", f"refs/heads/{target}"), capture_output=True).returncode:
+        raise ValueError("Не определена целевая ветка передачи; укажи --target-branch")
+    if target.startswith("requirements/"):
+        raise ValueError("Ветка передачи не может быть целевой веткой")
+    return target
+
+
+def configured_delivery_target() -> str | None:
+    registry_path = state_root() / "code-repos.json"
+    if not registry_path.is_file():
+        return None
+    repositories = load_json(registry_path).get("repositories", [])
+    for entry in repositories if isinstance(repositories, list) else []:
+        if isinstance(entry, dict) and entry.get("id") == "code":
+            settings = entry.get("requirements_exchange", {})
+            if not isinstance(settings, dict):
+                raise ValueError("requirements_exchange роли code должен быть объектом")
+            target = settings.get("target_branch")
+            if target is not None and (not isinstance(target, str) or not target.strip()):
+                raise ValueError("target_branch роли code должен быть непустой строкой")
+            return target
+    return None
+
+
 def publish_to_code(
     project: Path,
     code_root: Path,
     feature: str,
-    requirements: Path,
+    requirements_bytes: bytes,
     requirements_text: str,
     analyst: str,
+    target_branch: str | None = None,
 ) -> dict[str, Any]:
     before = code_snapshot(code_root)
     if before is None:
         raise CodeDestinationUnavailable("роль code не является доступным клоном Git с веткой и origin")
-    last_error = "не удалось опубликовать редакцию"
-    for attempt in range(2):
-        with tempfile.TemporaryDirectory(prefix="requirements-exchange-") as temporary:
-            clone = Path(temporary) / "code"
-            cloned = subprocess.run(
-                ("git", "clone", "--quiet", "--single-branch", "--branch", before["branch"], before["remote"], str(clone)),
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if cloned.returncode != 0:
-                raise CodeDestinationUnavailable("нет доступа на чтение удалённой роли code")
-            exchange = clone / EXCHANGE_DIR
-            if not exchange.is_dir():
-                raise CodeDestinationUnavailable(
-                    "в актуальной ветке роли code отсутствует корневой requirements-exchange"
-                )
-            prepared = prepare_in_exchange(
-                exchange, project, feature, requirements, requirements_text, analyst
-            )
-            changed = assert_exchange_only(clone)
-            if not changed:
-                manifest_cache = cache_manifest(feature, prepared["revision"], prepared["manifest_path"])
-                unchanged = code_snapshot(code_root) == before
-                result = {
-                    **prepared,
-                    "destination_role": "code",
-                    "manifest": str(manifest_cache),
-                    "repository_url": before["remote"],
-                    "repository_branch": before["branch"],
-                    "repository_path": f"{EXCHANGE_DIR}/{feature}",
-                    "requirements_repository_path": (
-                        f"{EXCHANGE_DIR}/{feature}/revisions/{prepared['revision']:03d}/requirements.md"
-                    ),
-                    "published_commit": git_value(clone, "rev-parse", "HEAD"),
-                    "local_code_worktree_unchanged": unchanged,
-                    "selection_reason": "Редакция уже находится в удалённой роли code",
-                    "message": (
-                        f"Редакция {prepared['revision']:03d} уже находится в роли code: "
-                        f"ветка {before['branch']}, путь {EXCHANGE_DIR}/{feature}"
-                    ),
-                }
-                result.pop("manifest_path", None)
-                result.pop("requirements_path", None)
-                return result
-            commit_message = f"Передать требования {feature}, редакция {prepared['revision']:03d}"
-            require_valid_commit_message(commit_message)
-            committed = git(
-                clone,
-                "-c", "user.name=Analyst Requirements Exchange",
-                "-c", "user.email=analyst-harness@local.invalid",
-                "commit", "--quiet", "-m", commit_message,
-            )
-            if committed.returncode != 0:
-                raise ValueError(f"не удалось создать защищённый коммит передачи: {committed.stderr.strip()}")
-            published_commit = git_value(clone, "rev-parse", "HEAD")
-            pushed = git(clone, "push", "--quiet", "origin", f"HEAD:refs/heads/{before['branch']}")
-            if pushed.returncode == 0:
-                unchanged = code_snapshot(code_root) == before
-                manifest_cache = cache_manifest(feature, prepared["revision"], prepared["manifest_path"])
-                result = {
-                    **prepared,
-                    "destination_role": "code",
-                    "manifest": str(manifest_cache),
-                    "repository_url": before["remote"],
-                    "repository_branch": before["branch"],
-                    "repository_path": f"{EXCHANGE_DIR}/{feature}",
-                    "requirements_repository_path": (
-                        f"{EXCHANGE_DIR}/{feature}/revisions/{prepared['revision']:03d}/requirements.md"
-                    ),
-                    "published_commit": published_commit,
-                    "local_code_worktree_unchanged": unchanged,
-                    "selection_reason": "Защищённая публикация в существующий каталог роли code выполнена",
-                    "message": (
-                        f"Редакция {prepared['revision']:03d} опубликована в роли code: "
-                        f"ветка {before['branch']}, путь {EXCHANGE_DIR}/{feature}, коммит {published_commit}"
-                    ),
-                }
-                result.pop("manifest_path", None)
-                result.pop("requirements_path", None)
-                return result
-            last_error = pushed.stderr.strip() or "удалённый репозиторий отклонил отправку"
-            if attempt == 0 and any(marker in last_error.lower() for marker in ("fetch first", "non-fast-forward", "rejected")):
+    target = delivery_target(before["remote"], target_branch or configured_delivery_target())
+    current_hash = hashlib.sha256(requirements_bytes).hexdigest()
+    target_key = hashlib.sha256(target.encode()).hexdigest()[:12]
+    branch = f"requirements/{feature}/{target_key}-{current_hash}"
+    branch_ref = f"refs/heads/{branch}"
+    with tempfile.TemporaryDirectory(prefix="requirements-exchange-") as temporary:
+        clone = Path(temporary) / "code"
+        cloned = subprocess.run(
+            ("git", "clone", "--quiet", "--single-branch", "--branch", target, before["remote"], str(clone)),
+            text=True, capture_output=True, check=False,
+        )
+        if cloned.returncode != 0:
+            raise CodeDestinationUnavailable("нет доступа к целевой ветке роли code")
+        exchange = clone / EXCHANGE_DIR
+        require_plain_exchange(exchange)
+        if not exchange.is_dir():
+            raise CodeDestinationUnavailable("в целевой ветке роли code отсутствует корневой requirements-exchange")
+        target_commit = git_value(clone, "rev-parse", "HEAD")
+        manifest_path = exchange / feature / "manifest.json"
+
+        def response(prepared: dict[str, Any], merged: bool, request_commit: str, push_output: str = "") -> dict[str, Any]:
+            if code_snapshot(code_root) != before:
+                raise ValueError("Обычный клон code изменился во время передачи; требуется проверка владельцем")
+            publication = {
+                "state": "merged" if merged else "awaiting-merge",
+                "repository_url": before["remote"], "target_branch": target,
+                "request_branch": None if merged else branch, "request_commit": request_commit,
+                "target_commit": target_commit, "verified_at": now(),
+            }
+            cached = cache_manifest(feature, prepared["revision"], prepared["manifest_path"], publication)
+            link = re.search(r"https?://[^\s]+(?:merge_requests/new|/compare/)[^\s]*", push_output)
+            result = {
+                **prepared, "status": "already-current" if merged else "awaiting-merge",
+                "destination_role": "code", "manifest": str(cached),
+                "repository_url": before["remote"], "repository_branch": target if merged else branch,
+                "target_branch": target, "request_branch": None if merged else branch,
+                "repository_path": f"{EXCHANGE_DIR}/{feature}",
+                "requirements_repository_path": f"{EXCHANGE_DIR}/{feature}/revisions/{prepared['revision']:03d}/requirements.md",
+                "publication_confirmed": merged, "published_commit": target_commit if merged else None,
+                "request_commit": request_commit, "merge_request_created": False,
+                "merge_request_create_url": link.group(0) if link else None,
+                "local_code_worktree_unchanged": True,
+                "selection_reason": "Проверена целевая ветка" if merged else "Редакция предложена через отдельную ветку",
+                "next_action": "mark-published" if merged else "create-or-review-merge-request",
+                "message": (
+                    f"Редакция {prepared['revision']:03d} найдена в целевой ветке {target}: {EXCHANGE_DIR}/{feature}"
+                    if merged else
+                    f"Передача ожидает слияния: {branch} -> {target}, редакция {prepared['revision']:03d}. "
+                    "Создай или проверь PR/MR; затем повтори проверку передачи. В целевую ветку обвязка не отправляла изменения."
+                ),
+            }
+            result.pop("manifest_path", None)
+            result.pop("requirements_path", None)
+            return result
+
+        accepted_revisions = {}
+        if manifest_path.is_file():
+            manifest = load_json(manifest_path)
+            errors = validate_manifest(manifest, manifest_path.parent)
+            if errors:
+                raise ValueError("; ".join(errors))
+            accepted_revisions = {entry["revision"]: entry for entry in manifest["revisions"]}
+            active = next(entry for entry in manifest["revisions"] if entry["revision"] == manifest["active_revision"])
+            if active["sha256"] == current_hash:
+                return response({"revision": active["revision"], "feature": feature, "manifest_path": manifest_path}, True, target_commit)
+
+        heads = remote_heads(before["remote"], f"refs/heads/requirements/{feature}/{target_key}-*")
+        pending_commit = None
+        for reference, commit in heads.items():
+            fetched = git(clone, "fetch", "--quiet", "origin", reference)
+            if fetched.returncode != 0 or git_value(clone, "rev-parse", "FETCH_HEAD") != commit:
+                raise ValueError("Ветка передачи изменилась во время проверки; повтори команду")
+            if git(clone, "merge-base", "--is-ancestor", commit, target_commit).returncode == 0:
                 continue
-            break
-    raise CodeDestinationUnavailable(
-        f"удалённая роль code отклонила отправку: {last_error.splitlines()[-1]}"
-    )
+            candidate = git(clone, "show", f"{commit}:{EXCHANGE_DIR}/{feature}/manifest.json")
+            try:
+                proposed = json.loads(candidate.stdout)
+                entry = next(item for item in proposed["revisions"] if item["revision"] == proposed["active_revision"])
+                accepted = accepted_revisions.get(entry["revision"])
+                if accepted and accepted["sha256"] == entry["sha256"] and accepted["requirements_path"] == entry["requirements_path"]:
+                    content = subprocess.run(
+                        ("git", "-C", str(clone), "show", f"{commit}:{EXCHANGE_DIR}/{feature}/{accepted['requirements_path']}"),
+                        capture_output=True, check=False,
+                    )
+                    if content.returncode == 0 and hashlib.sha256(content.stdout).hexdigest() == accepted["sha256"]:
+                        continue
+            except (ValueError, TypeError, KeyError, StopIteration):
+                raise ValueError("Ветка передачи содержит некорректный манифест") from None
+            if reference != branch_ref:
+                raise ValueError("Есть другая незавершённая передача этой функциональности; сначала прими или закрой её PR/MR и удали отклонённую ветку")
+            pending_commit = commit
+        if pending_commit:
+            base = git_value(clone, "merge-base", target_commit, pending_commit)
+            if not base:
+                raise ValueError("Ветка передачи не имеет общей истории с целевой веткой")
+            paths = git_paths(clone, "diff", "--no-renames", "--name-only", "-z", base, pending_commit)
+            if any(not path.startswith(f"{EXCHANGE_DIR}/") for path in paths):
+                raise ValueError("Ветка передачи изменяет файлы вне requirements-exchange")
+            checked_out = git(clone, "switch", "--detach", pending_commit)
+            if checked_out.returncode != 0:
+                raise ValueError("Не удалось прочитать существующую ветку передачи")
+            require_plain_exchange(exchange)
+            manifest = load_json(manifest_path)
+            errors = validate_manifest(manifest, manifest_path.parent)
+            if errors:
+                raise ValueError("; ".join(errors))
+            active = next(entry for entry in manifest["revisions"] if entry["revision"] == manifest["active_revision"])
+            if active["sha256"] != current_hash:
+                raise ValueError("Содержимое ветки передачи не совпадает с подтверждённым входом")
+            return response({"revision": active["revision"], "feature": feature, "manifest_path": manifest_path}, False, pending_commit)
+
+        switched = git(clone, "switch", "-c", branch)
+        if switched.returncode != 0:
+            raise ValueError("Не удалось создать изолированную ветку передачи")
+        prepared = prepare_in_exchange(exchange, project, feature, requirements_bytes, requirements_text, analyst)
+        assert_exchange_only(clone)
+        message = "Предложить редакцию требований для разработки"
+        require_valid_commit_message(message)
+        hook_path = git_value(clone, "rev-parse", "--path-format=absolute", "--git-path", "hooks/commit-msg")
+        if not hook_path or not Path(hook_path).resolve().is_relative_to(clone.resolve()):
+            raise ValueError("commit-msg hook временного клона должен находиться внутри него")
+        install_commit_message_hook(clone, harness_root() / "scripts" / "commit_message_policy.py")
+        committed = git(clone, "-c", "user.name=Analyst Requirements Exchange", "-c", "user.email=analyst-harness@local.invalid", "commit", "--quiet", "-m", message)
+        if committed.returncode != 0:
+            raise ValueError(f"Не удалось создать коммит передачи: {committed.stderr.strip()}")
+        request_commit = git_value(clone, "rev-parse", "HEAD")
+        pushed = git(clone, "push", "origin", f"HEAD:{branch_ref}")
+        if pushed.returncode != 0:
+            observed = remote_heads(before["remote"], branch_ref)
+            if observed.get(branch_ref) != request_commit:
+                if observed:
+                    raise ValueError("Удалённая ветка передачи создана другим процессом; повтори проверку без новой публикации")
+                raise CodeDestinationUnavailable(f"удалённая роль code отклонила отправку: {pushed.stderr.strip()}")
+        return response(prepared, False, request_commit, pushed.stdout + pushed.stderr)
 
 
 def prepare_command(args: argparse.Namespace) -> int:
@@ -770,12 +866,17 @@ def prepare_command(args: argparse.Namespace) -> int:
     requirements = feature_root / "requirements.md"
     if not requirements.is_file():
         raise ValueError(f"Требования не найдены: {requirements}")
-    require_confirmed_audit(project, args.feature, requirements)
-    requirements_text = requirements.read_text(encoding="utf-8")
+    requirements_bytes = requirements.read_bytes()
+    approved_hash = require_confirmed_audit(project, args.feature, requirements)
+    if hashlib.sha256(requirements_bytes).hexdigest() != approved_hash:
+        raise ValueError("Требования изменились во время проверки аудита")
+    requirements_text = requirements_bytes.decode("utf-8")
     errors = validate_requirements_text(requirements_text)
     if errors:
         raise ValueError("; ".join(errors))
     run_requirement_guards(project, args.feature)
+    if sha256(requirements) != approved_hash:
+        raise ValueError("Требования изменились после проверки; повтори аудит")
     analyst = current_analyst(args.analyst, project)
     if not analyst:
         raise ValueError("Не задан идентификатор аналитика: используй --analyst или CODA_ANALYST_ID")
@@ -784,7 +885,8 @@ def prepare_command(args: argparse.Namespace) -> int:
     if code_root is not None:
         try:
             result = publish_to_code(
-                project, code_root, args.feature, requirements, requirements_text, analyst
+                project, code_root, args.feature, requirements_bytes, requirements_text, analyst,
+                getattr(args, "target_branch", None),
             )
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
             return 0
@@ -793,7 +895,7 @@ def prepare_command(args: argparse.Namespace) -> int:
     exchange = project / EXCHANGE_DIR
     exchange.mkdir(parents=True, exist_ok=True)
     prepared = prepare_in_exchange(
-        exchange, project, args.feature, requirements, requirements_text, analyst
+        exchange, project, args.feature, requirements_bytes, requirements_text, analyst
     )
     result = {
         **prepared,
@@ -910,14 +1012,128 @@ def scan_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def validate_result_review(project: Path, feature: str, return_id: str, review: dict[str, Any]) -> None:
+    parts = return_id.split(":", 3)
+    if len(parts) != 4 or parts[0] != feature or not parts[1].isdigit():
+        raise ValueError("Некорректный return_id итогового отчёта")
+    revision = int(parts[1])
+    relative = f"revisions/{revision:03d}/returns/summary.md"
+    if parts[2] != relative:
+        raise ValueError("Подробное решение оформляется по returns/summary.md")
+    if review.get("schema_version") != 1 or review.get("return_id") != return_id:
+        raise ValueError("Решение должно ссылаться на точный return_id и schema_version 1")
+    requirement_ids: set[str] = set()
+    found = False
+    for _, exchange in exchange_roots(project, resolve_code_root(project, None)):
+        root = exchange / feature
+        manifest_path = root / "manifest.json"
+        summary = root / relative
+        if not manifest_path.is_file() or not summary.is_file() or sha256(summary) != parts[3]:
+            continue
+        manifest = load_json(manifest_path)
+        errors = validate_manifest(manifest, root)
+        if errors:
+            raise ValueError("; ".join(errors))
+        entry = next((item for item in manifest["revisions"] if item["revision"] == revision), None)
+        if entry is None or entry["sha256"] != review.get("requirements_sha256"):
+            raise ValueError("Решение не совпадает с контрольной суммой переданных требований")
+        processing = revision_processing_status(root, entry)
+        if processing["errors"]:
+            raise ValueError("; ".join(processing["errors"]))
+        requirement_ids = set(REQ_DEFINITION_RE.findall((root / entry["requirements_path"]).read_text(encoding="utf-8")))
+        found = True
+    if not found or not requirement_ids:
+        raise ValueError("Точный итоговый отчёт с переданными REQ-* не найден; повтори scan")
+
+    def text(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    def references(value: Any) -> bool:
+        return isinstance(value, list) and bool(value) and all(text(item) for item in value)
+
+    def local_file(value: Any, prefix: str | None = None) -> bool:
+        if not text(value) or Path(value).is_absolute():
+            return False
+        path = (project / value).resolve()
+        return path.is_relative_to(project) and path.is_file() and (prefix is None or path.is_relative_to(project / prefix))
+
+    items = review.get("items")
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        raise ValueError("Решение должно содержать массив items")
+    ids = [item.get("requirement") for item in items]
+    if not all(isinstance(item, str) for item in ids) or len(ids) != len(set(ids)) or set(ids) != requirement_ids:
+        raise ValueError("Решение должно покрывать ровно один раз каждый REQ-* переданной редакции")
+    for item in items:
+        requirement = item["requirement"]
+        choices = {
+            "implementation": {"full", "partial", "none", "unknown"},
+            "conformity": {"matches", "differs", "unknown", "not-applicable"},
+            "verification": {"passed", "failed", "not-run", "not-applicable", "unknown"},
+            "acceptance": {"accepted", "accepted-with-deviation", "rejected", "no-delivery"},
+        }
+        for field, allowed in choices.items():
+            if not isinstance(item.get(field), str) or item[field] not in allowed:
+                raise ValueError(f"{requirement}: некорректное поле {field}")
+        if not text(item.get("actual_behavior")) or not text(item.get("reason")):
+            raise ValueError(f"{requirement}: нужны фактическое поведение и причина решения")
+        if item["verification"] == "not-applicable" and item["implementation"] != "none":
+            raise ValueError(f"{requirement}: проверка работающего поведения не может быть not-applicable")
+        if item["implementation"] == "none" and item["conformity"] != "not-applicable":
+            raise ValueError(f"{requirement}: при отсутствии реализации соответствие должно быть not-applicable")
+        if item["implementation"] != "none" and item["conformity"] == "not-applicable":
+            raise ValueError(f"{requirement}: соответствие реализации не может быть not-applicable")
+        evidence = item.get("evidence")
+        if not isinstance(evidence, list) or not all(text(value) for value in evidence):
+            raise ValueError(f"{requirement}: evidence должен быть списком ссылок")
+        if item["verification"] in {"passed", "failed"} and not evidence:
+            raise ValueError(f"{requirement}: результат проверки требует доказательств")
+        accepted = item["acceptance"] in {"accepted", "accepted-with-deviation"}
+        if accepted and (item["implementation"] not in {"full", "partial"} or item["verification"] != "passed" or not evidence or not text(item.get("accepted_behavior"))):
+            raise ValueError(f"{requirement}: принятие требует проверенной реализации, доказательств и принятого объёма")
+        if item["acceptance"] == "accepted" and item["conformity"] != "matches":
+            raise ValueError(f"{requirement}: отличия принимаются только явно как accepted-with-deviation")
+        if item["acceptance"] == "accepted-with-deviation" and (item["conformity"] != "differs" or not text(item.get("differences"))):
+            raise ValueError(f"{requirement}: нужны точные принятые отличия")
+        if item["acceptance"] == "no-delivery" and item["implementation"] not in {"none", "unknown"}:
+            raise ValueError(f"{requirement}: no-delivery несовместим с фактической реализацией")
+        baseline = item.get("baseline")
+        follow_up = item.get("follow_up")
+        if not isinstance(baseline, dict) or baseline.get("action") not in ("none", "record-deployed"):
+            raise ValueError(f"{requirement}: некорректное решение по baseline")
+        if baseline["action"] == "record-deployed":
+            if item["implementation"] not in {"full", "partial"} or not references(baseline.get("deployment_evidence")) or not local_file(baseline.get("release_path"), "releases/"):
+                raise ValueError(f"{requirement}: baseline требует факта внедрения и существующей записи релиза")
+        if not isinstance(follow_up, dict) or follow_up.get("action") not in ("none", "backlog", "archive", "investigate"):
+            raise ValueError(f"{requirement}: некорректное решение по остатку")
+        if follow_up["action"] != "none" and (not local_file(follow_up.get("path")) or not text(follow_up.get("reason"))):
+            raise ValueError(f"{requirement}: остаток требует существующего адресата и причины решения")
+        if follow_up["action"] == "backlog" and follow_up.get("kind") not in ("product", "defect", "technical-debt"):
+            raise ValueError(f"{requirement}: укажи вид остатка в бэклоге")
+        if (item["implementation"] != "full" or not accepted) and follow_up["action"] == "none":
+            raise ValueError(f"{requirement}: нереализованный или непринятый объём требует решения по остатку")
+        if (item["implementation"] == "unknown" or item["conformity"] == "unknown" or item["verification"] in {"not-run", "unknown"}) and follow_up["action"] != "investigate":
+            raise ValueError(f"{requirement}: неизвестный результат требует проверки, а не окончательного списания")
+
+
 def record_processed_command(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
+    validate_feature(args.feature)
     feature_root = project / "features" / args.feature
     if not feature_root.is_dir():
         raise ValueError(f"Функциональность не найдена: {feature_root}")
     analyst = current_analyst(args.analyst, project)
     if not analyst:
         raise ValueError("Не задан идентификатор аналитика")
+    review = None
+    if args.decision == "reviewed":
+        if not args.review_file:
+            raise ValueError("Для reviewed требуется --review-file с решениями аналитика")
+        review = load_json(Path(args.review_file).expanduser().resolve())
+        validate_result_review(project, args.feature, args.return_id, review)
+    elif args.review_file:
+        raise ValueError("--review-file применяется только с --decision reviewed")
+    elif "/returns/summary.md:" in args.return_id:
+        raise ValueError("Итоговый summary.md требует --decision reviewed и --review-file")
     state_path = feature_root / STATE_NAME
     state = load_json(state_path) if state_path.is_file() else {
         "schema_version": 1,
@@ -926,15 +1142,19 @@ def record_processed_command(args: argparse.Namespace) -> int:
     }
     if state.get("schema_version") != 1 or state.get("feature") != args.feature:
         raise ValueError("Некорректный реестр обработанных результатов")
-    if any(item.get("return_id") == args.return_id for item in state["processed"] if isinstance(item, dict)):
+    previous = [item for item in state["processed"] if isinstance(item, dict) and item.get("return_id") == args.return_id]
+    if previous and (review is None or previous[-1].get("review") == review or previous[-1].get("decision") != "reviewed"):
         raise ValueError("Результат уже зарегистрирован как обработанный")
-    state["processed"].append({
+    record = {
         "return_id": args.return_id,
         "processed_at": now(),
         "processed_by": analyst,
         "decision": args.decision,
         "note": args.note
-    })
+    }
+    if review is not None:
+        record["review"] = review
+    state["processed"].append(record)
     save_json(state_path, state)
     print(json.dumps({
         "status": "recorded",
@@ -988,6 +1208,7 @@ def parser() -> argparse.ArgumentParser:
     prepare.add_argument("feature")
     prepare.add_argument("--analyst")
     prepare.add_argument("--code-root")
+    prepare.add_argument("--target-branch")
     prepare.set_defaults(handler=prepare_command)
     scan = commands.add_parser("scan")
     scan.add_argument("project")
@@ -999,7 +1220,8 @@ def parser() -> argparse.ArgumentParser:
     record.add_argument("project")
     record.add_argument("feature")
     record.add_argument("--return-id", required=True)
-    record.add_argument("--decision", choices=("requirements-updated", "baseline-updated", "deferred", "cancelled", "no-change"), required=True)
+    record.add_argument("--decision", choices=("requirements-updated", "baseline-updated", "deferred", "cancelled", "no-change", "reviewed"), required=True)
+    record.add_argument("--review-file")
     record.add_argument("--note")
     record.add_argument("--analyst")
     record.set_defaults(handler=record_processed_command)

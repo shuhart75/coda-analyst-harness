@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from commit_message_policy import require_valid_commit_message
+from collaboration import merge_request_create_url
+from workspace import install_commit_message_hook
 
 from workspace_entrypoint import (
     embedded_harness_paths as local_embedded_harness_paths,
@@ -440,8 +442,10 @@ def create_analytics_snapshot(
     operation: str,
     incoming_commit: str,
     incoming_label: str,
+    *,
+    local_commit: str | None = None,
 ) -> dict:
-    local_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+    local_commit = local_commit or git(analytics, "rev-parse", "HEAD").stdout.strip()
     if not local_commit or not incoming_commit:
         raise ValueError("Не удалось определить стороны защитного снимка analytics")
     for label, commit in (("local", local_commit), ("incoming", incoming_commit)):
@@ -701,63 +705,19 @@ def update_analytics_from_origin(root: Path, path: Path, analytics_id: str) -> d
             "after": remote_commit,
             "protective_snapshot": snapshot_summary(root, snapshot),
         }
-    if remote_is_ancestor:
-        return {
-            "status": "local-ahead",
-            "before": local_commit,
-            "remote": remote_commit,
-            "after": local_commit,
-        }
-
     snapshot = create_analytics_snapshot(
-        root, path, analytics_id, "analytics-origin-merge", remote_commit, f"origin/{BRANCH}"
+        root, path, analytics_id, "analytics-unaccepted-history", remote_commit, f"origin/{BRANCH}"
     )
-    merged = git(
-        path,
-        "-c", "user.name=Coda Analyst Harness",
-        "-c", "user.email=coda-analyst-harness@local.invalid",
-        "merge", "--no-ff", f"origin/{BRANCH}",
-        "-m", f"Merge origin/{BRANCH}",
-    )
-    if merged.returncode != 0:
-        conflicts = analytics_origin_conflict_records(path)
-        snapshot = archive_snapshot_conflicts(root, snapshot, path, conflicts)
-        aborted = git(path, "merge", "--abort")
-        if aborted.returncode != 0:
-            raise ValueError(
-                f"{name}: конфликт сохранён в снимке {snapshot['snapshot_id']}, "
-                f"но пробное слияние не удалось отменить: {aborted.stderr.strip()}"
-            )
-        raise ValueError(json.dumps({
-            "status": "blocked",
-            "reason": "analytics-origin-merge-conflict",
-            "message": (
-                "Локальные и удалённые коммиты роли analytics нельзя объединить автоматически; "
-                "пробное слияние отменено без изменения рабочего дерева"
-            ),
-            "local_commit": local_commit,
-            "remote_commit": remote_commit,
-            "conflicting_paths": [item["path"] for item in conflicts],
-            "protective_snapshot": snapshot_summary(root, snapshot),
-            "allowed_next_action": "inspect-analytics-origin-conflict",
-            "forbidden_actions": [
-                "git-reset",
-                "git-rebase",
-                "force-push",
-                "discard-local-history",
-                "discard-remote-history",
-                "git-add-all",
-            ],
-        }, ensure_ascii=False))
-    after = git(path, "rev-parse", "HEAD").stdout.strip()
-    snapshot = finalize_analytics_snapshot(root, path, snapshot, after)
-    return {
-        "status": "merged",
-        "before": local_commit,
-        "remote": remote_commit,
-        "after": after,
+    raise ValueError(json.dumps({
+        "status": "blocked",
+        "reason": "analytics-unaccepted-history",
+        "history_state": "local-ahead" if remote_is_ancestor else "diverged",
+        "message": "В местной main есть непринятые коммиты; сохрани их в рабочей ветке и проведи PR/MR. Синхронизация не сливает и не отправляет их в main.",
+        "local_commit": local_commit,
+        "remote_commit": remote_commit,
         "protective_snapshot": snapshot_summary(root, snapshot),
-    }
+        "allowed_next_action": "collaboration-migration",
+    }, ensure_ascii=False))
 
 
 def update_source_mirror(path: Path, repository_id: str) -> None:
@@ -785,80 +745,225 @@ def configure_source_remote(documents: Path, source: Path) -> None:
         raise ValueError(f"Не удалось прочитать локальное зеркало роли source: {fetched.stderr.strip()}")
 
 
-def merge_source(root: Path, documents: Path, analytics_id: str) -> dict:
-    local_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
-    incoming_commit = git(documents, "rev-parse", f"{SOURCE_REMOTE}/{BRANCH}").stdout.strip()
-    if git(documents, "merge-base", "--is-ancestor", incoming_commit, local_commit).returncode == 0:
-        return {
-            "status": "already-contained",
-            "before": local_commit,
-            "incoming": incoming_commit,
-            "after": local_commit,
-            "protective_snapshot": None,
-        }
-    snapshot = create_analytics_snapshot(
-        root,
-        documents,
-        analytics_id,
-        "source-analytics-merge",
-        incoming_commit,
-        f"{SOURCE_REMOTE}/{BRANCH}",
-    )
-    merged = git(
-        documents,
-        "-c", "user.name=Coda Analyst Harness",
-        "-c", "user.email=coda-analyst-harness@local.invalid",
-        "merge", "--no-ff", f"{SOURCE_REMOTE}/{BRANCH}",
-        "-m", f"Merge {SOURCE_REMOTE}/{BRANCH}",
-    )
-    if merged.returncode != 0:
-        paths = [
-            line.strip()
-            for line in git(documents, "diff", "--name-only", "--diff-filter=U").stdout.splitlines()
-            if line.strip()
-        ]
-        conflicts = []
-        for path in paths:
-            stages = conflict_stages(documents, path)
-            conflicts.append({
-                "path": path,
-                "kind": "source-analytics-conflict",
-                "base_blob": stages.get(1),
-                "analytics_blob": stages.get(2),
-                "source_blob": stages.get(3),
-            })
-        snapshot = archive_snapshot_conflicts(root, snapshot, documents, conflicts)
-        aborted = git(documents, "merge", "--abort")
-        if aborted.returncode != 0:
-            raise ValueError(
-                f"Конфликт сохранён в снимке {snapshot['snapshot_id']}, "
-                f"но слияние source не удалось отменить: {aborted.stderr.strip()}"
-            )
+def source_import_report(repository: Path, base: str, candidate: str) -> dict:
+    changed = git(repository, "diff", "--no-renames", "--name-status", "-z", base, candidate)
+    if changed.returncode:
+        raise ValueError("Не удалось получить состав импорта")
+    fields = changed.stdout.rstrip("\0").split("\0") if changed.stdout else []
+    changes = []
+    for index in range(0, len(fields), 2):
+        status, path = fields[index:index + 2]
+        readable = Path(path).suffix in {".md", ".txt", ".puml"}
+        before = blob_bytes(repository, base, path).decode("utf-8", errors="replace") if readable and status != "A" else ""
+        after = blob_bytes(repository, candidate, path).decode("utf-8", errors="replace") if readable and status != "D" else ""
+        requirements_pattern = r"^#{1,6}\s+(REQ-[A-Z0-9-]+)\b"
+        scenario_pattern = r"^#{1,6}\s+Сценарий[^\n]*"
+        changes.append({
+            "status": status, "path": path,
+            "removed_requirements": sorted(set(re.findall(requirements_pattern, before, re.MULTILINE)) - set(re.findall(requirements_pattern, after, re.MULTILINE))),
+            "removed_scenarios": sorted(set(re.findall(scenario_pattern, before, re.MULTILINE)) - set(re.findall(scenario_pattern, after, re.MULTILINE))),
+            "protected_artifact": path.startswith(("baseline/", "planning/", "releases/")) or path.endswith("/requirements.md"),
+        })
+    return {"base_commit": base, "candidate_commit": candidate, "changed_paths": changes,
+            "deleted_paths": [item["path"] for item in changes if item["status"] == "D"]}
+
+
+def source_import_heads(documents: Path) -> dict[str, str]:
+    result = git(documents, "ls-remote", "--heads", "origin", "refs/heads/codex/source-import/*")
+    if result.returncode:
+        raise ValueError("Не удалось проверить ветки импорта; повтори синхронизацию")
+    return {reference.removeprefix("refs/heads/"): commit
+            for commit, reference in (line.split() for line in result.stdout.splitlines())}
+
+
+def prepare_source_import(root: Path, source: Path, documents: Path, analytics_id: str, no_push: bool) -> dict:
+    source_commit = git(source, "rev-parse", BRANCH).stdout.strip()
+    target_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
+    remote = git(documents, "remote", "get-url", "origin").stdout.strip()
+    state_path = root / ".workspace-state/source-import.json"
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else None
+    if state is not None and (not isinstance(state, dict) or state.get("repository_url") != remote):
+        raise ValueError("Состояние импорта относится к другому репозиторию")
+    if state is not None and (
+        not isinstance(state.get("source_commit"), str)
+        or not re.fullmatch(r"[0-9a-f]{40,64}", state["source_commit"])
+        or state.get("request_branch") != f"codex/source-import/{state['source_commit']}"
+    ):
+        raise ValueError("Повреждено состояние импорта")
+    accepted_receipt = None
+    heads = source_import_heads(documents)
+    pending = {}
+    for branch, commit in heads.items():
+        if not re.fullmatch(r"codex/source-import/[0-9a-f]{40,64}", branch):
+            raise ValueError("Некорректное имя ветки импорта")
+        fetched = git(documents, "fetch", "--quiet", "origin", f"refs/heads/{branch}")
+        if fetched.returncode or git(documents, "rev-parse", "FETCH_HEAD").stdout.strip() != commit:
+            raise ValueError("Ветка импорта изменилась во время чтения; повтори синхронизацию")
+        if git(documents, "merge-base", "--is-ancestor", commit, target_commit).returncode != 0:
+            pending[branch] = commit
+    if state and state.get("request_commit") and git(documents, "merge-base", "--is-ancestor", state["request_commit"], target_commit).returncode == 0:
+        accepted_receipt = root / ".workspace-state/source-imports" / state["source_commit"] / "merged.json"
+        if not accepted_receipt.is_file():
+            atomic_write(accepted_receipt, (json.dumps({
+                **state, "status": "merged", "target_commit": target_commit, "confirmed_at": utc_now(),
+            }, ensure_ascii=False, indent=2) + "\n").encode())
+        state_path.unlink()
+        state = None
+    if state and state.get("status") == "deferred":
+        if source_commit == state["source_commit"]:
+            return {**state, "message": "Импорт source отложен аналитиком; ожидается новая версия источника. Обратная заплата заблокирована."}
+        if pending:
+            raise ValueError("Перед новым импортом заверши оставшиеся запросы source")
+        state_path.unlink()
+        state = None
+    if len(pending) > 1 or (state and pending and state.get("request_branch") not in pending):
+        raise ValueError("Найдено несколько незавершённых импортов; требуется решение владельца documents")
+    if state and state.get("status") == "awaiting-merge" and state["request_branch"] not in heads:
+        raise ValueError("Ветка импорта удалена без доказанного слияния; требуется решение владельца, автоматическая повторная отправка запрещена")
+    if state is None and not pending and git(documents, "merge-base", "--is-ancestor", source_commit, target_commit).returncode == 0:
+        return {"status": "already-contained", "incoming": source_commit, "after": target_commit,
+                "acceptance_receipt": str(accepted_receipt) if accepted_receipt else None}
+    if state is None:
+        branch = next(iter(pending), f"codex/source-import/{source_commit}")
+        incoming = branch.rsplit("/", 1)[1]
+        base = git(documents, "merge-base", target_commit, pending[branch]).stdout.strip() if branch in pending else target_commit
+        if not base:
+            raise ValueError("Ветка импорта не имеет общей истории с documents/main")
+        state = {"schema_version": 1, "repository_url": remote, "request_branch": branch,
+                 "source_commit": incoming, "target_branch": BRANCH, "base_commit": base}
+    branch = state["request_branch"]
+    incoming = state["source_commit"]
+    if branch != f"codex/source-import/{incoming}" or not re.fullmatch(r"[0-9a-f]{40,64}", incoming):
+        raise ValueError("Повреждено состояние импорта")
+    checkout = root / ".workspace-state/source-imports" / incoming / "repository"
+    state["checkout"] = str(checkout)
+    atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
+    if not checkout.exists():
+        checkout.parent.mkdir(parents=True, exist_ok=True)
+        cloned = run("git", "clone", "--quiet", "--single-branch", "--branch", BRANCH, remote, str(checkout))
+        if cloned.returncode:
+            raise ValueError(f"Не удалось создать изолированный клон импорта: {cloned.stderr.strip()}")
+        start = state["base_commit"]
+        if branch in pending:
+            fetched = git(checkout, "fetch", "--quiet", "origin", f"refs/heads/{branch}")
+            if fetched.returncode or git(checkout, "rev-parse", "FETCH_HEAD").stdout.strip() != pending[branch]:
+                raise ValueError("Ветка импорта изменилась во время восстановления")
+            start = pending[branch]
+            state["base_commit"] = git(checkout, "merge-base", target_commit, start).stdout.strip()
+            if not state["base_commit"]:
+                raise ValueError("Ветка импорта не имеет общей истории с documents/main")
+        switched = git(checkout, "switch", "-c", branch, start)
+        if switched.returncode:
+            raise ValueError("Не удалось создать ветку импорта")
+    if current_branch(checkout) != branch or git(checkout, "remote", "get-url", "origin").stdout.strip() != remote:
+        raise ValueError("Изолированный клон импорта изменён; требуется проверка владельца")
+    hook_path = git(checkout, "rev-parse", "--path-format=absolute", "--git-path", "hooks/commit-msg").stdout.strip()
+    if not hook_path or not Path(hook_path).resolve().is_relative_to(checkout.resolve()):
+        raise ValueError("commit-msg hook импорта должен находиться внутри изолированного клона")
+    install_commit_message_hook(checkout, Path(__file__).with_name("commit_message_policy.py"))
+    if merge_head(checkout):
         raise ValueError(json.dumps({
-            "status": "blocked",
-            "reason": "source-analytics-merge-conflict",
-            "message": (
-                "Роль source нельзя автоматически объединить с ролью analytics; "
-                "слияние отменено, требуется осознанное разрешение конфликта"
-            ),
-            "conflicting_paths": paths,
-            "protective_snapshot": snapshot_summary(root, snapshot),
-            "allowed_next_action": "inspect-source-analytics-conflict",
-            "forbidden_alternatives": [
-                "repeat-code-update-as-fallback",
-                "skip-source-merge",
-                "overwrite-analytics-from-source",
-            ],
+            "status": "blocked", "reason": "source-analytics-merge-conflict",
+            "message": "Разреши конфликт только в изолированной ветке импорта и создай смысловой merge-коммит, затем повтори sync.",
+            "import_checkout": str(checkout), "request_branch": branch,
+            "conflicts": analytics_origin_conflict_records(checkout),
         }, ensure_ascii=False))
-    after = git(documents, "rev-parse", "HEAD").stdout.strip()
-    snapshot = finalize_analytics_snapshot(root, documents, snapshot, after)
+    require_clean(checkout, "Изолированный импорт")
+    if branch in pending:
+        fetched = git(checkout, "fetch", "--quiet", "origin", f"refs/heads/{branch}")
+        if fetched.returncode or git(checkout, "rev-parse", "FETCH_HEAD").stdout.strip() != pending[branch]:
+            raise ValueError("Ветка импорта изменилась во время проверки")
+        if git(checkout, "merge", "--ff-only", pending[branch]).returncode:
+            raise ValueError("Местная и удалённая ветки импорта разошлись; автоматическая перезапись запрещена")
+    fetched = git(checkout, "fetch", "--quiet", str(source), incoming)
+    if fetched.returncode:
+        raise ValueError("Исходный коммит незавершённого импорта недоступен")
+    if git(checkout, "merge-base", "--is-ancestor", incoming, "HEAD").returncode != 0:
+        if branch in pending or state.get("request_commit"):
+            raise ValueError("Ветка импорта потеряла исходную историю; автоматическое повторное слияние source запрещено")
+        snapshot = create_analytics_snapshot(
+            root, documents, analytics_id, "source-analytics-merge", incoming,
+            f"{SOURCE_REMOTE}/{BRANCH}", local_commit=state["base_commit"],
+        )
+        message = "Предложить входящие аналитические изменения"
+        require_valid_commit_message(message)
+        merged = git(checkout, "-c", "user.name=Coda Analyst Harness", "-c", "user.email=coda-analyst-harness@local.invalid",
+                     "merge", "--no-ff", incoming, "-m", message)
+        if merged.returncode:
+            conflicts = analytics_origin_conflict_records(checkout)
+            snapshot = archive_snapshot_conflicts(root, snapshot, checkout, conflicts)
+            raise ValueError(json.dumps({
+                "status": "blocked", "reason": "source-analytics-merge-conflict",
+                "message": "Импорт остановлен в изолированной копии; documents/main не изменена входящим source.",
+                "import_checkout": str(checkout), "request_branch": branch,
+                "conflicts": conflicts, "protective_snapshot": snapshot_summary(root, snapshot),
+                "allowed_next_action": "inspect-source-analytics-conflict",
+                "forbidden_alternatives": ["skip-source-merge", "overwrite-analytics-from-source"],
+                "detail": merged.stderr.strip(),
+            }, ensure_ascii=False))
+    candidate = git(checkout, "rev-parse", "HEAD").stdout.strip()
+    require_clean(checkout, "Изолированный импорт")
+    require_nfc_paths(checkout, candidate, analytics_id)
+    require_content_only(checkout, analytics_id)
+    require_analytics_content_policy(root, source, checkout, incoming, candidate)
+    if git(checkout, "diff", "--check", state["base_commit"], candidate).returncode:
+        raise ValueError("Импорт содержит ошибки пробельного оформления")
+    report = source_import_report(checkout, state["base_commit"], candidate)
+    state.update({"request_commit": candidate, "status": "prepared", "review": report})
+    atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
+    pushed = pending.get(branch) == candidate
+    push_error = None
+    if not no_push and not pushed:
+        sent = git(checkout, "push", "origin", f"HEAD:refs/heads/{branch}")
+        state["merge_request_create_url"] = merge_request_create_url(sent)
+        if sent.returncode:
+            observed = source_import_heads(documents)
+            if observed.get(branch) == candidate:
+                pushed = True
+            elif branch in observed:
+                raise ValueError("Ветку импорта создал другой процесс; повтори проверку без перезаписи")
+            else:
+                push_error = sent.stderr.strip()
+        else:
+            pushed = True
+    state["status"] = "awaiting-merge" if pushed else "prepared-not-pushed"
+    atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
     return {
-        "status": "merged",
-        "before": local_commit,
-        "incoming": incoming_commit,
-        "after": after,
-        "protective_snapshot": snapshot_summary(root, snapshot),
+        **state, "state_file": str(state_path), "merge_request_created": False,
+        "target_commit": target_commit, "source_has_newer_commit": source_commit != incoming,
+        "target_changed_since_preparation": target_commit != state["base_commit"],
+        "push_error": push_error, "merge_method": "merge-commit",
+        "message": (
+            f"Импорт source ожидает PR/MR: {branch} -> main. documents/main не изменена входящим source."
+            if pushed else f"Импорт source подготовлен, но не отправлен: {branch}. Повтори синхронизацию для отправки."
+        ),
     }
+
+
+def defer_source_import_command(args: argparse.Namespace) -> int:
+    if not args.analyst_confirmed:
+        raise ValueError("Отложить импорт можно только по явному решению аналитика")
+    root = root_path(args.root)
+    handle = lock(root)
+    try:
+        documents, _ = analytics_repository(root)
+        path = root / ".workspace-state/source-import.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if not re.fullmatch(r"[0-9a-f]{40,64}", str(state.get("source_commit", ""))):
+            raise ValueError("Повреждено состояние импорта")
+        if state["repository_url"] != git(documents, "remote", "get-url", "origin").stdout.strip():
+            raise ValueError("Состояние импорта относится к другому репозиторию")
+        if state["request_branch"] in source_import_heads(documents):
+            raise ValueError("Сначала закрой PR/MR и удали его удалённую ветку обычными средствами documents")
+        state.update({"status": "deferred", "deferred_at": utc_now()})
+        serialized = (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode()
+        archive = root / ".workspace-state/source-imports" / state["source_commit"] / "deferred.json"
+        atomic_write(archive, serialized)
+        atomic_write(path, serialized)
+        print(json.dumps({"status": "deferred", "source_commit": state["source_commit"], "receipt": str(archive)}, ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        handle.close()
 
 
 def forbidden_content_path(path: str) -> bool:
@@ -1210,6 +1315,11 @@ def inspect_conflict_command(args: argparse.Namespace) -> int:
         require_branch(documents, f"{analytics_id} (analytics)")
         source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
         analytics_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
+        pending_path = root / ".workspace-state/source-import.json"
+        pending = json.loads(pending_path.read_text(encoding="utf-8")) if pending_path.is_file() else None
+        if pending:
+            source_commit = pending["source_commit"]
+            analytics_commit = pending["base_commit"]
         if not source_commit or not analytics_commit:
             raise ValueError("Не удалось определить ревизии source и analytics")
 
@@ -1218,6 +1328,9 @@ def inspect_conflict_command(args: argparse.Namespace) -> int:
             cloned = run("git", "clone", "--quiet", "--no-hardlinks", str(documents), str(probe))
             if cloned.returncode != 0:
                 raise ValueError(f"Не удалось создать временную копию analytics: {cloned.stderr.strip()}")
+            selected = git(probe, "switch", "--detach", analytics_commit)
+            if selected.returncode:
+                raise ValueError("Исходная аналитическая версия импорта недоступна")
             added = git(probe, "remote", "add", SOURCE_REMOTE, str(source))
             if added.returncode != 0:
                 raise ValueError(f"Не удалось подключить временный source: {added.stderr.strip()}")
@@ -1281,6 +1394,7 @@ def inspect_conflict_command(args: argparse.Namespace) -> int:
                 "source-analytics-merge",
                 source_commit,
                 f"{SOURCE_REMOTE}/{BRANCH}",
+                local_commit=analytics_commit,
             )
             snapshot = archive_snapshot_conflicts(root, snapshot, probe, conflicts)
 
@@ -1289,12 +1403,13 @@ def inspect_conflict_command(args: argparse.Namespace) -> int:
             "source": {"repository": source_id, "commit": source_commit},
             "analytics": {"repository": analytics_id, "commit": analytics_commit},
             "real_repositories_changed": False,
+            "import_checkout": pending.get("checkout") if pending else None,
             "protective_snapshot": snapshot_summary(root, snapshot),
             "conflicts": conflicts,
             "next_step": (
                 "Для каждого analyst-decision-required запросить решение аналитика. "
-                "Для accept-source-deletion удалить указанный устаревший служебный путь из analytics, "
-                "зафиксировать удаление и повторить workspace.py sync."
+                "Решения и удаление устаревших служебных путей применять только в изолированной ветке импорта, "
+                "создать смысловой merge-коммит и повторить workspace.py sync. Не менять documents/main."
             ),
         }, ensure_ascii=False, indent=2))
         return 0
@@ -1312,6 +1427,14 @@ def verified_reverse_patch(
     configure_source_remote(analytics, source)
     source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
     documents_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+    if git(analytics, "merge-base", "--is-ancestor", source_commit, documents_commit).returncode != 0:
+        raise ValueError("source-import-pending: входящий source ещё не принят в documents/main; обратная заплата запрещена")
+    pending_path = root / ".workspace-state/source-import.json"
+    if pending_path.is_file():
+        pending = json.loads(pending_path.read_text(encoding="utf-8"))
+        candidate = pending.get("request_commit")
+        if not candidate or git(analytics, "merge-base", "--is-ancestor", candidate, documents_commit).returncode != 0:
+            raise ValueError("source-import-pending: незавершённый импорт блокирует обратную заплату")
     require_analytics_content_policy(root, source, analytics, source_commit, documents_commit)
     source_tree = git(source, "rev-parse", f"{source_commit}^{{tree}}").stdout.strip()
     documents_tree = git(analytics, "rev-parse", f"{documents_commit}^{{tree}}").stdout.strip()
@@ -1559,16 +1682,27 @@ def sync_command(args: argparse.Namespace) -> int:
         analytics_origin_update = update_analytics_from_origin(root, documents, analytics_id)
         verify_unicode_aliases(documents, unicode_aliases)
         configure_source_remote(documents, source)
-        analytics_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
-        require_analytics_content_policy(
-            root,
-            source,
-            documents,
-            source_commit,
-            analytics_commit,
-            allow_legacy_harness=True,
-        )
-        source_merge = merge_source(root, documents, analytics_id)
+        if (root / ".workspace-state/source-import.json").exists() or git(documents, "merge-base", "--is-ancestor", source_commit, "HEAD").returncode != 0:
+            latest = root / "reverse-diffs/reverse-diff-latest.patch"
+            latest.unlink(missing_ok=True)
+            atomic_write(root / "reverse-diffs/reverse-diff-latest.json", json.dumps({
+                "status": "unavailable", "reason": "source-import-pending", "verified": False,
+            }, ensure_ascii=False).encode())
+        source_merge = prepare_source_import(root, source, documents, analytics_id, args.no_push)
+        if source_merge["status"] != "already-contained":
+            print(json.dumps({
+                "status": source_merge["status"], "source_analytics_state": "source-import-pending",
+                "source_import": source_merge, "analytics_pushed": False,
+                "analytics_origin_update": analytics_origin_update,
+                "reverse_diff": None, "all_repositories_synchronized": False,
+                "report_message": source_merge["message"],
+                "next_action": {
+                    "awaiting-merge": "create-or-review-import-merge-request",
+                    "deferred": "wait-for-source-revision",
+                }.get(source_merge["status"], "retry-import-push"),
+                "forbidden_claims": ["all-repositories-synchronized"],
+            }, ensure_ascii=False, indent=2))
+            return 0
         documents_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
         require_nfc_paths(documents, documents_commit, f"{analytics_id} (analytics)")
         require_content_only(documents, analytics_id)
@@ -2020,6 +2154,9 @@ def parser() -> argparse.ArgumentParser:
     approve_deletion.set_defaults(handler=approve_deletion_command)
     inspect_conflict = commands.add_parser("inspect-source-analytics-conflict")
     inspect_conflict.set_defaults(handler=inspect_conflict_command)
+    defer_import = commands.add_parser("defer-source-import")
+    defer_import.add_argument("--analyst-confirmed", action="store_true")
+    defer_import.set_defaults(handler=defer_source_import_command)
     inspect_analytics_origin = commands.add_parser("inspect-analytics-origin-conflict")
     inspect_analytics_origin.set_defaults(handler=inspect_analytics_origin_conflict_command)
     update_feature = commands.add_parser("update-feature-branch")

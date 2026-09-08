@@ -20,6 +20,39 @@ def run(*args: str, env: dict | None = None) -> subprocess.CompletedProcess[str]
 
 
 class CodaWorkspaceTests(unittest.TestCase):
+    def accept_review_branch(self, repository: Path, branch: str) -> None:
+        pushed = run("git", "-C", str(repository), "push", "origin", f"HEAD:refs/heads/{branch}")
+        self.assertEqual(pushed.returncode, 0, pushed.stdout + pushed.stderr)
+        remote = run("git", "-C", str(repository), "remote", "get-url", "origin").stdout.strip()
+        with tempfile.TemporaryDirectory() as temp:
+            reviewer = Path(temp) / "reviewer"
+            cloned = run("git", "clone", "--branch", "main", remote, str(reviewer))
+            self.assertEqual(cloned.returncode, 0, cloned.stdout + cloned.stderr)
+            self.configure_identity(reviewer)
+            merged = run("git", "-C", str(reviewer), "merge", "--no-ff", f"origin/{branch}",
+                         "-m", "Accept reviewed analytical changes")
+            self.assertEqual(merged.returncode, 0, merged.stdout + merged.stderr)
+            accepted = run("git", "-C", str(reviewer), "push", "origin", "main")
+            self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+
+    def accept_source_import(self, workspace: Path, payload: dict) -> None:
+        exchange = payload.get("analytics_exchange", payload)
+        self.assertEqual(exchange["source_analytics_state"], "source-import-pending")
+        self.assertFalse(exchange["all_repositories_synchronized"])
+        self.assertFalse(exchange["analytics_pushed"])
+        self.assertIsNone(exchange["reverse_diff"])
+        metadata = json.loads((workspace / "reverse-diffs/reverse-diff-latest.json").read_text(encoding="utf-8"))
+        self.assertFalse(metadata["verified"])
+        self.assertEqual(metadata["reason"], "source-import-pending")
+        self.assertFalse((workspace / "reverse-diffs/reverse-diff-latest.patch").exists())
+        request = exchange["source_import"]
+        self.assertFalse(request["merge_request_created"])
+        self.assertEqual(request["request_branch"], f"codex/source-import/{request['source_commit']}")
+        self.assertEqual(request["merge_method"], "merge-commit")
+        checkout = Path(request["checkout"])
+        self.assertTrue(checkout.is_relative_to(workspace / ".workspace-state/source-imports"))
+        self.accept_review_branch(checkout, request["request_branch"])
+
     def configure_identity(self, repository: Path) -> None:
         for key, value in (("user.name", "Harness Test"), ("user.email", "harness@example.test")):
             result = run("git", "-C", str(repository), "config", key, value)
@@ -211,6 +244,16 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             sync_payload = json.loads(result.stdout)
+            self.assertEqual(sync_payload["status"], "source-import-pending")
+            self.assertEqual(sync_payload["analytics_exchange"]["source_import"]["status"], "prepared-not-pushed")
+            self.assertFalse((documents / "context/source-only.txt").exists())
+            self.assertEqual(run("git", "ls-remote", str(documents_remote),
+                                 "refs/heads/codex/source-import/*").stdout, "")
+            self.accept_source_import(workspace, sync_payload)
+            result = run(sys.executable, str(ROOT / "scripts/workspace.py"), "--root",
+                         str(workspace), "sync", "--no-push", env=environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            sync_payload = json.loads(result.stdout)
             self.assertEqual(sync_payload["status"], "analytics-synchronized-reverse-diff-pending")
             self.assertEqual(sync_payload["source_analytics_state"], "reverse-diff-pending")
             self.assertFalse(sync_payload["repositories_identical"])
@@ -276,7 +319,7 @@ class CodaWorkspaceTests(unittest.TestCase):
 
             remote_check = root / "documents-remote-check"
             self.assertEqual(run("git", "clone", str(documents_remote), str(remote_check)).returncode, 0)
-            self.assertFalse((remote_check / "context/source-only.txt").exists(), "--no-push must not update documents origin")
+            self.assertTrue((remote_check / "context/source-only.txt").is_file(), "reviewer accepted the import")
 
             result = run(
                 sys.executable,
@@ -358,7 +401,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertNotEqual(blocked.returncode, 0)
             self.assertIn("локальные изменения", blocked.stdout)
 
-    def test_removed_source_stays_absent_and_sync_updates_code_and_pushes_analytics(self) -> None:
+    def test_removed_source_stays_absent_and_sync_updates_code_and_accepted_analytics(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace, _, documents_remote, environment = self.prepare_workspace(root)
@@ -369,6 +412,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             (documents / relative).write_text("локальное изменение\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", relative).returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "analytics without source").returncode, 0)
+            self.accept_review_branch(documents, "feature/analytics-without-source")
             remote_work = root / "documents-without-source-remote"
             self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
             self.configure_identity(remote_work)
@@ -409,7 +453,9 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertIn("source отсутствует", payload["report_message"])
             self.assertIn("all-repositories-synchronized", payload["forbidden_claims"])
             self.assertEqual(payload["sync_mode"], "analytics-only")
-            self.assertEqual(payload["analytics_origin_update"]["status"], "merged")
+            self.assertEqual(payload["analytics_origin_update"]["status"], "fast-forwarded")
+            self.assertEqual(run("git", "-C", str(documents_remote), "rev-parse", "main").stdout.strip(),
+                             payload["analytics_origin_update"]["remote"])
             self.assertIn(payload["code_update"]["status"], {"current", "updated"})
             self.assertEqual(payload["analytics_exchange"]["reverse_diff"]["reason"], "source-role-absent")
             self.assertFalse(payload["analytics_exchange"]["reverse_diff"]["verified"])
@@ -483,6 +529,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             (documents / analytics_relative).write_text("аналитическое изменение\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", analytics_relative).returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "analytics without code").returncode, 0)
+            self.accept_review_branch(documents, "feature/analytics-without-code")
             source_relative = "context/source-without-code.md"
             (source_work / source_relative).write_text("изменение источника\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(source_work), "add", "--", source_relative).returncode, 0)
@@ -513,6 +560,12 @@ class CodaWorkspaceTests(unittest.TestCase):
                 "sync",
                 env=environment,
             )
+            self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
+            payload = json.loads(synchronized.stdout)
+            self.assertFalse((documents / source_relative).exists())
+            self.accept_source_import(workspace, payload)
+            synchronized = run(sys.executable, str(ROOT / "scripts/workspace.py"), "--root",
+                               str(workspace), "sync", env=environment)
             self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
             payload = json.loads(synchronized.stdout)
             self.assertEqual(payload["status"], "analytics-synchronized-reverse-diff-pending")
@@ -552,6 +605,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             (documents / relative).write_text("изменение без дополнительных ролей\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", relative).returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "analytics only workspace").returncode, 0)
+            self.accept_review_branch(documents, "feature/analytics-only-workspace")
 
             bootstrap = run(
                 sys.executable,
@@ -585,6 +639,9 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertFalse(payload["all_repositories_synchronized"])
             self.assertEqual(payload["sync_mode"], "analytics-only")
             self.assertEqual(payload["code_update"]["status"], "skipped")
+            self.assertEqual(payload["analytics_origin_update"]["status"], "fast-forwarded")
+            self.assertEqual(run("git", "-C", str(documents_remote), "rev-parse", "main").stdout.strip(),
+                             payload["analytics_origin_update"]["remote"])
             entrypoint = (documents / "AGENTS.md").read_text(encoding="utf-8")
             self.assertIn("Репозиторий роли code локально отсутствует", entrypoint)
             registry = json.loads((workspace / ".workspace-state/code-repos.json").read_text(encoding="utf-8"))
@@ -829,14 +886,11 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(metadata["changed_paths"], ["context/shared.txt"])
             self.assertEqual(metadata["approved_source_deletions"], ["context/shared.txt"])
 
-    def test_sync_rejects_whitespace_errors_before_push_or_artifact_write(self) -> None:
+    def test_reverse_diff_rejects_whitespace_errors_before_artifact_write(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace, _, documents_remote, environment = self.prepare_workspace(root)
             documents = workspace / "documents"
-            remote_before = run(
-                "git", "-C", str(documents_remote), "rev-parse", "refs/heads/main",
-            ).stdout.strip()
             relative = "features/example/requirements.md"
             target = documents / relative
             target.parent.mkdir(parents=True)
@@ -846,13 +900,16 @@ class CodaWorkspaceTests(unittest.TestCase):
                 run("git", "-C", str(documents), "commit", "-m", "add invalid requirements").returncode,
                 0,
             )
+            self.accept_review_branch(documents, "feature/whitespace-check")
+            self.assertEqual(run("git", "-C", str(documents), "pull", "--ff-only").returncode, 0)
+            remote_before = run("git", "-C", str(documents_remote), "rev-parse", "main").stdout.strip()
 
             result = run(
                 sys.executable,
-                str(ROOT / "scripts/workspace.py"),
+                str(ROOT / "scripts/repository-exchange.py"),
                 "--root",
                 str(workspace),
-                "sync",
+                "reverse-diff",
                 env=environment,
             )
 
@@ -894,7 +951,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertIn(".idea/modules.xml", result.stdout)
             self.assertFalse((workspace / "documents/.idea").exists())
 
-    def test_exchange_aborts_conflicting_merge_without_overwriting_documents(self) -> None:
+    def test_exchange_retains_isolated_conflict_without_overwriting_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace, source_work, _, environment = self.prepare_workspace(root)
@@ -919,9 +976,12 @@ class CodaWorkspaceTests(unittest.TestCase):
                 env=environment,
             )
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("слияние отменено", result.stdout)
-            self.assertIn("inspect-source-analytics-conflict", result.stdout)
-            self.assertIn("skip-source-merge", result.stdout)
+            conflict = json.loads(result.stdout.removeprefix("ERROR: "))
+            self.assertEqual(conflict["reason"], "source-analytics-merge-conflict")
+            import_checkout = Path(conflict["import_checkout"])
+            self.assertTrue(import_checkout.is_relative_to(workspace / ".workspace-state/source-imports"))
+            self.assertTrue((import_checkout / ".git/MERGE_HEAD").is_file())
+            self.assertIn("context/shared.txt", run("git", "-C", str(import_checkout), "diff", "--name-only", "--diff-filter=U").stdout)
             self.assertEqual((documents / "context/shared.txt").read_text(encoding="utf-8"), "documents version\n")
             status = run("git", "-C", str(documents), "status", "--porcelain=v1")
             self.assertEqual(status.stdout, "")
@@ -957,8 +1017,25 @@ class CodaWorkspaceTests(unittest.TestCase):
                 "source version\n",
             )
             self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
+            self.assertTrue((import_checkout / ".git/MERGE_HEAD").is_file())
+            self.configure_identity(import_checkout)
+            (import_checkout / "context/shared.txt").write_text("reviewed combined version\n", encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(import_checkout), "add", "--", "context/shared.txt").returncode, 0)
+            resolved = run("git", "-C", str(import_checkout), "commit", "-m", "Resolve reviewed source conflict")
+            self.assertEqual(resolved.returncode, 0, resolved.stdout + resolved.stderr)
+            prepared = run(sys.executable, str(ROOT / "scripts/repository-exchange.py"), "--root",
+                           str(workspace), "sync", "--no-push", env=environment)
+            self.assertEqual(prepared.returncode, 0, prepared.stdout + prepared.stderr)
+            self.assertEqual((documents / "context/shared.txt").read_text(encoding="utf-8"), "documents version\n")
+            self.accept_source_import(workspace, json.loads(prepared.stdout))
+            completed = run(sys.executable, str(ROOT / "scripts/repository-exchange.py"), "--root",
+                            str(workspace), "sync", "--no-push", env=environment)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual((documents / "context/shared.txt").read_text(encoding="utf-8"), "reviewed combined version\n")
+            self.assertEqual((source_snapshot_root / source_saved["local"]["file"]).read_text(encoding="utf-8"),
+                             "documents version\n")
 
-    def test_sync_merges_diverged_analytics_origin_without_conflicts(self) -> None:
+    def test_sync_blocks_diverged_analytics_origin_even_without_conflicts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace, _, documents_remote, environment = self.prepare_workspace(root)
@@ -967,6 +1044,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             (documents / local_path).write_text("локальная работа\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", local_path).returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "local analytics").returncode, 0)
+            local_head = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
 
             remote_work = root / "documents-remote-work"
             self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
@@ -987,17 +1065,21 @@ class CodaWorkspaceTests(unittest.TestCase):
                 "--no-push",
                 env=environment,
             )
-            self.assertEqual(synchronized.returncode, 0, synchronized.stdout + synchronized.stderr)
+            self.assertNotEqual(synchronized.returncode, 0)
             payload = json.loads(synchronized.stdout)
-            origin_update = payload["analytics_exchange"]["analytics_origin_update"]
-            self.assertEqual(origin_update["status"], "merged")
-            self.assertEqual(origin_update["remote"], remote_head)
-            snapshot = origin_update["protective_snapshot"]
-            self.assertEqual(snapshot["status"], "completed")
-            self.assertTrue(snapshot["commits"]["result"])
+            blocked = json.loads(payload["analytics_exchange"].removeprefix("ERROR: "))
+            self.assertEqual(blocked["reason"], "analytics-unaccepted-history")
+            self.assertEqual(blocked["history_state"], "diverged")
+            self.assertEqual(blocked["local_commit"], local_head)
+            self.assertEqual(blocked["remote_commit"], remote_head)
+            snapshot = blocked["protective_snapshot"]
+            self.assertEqual(snapshot["status"], "prepared")
+            self.assertIsNone(snapshot["commits"]["result"])
+            self.assertEqual(snapshot["commits"]["local"], local_head)
+            self.assertEqual(snapshot["commits"]["incoming"], remote_head)
             snapshot_metadata = json.loads(Path(snapshot["metadata"]).read_text(encoding="utf-8"))
-            self.assertTrue(snapshot_metadata["ancestry_verified"])
-            self.assertEqual(snapshot_metadata["ancestor_checks"], {"local": True, "incoming": True})
+            self.assertEqual(snapshot_metadata["status"], "prepared")
+            self.assertFalse(snapshot_metadata["ancestry_verified"])
             for reference in snapshot["refs"].values():
                 if reference:
                     self.assertEqual(
@@ -1005,12 +1087,12 @@ class CodaWorkspaceTests(unittest.TestCase):
                         0,
                     )
             self.assertTrue((documents / local_path).is_file())
-            self.assertTrue((documents / remote_path).is_file())
-            parents = run("git", "-C", str(documents), "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
-            self.assertEqual(len(parents), 3)
+            self.assertFalse((documents / remote_path).exists())
+            self.assertEqual(run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip(), local_head)
+            self.assertEqual(run("git", "-C", str(documents_remote), "rev-parse", "main").stdout.strip(), remote_head)
+            self.assertFalse((documents / ".git/MERGE_HEAD").exists())
             self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
             self.assertFalse((remote_work / local_path).exists(), "--no-push must not update analytics origin")
-            self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
             remote_snapshot_refs = run(
                 "git",
                 "ls-remote",
@@ -1020,7 +1102,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(remote_snapshot_refs.returncode, 0)
             self.assertEqual(remote_snapshot_refs.stdout, "")
 
-    def test_sync_aborts_and_inspects_diverged_analytics_origin_conflict(self) -> None:
+    def test_sync_blocks_and_inspects_diverged_analytics_origin_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace, _, documents_remote, environment = self.prepare_workspace(root)
@@ -1051,9 +1133,10 @@ class CodaWorkspaceTests(unittest.TestCase):
             )
             self.assertNotEqual(blocked.returncode, 0)
             blocked_payload = json.loads(blocked.stdout)
-            self.assertEqual(blocked_payload["allowed_next_action"], "inspect-analytics-origin-conflict")
-            self.assertIn("inspect-analytics-origin-conflict", blocked_payload["next_command"])
-            self.assertIn("analytics-origin-merge-conflict", blocked_payload["analytics_exchange"])
+            exchange_error = json.loads(blocked_payload["analytics_exchange"].removeprefix("ERROR: "))
+            self.assertEqual(exchange_error["reason"], "analytics-unaccepted-history")
+            self.assertEqual(exchange_error["history_state"], "diverged")
+            self.assertEqual(exchange_error["protective_snapshot"]["status"], "prepared")
             self.assertEqual((documents / shared).read_text(encoding="utf-8"), "локальная версия\n")
             self.assertEqual(run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip(), local_head)
             self.assertEqual(run("git", "-C", str(documents), "status", "--porcelain=v1").stdout, "")
@@ -1894,6 +1977,12 @@ class CodaWorkspaceTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
+            self.assertEqual(run("git", "-C", str(analytics), "status", "--porcelain=v1", "-z").stdout, before)
+            self.assertIn(old_name, run("git", "-C", str(analytics), "ls-files", "-z").stdout.split("\0"))
+            self.accept_source_import(workspace, json.loads(sync.stdout))
+            sync = run(sys.executable, str(ROOT / "scripts/repository-exchange.py"), "--root",
+                       str(workspace), "sync", "--no-push", env=environment)
+            self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
             tracked = run("git", "-C", str(analytics), "ls-files", "-z").stdout.split("\0")
             self.assertIn(new_name, tracked)
             self.assertNotIn(old_name, tracked)
@@ -1994,8 +2083,15 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(active_mode["recommended_resolution"], "accept-source-deletion")
             self.assertEqual(run("git", "-C", str(analytics), "status", "--porcelain=v1").stdout, "")
 
-            self.assertEqual(run("git", "-C", str(analytics), "rm", ".workflow/active-mode.md").returncode, 0)
-            self.assertEqual(run("git", "-C", str(analytics), "commit", "-m", "remove legacy active mode").returncode, 0)
+            conflict = json.loads(sync.stdout.removeprefix("ERROR: "))
+            import_checkout = Path(conflict["import_checkout"])
+            analytics_before = run("git", "-C", str(analytics), "rev-parse", "HEAD").stdout.strip()
+            source_head = run("git", "-C", str(source_work), "rev-parse", "HEAD").stdout.strip()
+            self.configure_identity(import_checkout)
+            self.assertTrue((import_checkout / ".git/MERGE_HEAD").is_file())
+            self.assertEqual(run("git", "-C", str(import_checkout), "rm", "--", ".workflow/active-mode.md").returncode, 0)
+            resolved = run("git", "-C", str(import_checkout), "commit", "-m", "Remove legacy active mode in reviewed import")
+            self.assertEqual(resolved.returncode, 0, resolved.stdout + resolved.stderr)
             sync = run(
                 sys.executable,
                 str(ROOT / "scripts/repository-exchange.py"),
@@ -2006,6 +2102,15 @@ class CodaWorkspaceTests(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
+            self.assertEqual(run("git", "-C", str(analytics), "rev-parse", "HEAD").stdout.strip(), analytics_before)
+            self.assertTrue((analytics / ".workflow/active-mode.md").is_file())
+            self.assertFalse((analytics / "planning/team.md").exists())
+            self.accept_source_import(workspace, json.loads(sync.stdout))
+            sync = run(sys.executable, str(ROOT / "scripts/repository-exchange.py"), "--root",
+                       str(workspace), "sync", "--no-push", env=environment)
+            self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
+            for original in (analytics_before, source_head):
+                self.assertEqual(run("git", "-C", str(analytics), "merge-base", "--is-ancestor", original, "HEAD").returncode, 0)
             self.assertTrue((analytics / "features/registry/requirements.md").is_file())
             self.assertTrue((analytics / "planning/team.md").is_file())
             self.assertFalse((analytics / ".workflow").exists())

@@ -31,6 +31,18 @@
 
 ## Consistency gate
 
+`baseline/current/` describes the deployed system. A development report alone
+does not prove deployment. Before promotion, identify the deployed version,
+environment and evidence, record the release and review the analyst's decisions
+from `features/<feature>/development-results-state.json`.
+
+Promote only the deployed behavior. Preserve immutable input requirements and
+returns. If deployed behavior differs from the requested behavior, describe that
+fact and the known limitation without implying business acceptance; link the
+analyst's acceptance or rejection and any follow-up. Undeployed code remains in
+release preparation. A rejected deployed change may require rollback or repair,
+but must not be hidden from the description of the current system.
+
 Before promoting a release into `baseline/current/`:
 - review every included feature's `domain-impact.md`;
 - review `documents/planning/consistency-backlog.md`;

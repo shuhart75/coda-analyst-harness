@@ -16,6 +16,12 @@ Prefer the simplest tool that preserves auditability.
 
 ## Validation discipline
 
+During harness development, run focused tests for the changed operation and its
+failure/retry paths after each meaningful change. Before delivery, run affected
+cross-workflow checks and one complete regression suite per harness version.
+CI keeps the complete suite mandatory. Do not repeat the full suite after every
+small edit; never drop data-loss, recovery or ownership-boundary checks to save time.
+
 After structural or canonical changes, run available validators.
 After gantt-related changes, regenerate the gantt. For actual-progress, the regeneration must also refresh the standalone Confluence export without includes.
 After release promotion, validate both structure and links again.

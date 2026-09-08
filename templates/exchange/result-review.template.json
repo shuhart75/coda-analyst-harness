@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "return_id": "<точный return_id итогового summary.md из scan>",
+  "requirements_sha256": "<sha256 переданного requirements.md>",
+  "items": [
+    {
+      "requirement": "REQ-DEMO-001",
+      "implementation": "partial",
+      "conformity": "differs",
+      "verification": "passed",
+      "actual_behavior": "<Фактическое поведение и работающие сценарии>",
+      "differences": "<Точные отличия от переданной редакции>",
+      "evidence": ["<Ссылка на проверку, её результат и версию реализации>"],
+      "acceptance": "accepted-with-deviation",
+      "accepted_behavior": "<Объём, который аналитик явно принял>",
+      "reason": "<Решение аналитика и его причина>",
+      "baseline": {
+        "action": "record-deployed",
+        "deployment_evidence": ["<Версия, среда, дата и подтверждение внедрения>"],
+        "release_path": "releases/<release>/release.md"
+      },
+      "follow_up": {
+        "action": "backlog",
+        "kind": "product",
+        "path": "planning/intake/<next-change>.md",
+        "reason": "<Какой остаток направлен в следующий цикл и почему>"
+      }
+    }
+  ]
+}

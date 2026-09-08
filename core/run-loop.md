@@ -19,7 +19,7 @@ A failed check does not advance the run. Repeated failure reaches the configured
 ## Run Kinds
 
 - `planning`: intake, delta, role stories, estimates, dependencies, capacity schedule, review, approval.
-- `requirements`: root requirements, cross-feature impact, tail cleanup and explicit exchange revisions.
+- `requirements`: context, analyst-approved delivery scope, root requirements, cross-feature impact, tail cleanup, independent review and verification.
 - `implementation`: code research, implementation plan, one small change, deterministic checks, review.
 - `qa`: coverage, test design, execution, failure classification, routing gaps to their owner.
 
@@ -46,6 +46,11 @@ A failed check does not advance the run. Repeated failure reaches the configured
 - Analyst code evidence improves the input but never replaces developer-side reconciliation against the implementation branch used for delivery.
 
 ## Requirement Preparation Invariants
+
+- The requirements run ends at verification of the authored delivery contract. Publication is a separate explicit action; implementation, acceptance and deployment are separate events.
+- New requirements runs never contain slice, detail-pack or developer task-candidate stages. Existing run files keep their recorded stage history; do not reinterpret an old stage index under a new stage list.
+- Delivery scope is approved by the analyst with product-owner authority. Developer SDD proposes technical decomposition and reports all remaining scope; it never silently reduces the business contract.
+- Per-requirement result decisions follow `core/developer-handoff.md`. Accepted deviations and a next-cycle delta may coexist. Reporting completion never authorizes automatic baseline promotion.
 
 - Ordinary requirement authoring changes only `features/<feature>/requirements.md` as the requirements artifact. The state file and bounded code-research evidence are control and auxiliary records, not a decomposition of the requirements.
 - Slices, contour packs and preliminary task candidates are never created by the requirements process. An exchange revision is created only after the analyst explicitly requests or accepts transfer.

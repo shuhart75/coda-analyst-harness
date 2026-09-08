@@ -7,6 +7,7 @@ import hashlib
 import sys
 from pathlib import Path
 
+from actualization_baseline import baseline_rows as actualization_baseline_rows
 from workspace_paths import approved_plans_path
 
 
@@ -154,14 +155,7 @@ def main() -> int:
                 errors.append(f"approved plan was modified: {rel}")
         for rel, expected_rows in snapshot.get("actualization_baseline", {}).items():
             target = root / rel
-            actual_rows: list[list[str]] = []
-            if target.exists():
-                for line in target.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    if not line.startswith("| STORY-"):
-                        continue
-                    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-                    if len(cells) >= 4:
-                        actual_rows.append([cells[0], cells[2], cells[3]])
+            actual_rows = actualization_baseline_rows(target) if target.exists() else []
             if actual_rows != expected_rows:
                 errors.append(f"approved actualization baseline was modified: {rel}")
     if errors:

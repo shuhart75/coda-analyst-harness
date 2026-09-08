@@ -10,6 +10,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from actualization_baseline import baseline_rows as actualization_baseline_rows
 from workspace_paths import (
     active_mode_path,
     approved_plans_path,
@@ -35,12 +36,11 @@ RUN_STAGES = {
     ],
     "requirements": [
         "context",
+        "delivery-scope",
         "root-requirements",
-        "slices",
-        "detail-packs",
         "cross-feature-impact",
-        "task-candidates",
         "tail-cleanup",
+        "review",
         "verified",
     ],
     "implementation": [
@@ -181,6 +181,8 @@ def session_brief_command(args: argparse.Namespace) -> int:
 
 
 def run_init_command(args: argparse.Namespace) -> int:
+    if args.kind == "requirements" and args.slice:
+        raise SystemExit("Цикл требований работает с корневым документом; --slice недопустим")
     project = Path(args.project).resolve()
     ensure_local_state()
     stages = RUN_STAGES[args.kind]
@@ -402,15 +404,9 @@ def plan_approve_command(args: argparse.Namespace) -> int:
         actualization = project / "features" / feature_slug / "planning/actualization.md"
         if not actualization.exists():
             continue
-        baseline_rows: list[list[str]] = []
-        for line in actualization.read_text(encoding="utf-8", errors="ignore").splitlines():
-            if not line.startswith("| STORY-"):
-                continue
-            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-            if len(cells) >= 4:
-                baseline_rows.append([cells[0], cells[2], cells[3]])
-        if baseline_rows:
-            actualization_baseline[str(actualization.relative_to(project))] = baseline_rows
+        rows = actualization_baseline_rows(actualization)
+        if rows:
+            actualization_baseline[str(actualization.relative_to(project))] = rows
     snapshot = {
         "schema_version": 1,
         "quarter": args.quarter,

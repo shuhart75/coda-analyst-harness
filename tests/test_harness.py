@@ -371,7 +371,6 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("сверь SberTrek и Jira", commands)
             self.assertIn("## Трекеры задач", commands)
             self.assertTrue((ROOT / "core/tracker-reading.md").exists())
-            self.assertTrue((ROOT / "core/tracker-collector.md").exists())
             self.assertTrue((ROOT / "scripts/trackerctl.py").exists())
             tracker_contract = (ROOT / "core/tracker-reading.md").read_text(encoding="utf-8")
             self.assertIn("config-status", tracker_contract)
@@ -734,6 +733,66 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("does not create a merge request", agents)
         self.assertIn("merge-request creation form", agents)
         self.assertIn("run all three levels from `core/requirements-audit.md`", agents)
+
+
+    def test_actualization_followup_sections_are_not_approved_baseline_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            project = self.scaffold(Path(temp))
+            result = run("bash", str(ROOT / "scripts/scaffold-quarter.sh"), str(project), "2026-Q3")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            actualization = project / "features/demo/planning/actualization.md"
+            actualization.parent.mkdir(parents=True, exist_ok=True)
+            actualization.write_text(
+                "# Actualization map\n"
+                "\n"
+                "## Mapping\n"
+                "\n"
+                "| Story ID | Summary | Baseline Start | Baseline Duration (дн) | Actualization State | Mapping Mode | Replaced By | Residual Virtual Tasks | Depends On |\n"
+                "|---|---|---|---:|---|---|---|---|---|\n"
+                "| STORY-DEMO-001 | Backend foundation | 2026-04-16 | 16 | materialized | explicit |  |  |  |\n"
+                "| STORY-DEMO-002 | Frontend форма | 2026-05-22 | 13 | materialized | explicit |  |  | STORY-DEMO-001 |\n"
+                "\n"
+                "## Q3 follow-up\n"
+                "\n"
+                "| Story ID | Summary | Quarter | Actualization State | Mapping Mode | Replaced By | Notes |\n"
+                "|---|---|---|---|---|---|---|\n"
+                "| STORY-DEMO-001 | Backend валидации CSV | 2026-Q3 | materialized | explicit | RSCON-2802 | late scope |\n",
+                encoding="utf-8",
+            )
+            (project / "planning/2026-Q3/gantt/order.txt").write_text("demo\n", encoding="utf-8")
+            result = run(
+                sys.executable,
+                str(ROOT / "scripts/harnessctl.py"),
+                "plan-approve",
+                str(project),
+                "2026-Q3",
+                "--by",
+                "owner",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            snapshot = json.loads((project / "planning/approved-plans/2026-Q3.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                snapshot["actualization_baseline"]["features/demo/planning/actualization.md"],
+                [["STORY-DEMO-001", "2026-04-16", "16"], ["STORY-DEMO-002", "2026-05-22", "13"]],
+            )
+            result = run(sys.executable, str(ROOT / "scripts/validate-planning.py"), str(project))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            actualization.write_text(
+                actualization.read_text(encoding="utf-8")
+                + "| STORY-DEMO-002 | Frontend показа ошибок CSV | 2026-Q3 | materialized | explicit | RSCON-2801 | late scope |\n",
+                encoding="utf-8",
+            )
+            result = run(sys.executable, str(ROOT / "scripts/validate-planning.py"), str(project))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            actualization.write_text(
+                actualization.read_text(encoding="utf-8").replace("| 2026-04-16 | 16 |", "| 2026-04-16 | 99 |"),
+                encoding="utf-8",
+            )
+            result = run(sys.executable, str(ROOT / "scripts/validate-planning.py"), str(project))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("approved actualization baseline was modified", result.stdout)
 
 
 if __name__ == "__main__":

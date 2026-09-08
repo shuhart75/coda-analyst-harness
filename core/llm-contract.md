@@ -30,6 +30,13 @@ Before changing artifacts, read:
 18. relevant feature source artifacts under `PROJECT_ROOT`
 19. relevant `PROJECT_ROOT/releases/` artifacts when finalizing a delivered change
 
+Additional contracts are read when the action needs them:
+
+- `core/developer-handoff.md` before preparing a handoff or reviewing developer returns;
+- `core/entity-model.md` before planning-story, actualization-mapping or actual-progress work;
+- `core/workflow.md` before changing workflow layers, containers or artifact types;
+- `core/naming.md` before scaffolding, renaming or creating project files.
+
 If the user points to a folder with current-system docs/screenshots/change requests, inspect that folder first and keep source references in the produced artifacts.
 
 `HARNESS_ROOT` is the `coda-analyst-harness` repository. Resolve `PROJECT_ROOT` only through `python3 HARNESS_ROOT/scripts/workspace.py --root HARNESS_ROOT project-root`. Unless a path explicitly starts with a harness directory such as `core/`, `modes/`, `scripts/`, `skills/`, `templates/` or `.workspace-state/`, resolve project paths such as `baseline/`, `context/`, `planning/`, `features/` and `releases/` under `PROJECT_ROOT`, regardless of the directory from which the LLM was launched.
@@ -70,6 +77,13 @@ Git commit messages are a strict privacy boundary. Never put a task number or tr
 
 For the exact full-exchange command `синкани репы`, use `workspace.py sync` even when an `awaiting-merge` feature branch is still checked out. The program itself attempts guarded finish: it continues only when `origin/main` contains the submitted commit and otherwise stops before code and source updates. Do not decide from the stale local collaboration status that a remotely accepted request is still unmerged.
 
+Source changes are prepared only in an isolated clone and pushed to a separate
+review branch of documents. The human creates and accepts its PR/MR into main;
+never integrate incoming source directly into documents/main, even without Git
+conflicts. Show the import's changed/deleted paths and removed requirements and
+scenarios. Pending import is not synchronization and blocks reverse-patch generation.
+Repeat sync to reuse the pending request and verify acceptance before resuming.
+
 If the command references impacted requirements, prototypes, or rollback of a known decision, consult:
 - `features/*/domain-impact.md`;
 - `PROJECT_ROOT/planning/consistency-backlog.md`;
@@ -109,6 +123,7 @@ If the user asks for work outside the active mode, either switch mode explicitly
 
 ## Canonical entities
 
+- The analyst approves delivery scope; developer SDD owns technical decomposition, not business-scope reduction. Review each returned requirement through `core/developer-handoff.md`: input receipt, implementation, verification, analyst acceptance and deployment are separate. An accepted deviation can coexist with a follow-up delta; `baseline/current` records evidenced deployed behavior, including unaccepted deviations with limitations.
 - `baseline/current` is the canonical deployed-system description.
 - `planning story` is a planning/HLE unit. It has Summary, Description, estimates split by `AN / FE / BE / QA`, and may not match implementation tasks 1:1.
 - `implementation task` is an execution tracking unit. It should match Jira naming where possible and includes estimate, dates, executor, status and progress.
@@ -198,7 +213,7 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - Audit by `core/requirements-audit.md`. Build applicable role/action, state/transition, data, scenario, dependency, impact and internal/external-view models; reason across the full requirement set, not only one paragraph at a time. Apply only meaning-preserving corrections automatically. For every semantic ambiguity ask the analyst exactly one question and wait, then recheck affected relations. After all corrections rerun all three levels over the complete document.
 - Reject placeholder prose while authoring. `Когда` names a concrete state and event; `Тогда` states an observable outcome without repeating `система должна`. Never choose the intended meaning of vague quantifiers or references on the analyst's behalf.
 - When blockers are resolved, record the result with `requirementsctl.py record-audit`, show the full audit report in chat, and ask the exact confirmation question from the profile. Do not infer confirmation from the original transfer command or from approval of the document.
-- Only after an explicit positive answer run `requirementsctl.py confirm-audit`. Then run `requirements-exchange.py prepare` for the unchanged audited document, record the returned manifest and destination with `requirementsctl.py mark-published`, and report the actual location. Any intervening root change requires a new audit. There is no analyst-facing package state `ready`.
+- Only after an explicit positive answer run `requirementsctl.py confirm-audit`. Then run `requirements-exchange.py prepare` for the unchanged audited document. Code publication pushes only a separate review branch: `awaiting-merge` is not delivered, and the human creates and accepts the PR/MR. Repeat `prepare` after acceptance without reconfirming an unchanged audit; run `requirementsctl.py mark-published` for code only when `publication_confirmed=true`, or immediately for the local analytics fallback. Report the actual location and pending state. Any intervening root change requires a new audit. There is no analyst-facing package state `ready`.
 - Developer SDD treats the transmitted file as a business contract, derives technical deltas against current code in each contour's local SDD, and preserves `REQ-*` links. Before any other return it writes an immutable `returns/receipt.json` for the exact active revision and checksum. It then writes its already agreed single-contour decomposition to `returns/tasks.md`, per-task actual results and local SDD references to `returns/tasks/<task-id>.md`, and final coverage to `returns/summary.md`. Backend and frontend work must not be mixed in one task.
 - When transmitted requirements change, do not rewrite any immutable input revision or its returns. A new input revision is created only after the analyst explicitly requests or accepts its preparation.
 - Receiving `tasks.md` does not change planning stories or approved plans. The analyst separately uses it to update actual planning.
@@ -342,7 +357,7 @@ Partial rollback:
 - Skills are optional reusable behaviors, not a substitute for the project contract.
 - Use a skill only if it clearly matches the current mode and improves repeatability.
 - A skill must not bypass mode boundaries or mutate canonical baseline files outside release-finalization.
-- When a platform has no native skills, follow the same rules through prompts/templates instead.
+- When a platform has no native skills, express the same reusable behavior through `templates/` and the active mode file instead.
 
 ## Tool discipline
 

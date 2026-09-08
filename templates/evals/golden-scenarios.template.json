@@ -4,6 +4,7 @@
     {
       "name": "workflow-bootstrap",
       "assertions": [
+        {"type": "valid_json", "path": "context/evals/golden-scenarios.json"},
         {"type": "exists", "path": "planning/team.md"},
         {"type": "exists", "path": "planning/consistency-backlog.md"},
         {"type": "not_exists", "path": ".workflow"},
