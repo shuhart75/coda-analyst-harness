@@ -107,7 +107,8 @@ class StoryMap:
     replaced_by: list[str]
     residual_virtual_tasks: list[str]
     depends_on: list[str]
-    baseline_state: str = "present"
+    baseline_state: str | None = "present"
+    follow_up_quarter: str = ""
 
 
 @dataclass
@@ -305,17 +306,32 @@ def load_story_map(feature_dir: Path) -> list[StoryMap]:
     path = feature_dir / "planning/actualization.md"
     if not path.exists():
         return []
-    rows = first_table_with(path, "Story ID")
+    rows = [row for table in parse_tables(path) for row in table if "Story ID" in row]
     result: list[StoryMap] = []
+    story_ids: set[str] = set()
     for row in rows:
         story_id = clean_cell(row.get("Story ID", ""))
         if not story_id:
             raise ValueError(f"{path}: требуется Story ID")
+        if story_id in story_ids:
+            raise ValueError(f"{path}: Duplicate Story ID: {story_id}")
+        story_ids.add(story_id)
         duration = clean_cell(row.get("Baseline Duration (дн)", ""))
         baseline_start = clean_cell(row.get("Baseline Start", ""))
-        baseline_state = clean_cell(row.get("Baseline State", "present")).lower()
-        if baseline_state not in {"present", "absent"}:
-            raise ValueError(f"{path}: Baseline State должен быть present или absent")
+        follow_up_quarter = ""
+        baseline_fields = {"Baseline Start", "Baseline Duration (дн)", "Baseline State"}
+        if "Quarter" in row and not baseline_fields.intersection(row):
+            required = {"Summary", "Actualization State", "Mapping Mode", "Replaced By"}
+            if not required.issubset(row) or not row["Summary"] or row["Mapping Mode"] not in {"explicit", "inferred"}:
+                raise ValueError(f"{path}: {story_id}: неполная карта follow-up")
+            follow_up_quarter = clean_cell(row["Quarter"])
+            if not re.fullmatch(r"\d{4}-Q[1-4]", follow_up_quarter):
+                raise ValueError(f"{path}: {story_id}: неверный Quarter в follow-up")
+            baseline_state = None
+        else:
+            baseline_state = clean_cell(row.get("Baseline State", "present")).lower()
+            if baseline_state not in {"present", "absent"}:
+                raise ValueError(f"{path}: Baseline State должен быть present или absent")
         if baseline_state == "absent" and (baseline_start or duration):
             raise ValueError(f"{path}: absent требует пустых Baseline Start и Baseline Duration (дн)")
         if baseline_state == "present" and not re.fullmatch(r"[1-9]\d*", duration):
@@ -334,6 +350,7 @@ def load_story_map(feature_dir: Path) -> list[StoryMap]:
                 residual_virtual_tasks=split_list(row.get("Residual Virtual Tasks", "")),
                 depends_on=split_list(row.get("Depends On", "")),
                 baseline_state=baseline_state,
+                follow_up_quarter=follow_up_quarter,
             )
         )
     return result
@@ -1007,11 +1024,12 @@ def render_story(
     story_ends: dict[str, date],
     closed_days: set[date],
 ) -> tuple[list[str], date | None]:
-    if story.baseline_state == "absent":
+    if story.baseline_state != "present":
         task_ids = mapped_task_ids(story, tasks)
         finishes = [schedules[task_id].finish for task_id in task_ids if task_id in schedules and schedules[task_id].finish]
+        label = f"Follow-up {story.follow_up_quarter}; baseline not declared" if story.follow_up_quarter else "No approved baseline"
         return [
-            f"' No approved baseline: {story.story_id}; progress={story_progress(story, tasks)}%; tasks={', '.join(task_ids)}",
+            f"' {label}: {story.story_id}; progress={story_progress(story, tasks)}%; tasks={', '.join(task_ids)}",
         ], max(finishes, default=None)
     start, finish = story_dates(story, tasks, schedules, story_ends, closed_days)
     if not start:
@@ -1142,7 +1160,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
                     raise ValueError(f"{feature_dir}: неоднозначная ссылка Task ID/Jira {reference}")
                 if reference not in tasks and not any(task.tracker_key == reference for task in tasks.values()):
                     raise ValueError(f"{feature_dir}: история {story.story_id} ссылается на отсутствующую задачу {reference}")
-            if (story.baseline_state == "absent" or story.state in {"materialized", "mixed", "done", "real"}) and not mapped_task_ids(story, tasks):
+            if (story.baseline_state != "present" or story.state in {"materialized", "mixed", "done", "real"}) and not mapped_task_ids(story, tasks):
                 raise ValueError(f"{feature_dir}: отсутствует состав истории {story.story_id}")
             if any(dependency not in story_ids for dependency in story.depends_on):
                 raise ValueError(f"{feature_dir}: неизвестная зависимость истории {story.story_id}")
@@ -1153,8 +1171,9 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             if not to_alias(task.task_id) or alias in aliases:
                 raise ValueError(f"Повторяющийся или пустой идентификатор PlantUML: {alias}")
             aliases.add(alias)
-            if any(story_id not in story_ids for story_id in task.related_stories):
-                raise ValueError(f"{feature_dir}: задача {task.task_id} ссылается на неизвестную историю")
+            unknown_stories = [story_id for story_id in task.related_stories if story_id not in story_ids]
+            if unknown_stories:
+                raise ValueError(f"{feature_dir}: задача {task.task_id} ссылается на неизвестную историю: {', '.join(unknown_stories)}")
         feature_tasks[feature_slug] = tasks
         for task_id, task in tasks.items():
             scoped_tasks[f"{feature_slug}/{task_id}"] = task

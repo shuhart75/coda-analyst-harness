@@ -46,6 +46,23 @@ start/duration; explicit `absent` requires both empty and documented source chec
 An absent baseline does not imply virtual work and never authorizes inventing a
 plan. Actual tasks and their confirmed story links remain valid without a PLAN bar.
 
+Генератор читает все таблицы с колонкой `Story ID` в `planning/actualization.md`
+в порядке документа. Идентификаторы должны быть уникальны во всём файле;
+повторная строка не переопределяет прежнюю историю.
+
+Существующий формат follow-up задаётся колонками `Story ID`, `Summary`, `Quarter`,
+`Actualization State`, `Mapping Mode`, `Replaced By` без колонок `Baseline Start`,
+`Baseline Duration (дн)` и `Baseline State`. `Quarter` должен иметь вид `YYYY-QN`
+с номером квартала от 1 до 4; `Mapping Mode` принимает `explicit` или `inferred`.
+Такая таблица описывает связи с задачами, но не объявляет baseline: генератор
+не присваивает `absent`, не создаёт плановые даты или полосу `PLAN` из дат задач.
+Внутреннее значение baseline остаётся неопределённым (`None`); исходный документ
+не меняется. В Ганте остаются задачи и комментарий с кварталом, составом и
+рассчитанным прогрессом истории. Состав и ссылки проверяются как в обычной карте.
+Поле `Quarter` сохраняется как контекст связи, а не фильтр дат выполнения задач.
+Проверка утверждённого снимка по разделу `Mapping` не меняется; перенос строк
+из него в follow-up не является способом обойти защиту baseline.
+
 Mapping fields:
 - `replaced_by`: implementation task ids that replace the planning story.
 - `mapping_mode`: `explicit` for a confirmed replacement; legacy `inferred` records a semantic mapping, not proof of analyst approval. Verify its source before using it to resolve disputed story membership.

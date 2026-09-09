@@ -87,6 +87,102 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIn("30% completed", outputs[self.target])
         self.assertEqual(OVERLAY.story_progress(OVERLAY.load_story_map(self.feature)[0], tasks), 62)
 
+    def follow_up_map(self) -> None:
+        self.map.write_text("## Mapping\n\n" + self.map.read_text().replace(
+            "ITEM-100/FE, QA-COHORT", "ITEM-100/FE",
+        ) + (
+            "\n## Q3 follow-up\n\n"
+            "| Story ID | Summary | Quarter | Actualization State | Mapping Mode | Replaced By | Notes |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| STORY-FOLLOW-UP | Additional check | 2026-Q3 | materialized | explicit | QA-COHORT | Late scope |\n"
+        ), encoding="utf-8")
+        self.registry.write_text(self.registry.read_text().replace(
+            "| 30 | STORY-COHORT |", "| 30 | STORY-FOLLOW-UP |",
+        ), encoding="utf-8")
+
+    def test_follow_up_loads_without_inventing_baseline_and_preserves_export(self) -> None:
+        self.follow_up_map()
+        snapshots = self.root / "planning/approved-plans"
+        snapshots.mkdir()
+        expected = [["STORY-COHORT", "2026-09-01", "5"]]
+        (snapshots / "2026-Q3.json").write_text(json.dumps({
+            "actualization_baseline": {"features/cohorts/planning/actualization.md": expected},
+        }), encoding="utf-8")
+        source = self.map.read_bytes()
+        plans = {name: (self.gantt / (name + ".puml")).read_bytes() for name in ("quarter-plan", "commander-plan")}
+        stories = OVERLAY.load_story_map(self.feature)
+        self.assertEqual([story.story_id for story in stories], ["STORY-COHORT", "STORY-FOLLOW-UP"])
+        self.assertIsNone(stories[1].baseline_state)
+        self.assertIsNone(stories[1].baseline_duration)
+        self.assertEqual(stories[1].baseline_start, "")
+        self.assertEqual(stories[1].follow_up_quarter, "2026-Q3")
+        self.quarter()
+        content = self.target.read_text()
+        self.assertIn("as [STORY_STORY_COHORT]", content)
+        self.assertNotIn("as [STORY_STORY_FOLLOW_UP]", content)
+        self.assertIn("Follow-up 2026-Q3; baseline not declared: STORY-FOLLOW-UP; progress=30%", content)
+        self.assertEqual(content.count("as [TASK_QA_COHORT]"), 1)
+        self.assertEqual(self.map.read_bytes(), source)
+        self.assertEqual(BASELINE.baseline_rows(self.map), expected)
+        for name, contents in plans.items():
+            self.assertEqual((self.gantt / (name + ".puml")).read_bytes(), contents)
+        expanded = "\n".join(EXPANDER.expand_file(self.gantt / "actual-progress.puml", [])).rstrip() + "\n"
+        self.assertEqual((self.gantt / "actual-progress-confluence.puml").read_text(), expanded)
+        before = self.snapshot()
+        self.quarter()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_all_standard_mapping_tables_are_loaded(self) -> None:
+        original = self.map.read_text()
+        self.map.write_text(original + "\n## Additional mapping\n\n" + original.replace(
+            "STORY-COHORT", "STORY-SECOND",
+        ), encoding="utf-8")
+        self.assertEqual([story.story_id for story in OVERLAY.load_story_map(self.feature)], ["STORY-COHORT", "STORY-SECOND"])
+        self.quarter()
+        self.assertIn("as [STORY_STORY_SECOND]", self.target.read_text())
+
+    def test_duplicate_story_ids_across_tables_fail_without_writes(self) -> None:
+        self.follow_up_map()
+        self.map.write_text(self.map.read_text().replace("STORY-FOLLOW-UP", "STORY-COHORT"), encoding="utf-8")
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, "Duplicate Story ID: STORY-COHORT"):
+            OVERLAY.load_story_map(self.feature)
+        self.quarter(success=False)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_invalid_follow_up_does_not_default_missing_facts(self) -> None:
+        self.follow_up_map()
+        self.registry.write_text(self.registry.read_text().replace("STORY-FOLLOW-UP", ""), encoding="utf-8")
+        original = self.map.read_text()
+        for invalid in (
+            original.replace("| 2026-Q3 |", "| |"),
+            original.replace("| 2026-Q3 |", "| 2026-Q5 |"),
+            original.replace("| Quarter |", "| Baseline Start |"),
+            original.replace("| Notes |", "| Baseline State |"),
+            original.replace("| Mapping Mode | Replaced By | Notes |", "| Mapping Mode | Missing | Notes |"),
+            original.replace("| explicit | QA-COHORT |", "| | QA-COHORT |"),
+            original.replace("| materialized | explicit | QA-COHORT |", "| virtual | explicit | |"),
+        ):
+            with self.subTest(invalid=invalid):
+                self.map.write_text(invalid, encoding="utf-8")
+                before = self.snapshot()
+                self.quarter(success=False)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_follow_up_missing_task_still_blocks(self) -> None:
+        self.follow_up_map()
+        self.map.write_text(self.map.read_text().replace("| QA-COHORT | Late scope |", "| UNKNOWN-TASK | Late scope |"), encoding="utf-8")
+        before = self.snapshot()
+        self.assertIn("STORY-FOLLOW-UP", self.quarter(success=False).stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_unknown_story_error_names_the_missing_reference(self) -> None:
+        self.follow_up_map()
+        self.registry.write_text(self.registry.read_text().replace("STORY-FOLLOW-UP", "STORY-UNKNOWN"), encoding="utf-8")
+        before = self.snapshot()
+        self.assertIn("STORY-UNKNOWN", self.quarter(success=False).stderr)
+        self.assertEqual(self.snapshot(), before)
+
     def test_root_and_legacy_registry_merge_without_hidden_precedence(self) -> None:
         legacy = self.feature / "slices/legacy/execution/tasks.md"
         legacy.parent.mkdir(parents=True)
