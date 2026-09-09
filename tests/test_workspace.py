@@ -1035,10 +1035,37 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual((source_snapshot_root / source_saved["local"]["file"]).read_text(encoding="utf-8"),
                              "documents version\n")
 
+    def test_sync_blocks_pending_recovery_before_repository_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace, _, _, environment = self.prepare_workspace(Path(temp))
+            documents = workspace / "documents"
+            target = "feature/cohorts/ivan"
+            (workspace / ".workspace-state/collaboration.json").write_text(json.dumps({
+                "schema_version": 1, "mode": "multi-user-branches", "analyst_id": "ivan",
+                "active_work": {"status": "recovery-pending", "branch": target, "recovery": True},
+                "completed_work": [],
+            }), encoding="utf-8")
+            self.assertEqual(run("git", "-C", str(documents), "branch", target).returncode, 0)
+            for branch in ("main", target):
+                with self.subTest(branch=branch):
+                    self.assertEqual(run("git", "-C", str(documents), "switch", branch).returncode, 0)
+                    result = run(sys.executable, str(ROOT / "scripts/workspace.py"), "--root",
+                                 str(workspace), "sync", env=environment)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    payload = json.loads(result.stdout)
+                    self.assertEqual(payload["reason"], "collaboration-recovery-pending")
+                    self.assertEqual(payload["code_update"]["status"], "not-started")
+                    self.assertEqual(payload["source_update"]["status"], "not-started")
+                    self.assertEqual(payload["allowed_next_action"], "collaboration-recover-main")
+
     def test_sync_blocks_diverged_analytics_origin_even_without_conflicts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             workspace, _, documents_remote, environment = self.prepare_workspace(root)
+            (workspace / ".workspace-state/collaboration.json").write_text(json.dumps({
+                "schema_version": 1, "mode": "multi-user-branches", "analyst_id": "ivan",
+                "active_work": None, "completed_work": [],
+            }), encoding="utf-8")
             documents = workspace / "documents"
             local_path = "context/local-analytics.md"
             (documents / local_path).write_text("локальная работа\n", encoding="utf-8")
@@ -1070,6 +1097,10 @@ class CodaWorkspaceTests(unittest.TestCase):
             blocked = json.loads(payload["analytics_exchange"].removeprefix("ERROR: "))
             self.assertEqual(blocked["reason"], "analytics-unaccepted-history")
             self.assertEqual(blocked["history_state"], "diverged")
+            self.assertEqual(blocked["allowed_next_action"], "collaboration-recover-main")
+            self.assertEqual(payload["allowed_next_action"], "collaboration-recover-main")
+            self.assertEqual(payload["next_command"], "python3 scripts/collaboration.py status")
+            self.assertIn("sync-without-push", payload["forbidden_alternatives"])
             self.assertEqual(blocked["local_commit"], local_head)
             self.assertEqual(blocked["remote_commit"], remote_head)
             snapshot = blocked["protective_snapshot"]
@@ -1136,6 +1167,8 @@ class CodaWorkspaceTests(unittest.TestCase):
             exchange_error = json.loads(blocked_payload["analytics_exchange"].removeprefix("ERROR: "))
             self.assertEqual(exchange_error["reason"], "analytics-unaccepted-history")
             self.assertEqual(exchange_error["history_state"], "diverged")
+            self.assertEqual(exchange_error["allowed_next_action"], "collaboration-migration")
+            self.assertEqual(blocked_payload["allowed_next_action"], "collaboration-migration")
             self.assertEqual(exchange_error["protective_snapshot"]["status"], "prepared")
             self.assertEqual((documents / shared).read_text(encoding="utf-8"), "локальная версия\n")
             self.assertEqual(run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip(), local_head)

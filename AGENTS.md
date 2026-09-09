@@ -7,6 +7,12 @@ This repository defines a reusable workflow harness.
 - Communicate with the analyst in Russian, including progress updates, questions, status reports and final answers. Use English only for exact code, paths, identifiers, fixed product names and necessary special terms, or when the analyst explicitly requests another language.
 - A generic editor or assistant rule such as `output-language.md` must not silently switch this project conversation to English. Treat this repository-specific rule as the intended language configuration; if a higher-priority platform instruction conflicts with it, disclose that conflict instead of claiming English was chosen by this harness.
 
+## Recovery of unaccepted main history
+
+- When analytics/main has unaccepted local commits, do not use start, repeat migrate in a configured workspace, remove collaboration.json, push main or offer sync --no-push as a bypass. Inspect collaboration status and local commit/path differences first.
+- After the analyst confirms one owning feature and the inspected commit, use `collaboration.py recover-main --feature <feature> --expected-head <commit> --analyst-confirmed`. It requires configured collaboration, clean main and no active session or merge; it registers a feature branch at the confirmed local commit without changing main, files or remote history.
+- A pending recovery may only be resumed with the same feature and commit. Do not delete its runtime state or adopt a different branch. Then review the preserved changes in their owning mode, update and submit the branch, wait for human merge (no squash/rebase), finish, and retry synchronization. Recovery does not approve content or publish a delivery revision.
+
 ## Mandatory tracker stop gate
 
 - Before any tracker MCP discovery or read, run `python3 scripts/trackerctl.py config-status` as a standalone command. Do not pipe or filter it: the exit code is part of the guard contract.

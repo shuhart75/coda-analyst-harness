@@ -665,6 +665,12 @@ def _sync_command(args: argparse.Namespace, collaboration_finish: dict | None = 
     exchange = run(*command)
     if exchange.returncode != 0:
         exchange_error = exchange.stdout.strip() or exchange.stderr.strip()
+        try:
+            exchange_failure = json.loads(exchange_error.removeprefix("ERROR: "))
+        except json.JSONDecodeError:
+            exchange_failure = {}
+        if not isinstance(exchange_failure, dict):
+            exchange_failure = {}
         source_conflict = "source-analytics-merge-conflict" in exchange_error
         analytics_origin_conflict = any(
             reason in exchange_error
@@ -673,7 +679,11 @@ def _sync_command(args: argparse.Namespace, collaboration_finish: dict | None = 
                 "analytics-origin-merge-in-progress",
             )
         )
-        if analytics_origin_conflict:
+        if exchange_failure.get("reason") == "analytics-unaccepted-history":
+            allowed_next_action = exchange_failure["allowed_next_action"]
+            next_command = exchange_failure["next_command"]
+            forbidden_alternatives = exchange_failure["forbidden_alternatives"]
+        elif analytics_origin_conflict:
             allowed_next_action = "inspect-analytics-origin-conflict"
             next_command = "python3 scripts/workspace.py inspect-analytics-origin-conflict"
             forbidden_alternatives = [
@@ -757,8 +767,6 @@ def finish_accepted_feature_before_sync(root: Path) -> tuple[dict | None, dict |
     analytics = root / analytics_id
     branch = run("git", "-C", str(analytics), "symbolic-ref", "--quiet", "--short", "HEAD")
     current = branch.stdout.strip() if branch.returncode == 0 else None
-    if not current or not current.startswith("feature/"):
-        return None, None
     collaboration_path = root / ".workspace-state/collaboration.json"
     if not collaboration_path.is_file():
         return None, None
@@ -767,6 +775,18 @@ def finish_accepted_feature_before_sync(root: Path) -> tuple[dict | None, dict |
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Не удалось прочитать состояние совместной работы: {exc}") from exc
     work = state.get("active_work")
+    if isinstance(work, dict) and work.get("status") == "recovery-pending":
+        return None, {
+            "status": "blocked", "reason": "collaboration-recovery-pending",
+            "current_branch": current,
+            "code_update": {"status": "not-started"},
+            "source_update": {"status": "not-started"},
+            "allowed_next_action": "collaboration-recover-main",
+            "next_command": "python3 scripts/collaboration.py status",
+            "message": "Сначала повтори recover-main с теми же параметрами; полный обмен не начат.",
+        }
+    if not current or not current.startswith("feature/"):
+        return None, None
     if (
         not isinstance(work, dict)
         or work.get("branch") != current

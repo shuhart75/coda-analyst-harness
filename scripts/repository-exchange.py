@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from commit_message_policy import require_valid_commit_message
-from collaboration import merge_request_create_url
+from collaboration import load_state as load_collaboration_state, merge_request_create_url
 from workspace import install_commit_message_hook
 
 from workspace_entrypoint import (
@@ -716,7 +716,12 @@ def update_analytics_from_origin(root: Path, path: Path, analytics_id: str) -> d
         "local_commit": local_commit,
         "remote_commit": remote_commit,
         "protective_snapshot": snapshot_summary(root, snapshot),
-        "allowed_next_action": "collaboration-migration",
+        "allowed_next_action": (
+            "collaboration-recover-main" if load_collaboration_state(root, required=False)
+            else "collaboration-migration"
+        ),
+        "next_command": "python3 scripts/collaboration.py status",
+        "forbidden_alternatives": ["sync-without-push", "start-feature-from-origin", "push-main", "git-reset"],
     }, ensure_ascii=False))
 
 

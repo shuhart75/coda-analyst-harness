@@ -219,14 +219,17 @@ def next_feature_branch(repository: Path, feature: str, analyst: str) -> str:
             "--quiet",
             f"refs/heads/{candidate}",
         ).returncode == 0
-        remote_exists = git(
+        remote_result = git(
             repository,
             "ls-remote",
             "--exit-code",
             "--heads",
             "origin",
             candidate,
-        ).returncode == 0
+        )
+        if remote_result.returncode not in {0, 2}:
+            raise ValueError(f"Не удалось проверить удалённые ветки: {remote_result.stderr.strip()}")
+        remote_exists = remote_result.returncode == 0
         if not local_exists and not remote_exists:
             return candidate
     raise ValueError(f"Не удалось подобрать имя новой рабочей ветки для {feature}")
@@ -347,6 +350,76 @@ def migrate_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def recover_main_command(args: argparse.Namespace) -> int:
+    root = root_path(args.root)
+    analytics, analytics_id = analytics_repository(root)
+    state = load_state(root)
+    feature = validate_slug(args.feature, "Идентификатор функциональности")
+    require_feature(analytics, feature)
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", args.expected_head):
+        raise ValueError("Укажи проверенный хеш коммита, не имя ветки или HEAD")
+    expected = git(analytics, "rev-parse", "--verify", "--end-of-options", f"{args.expected_head}^{{commit}}")
+    if expected.returncode != 0:
+        raise ValueError("Подтверждённый коммит не найден; повтори диагностику")
+    local = expected.stdout.strip()
+    work = state.get("active_work")
+    if work and not (
+        work.get("recovery") is True and work.get("feature") == feature
+        and work.get("started_from") == local
+        and work.get("status") in {"recovery-pending", "active"}
+    ):
+        raise ValueError("Есть другая активная работа; восстановление не разрешено")
+    if active_merge(analytics):
+        raise ValueError("В analytics выполняется незавершённое слияние")
+    require_clean(analytics)
+    branch = current_branch(analytics)
+    if branch not in ({BRANCH, work["branch"]} if work else {BRANCH}):
+        raise ValueError("Восстановление начинается только из main")
+    if head(analytics) != local or head(analytics, BRANCH) != local:
+        raise ValueError("HEAD или main изменились после диагностики; повтори проверку и подтверждение")
+    if not work:
+        remote = fetch_main(analytics)
+        relation = branch_relation(analytics, local, remote)
+        if relation not in {"ahead", "diverged"}:
+            raise ValueError("В main нет непринятых локальных коммитов")
+        if git(analytics, "merge-base", local, remote).returncode != 0:
+            raise ValueError("Истории не имеют общей базы; требуется отдельное решение")
+        target = next_feature_branch(analytics, feature, state["analyst_id"])
+        require_clean(analytics)
+        if current_branch(analytics) != BRANCH or head(analytics) != local or active_merge(analytics):
+            raise ValueError("Рабочая область изменилась во время проверки; повтори диагностику")
+        work = {
+            "feature": feature, "branch": target, "status": "recovery-pending",
+            "started_at": utc_now(), "started_from": local,
+            "origin_main_at_start": remote, "migration": False, "recovery": True,
+        }
+        state["active_work"] = work
+        write_state(root, state)
+    target = work["branch"]
+    if branch != target:
+        exists = git(analytics, "show-ref", "--verify", "--quiet", f"refs/heads/{target}")
+        if exists.returncode == 0:
+            if head(analytics, target) != local:
+                raise ValueError("Зарегистрированная ветка восстановления изменилась; требуется проверка")
+            switched = git(analytics, "switch", target)
+        elif exists.returncode == 1:
+            switched = git(analytics, "switch", "--no-track", "-c", target, local)
+        else:
+            raise ValueError("Не удалось проверить ветку восстановления")
+        if switched.returncode != 0:
+            raise ValueError(f"Восстановление зарегистрировано; повтори ту же команду: {switched.stderr.strip()}")
+    work["status"] = "active"
+    write_state(root, state)
+    print(json.dumps({
+        "status": "local-main-work-recovered", "analytics_repository": analytics_id,
+        "feature": feature, "branch": target, "preserved_commit": local,
+        "automatic_commit_created": False, "automatic_push_performed": False,
+        "main_unchanged": True,
+        "next_action": "проверить изменения, обновить рабочую ветку и передать её на проверку через submit",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def start_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     analytics, analytics_id = analytics_repository(root)
@@ -359,6 +432,8 @@ def start_command(args: argparse.Namespace) -> int:
     feature = validate_slug(args.feature, "Идентификатор функциональности")
     require_feature(analytics, feature)
     remote = fetch_main(analytics)
+    if current_branch(analytics) == BRANCH and branch_relation(analytics, head(analytics), remote) in {"ahead", "diverged"}:
+        raise ValueError("В main есть непринятые коммиты; сначала проверь их и выполни recover-main, не start")
     target = next_feature_branch(analytics, feature, state["analyst_id"])
     switched = git(analytics, "switch", "--no-track", "-c", target, remote)
     if switched.returncode != 0:
@@ -388,6 +463,8 @@ def require_active_work(root: Path, analytics: Path, state: dict) -> dict:
     work = state.get("active_work")
     if not isinstance(work, dict):
         raise ValueError("Активная работа над функциональностью не зарегистрирована")
+    if work.get("status") == "recovery-pending":
+        raise ValueError("Сначала заверши recover-main с теми же параметрами")
     branch = current_branch(analytics)
     if branch != work.get("branch"):
         raise ValueError(
@@ -522,6 +599,8 @@ def finish_command(args: argparse.Namespace) -> int:
     work = state.get("active_work")
     if not isinstance(work, dict):
         raise ValueError("Активная работа над функциональностью не зарегистрирована")
+    if work.get("status") == "recovery-pending":
+        raise ValueError("Сначала заверши recover-main с теми же параметрами")
     branch = current_branch(analytics)
     if branch not in {work.get("branch"), BRANCH}:
         raise ValueError(
@@ -610,14 +689,26 @@ def status_command(args: argparse.Namespace) -> int:
     analytics, analytics_id = analytics_repository(root)
     state = load_state(root, required=False)
     configured = state is not None
+    branch = current_branch(analytics)
+    relation = None
+    next_action = None if configured else "запросить идентификатор аналитика и выполнить migrate"
+    if configured and not state.get("active_work") and branch == BRANCH:
+        remote = git(analytics, "rev-parse", "--verify", f"refs/remotes/origin/{BRANCH}")
+        if remote.returncode == 0:
+            relation = branch_relation(analytics, head(analytics), remote.stdout.strip())
+            if relation in {"ahead", "diverged"}:
+                next_action = "проверить локальные коммиты и подтвердить функциональность для recover-main"
+    if configured and (state.get("active_work") or {}).get("status") == "recovery-pending":
+        next_action = "повторить recover-main с теми же параметрами"
     print(json.dumps({
         "status": "configured" if configured else "migration-required",
         "analytics_repository": analytics_id,
-        "current_branch": current_branch(analytics),
+        "current_branch": branch,
         "dirty_paths": sorted(changed_paths(analytics)),
         "collaboration": state,
-        "feature_work_allowed": configured,
-        "required_next_action": None if configured else "запросить идентификатор аналитика и выполнить migrate",
+        "main_relation_cached": relation,
+        "feature_work_allowed": configured and next_action is None,
+        "required_next_action": next_action,
     }, ensure_ascii=False, indent=2))
     return 0
 
@@ -630,6 +721,11 @@ def parser() -> argparse.ArgumentParser:
     migrate.add_argument("--analyst", required=True)
     migrate.add_argument("--feature")
     migrate.set_defaults(handler=migrate_command)
+    recover = commands.add_parser("recover-main")
+    recover.add_argument("--feature", required=True)
+    recover.add_argument("--expected-head", required=True)
+    recover.add_argument("--analyst-confirmed", action="store_true", required=True)
+    recover.set_defaults(handler=recover_main_command)
     start = commands.add_parser("start")
     start.add_argument("--feature", required=True)
     start.set_defaults(handler=start_command)
