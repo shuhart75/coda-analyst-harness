@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+import argparse
+import importlib.util
 import re
-import subprocess
 import sys
 
 
@@ -41,10 +42,6 @@ ganttDiagram {
 </style>"""
 
 
-def usage() -> None:
-    print("Usage: sync-quarter-gantt.py <gantt-dir>")
-
-
 def parse_quarter_start(gantt_dir: Path) -> date:
     quarter_id = gantt_dir.parent.name
     match = re.fullmatch(r"(\d{4})-Q([1-4])", quarter_id)
@@ -55,18 +52,18 @@ def parse_quarter_start(gantt_dir: Path) -> date:
     return date(year, QUARTER_START_MONTH[quarter], 1)
 
 
-def parse_task_starts(path: Path) -> list[date]:
-    text = path.read_text(encoding="utf-8")
+def parse_task_starts(path: Path, contents: dict[Path, str]) -> list[date]:
+    text = contents[path] if path in contents else path.read_text(encoding="utf-8")
     starts: list[date] = []
     for year, month, day in START_RE.findall(text):
         starts.append(date(int(year), int(month), int(day)))
     return starts
 
 
-def view_start(quarter_start: date, include_files: list[Path]) -> date:
+def view_start(quarter_start: date, include_files: list[Path], contents: dict[Path, str]) -> date:
     starts = [quarter_start]
     for include in include_files:
-        starts.extend(parse_task_starts(include))
+        starts.extend(parse_task_starts(include, contents))
     return min(starts)
 
 
@@ -80,8 +77,8 @@ def feature_slug(path: Path) -> str:
     return name.removeprefix("FEATURE-")
 
 
-def feature_title(gantt_dir: Path, path: Path) -> str:
-    text = path.read_text(encoding="utf-8")
+def feature_title(gantt_dir: Path, path: Path, contents: dict[Path, str]) -> str:
+    text = contents[path] if path in contents else path.read_text(encoding="utf-8")
     comment_match = FEATURE_COMMENT_RE.search(text)
     slug = feature_slug(path)
 
@@ -199,68 +196,57 @@ def header_lines(
     return lines
 
 
-def sync_actual_progress_overlays(gantt_dir: Path) -> None:
-    script = Path(__file__).with_name("sync-actual-progress-overlay.py")
-    if not script.exists():
-        return
+def load_tool(name: str):
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), Path(__file__).with_name(name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def sync_actual_progress_overlays(gantt_dir: Path, overlay) -> dict[Path, str]:
     feature_slugs = sorted(
         {
             feature_slug(path)
-            for view in ("quarter-plan", "commander-plan")
+            for view in ("quarter-plan", "commander-plan", "actual-progress")
             for path in (gantt_dir / "includes" / view).glob("FEATURE-*.puml")
         }
     )
-    if feature_slugs:
-        actual_dir = gantt_dir / "includes" / "actual-progress"
-        actual_dir.mkdir(parents=True, exist_ok=True)
-        allowed = {f"FEATURE-{slug}.puml" for slug in feature_slugs}
-        for stale in actual_dir.glob("FEATURE-*.puml"):
-            if stale.name not in allowed:
-                stale.unlink()
-    subprocess.run(
-        [
-            sys.executable,
-            str(script),
-            str(project_root(gantt_dir)),
-            gantt_dir.parent.name,
-            *feature_slugs,
-        ],
-        check=True,
-    )
+    return overlay.prepare_outputs(project_root(gantt_dir), gantt_dir.parent.name, feature_slugs or None)
 
 
-def sync_confluence_export(gantt_dir: Path) -> None:
-    script = Path(__file__).with_name("expand-plantuml-includes.py")
+def sync_confluence_export(gantt_dir: Path, contents: dict[Path, str]) -> None:
     source = gantt_dir / "actual-progress.puml"
     target = gantt_dir / "actual-progress-confluence.puml"
-    if not script.exists() or not source.exists():
-        return
-    subprocess.run([sys.executable, str(script), str(source), str(target)], check=True)
+    expander = load_tool("expand-plantuml-includes")
+    contents[target] = "\n".join(expander.expand_file(source, [], contents)).rstrip() + "\n"
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
-        usage()
-        return 1
-
-    gantt_dir = Path(sys.argv[1])
+    parser = argparse.ArgumentParser(description="Генерация Ганта с проверкой источников до записи")
+    parser.add_argument("gantt_dir")
+    parser.add_argument("--actual-only", action="store_true", help="Не изменять quarter-plan и commander-plan")
+    args = parser.parse_args()
+    gantt_dir = Path(args.gantt_dir).resolve()
     quarter_start = parse_quarter_start(gantt_dir)
     closed_days = read_closed_days(gantt_dir)
     order = feature_order(gantt_dir)
-    sync_actual_progress_overlays(gantt_dir)
+    overlay = load_tool("sync-actual-progress-overlay")
+    outputs = sync_actual_progress_overlays(gantt_dir, overlay)
 
     for slug, title in VIEWS:
+        if args.actual_only and slug != "actual-progress":
+            continue
         include_dir = gantt_dir / "includes" / slug
-        include_dir.mkdir(parents=True, exist_ok=True)
         include_files = sorted(
-            include_dir.glob("FEATURE-*.puml"),
+            set(include_dir.glob("FEATURE-*.puml")) | {path for path in outputs if path.parent == include_dir},
             key=lambda path: (
                 order.get(feature_slug(path), len(order)),
                 feature_slug(path),
             ),
         )
         preambles = preamble_files(gantt_dir, slug)
-        start = view_start(quarter_start, preambles + include_files)
+        start = view_start(quarter_start, preambles + include_files, outputs)
         lines = header_lines(
             gantt_dir,
             title,
@@ -275,7 +261,7 @@ def main() -> int:
 
         if include_files:
             for path in include_files:
-                lines.append(f"-- {feature_title(gantt_dir, path)} --")
+                lines.append(f"-- {feature_title(gantt_dir, path, outputs)} --")
                 lines.append(f'!include {path.relative_to(gantt_dir).as_posix()}')
                 lines.append("")
         else:
@@ -283,12 +269,18 @@ def main() -> int:
 
         lines.append("@endgantt")
         target = gantt_dir / f"{slug}.puml"
-        target.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-        print(f"Wrote {target}", flush=True)
+        outputs[target] = "\n".join(lines).rstrip() + "\n"
 
-    sync_confluence_export(gantt_dir)
+    sync_confluence_export(gantt_dir, outputs)
+    overlay.publish_outputs(outputs)
+    for path in outputs:
+        print(f"Wrote {path}", flush=True)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        raise SystemExit(1)

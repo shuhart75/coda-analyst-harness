@@ -7,9 +7,11 @@ from pathlib import Path
 
 from workspace_paths import team_path
 import math
+import json
 import os
 import re
 import sys
+import tempfile
 
 
 ROLE_COLORS = {
@@ -305,7 +307,12 @@ def load_story_map(feature_dir: Path) -> list[StoryMap]:
     for row in rows:
         story_id = clean_cell(row.get("Story ID", ""))
         if not story_id:
-            continue
+            raise ValueError(f"{path}: требуется Story ID")
+        duration = clean_cell(row.get("Baseline Duration (дн)", ""))
+        if not re.fullmatch(r"[1-9]\d*", duration):
+            raise ValueError(f"{path}: требуется положительная целая Baseline Duration (дн)")
+        if clean_cell(row.get("Actualization State", "")).lower() not in {"virtual", "mixed", "materialized", "done", "real"}:
+            raise ValueError(f"{path}: неизвестный Actualization State")
         result.append(
             StoryMap(
                 story_id=story_id,
@@ -455,23 +462,65 @@ def explicit_executor(task: Task, team_resources: dict[str, list[str]]) -> str:
     return normalized
 
 
+def validate_task_row(row: dict[str, str], path: Path) -> None:
+    for column in ("Summary", "Kind", "Role", "Estimate (дн)", "Status", "Progress %"):
+        if not clean_cell(row.get(column, "")):
+            raise ValueError(f"{path}: требуется заполненное поле {column}")
+    if normalize_role(row["Role"]) not in ROLE_COLORS or row["Kind"].lower() not in {"real", "virtual"}:
+        raise ValueError(f"{path}: неизвестный Role или Kind")
+    estimate = clean_cell(row["Estimate (дн)"]).replace(",", ".")
+    if not re.fullmatch(r"\d+(?:\.\d+)?", estimate) or not math.isfinite(float(estimate)) or float(estimate) <= 0:
+        raise ValueError(f"{path}: Estimate (дн) должна быть положительным числом")
+    progress = clean_cell(row["Progress %"])
+    if not re.fullmatch(r"\d+", progress) or not 0 <= int(progress) <= 100:
+        raise ValueError(f"{path}: Progress % должен быть целым числом от 0 до 100")
+    for column in ("Planned Start", "Planned Finish", "Actual Start", "Actual Finish"):
+        value = clean_cell(row.get(column, ""))
+        if value and not parse_date(value):
+            raise ValueError(f"{path}: неверная дата {column}")
+    for prefix in ("Planned", "Actual"):
+        start = parse_date(row.get(f"{prefix} Start", ""))
+        finish = parse_date(row.get(f"{prefix} Finish", ""))
+        if start and finish and finish < start:
+            raise ValueError(f"{path}: окончание {prefix} раньше начала")
+    if int(progress) > 0 and not (parse_date(row.get("Actual Start", "")) or parse_date(row.get("Planned Start", ""))):
+        raise ValueError(f"{path}: для начатой задачи требуется дата начала из источника")
+
+
 def load_tasks(feature_dir: Path) -> dict[str, Task]:
     tasks: dict[str, Task] = {}
-    for path in sorted(feature_dir.glob("slices/*/execution/tasks.md")):
-        rows = first_table_with(path, "Jira")
+    tracker_roles: set[tuple[str, str]] = set()
+    registry = feature_dir / "execution/tasks.md"
+    paths = ([registry] if registry.exists() else []) + sorted(feature_dir.glob("slices/*/execution/tasks.md"))
+    for path in paths:
+        rows = first_table_with(path, "Task ID") or first_table_with(path, "Jira")
+        if not rows:
+            raise ValueError(f"{path}: нет непустого реестра Task ID/Jira; Гант сохранён")
         for row in rows:
             tracker_key = clean_cell(row.get("Jira", ""))
-            if not tracker_key:
-                continue
+            if tracker_key in {"-", "—"}:
+                tracker_key = ""
+            explicit_id = clean_cell(row.get("Task ID", ""))
+            if explicit_id in {"-", "—"}:
+                explicit_id = ""
+            if not tracker_key and not explicit_id:
+                raise ValueError(f"{path}: требуется Task ID или подтверждённый Jira")
+            if path == registry or "Task ID" in row:
+                validate_task_row(row, path)
             status = clean_cell(row.get("Status", "planned"))
             progress_value = row.get("Progress %", "")
             progress = parse_int(progress_value, progress_from_status(status)) if progress_value else progress_from_status(status)
             kind = clean_cell(row.get("Kind", "virtual")).lower()
             role = clean_cell(row.get("Role", ""))
             normalized_role = normalize_role(role)
-            task_id = f"{tracker_key}/{normalized_role}" if kind == "real" and normalized_role in ROLE_COLORS else tracker_key
+            task_id = explicit_id or (f"{tracker_key}/{normalized_role}" if kind == "real" and normalized_role in ROLE_COLORS else tracker_key)
             if task_id in tasks:
                 raise ValueError(f"Duplicate execution work item: {task_id}")
+            pair = (tracker_key, normalized_role)
+            if tracker_key and pair in tracker_roles:
+                raise ValueError(f"Duplicate tracker role: {tracker_key}/{normalized_role}")
+            if tracker_key:
+                tracker_roles.add(pair)
             tasks[task_id] = Task(
                 task_id=task_id,
                 tracker_key=tracker_key,
@@ -488,7 +537,8 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
                 progress=progress,
                 related_stories=split_list(row.get("Related Stories", "")),
             )
-    for path in sorted(feature_dir.glob("slices/*/execution/task-candidates.md")):
+    candidates = feature_dir / "execution/task-candidates.md"
+    for path in ([candidates] if candidates.exists() else []) + sorted(feature_dir.glob("slices/*/execution/task-candidates.md")):
         rows = first_table_with(path, "Candidate ID")
         russian = False
         if not rows:
@@ -498,6 +548,8 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
             task_id = clean_cell(row.get("Идентификатор" if russian else "Candidate ID", ""))
             if not task_id:
                 continue
+            if task_id in tasks:
+                raise ValueError(f"Duplicate execution work item: {task_id}")
             status = clean_cell(row.get("Статус" if russian else "Status", "proposed"))
             tasks[task_id] = Task(
                 task_id=task_id,
@@ -999,41 +1051,84 @@ def render_feature(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def main() -> int:
-    if len(sys.argv) < 3:
-        usage()
-        return 1
-
-    project_root = Path(sys.argv[1])
-    quarter_id = sys.argv[2]
+def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str] | None = None) -> dict[Path, str]:
+    project_root = project_root.resolve()
+    if not re.fullmatch(r"\d{4}-Q[1-4]", quarter_id):
+        raise ValueError("Неверный идентификатор квартала")
+    target_dir = project_root / "planning" / quarter_id / "gantt/includes/actual-progress"
+    mapping_path = target_dir.parent.parent / "actual-progress-features.json"
+    feature_map = {}
+    if mapping_path.exists():
+        payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1 or not isinstance(payload.get("features"), dict):
+            raise ValueError(f"{mapping_path}: ожидается schema_version=1 и объект features")
+        feature_map = payload["features"]
+        if any(not isinstance(value, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", value) for pair in feature_map.items() for value in pair):
+            raise ValueError(f"{mapping_path}: неверный slug")
+    if feature_slugs is None:
+        feature_slugs = sorted({
+            path.name for path in (project_root / "features").iterdir()
+            if path.is_dir() and (
+                (path / "planning/actualization.md").exists() or (path / "execution").exists()
+                or list(path.glob("slices/*/execution/tasks.md"))
+            )
+        } | {path.stem.removeprefix("FEATURE-") for path in target_dir.glob("FEATURE-*.puml")})
+        feature_slugs = [slug for slug in feature_slugs if slug not in feature_map.values() or slug in feature_map]
+        feature_slugs = sorted(set(feature_slugs) | set(feature_map))
+    if any(not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug) for slug in feature_slugs):
+        raise ValueError("Неверный slug функциональности")
+    sources = [feature_map.get(slug, slug) for slug in feature_slugs]
+    if len(set(sources)) != len(sources):
+        raise ValueError("Одна функциональность назначена нескольким файлам Ганта")
     closed_days = load_closed_days(project_root, quarter_id)
     team_resources = load_team_resources(project_root)
-    if len(sys.argv) > 3:
-        feature_slugs = sys.argv[3:]
-    else:
-        feature_slugs = [path.name for path in sorted((project_root / "features").iterdir()) if path.is_dir()]
-
     feature_tasks: dict[str, dict[str, Task]] = {}
     scoped_tasks: dict[str, Task] = {}
+    aliases: set[str] = set()
     for feature_slug in feature_slugs:
-        feature_dir = project_root / "features" / feature_slug
+        feature_dir = project_root / "features" / feature_map.get(feature_slug, feature_slug)
         if not feature_dir.exists():
-            continue
+            raise ValueError(f"{feature_dir}: функциональность не найдена; проверь actual-progress-features.json")
+        stories = load_story_map(feature_dir)
+        if not stories:
+            raise ValueError(f"{feature_dir}: нет непустой planning/actualization.md; существующий Гант сохранён")
         tasks = load_tasks(feature_dir)
+        story_ids = {story.story_id for story in stories}
+        for story in stories:
+            alias = f"STORY_{to_alias(story.story_id)}"
+            if alias in aliases:
+                raise ValueError(f"Повторяющийся идентификатор PlantUML: {alias}")
+            aliases.add(alias)
+            if not parse_date(story.baseline_start) or story.baseline_duration <= 0:
+                raise ValueError(f"{feature_dir}: неверные исходные даты истории {story.story_id}")
+            references = story.replaced_by + story.residual_virtual_tasks
+            for reference in references:
+                if reference in tasks and any(task.task_id != reference and task.tracker_key == reference for task in tasks.values()):
+                    raise ValueError(f"{feature_dir}: неоднозначная ссылка Task ID/Jira {reference}")
+                if reference not in tasks and not any(task.tracker_key == reference for task in tasks.values()):
+                    raise ValueError(f"{feature_dir}: история {story.story_id} ссылается на отсутствующую задачу {reference}")
+            if story.state in {"materialized", "mixed", "done", "real"} and not mapped_task_ids(story, tasks):
+                raise ValueError(f"{feature_dir}: отсутствует состав истории {story.story_id}")
+            if any(dependency not in story_ids for dependency in story.depends_on):
+                raise ValueError(f"{feature_dir}: неизвестная зависимость истории {story.story_id}")
+        if not tasks and ((feature_dir / "execution/actual-progress.md").exists() or list(feature_dir.glob("execution/tasks/*.md"))):
+            raise ValueError(f"{feature_dir}: индивидуальные карточки и сводка не заменяют execution/tasks.md")
+        for task in tasks.values():
+            alias = f"TASK_{to_alias(task.task_id)}"
+            if not to_alias(task.task_id) or alias in aliases:
+                raise ValueError(f"Повторяющийся или пустой идентификатор PlantUML: {alias}")
+            aliases.add(alias)
+            if any(story_id not in story_ids for story_id in task.related_stories):
+                raise ValueError(f"{feature_dir}: задача {task.task_id} ссылается на неизвестную историю")
         feature_tasks[feature_slug] = tasks
         for task_id, task in tasks.items():
             scoped_tasks[f"{feature_slug}/{task_id}"] = task
 
     scoped_schedules = task_schedules(scoped_tasks, closed_days, harness_today(), team_resources)
 
-    target_dir = project_root / "planning" / quarter_id / "gantt/includes/actual-progress"
-    target_dir.mkdir(parents=True, exist_ok=True)
-
+    outputs: dict[Path, str] = {}
     for feature_slug in feature_slugs:
-        feature_dir = project_root / "features" / feature_slug
-        if not feature_dir.exists():
-            print(f"Skip missing feature: {feature_slug}")
-            continue
+        feature_dir = project_root / "features" / feature_map.get(feature_slug, feature_slug)
         target = target_dir / f"FEATURE-{feature_slug}.puml"
         tasks = feature_tasks.get(feature_slug, {})
         schedules = {
@@ -1041,19 +1136,58 @@ def main() -> int:
             for task_id in tasks
             if f"{feature_slug}/{task_id}" in scoped_schedules
         }
+        if any(task.status.lower() != "superseded" and task_id not in schedules for task_id, task in tasks.items()):
+            raise ValueError(f"{feature_dir}: не для каждой задачи определена дата начала; Гант сохранён")
         content = render_feature(feature_dir, feature_slug, closed_days, tasks, schedules)
         if content is None:
-            if target.exists():
-                target.unlink()
-                print(f"Removed stale {target}")
-            else:
-                print(f"Skip feature without actualization map: {feature_slug}")
-            continue
-        target.write_text(content, encoding="utf-8")
-        print(f"Wrote {target}")
+            raise ValueError(f"{feature_dir}: источники изменились во время генерации")
+        outputs[target] = content
+    return outputs
 
+
+def atomic_write(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def publish_outputs(outputs: dict[Path, str]) -> None:
+    previous = {path: path.read_bytes() if path.exists() else None for path in outputs}
+    written: list[Path] = []
+    try:
+        for path, content in outputs.items():
+            if previous[path] == content.encode("utf-8"):
+                continue
+            atomic_write(path, content.encode("utf-8"))
+            written.append(path)
+    except OSError:
+        for path in reversed(written):
+            if previous[path] is None:
+                path.unlink()
+            else:
+                atomic_write(path, previous[path])
+        raise
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        usage()
+        return 1
+    outputs = prepare_outputs(Path(sys.argv[1]), sys.argv[2], sys.argv[3:] or None)
+    publish_outputs(outputs)
+    for path in outputs:
+        print(f"Wrote {path}")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        raise SystemExit(1)

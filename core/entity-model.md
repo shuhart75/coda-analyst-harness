@@ -43,7 +43,7 @@ Actualization states:
 
 Mapping fields:
 - `replaced_by`: implementation task ids that replace the planning story.
-- `mapping_mode`: `explicit` when the user stated the replacement, `inferred` when LLM mapped it by feature/role/summary.
+- `mapping_mode`: `explicit` for a confirmed replacement; legacy `inferred` records a semantic mapping, not proof of analyst approval. Verify its source before using it to resolve disputed story membership.
 - `residual_virtual_tasks`: virtual execution items that remain visible on actual-progress.
 
 ## Exchange revision
@@ -64,7 +64,8 @@ It records existing behavior, implemented behavior, differences, remaining work,
 ## Implementation task
 
 Analyst-side actual execution tracking artifact with fields such as:
-- Jira key
+- internal Task ID, unique across loaded registries and rendered aliases
+- optional confirmed Jira key, never a fabricated key for local work
 - summary
 - kind: `real` or `virtual`
 - role: `AN`, `BE`, `FE`, or `QA`
@@ -76,6 +77,8 @@ Analyst-side actual execution tracking artifact with fields such as:
 - progress %
 - related/replaced planning stories
 - optional description
+
+The canonical registry is `features/<feature>/execution/tasks.md`; existing slice registries remain readable without creating new slices. A real local task may have no tracker key. Individual task cards and progress summaries supplement the registry, not replace it. Preserve unknown facts and ask the analyst rather than inventing estimates, story membership or person-to-resource mappings.
 
 Not-started implementation tasks have `Progress % = 0` and no actual dates. In generated actual-progress gantt views, not-started tasks are rendered no earlier than the current date marker, frontend tasks are delayed until backend/API work in the same feature has had a 3-open-day lead, and resources are capacity-scheduled from `PROJECT_ROOT/planning/team.md` at no more than 100% per open workday.
 

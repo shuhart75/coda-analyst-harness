@@ -359,7 +359,8 @@ Partial rollback:
 - Preserve user edits; do not revert unrelated changes.
 - Run all workflow tools from `HARNESS_ROOT/scripts/` and pass the resolved `PROJECT_ROOT` as the project root.
 - Before the final response after file edits, and always before a commit, review the current-turn diff for necessity, correctness and conciseness. Fix in-scope issues; report or ask about issues that are out of mode, touch unrelated user changes, or require a business decision.
-- After planning/execution gantt edits, run `scripts/sync-quarter-gantt.py <project>/planning/<quarter>/gantt` when available.
+- After planning gantt edits, run `scripts/sync-quarter-gantt.py <project>/planning/<quarter>/gantt` when available.
+- In execution-update use `scripts/sync-quarter-gantt.py <project>/planning/<quarter>/gantt --actual-only`. Follow the source gate in `modes/execution-update.md`; incomplete sources block generation without deleting existing overlays or rewriting approved plans.
 - After structural edits, run `scripts/validate-structure.py <project>` and `scripts/validate-links.py <project>` when available.
 - If validation fails, fix the cause or report the exact residual issue.
 

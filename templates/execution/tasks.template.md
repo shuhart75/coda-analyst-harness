@@ -1,14 +1,19 @@
 # Implementation tasks
 
-Feature: `../../feature.md`  
-Slice: `../slice.md`  
+Feature: `../feature.md`
+
 Дата обновления: `<YYYY-MM-DD>`
 
 ## Правила
 - Summary по возможности совпадает с Jira summary.
-- Этот файл является source of truth для execution-данных по данному slice.
+- Канонический путь: `features/<feature>/execution/tasks.md`. Индивидуальные карточки и `actual-progress.md` дополняют реестр, но не заменяют вход генератора.
+- Существующие `slices/*/execution/tasks.md` читаются совместно с реестром функциональности. Не создавай срезы ради генератора и не дублируй задачи между реестрами.
 - Фактические даты и исполнитель обновляются по мере работы.
-- `Kind` показывает, является ли execution item реальной Jira-задачей (`real`) или временной виртуальной задачей (`virtual`).
+- `Kind` различает реальную работу (`real`, в том числе без трекера) и виртуальную задачу (`virtual`).
+- `Task ID` является внутренним идентификатором; `Jira` заполняется только реальным подтверждённым ключом Jira. Для локальной задачи обязателен `Task ID`, а `Jira` остаётся пустым.
+- Если `Task ID` не заполнен, реальная задача трекера получает идентификатор `<Jira>/<Role>`. Явный идентификатор сохраняется; он должен быть уникален, в том числе после преобразования в PlantUML alias.
+- Например, локальный `QA-COHORT` получает alias `TASK_QA_COHORT`; это не ключ Jira или SberTrek. Связь со старым alias сохраняй в Notes.
+- Обязательны Summary, Kind, Role, положительная числовая Estimate (дн), Status и целый Progress % от 0 до 100. Для начатой задачи нужна подтверждённая дата Actual Start или Planned Start. Не придумывай оценки и даты ради заполнения таблицы.
 - `Progress %` нужен для информативного actual-progress gantt.
 - `Role` хранит семантическую роль: `AN`, `BE`, `FE`, `QA`.
 - Одна реальная задача трекера может повторяться в таблице по одному разу для каждой заполненной ролевой оценки. Пара `Jira + Role` уникальна и создаёт отдельную полосу Ганта с внутренним идентификатором `<Jira>/<Role>`.
@@ -25,10 +30,10 @@ Slice: `../slice.md`
 
 ## Реестр задач
 
-| Jira | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories | Details |
-|---|---|---|---|---:|---|---|---|---|---|---|---:|---|---|
-| PROJECT-123 | AN <analysis part of task> | real | AN | 1 | A1 | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 | STORY-XXX-001 |  |
-| PROJECT-123 | BE <backend part of task> | real | BE | 3 | B1 | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 | STORY-XXX-001 |  |
-| PROJECT-123 | QA <testing part of task> | real | QA | 2 | Q1 | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 | STORY-XXX-001 |  |
+| Task ID | Jira | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories | Details |
+|---|---|---|---|---|---:|---|---|---|---|---|---|---:|---|---|
+| PROJECT-123/AN | PROJECT-123 | AN <анализ> | real | AN | <оценка> | A1 | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 | STORY-XXX-AN |  |
+| PROJECT-123/BE | PROJECT-123 | BE <разработка> | real | BE | <оценка> | B1 | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 | STORY-XXX-BE |  |
+| LOCAL-QA-001 |  | QA <проверка> | real | QA | <оценка> | TBD_Q | <YYYY-MM-DD> | <YYYY-MM-DD> |  |  | planned | 0 |  |  |
 
 ## Notes

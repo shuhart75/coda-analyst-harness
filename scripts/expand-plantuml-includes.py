@@ -20,15 +20,17 @@ def clean_include_target(value: str) -> str:
     return value
 
 
-def expand_file(path: Path, stack: list[Path]) -> list[str]:
+def expand_file(path: Path, stack: list[Path], contents: dict[Path, str] | None = None) -> list[str]:
     resolved = path.resolve()
+    contents = contents or {}
     if resolved in stack:
         cycle = " -> ".join(str(item) for item in stack + [resolved])
         raise ValueError(f"PlantUML include cycle detected: {cycle}")
 
     lines: list[str] = []
     next_stack = stack + [resolved]
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    text = contents[resolved] if resolved in contents else path.read_text(encoding="utf-8")
+    for raw_line in text.splitlines():
         match = INCLUDE_RE.match(raw_line)
         if not match:
             lines.append(raw_line)
@@ -36,12 +38,12 @@ def expand_file(path: Path, stack: list[Path]) -> list[str]:
 
         include_target = clean_include_target(match.group(1))
         include_path = (path.parent / include_target).resolve()
-        if not include_path.exists():
+        if not include_path.exists() and include_path not in contents:
             raise FileNotFoundError(f"Included file not found: {include_target} from {path}")
 
         marker = include_path.relative_to(path.parent).as_posix() if include_path.is_relative_to(path.parent) else str(include_path)
         lines.append(f"' BEGIN INCLUDE: {marker}")
-        lines.extend(expand_file(include_path, next_stack))
+        lines.extend(expand_file(include_path, next_stack, contents))
         lines.append(f"' END INCLUDE: {marker}")
 
     return lines

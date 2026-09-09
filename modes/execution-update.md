@@ -50,6 +50,21 @@ with the role. If all role estimates are empty and only the general estimate is
 present, use it only for one unambiguous `AN`, `BE` or `FE` prefix. Do not split a
 general estimate between roles, and do not add it when any role estimate exists.
 
+## Source and generation gate
+
+- Resolve analytics through `workspace.py project-root`. Check Git state with `git -C "$PROJECT_ROOT"`, never from the harness root. An ignored analytics directory in the harness does not mean its files are untracked in their own repository.
+- Read the canonical feature registry `features/<feature>/execution/tasks.md` and `planning/actualization.md`. Legacy slice registries remain supported; do not create slices or duplicate tasks merely to satisfy tooling.
+- Individual task cards and `execution/actual-progress.md` are supporting evidence, not interchangeable generator inputs. Prepare a missing registry only from confirmed facts and explicit authorization; do not guess missing estimates, dates, story membership or resource assignments.
+- Use `templates/execution/tasks.template.md` for internal `Task ID` and optional confirmed `Jira`. A local real QA task needs no tracker key. `QA-COHORT` renders as `TASK_QA_COHORT`; record the preserved alias in Notes, not as a tracker-issued identifier.
+- The existing weighted story formula and membership rules are documented in `templates/planning/actualization.template.md`. PlantUML comments, task titles and numerical coincidence do not prove membership. Show source paths and excerpts; ask one missing-rule question at a time.
+- A task's tracker Updated, document update date and actual completion date have distinct meanings. Do not synchronize them merely because the dates differ.
+- A rendered resource lane is not proof of an actual assignee. Auto-allocation applies to not-started work, not retroactive person-to-lane attribution.
+- If an overlay slug differs from the feature directory, require an explicit mapping in `planning/<quarter>/gantt/actual-progress-features.json`: `{"schema_version":1,"features":{"<overlay-slug>":"<feature-directory>"}}`. Never infer this mapping from similar names.
+- In execution-update run only `python3 scripts/sync-quarter-gantt.py "$PROJECT_ROOT/planning/<quarter>/gantt" --actual-only` from HARNESS_ROOT. It regenerates actual-progress includes, the view and Confluence export without writing approved quarter/commander plans.
+- All selected sources and Confluence includes are checked before publication. Missing or ambiguous sources block the whole run and preserve existing outputs; no automatic stale-overlay deletion. Ordinary write errors trigger rollback of earlier writes; this is not a crash-atomic multi-file transaction.
+- On a block, stop generation, show the actual project diff and missing sources. Do not patch installed generators, invent tracker keys or build an alternate slice structure during project work.
+- After success inspect the diff, run applicable checks and verify Confluence parity through the standard `expand-plantuml-includes.py`. Do not commit, submit or merge unless authorized.
+
 ## Actual-progress scheduling rules
 
 - Do not hand-edit generated actual-progress PlantUML for task dates. Update execution markdown, then regenerate the gantt.
@@ -63,7 +78,7 @@ general estimate between roles, and do not add it when any role estimate exists.
 - Actual started or completed tasks keep their actual dates, even when those dates are in the past.
 - Keep `PLAN ...` story bars visible; they are the commander-plan baseline, not a replacement for the execution task layer.
 - Never rewrite approved quarter or commander plans to absorb later scope. Render later work as task candidates or actual tasks.
-- Regenerate actual-progress through `scripts/sync-quarter-gantt.py`; it also refreshes `actual-progress-confluence.puml`.
+- Regenerate actual-progress through `scripts/sync-quarter-gantt.py --actual-only`; it also refreshes `actual-progress-confluence.puml`.
 
 ## Small-context execution rules
 

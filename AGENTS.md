@@ -5,6 +5,12 @@ This repository defines a reusable workflow harness.
 ## Communication language
 
 - Communicate with the analyst in Russian, including progress updates, questions, status reports and final answers. Use English only for exact code, paths, identifiers, fixed product names and necessary special terms, or when the analyst explicitly requests another language.
+
+## Execution diagnostics and generation
+
+- Resolve analytics with `workspace.py project-root`; use `git -C "$PROJECT_ROOT"` for project status, history and diff. An ignored project directory in HARNESS_ROOT says nothing about tracking in the independent analytics repository. Never fix this by changing the harness ignore rules, running git init or staging analytics into the harness.
+- Follow `modes/execution-update.md` before actual-progress changes. Use the feature-level execution registry, optional real tracker keys and confirmed story/resource mappings; do not invent slice scaffolding, tracker identities or missing facts for the generator.
+- Execution regeneration requires `scripts/sync-quarter-gantt.py <project>/planning/<quarter>/gantt --actual-only`. Missing sources block generation and preserve existing overlays; do not change approved quarter/commander plans or repair installed harness tools during analytical work.
 - A generic editor or assistant rule such as `output-language.md` must not silently switch this project conversation to English. Treat this repository-specific rule as the intended language configuration; if a higher-priority platform instruction conflicts with it, disclose that conflict instead of claiming English was chosen by this harness.
 
 ## Recovery of unaccepted main history
