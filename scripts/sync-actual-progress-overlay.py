@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from actualization_baseline import baseline_rows
+from actual_progress_scope import load_forecast_scope
 from workspace_paths import approved_plans_path, team_path
 import math
 import json
@@ -1089,15 +1090,8 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
     if not re.fullmatch(r"\d{4}-Q[1-4]", quarter_id):
         raise ValueError("Неверный идентификатор квартала")
     target_dir = project_root / "planning" / quarter_id / "gantt/includes/actual-progress"
-    mapping_path = target_dir.parent.parent / "actual-progress-features.json"
-    feature_map = {}
-    if mapping_path.exists():
-        payload = json.loads(mapping_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or payload.get("schema_version") != 1 or not isinstance(payload.get("features"), dict):
-            raise ValueError(f"{mapping_path}: ожидается schema_version=1 и объект features")
-        feature_map = payload["features"]
-        if any(not isinstance(value, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", value) for pair in feature_map.items() for value in pair):
-            raise ValueError(f"{mapping_path}: неверный slug")
+    scope = load_forecast_scope(project_root, quarter_id)
+    feature_map = scope.features
     if feature_slugs is None:
         feature_slugs = sorted({
             path.name for path in (project_root / "features").iterdir()
@@ -1107,12 +1101,13 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             )
         } | {path.stem.removeprefix("FEATURE-") for path in target_dir.glob("FEATURE-*.puml")})
         feature_slugs = [slug for slug in feature_slugs if slug not in feature_map.values() or slug in feature_map]
-        feature_slugs = sorted(set(feature_slugs) | set(feature_map))
+    feature_slugs = sorted(set(feature_slugs) | set(feature_map) | set(scope.exclusions))
     if any(not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug) for slug in feature_slugs):
         raise ValueError("Неверный slug функциональности")
     sources = [feature_map.get(slug, slug) for slug in feature_slugs]
     if len(set(sources)) != len(sources):
         raise ValueError("Одна функциональность назначена нескольким файлам Ганта")
+    feature_slugs = [slug for slug in feature_slugs if slug not in scope.exclusions]
     closed_days = load_closed_days(project_root, quarter_id)
     team_resources = load_team_resources(project_root)
     feature_tasks: dict[str, dict[str, Task]] = {}

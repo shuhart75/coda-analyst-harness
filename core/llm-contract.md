@@ -222,7 +222,7 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - If the user says "replace story X by tasks A/B", update `actualization.md` and the tasks' `Related Stories`.
 - If mapping is obvious from semantics, role and naming, use `mapping_mode = inferred`; if the user stated it explicitly, use `explicit`.
 - Story progress is calculated from linked execution tasks, weighted by estimate.
-- Baseline availability is independent of task materialization. Follow `templates/planning/actualization.template.md`: explicit `Baseline State = absent` permits empty baseline cells and task rendering without a PLAN story bar; missing maps and unknown task estimates/dates still block generation.
+- Baseline availability is independent of task materialization. Follow `templates/planning/actualization.template.md`: explicit `Baseline State = absent` permits empty baseline cells and task rendering without a PLAN story bar; missing maps and unknown task estimates/dates still block generation. The only plan-only exception is an explicit quarter forecast exclusion under `core/forecast-exclusions.md`; never infer it from missing sources.
 - QA work uses the dedicated QA estimate from the analyst or tracker, never a guessed share of FE work. FE plus QA estimates produce two execution rows. If the QA estimate is lost, ask the analyst. Display QA titles without the tracker-number prefix, preserving internal ids and source-key metadata.
 - Story finish is the latest finish of linked replacement tasks; if a story has no replacement tasks, keep its commander baseline start unless `Depends On` says otherwise.
 - Render a real task once even when it maps to multiple stories.

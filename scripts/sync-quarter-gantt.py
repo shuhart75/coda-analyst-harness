@@ -8,6 +8,8 @@ import importlib.util
 import re
 import sys
 
+from actual_progress_scope import load_forecast_scope
+
 
 VIEWS = [
     ("quarter-plan", "План на квартал"),
@@ -233,13 +235,16 @@ def main() -> int:
     order = feature_order(gantt_dir)
     overlay = load_tool("sync-actual-progress-overlay")
     outputs = sync_actual_progress_overlays(gantt_dir, overlay)
+    scope = load_forecast_scope(project_root(gantt_dir), gantt_dir.parent.name)
 
     for slug, title in VIEWS:
         if args.actual_only and slug != "actual-progress":
             continue
         include_dir = gantt_dir / "includes" / slug
         include_files = sorted(
-            set(include_dir.glob("FEATURE-*.puml")) | {path for path in outputs if path.parent == include_dir},
+            set(include_dir.glob("FEATURE-*.puml"))
+            | {path for path in outputs if path.parent == include_dir}
+            | (set(scope.baselines.values()) if slug == "actual-progress" else set()),
             key=lambda path: (
                 order.get(feature_slug(path), len(order)),
                 feature_slug(path),
@@ -261,7 +266,14 @@ def main() -> int:
 
         if include_files:
             for path in include_files:
-                lines.append(f"-- {feature_title(gantt_dir, path, outputs)} --")
+                title = feature_title(gantt_dir, path, outputs)
+                excluded_slug = feature_slug(path)
+                if slug == "actual-progress" and excluded_slug in scope.exclusions:
+                    decision = scope.exclusions[excluded_slug]
+                    title += f" (PLAN; вне прогноза {gantt_dir.parent.name})"
+                    lines.append(f"' Forecast exclusion: {excluded_slug}; {decision['reason']}")
+                    lines.append(f"' Decision source: {decision['source']}")
+                lines.append(f"-- {title} --")
                 lines.append(f'!include {path.relative_to(gantt_dir).as_posix()}')
                 lines.append("")
         else:
