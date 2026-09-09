@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import importlib
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 
 
 class ForecastExclusionTests(unittest.TestCase):
@@ -153,7 +157,7 @@ class ForecastExclusionTests(unittest.TestCase):
         self.assert_blocked_without_writes("Повторяющийся ключ JSON")
         for payload in (
             [], {"schema_version": True, "features": {}},
-            {"schema_version": 3, "features": {}},
+            {"schema_version": 4, "features": {}},
             {**self.payload, "forecast_exclusions": []},
             {**self.payload, "forecast_exclusions": {"../optimizer": self.decision}},
             {**self.payload, "features": {"optimizer": "../optimizer"}},
@@ -236,14 +240,14 @@ class ForecastExclusionTests(unittest.TestCase):
         self.run_generator(standalone=True)
         self.assertEqual(self.snapshot(), before)
 
-    def test_active_feature_renders_normally_alongside_excluded_plan(self) -> None:
+    def add_active_feature(self, task_id: str = "LOCAL-FE") -> tuple[Path, Path]:
         feature = self.root / "features/active"
         mapping = feature / "planning/actualization.md"
         mapping.parent.mkdir(parents=True)
         mapping.write_text(
             "| Story ID | Summary | Baseline Start | Baseline Duration (дн) | Actualization State | Mapping Mode | Replaced By | Residual Virtual Tasks | Depends On |\n"
             "|---|---|---|---|---|---|---|---|---|\n"
-            "| STORY-ACTIVE | Active work | 2026-09-01 | 5 | materialized | explicit | LOCAL-FE | | |\n",
+            f"| STORY-ACTIVE | Active work | 2026-09-01 | 5 | materialized | explicit | {task_id} | | |\n",
             encoding="utf-8",
         )
         registry = feature / "execution/tasks.md"
@@ -251,11 +255,15 @@ class ForecastExclusionTests(unittest.TestCase):
         registry.write_text(
             "| Task ID | Jira | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories |\n"
             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
-            "| LOCAL-FE | | Active work | real | FE | 5 | F1 | | | 2026-08-31 | 2026-09-07 | completed | 100 | STORY-ACTIVE |\n",
+            f"| {task_id} | | Active work | real | FE | 5 | F1 | | | 2026-08-31 | 2026-09-07 | completed | 100 | STORY-ACTIVE |\n",
             encoding="utf-8",
         )
         self.payload["features"]["active-plan"] = "active"
         self.write_config()
+        return mapping, registry
+
+    def test_active_feature_renders_normally_alongside_excluded_plan(self) -> None:
+        mapping, registry = self.add_active_feature()
         before = self.snapshot()
         self.run_generator()
         export = (self.gantt / "actual-progress-confluence.puml").read_text()
@@ -281,6 +289,307 @@ class ForecastExclusionTests(unittest.TestCase):
         self.payload["forecast_exclusions"].clear()
         self.write_config()
         self.assert_blocked_without_writes("нет непустой planning/actualization.md")
+
+    def preserve_forecast(self) -> None:
+        self.context.write_text("Keep the existing forecast without approving its dates again.\n", encoding="utf-8")
+        self.forecast = self.gantt / "includes/actual-progress/FORECAST-shared.puml"
+        self.forecast.parent.mkdir(parents=True)
+        self.forecast.write_bytes((
+            "' Existing shared forecast\r\n"
+            "-- Other feature --\r\n"
+            "[AN Other] as [TASK_OTHER_AN] on {A1} starts 2026/08/31\r\n"
+            "[TASK_OTHER_AN] ends 2026/08/31\r\n"
+            "[TASK_OTHER_AN] is 100% completed\r\n"
+            "[FORECAST FE Other] as [FORECAST_OTHER_FE] on {F1} starts 2026/10/26\r\n"
+            "[FORECAST_OTHER_FE] ends 2026/11/20\r\n"
+            "-- Optimizer --\r\n"
+            "[FORECAST BE Optimizer] as [FORECAST_OPT_BE] on {B3} starts 2026/10/07\r\n"
+            "[FORECAST_OPT_BE] ends 2026/10/27\r\n"
+            "[FORECAST FE Optimizer] as [FORECAST_OPT_FE] on {F1} starts 2026/10/26\r\n"
+            "[FORECAST_OPT_FE] ends 2026/11/20\r\n"
+            "[FORECAST QA Optimizer] as [FORECAST_OPT_QA] on {Q1} starts 2026/10/06\r\n"
+            "[FORECAST_OPT_QA] ends 2026/10/13\r\n"
+            "[FORECAST_OPT_QA] is 0% completed\r\n"
+        ).encode("utf-8"))
+        self.decision = {
+            "state": "preserve-existing", "analyst_confirmed": True,
+            "reason": "Keep existing bars; future quarter not decided.",
+            "source": "features/optimizer/planning/planning-context.md",
+            "include": self.forecast.relative_to(self.gantt).as_posix(),
+            "sha256": hashlib.sha256(self.forecast.read_bytes()).hexdigest(),
+            "aliases": ["FORECAST_OPT_BE", "FORECAST_OPT_FE", "FORECAST_OPT_QA"],
+        }
+        self.payload = {"schema_version": 3, "features": {}, "preserved_forecasts": {"optimizer": self.decision}}
+        self.write_config()
+        (self.gantt / "actual-progress.puml").write_text(
+            "@startgantt\n!include includes/actual-progress/FORECAST-shared.puml\n@endgantt\n",
+            encoding="utf-8",
+        )
+
+    def test_preserved_forecast_retains_shared_file_dates_and_export_connection(self) -> None:
+        self.preserve_forecast()
+        before = self.snapshot()
+        self.run_generator()
+        after = self.snapshot()
+        self.assertEqual(set(before), set(after))
+        self.assertEqual({path for path in before if before[path] != after[path]}, {
+            "planning/2026-Q3/gantt/actual-progress.puml",
+            "planning/2026-Q3/gantt/actual-progress-confluence.puml",
+        })
+        view = (self.gantt / "actual-progress.puml").read_text()
+        export = (self.gantt / "actual-progress-confluence.puml").read_text()
+        self.assertEqual(view.count("!include includes/actual-progress/FORECAST-shared.puml"), 1)
+        self.assertIn(self.forecast.read_text(), export)
+        self.assertIn("TASK_OTHER_AN", export)
+        self.assertIn("[OPT_PLAN] starts 2026/08/03", export)
+        self.assertNotIn("вне прогноза", view)
+        self.assertIn("Preserved forecast: optimizer", view)
+        self.assertFalse((self.feature / "planning/actualization.md").exists())
+        self.assertFalse((self.forecast.parent / "FEATURE-optimizer.puml").exists())
+        expander = importlib.import_module("expand-plantuml-includes")
+        expanded = "\n".join(expander.expand_file(self.gantt / "actual-progress.puml", [])).rstrip() + "\n"
+        self.assertEqual(export, expanded)
+        self.run_generator()
+        self.assertEqual(self.snapshot(), after)
+        self.run_generator(standalone=True)
+        self.assertEqual(self.snapshot(), after)
+
+    def test_preserved_forecast_already_in_nested_preamble_is_not_included_twice(self) -> None:
+        self.preserve_forecast()
+        preamble = self.gantt / "preamble/actual-progress.puml"
+        preamble.parent.mkdir()
+        preamble.write_text("!include nested.puml\n", encoding="utf-8")
+        nested = preamble.with_name("nested.puml")
+        nested.write_text("!include ../includes/actual-progress/FORECAST-shared.puml\n", encoding="utf-8")
+        (self.gantt / "actual-progress.puml").write_text(
+            "@startgantt\n!include preamble/actual-progress.puml\n@endgantt\n", encoding="utf-8",
+        )
+        before = self.snapshot()
+        self.run_generator()
+        view = (self.gantt / "actual-progress.puml").read_text()
+        self.assertNotIn("!include includes/actual-progress/FORECAST-shared.puml", view)
+        export = (self.gantt / "actual-progress-confluence.puml").read_text()
+        self.assertEqual(export.count("as [FORECAST_OPT_BE]"), 1)
+        for path in (preamble, nested, self.forecast):
+            self.assertEqual(path.read_bytes(), before[str(path.relative_to(self.root))])
+        self.run_generator()
+        self.assertEqual((self.gantt / "actual-progress-confluence.puml").read_text(), export)
+
+    def test_preservation_requires_existing_single_connection(self) -> None:
+        self.preserve_forecast()
+        current = self.gantt / "actual-progress.puml"
+        original = current.read_text()
+        for content in (
+            "@startgantt\n@endgantt\n",
+            original.replace("@endgantt", "!include includes/actual-progress/FORECAST-shared.puml\n@endgantt"),
+        ):
+            with self.subTest(content=content):
+                current.write_text(content, encoding="utf-8")
+                self.assert_blocked_without_writes("ровно один раз")
+        current.unlink()
+        self.assert_blocked_without_writes("нет существующего Ганта")
+
+    def test_preserved_forecast_missing_or_changed_blocks_both_entrypoints(self) -> None:
+        self.preserve_forecast()
+        content = self.forecast.read_bytes()
+        self.forecast.write_bytes(content.replace(b"2026/10/07", b"2026/10/08"))
+        self.assert_blocked_without_writes("sha256")
+        self.assert_blocked_without_writes("sha256", standalone=True)
+        self.forecast.unlink()
+        self.assert_blocked_without_writes("прогноз не найден")
+
+    def test_preservation_rejects_invalid_decisions_and_old_schema(self) -> None:
+        self.preserve_forecast()
+        original = dict(self.decision)
+        for updates in (
+            {"state": "outside-quarter"}, {"analyst_confirmed": False}, {"reason": ""},
+            {"include": "../../2026-Q4/gantt/includes/actual-progress/FORECAST-shared.puml"},
+            {"include": "includes/actual-progress/FEATURE-optimizer.puml"},
+            {"include": str(self.forecast)}, {"include": None},
+            {"sha256": "bad"}, {"sha256": None}, {"aliases": []},
+            {"aliases": ["TASK_OTHER_AN"]}, {"aliases": ["FORECAST_ABSENT"]},
+            {"aliases": ["FORECAST_OPT_BE", "FORECAST_OPT_BE"]},
+            {"aliases": "FORECAST_OPT_BE"}, {"unexpected": True},
+        ):
+            with self.subTest(updates=updates):
+                self.payload["preserved_forecasts"]["optimizer"] = {**original, **updates}
+                self.write_config()
+                self.assert_blocked_without_writes("ERROR:")
+        for field in original:
+            self.payload["preserved_forecasts"]["optimizer"] = {
+                key: value for key, value in original.items() if key != field
+            }
+            self.write_config()
+            self.assert_blocked_without_writes("нужны state")
+        self.payload["preserved_forecasts"]["optimizer"] = original
+        for version in (1, 2):
+            self.payload["schema_version"] = version
+            self.write_config()
+            self.assert_blocked_without_writes("поля конфигурации")
+
+    def test_preservation_and_exclusion_for_same_feature_conflict(self) -> None:
+        self.preserve_forecast()
+        self.payload["forecast_exclusions"] = {"optimizer": {
+            key: value for key, value in self.decision.items() if key not in {"include", "sha256", "aliases"}
+        }}
+        self.payload["forecast_exclusions"]["optimizer"]["state"] = "outside-quarter"
+        self.write_config()
+        self.assert_blocked_without_writes("несовместимы")
+
+    def test_preservation_cannot_hide_execution_evidence_or_approved_map(self) -> None:
+        self.preserve_forecast()
+        for relative in (
+            "features/optimizer/planning/actualization.md",
+            "features/optimizer/execution-context.md",
+            "features/optimizer/execution/tasks.md",
+            "features/optimizer/slices/legacy/execution/task-candidates.md",
+            "planning/2026-Q3/gantt/includes/actual-progress/FEATURE-optimizer.puml",
+        ):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("Existing evidence\n", encoding="utf-8")
+                self.assert_blocked_without_writes("не может скрыть")
+                path.unlink()
+        snapshot = self.root / "planning/approved-plans/2026-Q2.json"
+        snapshot.parent.mkdir()
+        snapshot.write_text(json.dumps({"actualization_baseline": {
+            "features/optimizer/planning/actualization.md": [["STORY-OPT", "2026-08-03", "5"]],
+        }}), encoding="utf-8")
+        self.assert_blocked_without_writes("approved actualization baseline")
+
+    def test_preservation_still_validates_other_features(self) -> None:
+        self.preserve_forecast()
+        (self.root / "features/missing-map").mkdir()
+        self.plan.with_name("FEATURE-missing-map.puml").write_text("Other plan\n", encoding="utf-8")
+        self.assert_blocked_without_writes("нет непустой planning/actualization.md")
+
+    def test_preservation_of_shared_file_for_two_features_connects_once(self) -> None:
+        self.preserve_forecast()
+        (self.root / "features/other").mkdir()
+        self.plan.with_name("FEATURE-other.puml").write_text(
+            self.plan.read_text().replace("OPT_PLAN", "OTHER_PLAN"), encoding="utf-8",
+        )
+        self.payload["preserved_forecasts"]["other"] = {**self.decision, "aliases": ["FORECAST_OTHER_FE"]}
+        self.write_config()
+        self.run_generator()
+        view = (self.gantt / "actual-progress.puml").read_text()
+        self.assertEqual(view.count("!include includes/actual-progress/FORECAST-shared.puml"), 1)
+        self.payload["preserved_forecasts"]["other"]["aliases"] = ["FORECAST_OPT_BE"]
+        self.write_config()
+        self.assert_blocked_without_writes("повторное назначение aliases")
+
+    def test_preservation_rejects_nested_or_conditional_forecast_content(self) -> None:
+        self.preserve_forecast()
+        original = self.forecast.read_text()
+        for directive in ("!include other.puml", "!if false", "!includeurl https://example.test/forecast", "@startgantt", "@endgantt"):
+            self.forecast.write_text(directive + "\n" + original, encoding="utf-8")
+            self.decision["sha256"] = hashlib.sha256(self.forecast.read_bytes()).hexdigest()
+            self.write_config()
+            self.assert_blocked_without_writes("без директив препроцессора")
+
+    def test_preservation_does_not_silently_drop_other_manual_forecasts(self) -> None:
+        self.preserve_forecast()
+        other = self.forecast.with_name("FORECAST-unregistered.puml")
+        other.write_text("[Other] as [UNREGISTERED] starts 2026/10/01\n", encoding="utf-8")
+        current = self.gantt / "actual-progress.puml"
+        current.write_text(current.read_text().replace(
+            "@endgantt", "!include includes/actual-progress/FORECAST-unregistered.puml\n@endgantt",
+        ), encoding="utf-8")
+        self.assert_blocked_without_writes("прежние FORECAST-подключения")
+
+    def test_preservation_rejects_alias_collision_with_plan(self) -> None:
+        self.preserve_forecast()
+        self.plan.write_text(self.plan.read_text().replace("OPT_PLAN", "FORECAST_OPT_BE"), encoding="utf-8")
+        self.assert_blocked_without_writes("Повторяющиеся идентификаторы PlantUML")
+
+    def test_preservation_configuration_removal_restores_missing_map_gate(self) -> None:
+        self.preserve_forecast()
+        self.run_generator()
+        self.payload["preserved_forecasts"].clear()
+        self.write_config()
+        self.assert_blocked_without_writes("нет непустой planning/actualization.md")
+
+    def test_preserved_forecast_and_active_execution_regenerate_together(self) -> None:
+        self.preserve_forecast()
+        mapping, registry = self.add_active_feature()
+        before = self.snapshot()
+        self.run_generator()
+        export = (self.gantt / "actual-progress-confluence.puml").read_text()
+        self.assertIn("as [TASK_LOCAL_FE]", export)
+        self.assertIn("[TASK_LOCAL_FE] ends 2026/09/07", export)
+        self.assertIn(self.forecast.read_text(), export)
+        for path in (mapping, registry, self.forecast, self.plan, self.context):
+            self.assertEqual(path.read_bytes(), before[str(path.relative_to(self.root))])
+        after = self.snapshot()
+        self.run_generator()
+        self.assertEqual(self.snapshot(), after)
+        registry.write_text(registry.read_text().replace("| FE | 5 |", "| FE | |"), encoding="utf-8")
+        self.assert_blocked_without_writes("уточни оценку у аналитика")
+
+    def test_preservation_rejects_collision_with_generated_task(self) -> None:
+        self.preserve_forecast()
+        self.add_active_feature("OTHER-AN")
+        self.assert_blocked_without_writes("Повторяющиеся идентификаторы PlantUML")
+
+    def test_preservation_rejects_forecast_symlink(self) -> None:
+        self.preserve_forecast()
+        original = self.forecast.with_name("FORECAST-original.puml")
+        self.forecast.rename(original)
+        self.forecast.symlink_to(original.name)
+        self.assert_blocked_without_writes("прогноз не найден внутри квартала")
+
+    def test_preservation_checks_duplicate_alias_declarations_not_comments(self) -> None:
+        self.preserve_forecast()
+        original = self.forecast.read_text()
+        self.forecast.write_text(original + "' [Comment] as [FORECAST_OPT_BE]\n", encoding="utf-8")
+        self.decision["sha256"] = hashlib.sha256(self.forecast.read_bytes()).hexdigest()
+        self.write_config()
+        self.run_generator()
+        self.forecast.write_text(original + "[Duplicate] as [FORECAST_OPT_BE] starts 2026/10/07\n", encoding="utf-8")
+        self.decision["sha256"] = hashlib.sha256(self.forecast.read_bytes()).hexdigest()
+        self.write_config()
+        self.assert_blocked_without_writes("объявлены несколько раз")
+
+    def test_preserved_file_change_during_generation_blocks_before_publication(self) -> None:
+        self.preserve_forecast()
+        before = self.snapshot()
+        quarter = importlib.import_module("sync-quarter-gantt")
+        export = quarter.sync_confluence_export
+        def change_after_export(gantt_dir, contents):
+            export(gantt_dir, contents)
+            self.forecast.write_bytes(self.forecast.read_bytes() + b"' external change\n")
+        with patch.object(quarter, "sync_confluence_export", side_effect=change_after_export):
+            with patch.object(sys, "argv", ["sync-quarter-gantt.py", str(self.gantt), "--actual-only"]):
+                with self.assertRaisesRegex(ValueError, "sha256"):
+                    quarter.main()
+        after = self.snapshot()
+        self.assertEqual(
+            {path for path in before if before[path] != after[path]},
+            {str(self.forecast.relative_to(self.root))},
+        )
+
+    def test_preservation_write_failure_rolls_back_generated_roots(self) -> None:
+        self.preserve_forecast()
+        before = self.snapshot()
+        quarter = importlib.import_module("sync-quarter-gantt")
+        load_tool = quarter.load_tool
+        overlay = load_tool("sync-actual-progress-overlay")
+        atomic_write = overlay.atomic_write
+        failed = False
+        def fail_once(path, content):
+            nonlocal failed
+            if path.name == "actual-progress-confluence.puml" and not failed:
+                failed = True
+                raise OSError("injected failure")
+            atomic_write(path, content)
+        with patch.object(quarter, "load_tool", side_effect=lambda name: overlay if name == "sync-actual-progress-overlay" else load_tool(name)):
+            with patch.object(overlay, "atomic_write", side_effect=fail_once):
+                with patch.object(sys, "argv", ["sync-quarter-gantt.py", str(self.gantt), "--actual-only"]):
+                    with self.assertRaisesRegex(OSError, "injected failure"):
+                        quarter.main()
+        self.assertTrue(failed)
+        self.assertEqual(self.snapshot(), before)
 
 
 if __name__ == "__main__":

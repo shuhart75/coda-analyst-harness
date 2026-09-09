@@ -77,6 +77,7 @@ All three views should keep the same feature lanes where possible.
 - baseline for schedule comparison is `commander-plan`
 - baseline stories stay visible even after execution is materialized into real Jira tasks
 - an analyst-confirmed exclusion of a plan-only feature from the quarter forecast follows `core/forecast-exclusions.md`: retain the original plan visibly, do not invent cancellation or a future delivery period, and never hide existing execution evidence
+- preserving existing forecast bars without recalculation follows `core/forecast-preservation.md`: preserve their shared include and its connection, do not treat preservation as renewed date approval or an exclusion, and never bypass lost execution sources
 - when no story baseline exists, record explicit `Baseline State = absent` in actualization.md; keep execution tasks and their links without inventing PLAN bars or changing approved views
 - current execution layer may contain:
   - `virtual` execution items

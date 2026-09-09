@@ -1101,13 +1101,13 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             )
         } | {path.stem.removeprefix("FEATURE-") for path in target_dir.glob("FEATURE-*.puml")})
         feature_slugs = [slug for slug in feature_slugs if slug not in feature_map.values() or slug in feature_map]
-    feature_slugs = sorted(set(feature_slugs) | set(feature_map) | set(scope.exclusions))
+    feature_slugs = sorted(set(feature_slugs) | set(feature_map) | set(scope.exclusions) | set(scope.preserved))
     if any(not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug) for slug in feature_slugs):
         raise ValueError("Неверный slug функциональности")
     sources = [feature_map.get(slug, slug) for slug in feature_slugs]
     if len(set(sources)) != len(sources):
         raise ValueError("Одна функциональность назначена нескольким файлам Ганта")
-    feature_slugs = [slug for slug in feature_slugs if slug not in scope.exclusions]
+    feature_slugs = [slug for slug in feature_slugs if slug not in scope.exclusions and slug not in scope.preserved]
     closed_days = load_closed_days(project_root, quarter_id)
     team_resources = load_team_resources(project_root)
     feature_tasks: dict[str, dict[str, Task]] = {}

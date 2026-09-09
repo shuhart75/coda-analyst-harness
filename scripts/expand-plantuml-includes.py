@@ -20,12 +20,19 @@ def clean_include_target(value: str) -> str:
     return value
 
 
-def expand_file(path: Path, stack: list[Path], contents: dict[Path, str] | None = None) -> list[str]:
+def expand_file(
+    path: Path,
+    stack: list[Path],
+    contents: dict[Path, str] | None = None,
+    dependencies: list[Path] | None = None,
+) -> list[str]:
     resolved = path.resolve()
     contents = contents or {}
     if resolved in stack:
         cycle = " -> ".join(str(item) for item in stack + [resolved])
         raise ValueError(f"PlantUML include cycle detected: {cycle}")
+    if dependencies is not None:
+        dependencies.append(resolved)
 
     lines: list[str] = []
     next_stack = stack + [resolved]
@@ -43,7 +50,7 @@ def expand_file(path: Path, stack: list[Path], contents: dict[Path, str] | None 
 
         marker = include_path.relative_to(path.parent).as_posix() if include_path.is_relative_to(path.parent) else str(include_path)
         lines.append(f"' BEGIN INCLUDE: {marker}")
-        lines.extend(expand_file(include_path, next_stack, contents))
+        lines.extend(expand_file(include_path, next_stack, contents, dependencies))
         lines.append(f"' END INCLUDE: {marker}")
 
     return lines

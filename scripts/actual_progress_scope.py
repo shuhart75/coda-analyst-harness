@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
+import hashlib
 import json
 import re
 
@@ -13,6 +15,19 @@ class ForecastScope:
     features: dict[str, str]
     exclusions: dict[str, dict]
     baselines: dict[str, Path]
+    preserved: dict[str, dict]
+    includes: dict[str, Path]
+
+
+def declared_aliases(text: str) -> list[str]:
+    return re.findall(r"^\s*\[[^\]\r\n]+\]\s+as\s+\[([A-Za-z_][A-Za-z0-9_]*)\]", text, re.MULTILINE)
+
+
+def expanded_with_paths(path: Path, contents: dict[Path, str] | None = None) -> tuple[str, list[Path]]:
+    dependencies: list[Path] = []
+    expander = import_module("expand-plantuml-includes")
+    lines = expander.expand_file(path, [], contents, dependencies)
+    return "\n".join(lines).rstrip() + "\n", dependencies
 
 
 def valid_slug(value: object) -> bool:
@@ -33,13 +48,15 @@ def load_forecast_scope(project_root: Path, quarter_id: str) -> ForecastScope:
     gantt_dir = project_root / "planning" / quarter_id / "gantt"
     config_path = gantt_dir / "actual-progress-features.json"
     if not config_path.exists():
-        return ForecastScope({}, {}, {})
+        return ForecastScope({}, {}, {}, {}, {})
     payload = json.loads(config_path.read_text(encoding="utf-8"), object_pairs_hook=unique_keys)
-    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] not in {1, 2}:
-        raise ValueError(f"{config_path}: ожидается schema_version=1 или 2")
+    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] not in {1, 2, 3}:
+        raise ValueError(f"{config_path}: ожидается schema_version=1, 2 или 3")
     allowed = {"schema_version", "features"}
-    if payload["schema_version"] == 2:
+    if payload["schema_version"] >= 2:
         allowed.add("forecast_exclusions")
+    if payload["schema_version"] == 3:
+        allowed.add("preserved_forecasts")
     if set(payload) - allowed or not isinstance(payload.get("features"), dict):
         raise ValueError(f"{config_path}: неверные поля конфигурации")
     feature_map = payload["features"]
@@ -48,13 +65,25 @@ def load_forecast_scope(project_root: Path, quarter_id: str) -> ForecastScope:
     exclusions = payload.get("forecast_exclusions", {})
     if not isinstance(exclusions, dict) or any(not valid_slug(slug) for slug in exclusions):
         raise ValueError(f"{config_path}: неверный forecast_exclusions")
+    preserved = payload.get("preserved_forecasts", {})
+    if not isinstance(preserved, dict) or any(not valid_slug(slug) for slug in preserved):
+        raise ValueError(f"{config_path}: неверный preserved_forecasts")
+    if set(exclusions) & set(preserved):
+        raise ValueError(f"{config_path}: сохранение и исключение одной фичи несовместимы")
 
     baselines = {}
-    for slug, decision in exclusions.items():
-        if not isinstance(decision, dict) or set(decision) != {"state", "reason", "source", "analyst_confirmed"}:
-            raise ValueError(f"{config_path}: {slug}: нужны state, reason, source, analyst_confirmed")
-        if decision["state"] != "outside-quarter" or decision["analyst_confirmed"] is not True:
-            raise ValueError(f"{config_path}: {slug}: исключение требует outside-quarter и подтверждения аналитика")
+    includes = {}
+    claimed_aliases: set[str] = set()
+    for slug, decision in {**exclusions, **preserved}.items():
+        fields = {"state", "reason", "source", "analyst_confirmed"}
+        state = "preserve-existing" if slug in preserved else "outside-quarter"
+        if slug in preserved:
+            fields.update({"include", "sha256", "aliases"})
+        if not isinstance(decision, dict) or set(decision) != fields:
+            raise ValueError(f"{config_path}: {slug}: нужны state, reason, source, analyst_confirmed"
+                             + (", include, sha256, aliases" if slug in preserved else ""))
+        if decision["state"] != state or decision["analyst_confirmed"] is not True:
+            raise ValueError(f"{config_path}: {slug}: требуется {state} и подтверждение аналитика")
         for field in ("reason", "source"):
             value = decision[field]
             if not isinstance(value, str) or not value.strip() or len(value.splitlines()) != 1 or any(ord(char) < 32 for char in value):
@@ -82,12 +111,12 @@ def load_forecast_scope(project_root: Path, quarter_id: str) -> ForecastScope:
                 evidence.append(overlay_path)
         if evidence:
             paths = ", ".join(sorted(str(path.relative_to(project_root)) for path in evidence))
-            raise ValueError(f"{config_path}: {slug}: исключение плановой фичи не может скрыть execution-источники или прежний Гант: {paths}")
+            raise ValueError(f"{config_path}: {slug}: решение о прогнозе не может скрыть execution-источники или прежний Гант: {paths}")
         relative_map = actualization.relative_to(project_root).as_posix()
         for snapshot_path in approved_plans_path(project_root).glob("*.json"):
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
             if relative_map in snapshot.get("actualization_baseline", {}):
-                raise ValueError(f"{actualization}: approved actualization baseline was modified; исключение запрещено")
+                raise ValueError(f"{actualization}: approved actualization baseline was modified; обход карты запрещён")
         for view in ("commander-plan", "quarter-plan"):
             baseline = gantt_dir / "includes" / view / f"FEATURE-{slug}.puml"
             if baseline.exists():
@@ -97,4 +126,40 @@ def load_forecast_scope(project_root: Path, quarter_id: str) -> ForecastScope:
                 break
         if slug not in baselines:
             raise ValueError(f"{config_path}: {slug}: нет исходного commander-plan/quarter-plan include")
-    return ForecastScope(feature_map, exclusions, baselines)
+        if slug in preserved:
+            include = decision["include"]
+            if not isinstance(include, str) or not re.fullmatch(r"includes/actual-progress/FORECAST-[a-zA-Z0-9_-]+\.puml", include):
+                raise ValueError(f"{config_path}: {slug}: include должен указывать на FORECAST-файл текущего квартала")
+            path = gantt_dir / include
+            if path.resolve() != path or not path.is_file():
+                raise ValueError(f"{config_path}: {slug}: сохранённый прогноз не найден внутри квартала")
+            content = path.read_bytes()
+            checksum = decision["sha256"]
+            if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+                raise ValueError(f"{config_path}: {slug}: неверный sha256")
+            if hashlib.sha256(content).hexdigest() != checksum:
+                raise ValueError(f"{path}: sha256 сохранённого прогноза не совпадает; нужна проверка изменения")
+            text = content.decode("utf-8")
+            if not text.strip() or re.search(r"^\s*(?:!|@(?:start|end))", text, re.MULTILINE | re.IGNORECASE):
+                raise ValueError(f"{path}: нужен непустой конечный FORECAST-блок без директив препроцессора и границ диаграммы")
+            aliases = decision["aliases"]
+            if not isinstance(aliases, list) or not aliases or any(
+                not isinstance(alias, str) or not re.fullmatch(r"FORECAST_[A-Za-z0-9_]+", alias) for alias in aliases
+            ):
+                raise ValueError(f"{config_path}: {slug}: нужны явные aliases прогнозных полос")
+            if len(set(aliases)) != len(aliases) or claimed_aliases.intersection(aliases):
+                raise ValueError(f"{config_path}: {slug}: повторное назначение aliases")
+            declarations = declared_aliases(text)
+            if any(declarations.count(alias) != 1 for alias in aliases):
+                raise ValueError(f"{path}: подтверждённые aliases отсутствуют или объявлены несколько раз")
+            claimed_aliases.update(aliases)
+            includes[slug] = path
+    if preserved:
+        current = gantt_dir / "actual-progress.puml"
+        if not current.is_file():
+            raise ValueError(f"{current}: нет существующего Ганта для сохранения прогноза")
+        _, dependencies = expanded_with_paths(current)
+        for path in set(includes.values()):
+            if dependencies.count(path) != 1:
+                raise ValueError(f"{path}: прогноз должен быть подключён в существующий Гант ровно один раз")
+    return ForecastScope(feature_map, exclusions, baselines, preserved, includes)

@@ -8,7 +8,7 @@ import importlib.util
 import re
 import sys
 
-from actual_progress_scope import load_forecast_scope
+from actual_progress_scope import declared_aliases, expanded_with_paths, load_forecast_scope
 
 
 VIEWS = [
@@ -251,7 +251,8 @@ def main() -> int:
             ),
         )
         preambles = preamble_files(gantt_dir, slug)
-        start = view_start(quarter_start, preambles + include_files, outputs)
+        preserved_paths = sorted(set(scope.includes.values())) if slug == "actual-progress" else []
+        start = view_start(quarter_start, preambles + include_files + preserved_paths, outputs)
         lines = header_lines(
             gantt_dir,
             title,
@@ -273,17 +274,51 @@ def main() -> int:
                     title += f" (PLAN; вне прогноза {gantt_dir.parent.name})"
                     lines.append(f"' Forecast exclusion: {excluded_slug}; {decision['reason']}")
                     lines.append(f"' Decision source: {decision['source']}")
+                elif slug == "actual-progress" and excluded_slug in scope.preserved:
+                    title += " (PLAN)"
                 lines.append(f"-- {title} --")
                 lines.append(f'!include {path.relative_to(gantt_dir).as_posix()}')
                 lines.append("")
         else:
             lines.append("' No feature include files yet")
 
+        if preserved_paths:
+            dependencies: list[Path] = []
+            for path in preambles + include_files:
+                _, included = expanded_with_paths(path, outputs)
+                dependencies.extend(included)
+            for feature, decision in scope.preserved.items():
+                lines.append(f"' Preserved forecast: {feature}; {decision['reason']}")
+                lines.append(f"' Decision source: {decision['source']}; aliases: {', '.join(decision['aliases'])}")
+            for path in preserved_paths:
+                if dependencies.count(path) > 1:
+                    raise ValueError(f"{path}: повторное подключение сохранённого прогноза")
+                if path not in dependencies:
+                    lines.append(f'!include {path.relative_to(gantt_dir).as_posix()}')
+                    lines.append("")
+
         lines.append("@endgantt")
         target = gantt_dir / f"{slug}.puml"
         outputs[target] = "\n".join(lines).rstrip() + "\n"
 
     sync_confluence_export(gantt_dir, outputs)
+    if scope.preserved:
+        expanded, dependencies = expanded_with_paths(gantt_dir / "actual-progress.puml", outputs)
+        _, previous_dependencies = expanded_with_paths(gantt_dir / "actual-progress.puml")
+        lost_forecasts = {
+            path for path in previous_dependencies
+            if path.name.startswith("FORECAST-") and path not in dependencies
+        }
+        if lost_forecasts:
+            raise ValueError("Будут потеряны прежние FORECAST-подключения; требуется явное решение: "
+                             + ", ".join(str(path) for path in sorted(lost_forecasts)))
+        if any(dependencies.count(path) != 1 for path in set(scope.includes.values())):
+            raise ValueError("Сохранённый прогноз должен быть подключён ровно один раз")
+        aliases = declared_aliases(expanded)
+        if len(set(aliases)) != len(aliases):
+            raise ValueError("Повторяющиеся идентификаторы PlantUML в сохранённом прогнозе и Ганте")
+        if load_forecast_scope(project_root(gantt_dir), gantt_dir.parent.name) != scope:
+            raise ValueError("Решение о сохранении прогноза изменилось во время генерации")
     overlay.publish_outputs(outputs)
     for path in outputs:
         print(f"Wrote {path}", flush=True)
