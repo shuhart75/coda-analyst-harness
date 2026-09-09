@@ -76,6 +76,7 @@ All three views should keep the same feature lanes where possible.
 
 - baseline for schedule comparison is `commander-plan`
 - baseline stories stay visible even after execution is materialized into real Jira tasks
+- when no story baseline exists, record explicit `Baseline State = absent` in actualization.md; keep execution tasks and their links without inventing PLAN bars or changing approved views
 - current execution layer may contain:
   - `virtual` execution items
   - `real` implementation tasks

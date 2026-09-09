@@ -41,6 +41,11 @@ Actualization states:
 - `materialized`: the story is fully covered by real implementation tasks.
 - `done`: the story is complete.
 
+Baseline availability is separate: `Baseline State = present` requires baseline
+start/duration; explicit `absent` requires both empty and documented source checks.
+An absent baseline does not imply virtual work and never authorizes inventing a
+plan. Actual tasks and their confirmed story links remain valid without a PLAN bar.
+
 Mapping fields:
 - `replaced_by`: implementation task ids that replace the planning story.
 - `mapping_mode`: `explicit` for a confirmed replacement; legacy `inferred` records a semantic mapping, not proof of analyst approval. Verify its source before using it to resolve disputed story membership.

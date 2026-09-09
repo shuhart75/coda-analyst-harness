@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
-from workspace_paths import team_path
+from actualization_baseline import baseline_rows
+from workspace_paths import approved_plans_path, team_path
 import math
 import json
 import os
@@ -99,12 +100,13 @@ class StoryMap:
     story_id: str
     summary: str
     baseline_start: str
-    baseline_duration: int
+    baseline_duration: int | None
     state: str
     mapping_mode: str
     replaced_by: list[str]
     residual_virtual_tasks: list[str]
     depends_on: list[str]
+    baseline_state: str = "present"
 
 
 @dataclass
@@ -309,7 +311,13 @@ def load_story_map(feature_dir: Path) -> list[StoryMap]:
         if not story_id:
             raise ValueError(f"{path}: требуется Story ID")
         duration = clean_cell(row.get("Baseline Duration (дн)", ""))
-        if not re.fullmatch(r"[1-9]\d*", duration):
+        baseline_start = clean_cell(row.get("Baseline Start", ""))
+        baseline_state = clean_cell(row.get("Baseline State", "present")).lower()
+        if baseline_state not in {"present", "absent"}:
+            raise ValueError(f"{path}: Baseline State должен быть present или absent")
+        if baseline_state == "absent" and (baseline_start or duration):
+            raise ValueError(f"{path}: absent требует пустых Baseline Start и Baseline Duration (дн)")
+        if baseline_state == "present" and not re.fullmatch(r"[1-9]\d*", duration):
             raise ValueError(f"{path}: требуется положительная целая Baseline Duration (дн)")
         if clean_cell(row.get("Actualization State", "")).lower() not in {"virtual", "mixed", "materialized", "done", "real"}:
             raise ValueError(f"{path}: неизвестный Actualization State")
@@ -317,13 +325,14 @@ def load_story_map(feature_dir: Path) -> list[StoryMap]:
             StoryMap(
                 story_id=story_id,
                 summary=clean_cell(row.get("Summary", story_id)),
-                baseline_start=clean_cell(row.get("Baseline Start", "")),
-                baseline_duration=parse_int(row.get("Baseline Duration (дн)", ""), 1),
+                baseline_start=baseline_start,
+                baseline_duration=int(duration) if baseline_state == "present" else None,
                 state=clean_cell(row.get("Actualization State", "virtual")).lower(),
                 mapping_mode=clean_cell(row.get("Mapping Mode", "explicit")).lower(),
                 replaced_by=split_list(row.get("Replaced By", "")),
                 residual_virtual_tasks=split_list(row.get("Residual Virtual Tasks", "")),
                 depends_on=split_list(row.get("Depends On", "")),
+                baseline_state=baseline_state,
             )
         )
     return result
@@ -462,15 +471,20 @@ def explicit_executor(task: Task, team_resources: dict[str, list[str]]) -> str:
     return normalized
 
 
+def validate_estimate(value: str, path: Path, task_id: str) -> None:
+    estimate = clean_cell(value).replace(",", ".")
+    if not re.fullmatch(r"\d+(?:\.\d+)?", estimate) or not math.isfinite(float(estimate)) or float(estimate) <= 0:
+        raise ValueError(f"{path}: {task_id}: требуется положительная числовая оценка; уточни оценку у аналитика")
+
+
 def validate_task_row(row: dict[str, str], path: Path) -> None:
-    for column in ("Summary", "Kind", "Role", "Estimate (дн)", "Status", "Progress %"):
+    for column in ("Summary", "Kind", "Role", "Status", "Progress %"):
         if not clean_cell(row.get(column, "")):
             raise ValueError(f"{path}: требуется заполненное поле {column}")
     if normalize_role(row["Role"]) not in ROLE_COLORS or row["Kind"].lower() not in {"real", "virtual"}:
         raise ValueError(f"{path}: неизвестный Role или Kind")
-    estimate = clean_cell(row["Estimate (дн)"]).replace(",", ".")
-    if not re.fullmatch(r"\d+(?:\.\d+)?", estimate) or not math.isfinite(float(estimate)) or float(estimate) <= 0:
-        raise ValueError(f"{path}: Estimate (дн) должна быть положительным числом")
+    task_id = clean_cell(row.get("Task ID", "")) or f"{row.get('Jira', '')}/{row.get('Role', '')}"
+    validate_estimate(row.get("Estimate (дн)", ""), path, task_id)
     progress = clean_cell(row["Progress %"])
     if not re.fullmatch(r"\d+", progress) or not 0 <= int(progress) <= 100:
         raise ValueError(f"{path}: Progress % должен быть целым числом от 0 до 100")
@@ -537,6 +551,8 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
                 progress=progress,
                 related_stories=split_list(row.get("Related Stories", "")),
             )
+            if role_for_task(tasks[task_id]) == "QA":
+                validate_estimate(row.get("Estimate (дн)", ""), path, task_id)
     candidates = feature_dir / "execution/task-candidates.md"
     for path in ([candidates] if candidates.exists() else []) + sorted(feature_dir.glob("slices/*/execution/task-candidates.md")):
         rows = first_table_with(path, "Candidate ID")
@@ -567,6 +583,8 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
                 progress=0,
                 related_stories=split_list(row.get("Связанная плановая история" if russian else "Related Story", "")),
             )
+            if role_for_task(tasks[task_id]) == "QA":
+                validate_estimate(row.get("Оценка (дн)" if russian else "Estimate (дн)", ""), path, task_id)
     return tasks
 
 
@@ -832,14 +850,23 @@ def plantuml_label(value: str) -> str:
 def role_prefixed_summary(task: Task) -> str:
     role = role_for_task(task)
     summary = task.summary.strip()
+    if role == "QA":
+        summary = plantuml_label(summary)
+        summary = re.sub(r"^QA\s+", "", summary, flags=re.IGNORECASE)
+        if task.tracker_key:
+            summary = re.sub(
+                rf"^{re.escape(task.tracker_key)}(?:/(?:AN|BE|FE|QA))?(?:\s*[:\-]\s*|\s+)",
+                "", summary, flags=re.IGNORECASE,
+            )
     if role not in ROLE_COLORS:
         return plantuml_label(summary)
+    prefix_roles = set(ROLE_COLORS) if role == "QA" else {role}
     bracketed = re.match(r"^\s*\[\s*([^\]]+)\s*\]\s*", summary)
-    if bracketed and normalize_role(bracketed.group(1)) == role:
+    if bracketed and normalize_role(bracketed.group(1)) in prefix_roles:
         summary = summary[bracketed.end():].strip()
     else:
         plain = re.match(r"^\s*([^\s:_/\-]+)(?=[\s:_/\-])\s*[:_\-/]?\s*", summary)
-        if plain and normalize_role(plain.group(1)) == role:
+        if plain and normalize_role(plain.group(1)) in prefix_roles:
             summary = summary[plain.end():].strip()
     return plantuml_label(f"{role} {summary}")
 
@@ -979,6 +1006,12 @@ def render_story(
     story_ends: dict[str, date],
     closed_days: set[date],
 ) -> tuple[list[str], date | None]:
+    if story.baseline_state == "absent":
+        task_ids = mapped_task_ids(story, tasks)
+        finishes = [schedules[task_id].finish for task_id in task_ids if task_id in schedules and schedules[task_id].finish]
+        return [
+            f"' No approved baseline: {story.story_id}; progress={story_progress(story, tasks)}%; tasks={', '.join(task_ids)}",
+        ], max(finishes, default=None)
     start, finish = story_dates(story, tasks, schedules, story_ends, closed_days)
     if not start:
         return [f"' Skip story without start date: {story.story_id}"], None
@@ -1018,7 +1051,7 @@ def render_feature(
     lines = [
         f"' FEATURE: {feature_slug}",
         "' Actual-progress overlay:",
-        "' - STORY rows are commander-plan stories actualized by linked execution tasks",
+        "' - STORY bars require a recorded baseline; absent baselines keep task links and progress in comments only",
         "' - TASK rows are current execution tasks rendered once, with many-to-many links kept in markdown",
         "",
         "' Story layer",
@@ -1092,6 +1125,13 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         stories = load_story_map(feature_dir)
         if not stories:
             raise ValueError(f"{feature_dir}: нет непустой planning/actualization.md; существующий Гант сохранён")
+        actualization_path = feature_dir / "planning/actualization.md"
+        relative_map = actualization_path.relative_to(project_root).as_posix()
+        for snapshot_path in approved_plans_path(project_root).glob("*.json"):
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            expected = snapshot.get("actualization_baseline", {}).get(relative_map)
+            if expected is not None and baseline_rows(actualization_path) != expected:
+                raise ValueError(f"{actualization_path}: approved actualization baseline was modified")
         tasks = load_tasks(feature_dir)
         story_ids = {story.story_id for story in stories}
         for story in stories:
@@ -1099,7 +1139,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             if alias in aliases:
                 raise ValueError(f"Повторяющийся идентификатор PlantUML: {alias}")
             aliases.add(alias)
-            if not parse_date(story.baseline_start) or story.baseline_duration <= 0:
+            if story.baseline_state == "present" and (not parse_date(story.baseline_start) or not story.baseline_duration):
                 raise ValueError(f"{feature_dir}: неверные исходные даты истории {story.story_id}")
             references = story.replaced_by + story.residual_virtual_tasks
             for reference in references:
@@ -1107,7 +1147,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
                     raise ValueError(f"{feature_dir}: неоднозначная ссылка Task ID/Jira {reference}")
                 if reference not in tasks and not any(task.tracker_key == reference for task in tasks.values()):
                     raise ValueError(f"{feature_dir}: история {story.story_id} ссылается на отсутствующую задачу {reference}")
-            if story.state in {"materialized", "mixed", "done", "real"} and not mapped_task_ids(story, tasks):
+            if (story.baseline_state == "absent" or story.state in {"materialized", "mixed", "done", "real"}) and not mapped_task_ids(story, tasks):
                 raise ValueError(f"{feature_dir}: отсутствует состав истории {story.story_id}")
             if any(dependency not in story_ids for dependency in story.depends_on):
                 raise ValueError(f"{feature_dir}: неизвестная зависимость истории {story.story_id}")

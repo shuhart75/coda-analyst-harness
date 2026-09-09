@@ -17,14 +17,22 @@ def baseline_rows(path: Path) -> list[list[str]]:
     """
     rows: list[list[str]] = []
     inside_mapping = False
+    headers: list[str] = []
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         stripped = line.strip()
         if stripped.startswith("## "):
             inside_mapping = stripped.lower().startswith(MAPPING_SECTION_PREFIX)
+            headers = []
+            continue
+        if inside_mapping and stripped.startswith("| Story ID"):
+            headers = [cell.strip() for cell in stripped.strip("|").split("|")]
             continue
         if not inside_mapping or not stripped.startswith("| STORY-"):
             continue
         cells = [cell.strip() for cell in stripped.strip("|").split("|")]
         if len(cells) >= 4:
+            row = dict(zip(headers, cells))
+            if row.get("Baseline State", "").strip("`").lower() == "absent" and not cells[2] and not cells[3]:
+                continue
             rows.append([cells[0], cells[2], cells[3]])
     return rows

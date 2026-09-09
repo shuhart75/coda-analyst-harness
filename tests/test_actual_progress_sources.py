@@ -25,6 +25,7 @@ def load_tool(name: str):
 
 OVERLAY = load_tool("sync-actual-progress-overlay")
 EXPANDER = load_tool("expand-plantuml-includes")
+BASELINE = load_tool("actualization_baseline")
 HEADER = "| Task ID | Jira | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories |"
 SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
@@ -226,6 +227,157 @@ class ActualProgressSourcesTests(unittest.TestCase):
                     self.actual / "FEATURE-new.puml": "new file\n",
                     self.gantt / "actual-progress.puml": "new view\n",
                 })
+        self.assertEqual(self.snapshot(), before)
+
+    def absent_baseline(self) -> None:
+        self.map.write_text(
+            "## Mapping\n\n"
+            "| Story ID | Summary | Baseline Start | Baseline Duration (дн) | Actualization State | Mapping Mode | Replaced By | Residual Virtual Tasks | Depends On | Baseline State |\n"
+            "|---|---|---|---|---|---|---|---|---|---|\n"
+            "| STORY-COHORT | Delivery | | | materialized | explicit | ITEM-100/FE, QA-COHORT | | | absent |\n",
+            encoding="utf-8",
+        )
+
+    def test_explicit_absent_baseline_renders_tasks_without_plan_bars(self) -> None:
+        self.absent_baseline()
+        approved = {name: (self.gantt / (name + ".puml")).read_bytes() for name in ("quarter-plan", "commander-plan")}
+        before = self.map.read_bytes()
+        self.quarter()
+        content = self.target.read_text()
+        self.assertNotIn("[PLAN ", content)
+        self.assertNotIn("as [STORY_", content)
+        self.assertIn("No approved baseline: STORY-COHORT; progress=62%", content)
+        self.assertIn("TASK_ITEM_100_FE", content)
+        self.assertIn("TASK_QA_COHORT", content)
+        self.assertEqual(self.map.read_bytes(), before)
+        for name, contents in approved.items():
+            self.assertEqual((self.gantt / (name + ".puml")).read_bytes(), contents)
+        expanded = "\n".join(EXPANDER.expand_file(self.gantt / "actual-progress.puml", [])).rstrip() + "\n"
+        self.assertEqual((self.gantt / "actual-progress-confluence.puml").read_text(), expanded)
+        snapshot = self.snapshot()
+        self.quarter()
+        self.assertEqual(self.snapshot(), snapshot)
+
+    def test_absent_baseline_is_independent_of_actualization_state(self) -> None:
+        self.absent_baseline()
+        original = self.map.read_text()
+        for state in ("virtual", "mixed", "materialized", "done"):
+            with self.subTest(state=state):
+                self.map.write_text(original.replace("| materialized |", f"| {state} |"), encoding="utf-8")
+                story = OVERLAY.load_story_map(self.feature)[0]
+                self.assertEqual(story.baseline_state, "absent")
+                self.assertIsNone(story.baseline_duration)
+                self.assertEqual(story.state, state)
+                self.assertNotIn("[PLAN ", OVERLAY.prepare_outputs(self.root, "2026-Q3", ["cohorts"])[self.target])
+
+    def test_absent_baseline_with_dates_or_ambiguous_state_blocks(self) -> None:
+        self.absent_baseline()
+        original = self.map.read_text()
+        for contents in (
+            original.replace("| Delivery | | |", "| Delivery | 2026-09-01 | |"),
+            original.replace("| Delivery | | |", "| Delivery | | 5 |"),
+            original.replace("| absent |", "| unknown |"),
+            original.replace("| absent |", "| |"),
+        ):
+            with self.subTest(contents=contents):
+                self.map.write_text(contents, encoding="utf-8")
+                before = self.snapshot()
+                self.quarter(success=False)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_mixed_baselines_preserve_existing_plan_bars(self) -> None:
+        self.absent_baseline()
+        self.map.write_text(self.map.read_text() +
+            "| STORY-BASELINE | Planned | 2026-09-01 | 5 | virtual | explicit | | | | present |\n",
+            encoding="utf-8",
+        )
+        self.quarter()
+        content = self.target.read_text()
+        self.assertIn("as [STORY_STORY_BASELINE]", content)
+        self.assertNotIn("as [STORY_STORY_COHORT]", content)
+        self.assertEqual(BASELINE.baseline_rows(self.map), [["STORY-BASELINE", "2026-09-01", "5"]])
+
+    def test_approved_baseline_cannot_be_removed_using_absent(self) -> None:
+        snapshots = self.root / "planning/approved-plans"
+        snapshots.mkdir()
+        expected = [["STORY-COHORT", "2026-09-01", "5"]]
+        (snapshots / "2026-Q3.json").write_text(json.dumps({
+            "actualization_baseline": {"features/cohorts/planning/actualization.md": expected},
+        }), encoding="utf-8")
+        self.absent_baseline()
+        before = self.snapshot()
+        self.assertIn("approved actualization baseline was modified", self.quarter(success=False).stderr)
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/validate-planning.py"), str(self.root)],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("approved actualization baseline was modified", result.stdout)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_absent_baseline_does_not_waive_missing_qa_estimate(self) -> None:
+        self.absent_baseline()
+        self.registry.write_text(self.registry.read_text().replace("| QA | 2 |", "| QA | |"), encoding="utf-8")
+        before = self.snapshot()
+        self.assertIn("уточни оценку у аналитика", self.quarter(success=False).stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_absent_baseline_still_requires_explicit_task_membership(self) -> None:
+        self.absent_baseline()
+        self.map.write_text(self.map.read_text().replace(
+            "| materialized | explicit | ITEM-100/FE, QA-COHORT |",
+            "| virtual | explicit | |",
+        ), encoding="utf-8")
+        self.registry.write_text(self.registry.read_text().replace("STORY-COHORT", ""), encoding="utf-8")
+        before = self.snapshot()
+        self.assertIn("отсутствует состав истории", self.quarter(success=False).stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_qa_candidate_estimate_is_not_defaulted(self) -> None:
+        candidate = self.feature / "execution/task-candidates.md"
+        for header, row in (
+            ("Candidate ID | Summary | Role | Estimate (дн)", "LOCAL-QA | QA Check | QA |"),
+            ("Идентификатор | Краткое описание | Роль | Оценка (дн)", "LOCAL-QA | QA Check | QA |"),
+        ):
+            with self.subTest(header=header):
+                candidate.write_text(f"| {header} |\n|---|---|---|---|\n| {row} |\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "LOCAL-QA.*уточни оценку у аналитика"):
+                    OVERLAY.load_tasks(self.feature)
+
+    def test_legacy_qa_estimate_is_never_defaulted(self) -> None:
+        legacy = self.feature / "slices/legacy/execution/tasks.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(
+            "| Jira | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
+            "|---|---|---|---|---|---|---|---|\n"
+            "| ITEM-200 | QA Additional | real | QA | | 2026-09-01 | planned | 0 |\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "уточни оценку у аналитика"):
+            OVERLAY.load_tasks(self.feature)
+
+    def test_qa_label_omits_source_number_but_keeps_traceability(self) -> None:
+        original = self.registry.read_text()
+        for summary in ("[FE] List", "ITEM-100 FE List", "QA ITEM-100/QA FE List", "QA List"):
+            with self.subTest(summary=summary):
+                self.registry.write_text(original.replace(
+                    "| QA-COHORT | | Cross-feature check |", f"| | ITEM-100 | {summary} |",
+                ), encoding="utf-8")
+                tasks = OVERLAY.load_tasks(self.feature)
+                self.assertEqual(tasks["ITEM-100/QA"].tracker_key, "ITEM-100")
+                self.assertEqual(tasks["ITEM-100/QA"].estimate, 2)
+                self.assertEqual(tasks["ITEM-100/FE"].estimate, 5)
+                self.assertEqual(OVERLAY.role_prefixed_summary(tasks["ITEM-100/QA"]), "QA List")
+                schedules = OVERLAY.task_schedules(tasks, set(), OVERLAY.harness_today(), OVERLAY.DEFAULT_TEAM_RESOURCES)
+                self.assertTrue(OVERLAY.render_task(tasks["ITEM-100/QA"], schedules)[0].startswith("[QA List] as [TASK_ITEM_100_QA]"))
+
+    def test_absent_baseline_does_not_waive_missing_task_dates(self) -> None:
+        self.absent_baseline()
+        self.registry.write_text(self.registry.read_text().replace(
+            "| 2026-09-03 | 2026-09-09 | 2026-09-03 |", "| | | |",
+        ), encoding="utf-8")
+        before = self.snapshot()
+        self.assertIn("дата начала", self.quarter(success=False).stderr)
         self.assertEqual(self.snapshot(), before)
 
 

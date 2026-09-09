@@ -2,7 +2,7 @@
 
 ## Goal
 
-Track real work after planning.
+Track real work with or without a recorded planning baseline.
 
 ## Main artifacts
 
@@ -34,6 +34,13 @@ Track real work after planning.
 
 When a returned developer task is materialized into real work, keep `returns/tasks.md` as the factual source. The analyst may use or replace optional developer estimates and may link Jira keys, but does not edit the returned decomposition or block development.
 
+QA estimates come from an explicit analyst answer or the tracker's dedicated QA
+estimate. A source card with FE and QA estimates produces separate FE and QA
+execution rows, each with its own estimate. If the QA estimate is lost, ask the
+analyst; never default it, copy the FE estimate or silently skip QA. In visible
+task titles use `QA <summary>`, without the tracker-number prefix; keep the source
+key and `<key>/QA` as metadata for traceability.
+
 ## Read-only tracker evidence
 
 Reading SberTrek and Jira follows `core/tracker-reading.md` and does not itself
@@ -57,6 +64,10 @@ general estimate between roles, and do not add it when any role estimate exists.
 - Individual task cards and `execution/actual-progress.md` are supporting evidence, not interchangeable generator inputs. Prepare a missing registry only from confirmed facts and explicit authorization; do not guess missing estimates, dates, story membership or resource assignments.
 - Use `templates/execution/tasks.template.md` for internal `Task ID` and optional confirmed `Jira`. A local real QA task needs no tracker key. `QA-COHORT` renders as `TASK_QA_COHORT`; record the preserved alias in Notes, not as a tracker-issued identifier.
 - The existing weighted story formula and membership rules are documented in `templates/planning/actualization.template.md`. PlantUML comments, task titles and numerical coincidence do not prove membership. Show source paths and excerpts; ask one missing-rule question at a time.
+- A confirmed missing story baseline is represented by `Baseline State = absent` in actualization.md with both baseline cells empty. This is independent of virtual/materialized; it does not require retrospective plan approval. Keep explicit task links and source evidence. Missing actualization.md itself still blocks generation.
+- An absent-baseline story has no generated `PLAN` bar; its task links and computed progress remain in export comments, while the tasks render normally. Never label execution-derived dates as an approved plan. Existing approved baseline snapshots remain protected.
+- Missing task estimates or required scheduling dates still block the entire run without writing outputs. A known finish is not a known start; do not infer start from Created, Updated, duration or an unverified old Gantt bar.
+- Feature execution context belongs in `features/<feature>/execution-context.md`, not a second context file under execution/. Preserve and consolidate existing notes only with the relevant project edit authorization.
 - A task's tracker Updated, document update date and actual completion date have distinct meanings. Do not synchronize them merely because the dates differ.
 - A rendered resource lane is not proof of an actual assignee. Auto-allocation applies to not-started work, not retroactive person-to-lane attribution.
 - If an overlay slug differs from the feature directory, require an explicit mapping in `planning/<quarter>/gantt/actual-progress-features.json`: `{"schema_version":1,"features":{"<overlay-slug>":"<feature-directory>"}}`. Never infer this mapping from similar names.
@@ -76,7 +87,7 @@ general estimate between roles, and do not add it when any role estimate exists.
 - An executor lane whose role conflicts with the work-item role is not preserved; the generator chooses a resource from the correct role roster.
 - Strip square brackets from generated PlantUML labels. In particular, tracker summary `[FE] Списковая форма` must render as `FE Списковая форма`, never as nested PlantUML brackets.
 - Actual started or completed tasks keep their actual dates, even when those dates are in the past.
-- Keep `PLAN ...` story bars visible; they are the commander-plan baseline, not a replacement for the execution task layer.
+- Keep `PLAN ...` story bars visible where a recorded baseline exists; do not fabricate them for `Baseline State = absent`.
 - Never rewrite approved quarter or commander plans to absorb later scope. Render later work as task candidates or actual tasks.
 - Regenerate actual-progress through `scripts/sync-quarter-gantt.py --actual-only`; it also refreshes `actual-progress-confluence.puml`.
 
