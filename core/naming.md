@@ -11,6 +11,17 @@ Examples:
 
 Human-readable Russian names live inside markdown files.
 
+## Delivery stage identifiers
+
+Follow `core/delivery-stages.md`. Use a plain `Этап поставки: stage-1` line in
+`Границы`, replacing `stage-1` with the current `stage_id`. Do not create a
+stage-specific authored requirements file or directory. `stage_revision` counts
+revisions inside one stage; `revisions/NNN` stays global within the feature.
+For example, `001` and `002` may be revisions 1 and 2 of `stage-1`, and `003`
+revision 1 of `stage-2` after explicit closure and a new analyst decision.
+Keep existing `return_id` and `REQ-*` identities; omission does not repeal earlier
+deployed behavior. Legacy inputs and returns are not renamed or rebound automatically.
+
 ## File conventions
 
 - feature root: `feature.md`
@@ -18,6 +29,7 @@ Human-readable Russian names live inside markdown files.
 - feature domain delta: `domain-impact.md`
 - planning stories: `STORY-<FEATURE>-NNN.md`
 - feature requirements: `requirements.md`
+- delivery stage registry: `requirements-state.json` at the feature root, without copies of requirement text
 - exchange manifest: `manifest.json`
 - returned task list: `returns/tasks.md`
 - execution registry: `tasks.md`

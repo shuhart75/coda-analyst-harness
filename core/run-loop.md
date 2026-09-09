@@ -45,6 +45,12 @@ A failed check does not advance the run. Repeated failure reaches the configured
 - When requirements depend on current implementation, analyst research is bounded to one registered `coda` contour, records the exact commit, and verifies that the code worktree is unchanged.
 - Analyst code evidence improves the input but never replaces developer-side reconciliation against the implementation branch used for delivery.
 
+## Business Delivery Stage Invariants
+
+- Follow `core/delivery-stages.md`: accepted feature -> business delivery stage -> revision. A run step is not a business stage; one stage targets a complete useful outcome. Only the analyst approves scope; registration does not approve the whole document.
+- Keep one current-stage root and the stage registry. A correction stays in the same stage; a next stage requires previous closure and explicit analyst scope choice, with factual dependencies and no automatic residual inclusion.
+- A completed run or summary does not close the business stage. Closure requires the current detailed reviewed result and explicit residual disposition; unknown results and investigate block it. Acceptance, deployment and closure remain separate.
+
 ## Requirement Preparation Invariants
 
 - The requirements run ends at verification of the authored delivery contract. Publication is a separate explicit action; implementation, acceptance and deployment are separate events.
@@ -57,7 +63,7 @@ A failed check does not advance the run. Repeated failure reaches the configured
 - Every root change records `analyst` or `developer-result` origin in `requirements-state.json`.
 - A `developer-result` change never triggers or offers a revision.
 - After an analyst change to previously transmitted requirements, the LLM offers a new revision at most once. A refusal suppresses further offers until an explicit preparation command.
-- Explicit preparation first completes the three-level cross-requirement audit in `core/requirements-audit.md` and asks semantic questions one at a time.
+- Authoring review is allowed in the feature branch. Explicit preparation requires accepted current `main`, finished collaboration and `require-main-for-delivery` before the three-level audit in `core/requirements-audit.md`. Ask semantic questions one at a time; any correction passes through the authoring branch and human acceptance before the full delivery audit is repeated.
 - Requirement authoring and preparation both run the controlled-wording check and the isolated-reader review from `core/requirements-wording.md`.
 - The LLM shows the completed audit report to the analyst. Publication is forbidden until the analyst explicitly confirms both that report and transfer.
 - Audit confirmation is bound to the exact `requirements.md` checksum. Any later change invalidates it and requires a new audit.

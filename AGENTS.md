@@ -114,6 +114,17 @@ Requirement templates live in `templates/requirements/`. Use them as the active 
 - `implementation task` is an execution tracking unit only.
 - They are related, but they are not the same artifact.
 
+## Delivery stages
+
+- Read `core/delivery-stages.md` before authoring, reviewing, delivering or closing a business delivery stage: accepted feature -> business delivery stage -> revision. Only the analyst approves scope; stages target sequential useful outcomes, never technical slices or BE/FE contours.
+- Keep one authored `features/<feature>/requirements.md` for the current approved scope, with one plain `Этап поставки: stage-1` line in `Границы` using the current `stage_id`. Keep the stage registry in `requirements-state.json`, without requirement text copies; future scope is tentative backlog or archive, not a second normative target document.
+- Publish only the current stage. The `Границы` section must contain the registered one-line `title` and `goal` verbatim. Preserve global `revisions/NNN` and stable `return_id`; revisions carry `stage_id`, `stage_revision`, the identity snapshot `stage` and `stage_sha256`. Audit binds both the file and stage snapshot. A correction stays in the same stage; a next stage requires an explicit analyst decision after the previous stage is closed. Never include residual scope automatically.
+- Closing requires the current detailed `reviewed` summary covering every input `REQ-*` and explicit disposition of all residual scope; `unknown` or `investigate` blocks closure. Zero implementation may be closed only with an explicit decision on the entire scope. `completed` summary, acceptance, deployment and stage closure are distinct.
+- Verify next-stage dependencies against previous implementation, verification and deployment facts. Omitted requirements do not repeal deployed behavior; any change or removal must be explicit. Preserve old inputs and returns; never rebind legacy to a stage automatically. Parallel stages are unsupported.
+- Authoring review is allowed in the feature branch. Delivery audit requires accepted current `main`, finished collaboration and `require-main-for-delivery`, followed by all three audit levels and explicit confirmation. A pending publication branch is not delivery; PR/MR creation and acceptance remain human actions.
+- Interpret `готовим первый этап`, `готовим следующий этап` and `закрыть этап` through the command catalog and `core/delivery-stages.md`. The agent runs internal `stage-status`, `start-stage` and `close-stage`; required `--analyst-confirmed` for start/close records only an explicit analyst decision. Registration preserves scope intent, but does not approve the whole document or confirm its audit. Follow the fail-closed legacy rule; never invent a migration command.
+- Older clients must not use the new requirements state; update the harness before continuing. Never downgrade the state schema to bypass stage gates.
+
 ## Requirements
 
 - Author requirements in Russian. Keep English only for exact code, paths, API and database identifiers, enum values, formats, fixed product names, and necessary technical terms.

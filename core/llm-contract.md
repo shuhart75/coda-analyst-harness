@@ -121,6 +121,37 @@ Treat the active mode as a write boundary.
 
 If the user asks for work outside the active mode, either switch mode explicitly or state the cross-mode change before editing.
 
+## Sequential business delivery
+
+Read `core/delivery-stages.md` before stage authoring, review, publication or closure.
+The chain is accepted feature -> business delivery stage -> revision. Only the
+analyst approves the stage scope; one stage targets a complete useful outcome,
+not a technical slice or BE/FE contour. Parallel stages are unsupported.
+
+Keep one authored root for the current scope, a plain `Этап поставки: stage-1`
+marker with the current identifier in `Границы`, and a registry without text copies
+in `requirements-state.json`. Preserve global revisions and `return_id`; add
+`stage_id` and `stage_revision`. Future scope is tentative backlog or archive.
+Corrections stay in the same stage; the next stage requires previous closure and
+an explicit new analyst decision. Never carry residual scope forward automatically.
+
+Closure requires the current detailed `reviewed` summary covering every input
+`REQ-*` and explicit disposition of all residual scope; `unknown` and `investigate`
+block closure. Zero implementation may be closed with an explicit decision on the
+whole scope. `completed`, acceptance, deployment and closure remain distinct.
+Verify next-stage dependencies against facts. Omission does not repeal deployed
+behavior: changes and removals must be explicit. Never rewrite old inputs/returns
+or automatically rebind legacy. Use role-oriented Russian commands from the catalog
+and the internal CLI in `core/delivery-stages.md`. Required `--analyst-confirmed`
+for start/close records an explicit analyst decision; registration preserves scope
+intent but does not approve the whole document or confirm its audit. Follow the
+fail-closed legacy rule; never invent a migration command.
+The scope section must include registered one-line `title` and `goal` verbatim.
+Audit and revision records bind the identity snapshot `stage` and `stage_sha256`
+as well as the input checksum; changes invalidate audit confirmation.
+Older clients must not use the new requirements state. Update the harness before
+continuing; never downgrade state to bypass stage gates.
+
 ## Canonical entities
 
 - The analyst approves delivery scope; developer SDD owns technical decomposition, not business-scope reduction. Review each returned requirement through `core/developer-handoff.md`: input receipt, implementation, verification, analyst acceptance and deployment are separate. An accepted deviation can coexist with a follow-up delta; `baseline/current` records evidenced deployed behavior, including unaccepted deviations with limitations.
@@ -209,7 +240,7 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 - After changing the root document, record the change origin in `features/<feature>/requirements-state.json` through `scripts/requirementsctl.py record-change`.
 - Use `origin=developer-result` only for a change accepted from a registered return and pass its stable `return_id`. Such a change never triggers or offers an exchange revision.
 - Use `origin=analyst` for an analyst-initiated change. If a package was already published, offer a new revision once. Call `mark-offered` before asking. If the analyst declines, call `decline-revision` and do not offer again until an explicit preparation command.
-- Begin explicit transfer with `requirementsctl.py begin-preparation`. This starts the mandatory audit; it does not authorize publication.
+- Authoring review is allowed in a registered feature branch. Delivery audit requires accepted current `main`, finished collaboration and a successful `collaboration.py require-main-for-delivery --feature <feature>` before `requirementsctl.py begin-preparation`. The latter starts the audit but does not authorize publication. Any file correction returns through feature-branch authoring and human acceptance before a fresh full delivery audit.
 - Audit by `core/requirements-audit.md`. Build applicable role/action, state/transition, data, scenario, dependency, impact and internal/external-view models; reason across the full requirement set, not only one paragraph at a time. Apply only meaning-preserving corrections automatically. For every semantic ambiguity ask the analyst exactly one question and wait, then recheck affected relations. After all corrections rerun all three levels over the complete document.
 - Reject placeholder prose while authoring. `Когда` names a concrete state and event; `Тогда` states an observable outcome without repeating `система должна`. Never choose the intended meaning of vague quantifiers or references on the analyst's behalf.
 - When blockers are resolved, record the result with `requirementsctl.py record-audit`, show the full audit report in chat, and ask the exact confirmation question from the profile. Do not infer confirmation from the original transfer command or from approval of the document.

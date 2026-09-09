@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.test_requirements_exchange import requirements
+from tests.test_requirements_exchange import register_stage, requirements
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,7 @@ class RequirementsStateTests(unittest.TestCase):
         feature.mkdir(parents=True)
         (feature / "requirements.md").write_text(requirements(), encoding="utf-8")
         self.command(SCRIPT, "init", str(project), "demo")
+        register_stage(project)
         return project, feature
 
     def authorize(self, project: Path, feature: str = "demo") -> None:
@@ -106,7 +107,7 @@ class RequirementsStateTests(unittest.TestCase):
             state["slice_derivation"] = {"state": "stale", "requirements_sha256": None}
             state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
             migrated = self.command(SCRIPT, "status", str(project), "demo")
-            self.assertEqual(migrated["state"]["schema_version"], 4)
+            self.assertEqual(migrated["state"]["schema_version"], 5)
             self.assertNotIn("slice_derivation", migrated["state"])
 
     def test_old_publication_authorization_migrates_to_required_audit(self) -> None:
@@ -123,7 +124,7 @@ class RequirementsStateTests(unittest.TestCase):
             }
             state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
             migrated = self.command(SCRIPT, "status", str(project), "demo")
-            self.assertEqual(migrated["state"]["schema_version"], 4)
+            self.assertEqual(migrated["state"]["schema_version"], 5)
             self.assertEqual(migrated["state"]["revision_offer"]["state"], "audit-required")
             self.assertEqual(migrated["state"]["delivery_audit"]["state"], "required")
             self.assertEqual(
@@ -153,7 +154,7 @@ class RequirementsStateTests(unittest.TestCase):
             }
             state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
             migrated = self.command(SCRIPT, "status", str(project), "demo")
-            self.assertEqual(migrated["state"]["schema_version"], 4)
+            self.assertEqual(migrated["state"]["schema_version"], 5)
             self.assertEqual(migrated["state"]["revision_offer"]["state"], "audit-required")
             self.assertEqual(migrated["state"]["delivery_audit"]["state"], "required")
 

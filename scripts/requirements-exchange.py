@@ -15,6 +15,7 @@ from typing import Any
 
 from commit_message_policy import require_valid_commit_message
 from workspace import install_commit_message_hook
+import delivery_stages as stages
 
 
 EXCHANGE_DIR = "requirements-exchange"
@@ -239,13 +240,14 @@ def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> 
     audit = state.get("delivery_audit")
     offer = state.get("revision_offer")
     if (
-        state.get("schema_version") != 4
+        state.get("schema_version") != 5
         or state.get("feature") != feature
         or not isinstance(audit, dict)
         or not isinstance(offer, dict)
     ):
         raise ValueError("Публикация запрещена: состояние требований не содержит актуального аудита")
     current_hash = sha256(requirements)
+    stages.require_audit_stage(state, requirements.read_text(encoding="utf-8"))
     levels = audit.get("levels")
     if (
         offer.get("state") != "preparation-authorized"
@@ -485,7 +487,14 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
             continue
         if item.get("state") not in ALLOWED_REVISION_STATES:
             errors.append(f"редакция {item.get('revision')} имеет неизвестное состояние")
-        if schema_version >= 3 and item.get("returns_contract_version") not in {0, 1}:
+        valid_stage = True
+        try:
+            stages.validate_revision(item)
+        except ValueError as exc:
+            errors.append(str(exc))
+            valid_stage = False
+        contract_version = item.get("returns_contract_version", None if item.get("stage_id") else 0)
+        if schema_version >= 3 and contract_version not in {0, 1}:
             errors.append(
                 f"редакция {item.get('revision')} не содержит поддерживаемую версию договора возвратов"
             )
@@ -502,6 +511,24 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
             errors.append(f"отсутствует файл редакции: {relative}")
         elif item.get("sha256") != sha256(path):
             errors.append(f"нарушена неизменяемость редакции: {relative}")
+        elif item.get("stage") and valid_stage:
+            try:
+                stages.validate_scope(item["stage"], path.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                errors.append(str(exc))
+    stage_revisions: dict[str, list[int]] = {}
+    stage_snapshots: dict[str, dict[str, Any]] = {}
+    for item in revisions:
+        if not isinstance(item, dict) or not isinstance(item.get("stage_id"), str):
+            continue
+        stage_id = item["stage_id"]
+        if stage_id in stage_snapshots and item.get("stage") != stage_snapshots[stage_id]:
+            errors.append("Редакции одного этапа содержат разные метаданные")
+        stage_snapshots[stage_id] = item.get("stage")
+        stage_revisions.setdefault(stage_id, []).append(item.get("stage_revision"))
+    for values in stage_revisions.values():
+        if all(type(value) is int for value in values) and len(values) != len(set(values)):
+            errors.append("stage_revision должен быть уникальным внутри этапа")
     return errors
 
 
@@ -518,8 +545,13 @@ def prepare_in_exchange(
     requirements_text: str,
     analyst: str,
 ) -> dict[str, Any]:
+    approved_hash = require_confirmed_audit(project, feature, project / "features" / feature / "requirements.md")
+    if hashlib.sha256(requirements_bytes).hexdigest() != approved_hash:
+        raise ValueError("Передаваемый документ не совпадает с подтверждённым аудитом")
+    state = load_json(project / "features" / feature / "requirements-state.json")
+    stage = stages.require_audit_stage(state, requirements_text)
+    records = stages.registry(state)["revisions"]
     require_plain_exchange(exchange)
-    install_root_contract(exchange)
     feature_exchange = exchange / feature
     manifest_path = feature_exchange / "manifest.json"
     manifest = load_json(manifest_path) if manifest_path.is_file() else {
@@ -543,23 +575,28 @@ def prepare_in_exchange(
     existing_errors = validate_manifest(manifest, feature_exchange) if revisions else []
     if existing_errors:
         raise ValueError("; ".join(existing_errors))
+    stages.require_manifest_history(state, manifest)
+    install_root_contract(exchange)
     current_hash = hashlib.sha256(requirements_bytes).hexdigest()
     active = manifest.get("active_revision")
     active_entry = next(
         (item for item in revisions if isinstance(item, dict) and item.get("revision") == active),
         None,
     )
-    if active_entry and active_entry.get("sha256") == current_hash:
+    if active_entry and active_entry.get("stage_id") and active_entry.get("sha256") == current_hash:
+        stages.require_entry_stage(active_entry, stage)
         return {
             "status": "already-current",
             "feature": feature,
             "revision": active,
             "manifest_path": manifest_path,
             "requirements_path": feature_exchange / active_entry["requirements_path"],
+            "stage_id": stage["stage_id"],
+            "stage_revision": active_entry["stage_revision"],
         }
     if manifest.get("schema_version") in {1, 2}:
         for item in revisions:
-            if isinstance(item, dict):
+            if isinstance(item, dict) and item.get("stage_id"):
                 item["returns_contract_version"] = 0
         manifest.update({
             "schema_version": CURRENT_MANIFEST_SCHEMA,
@@ -567,9 +604,15 @@ def prepare_in_exchange(
             "traceability": traceability_contract(CURRENT_MANIFEST_SCHEMA),
             "developer_sdd": developer_sdd_contract(CURRENT_MANIFEST_SCHEMA),
         })
-    revision = max(
-        (item["revision"] for item in revisions if isinstance(item, dict) and isinstance(item.get("revision"), int)),
-        default=0,
+    known_entries = [stages.record_entry(record) for record in records]
+    effective = {item["revision"]: item for item in known_entries}
+    all_entries = [*(effective.get(item["revision"], item) for item in revisions), *known_entries]
+    latest = max(all_entries, key=lambda item: item["revision"], default=None)
+    legacy_numbers = {record["entry"]["revision"] for record in records if "legacy_overlay" in record}
+    reuse = latest if latest and latest["revision"] not in legacy_numbers and latest["sha256"] == current_hash and latest.get("stage") == stage else None
+    revision = reuse["revision"] if reuse else max((item["revision"] for item in all_entries), default=0) + 1
+    stage_revision = reuse["stage_revision"] if reuse else max(
+        (item["stage_revision"] for item in all_entries if item.get("stage_id") == stage["stage_id"]), default=0,
     ) + 1
     revision_root = feature_exchange / "revisions" / f"{revision:03d}"
     if revision_root.exists():
@@ -578,13 +621,17 @@ def prepare_in_exchange(
     target_requirements = revision_root / "requirements.md"
     target_requirements.write_bytes(requirements_bytes)
     for item in revisions:
-        if isinstance(item, dict) and item.get("state") in {"sent", "in-progress", "paused"}:
+        if isinstance(item, dict) and item.get("stage_id") == stage["stage_id"] and item.get("state") in {"sent", "in-progress", "paused"}:
             item["state"] = "superseded"
     manifest["title"] = title_from_requirements(requirements_text, feature)
     manifest["owner"] = {"analyst_id": analyst}
     manifest["active_revision"] = revision
-    revisions.append({
+    revisions.append(dict(reuse) if reuse else {
         "revision": revision,
+        "stage_id": stage["stage_id"],
+        "stage_revision": stage_revision,
+        "stage": stage,
+        "stage_sha256": stages.checksum(stage),
         "state": "sent",
         "created_at": now(),
         "requirements_path": f"revisions/{revision:03d}/requirements.md",
@@ -607,6 +654,8 @@ def prepare_in_exchange(
         "revision": revision,
         "manifest_path": manifest_path,
         "requirements_path": target_requirements,
+        "stage_id": stage["stage_id"],
+        "stage_revision": stage_revision,
     }
 
 
@@ -720,11 +769,26 @@ def publish_to_code(
     analyst: str,
     target_branch: str | None = None,
 ) -> dict[str, Any]:
+    approved_hash = require_confirmed_audit(project, feature, project / "features" / feature / "requirements.md")
+    if hashlib.sha256(requirements_bytes).hexdigest() != approved_hash:
+        raise ValueError("Передаваемый документ не совпадает с подтверждённым аудитом")
+    state = load_json(project / "features" / feature / "requirements-state.json")
+    stage = stages.require_audit_stage(state, requirements_text)
     before = code_snapshot(code_root)
     if before is None:
         raise CodeDestinationUnavailable("роль code не является доступным клоном Git с веткой и origin")
     target = delivery_target(before["remote"], target_branch or configured_delivery_target())
     current_hash = hashlib.sha256(requirements_bytes).hexdigest()
+    for record in stages.registry(state)["revisions"]:
+        if record["publication_confirmed"]:
+            continue
+        pending = load_json(Path(record["manifest_path"])).get("publication", {})
+        if (
+            record["entry"]["sha256"] != current_hash
+            or pending.get("repository_url") != before["remote"]
+            or pending.get("target_branch") != target
+        ):
+            raise ValueError("Есть другая незавершённая передача; сначала заверши её в подтверждённом месте")
     target_key = hashlib.sha256(target.encode()).hexdigest()[:12]
     branch = f"requirements/{feature}/{target_key}-{current_hash}"
     branch_ref = f"refs/heads/{branch}"
@@ -744,6 +808,12 @@ def publish_to_code(
         manifest_path = exchange / feature / "manifest.json"
 
         def response(prepared: dict[str, Any], merged: bool, request_commit: str, push_output: str = "") -> dict[str, Any]:
+            current = load_json(project / "features" / feature / "requirements-state.json")
+            stages.require_audit_stage(current, requirements_text)
+            prepared_manifest = load_json(prepared["manifest_path"])
+            stages.require_manifest_history(current, prepared_manifest)
+            prepared_entry = next(item for item in prepared_manifest["revisions"] if item["revision"] == prepared["revision"])
+            stages.require_entry_stage(prepared_entry, stage)
             if code_snapshot(code_root) != before:
                 raise ValueError("Обычный клон code изменился во время передачи; требуется проверка владельцем")
             publication = {
@@ -756,6 +826,7 @@ def publish_to_code(
             link = re.search(r"https?://[^\s]+(?:merge_requests/new|/compare/)[^\s]*", push_output)
             result = {
                 **prepared, "status": "already-current" if merged else "awaiting-merge",
+                "stage_id": stage["stage_id"], "stage_revision": prepared_entry["stage_revision"],
                 "destination_role": "code", "manifest": str(cached),
                 "repository_url": before["remote"], "repository_branch": target if merged else branch,
                 "target_branch": target, "request_branch": None if merged else branch,
@@ -784,9 +855,11 @@ def publish_to_code(
             errors = validate_manifest(manifest, manifest_path.parent)
             if errors:
                 raise ValueError("; ".join(errors))
+            stages.require_manifest_history(state, manifest)
             accepted_revisions = {entry["revision"]: entry for entry in manifest["revisions"]}
             active = next(entry for entry in manifest["revisions"] if entry["revision"] == manifest["active_revision"])
-            if active["sha256"] == current_hash:
+            if active.get("stage_id") and active["sha256"] == current_hash:
+                stages.require_entry_stage(active, stage)
                 return response({"revision": active["revision"], "feature": feature, "manifest_path": manifest_path}, True, target_commit)
 
         heads = remote_heads(before["remote"], f"refs/heads/requirements/{feature}/{target_key}-*")
@@ -802,7 +875,7 @@ def publish_to_code(
                 proposed = json.loads(candidate.stdout)
                 entry = next(item for item in proposed["revisions"] if item["revision"] == proposed["active_revision"])
                 accepted = accepted_revisions.get(entry["revision"])
-                if accepted and accepted["sha256"] == entry["sha256"] and accepted["requirements_path"] == entry["requirements_path"]:
+                if accepted and stages.revision_identity(accepted) == stages.revision_identity(entry) and accepted["requirements_path"] == entry["requirements_path"]:
                     content = subprocess.run(
                         ("git", "-C", str(clone), "show", f"{commit}:{EXCHANGE_DIR}/{feature}/{accepted['requirements_path']}"),
                         capture_output=True, check=False,
@@ -832,6 +905,8 @@ def publish_to_code(
             active = next(entry for entry in manifest["revisions"] if entry["revision"] == manifest["active_revision"])
             if active["sha256"] != current_hash:
                 raise ValueError("Содержимое ветки передачи не совпадает с подтверждённым входом")
+            stages.require_manifest_history(state, manifest)
+            stages.require_entry_stage(active, stage)
             return response({"revision": active["revision"], "feature": feature, "manifest_path": manifest_path}, False, pending_commit)
 
         switched = git(clone, "switch", "-c", branch)
@@ -849,6 +924,8 @@ def publish_to_code(
         if committed.returncode != 0:
             raise ValueError(f"Не удалось создать коммит передачи: {committed.stderr.strip()}")
         request_commit = git_value(clone, "rev-parse", "HEAD")
+        if require_confirmed_audit(project, feature, project / "features" / feature / "requirements.md") != current_hash:
+            raise ValueError("Требования изменились перед отправкой; повтори аудит")
         pushed = git(clone, "push", "origin", f"HEAD:{branch_ref}")
         if pushed.returncode != 0:
             observed = remote_heads(before["remote"], branch_ref)
@@ -881,6 +958,8 @@ def prepare_command(args: argparse.Namespace) -> int:
     if not analyst:
         raise ValueError("Не задан идентификатор аналитика: используй --analyst или CODA_ANALYST_ID")
     code_root = resolve_code_root(project, args.code_root)
+    state = load_json(feature_root / "requirements-state.json")
+    pending = [item for item in stages.registry(state)["revisions"] if not item["publication_confirmed"]]
     reason = "Репозиторий роли code отсутствует или не настроен"
     if code_root is not None:
         try:
@@ -888,10 +967,15 @@ def prepare_command(args: argparse.Namespace) -> int:
                 project, code_root, args.feature, requirements_bytes, requirements_text, analyst,
                 getattr(args, "target_branch", None),
             )
+            record_prepared(project, args.feature, result)
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
             return 0
         except CodeDestinationUnavailable as exc:
+            if pending:
+                raise ValueError("Незавершённая передача в code блокирует резервное размещение; сначала проверь её PR/MR") from exc
             reason = str(exc)
+    elif pending:
+        raise ValueError("Незавершённая передача в code блокирует резервное размещение; сначала проверь её PR/MR")
     exchange = project / EXCHANGE_DIR
     exchange.mkdir(parents=True, exist_ok=True)
     prepared = prepare_in_exchange(
@@ -900,6 +984,7 @@ def prepare_command(args: argparse.Namespace) -> int:
     result = {
         **prepared,
         "destination_role": "analytics",
+        "publication_confirmed": True,
         "exchange_root": str(exchange),
         "manifest": str(prepared["manifest_path"]),
         "requirements": str(prepared["requirements_path"]),
@@ -911,8 +996,37 @@ def prepare_command(args: argparse.Namespace) -> int:
     }
     result.pop("manifest_path", None)
     result.pop("requirements_path", None)
+    record_prepared(project, args.feature, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
+
+
+def record_prepared(project: Path, feature: str, result: dict[str, Any]) -> None:
+    feature_root = project / "features" / feature
+    state_path = feature_root / "requirements-state.json"
+    require_confirmed_audit(project, feature, feature_root / "requirements.md")
+    state = load_json(state_path)
+    manifest = load_json(Path(result["manifest"]))
+    stages.require_manifest_history(state, manifest)
+    entry = next(item for item in manifest["revisions"] if item["revision"] == result["revision"])
+    if entry["sha256"] != sha256(feature_root / "requirements.md"):
+        raise ValueError("Подготовленная редакция не совпадает с текущими требованиями")
+    stage = stages.require_audit_stage(state, (feature_root / "requirements.md").read_text(encoding="utf-8"))
+    stages.require_entry_stage(entry, stage)
+    records = state["delivery_stages"]["revisions"]
+    previous = next((item for item in records if item["entry"]["revision"] == entry["revision"]), None)
+    record = {
+        "entry": entry, "destination_role": result["destination_role"],
+        "manifest_path": str(result["manifest"]), "publication_confirmed": result["publication_confirmed"],
+    }
+    if previous:
+        record["entry"] = previous["entry"]
+        previous.update(record)
+    else:
+        records.append(record)
+    stages.registry(state)
+    state["updated_at"] = now()
+    save_json(state_path, state)
 
 
 def exchange_roots(project: Path, code_root: Path | None) -> list[tuple[str, Path]]:
@@ -1012,7 +1126,30 @@ def scan_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def validate_result_review(project: Path, feature: str, return_id: str, review: dict[str, Any]) -> None:
+def publication_root(project: Path, feature: str, record: dict[str, Any]) -> Path:
+    manifest_path = Path(record["manifest_path"]).resolve()
+    manifest = load_json(manifest_path)
+    if not record.get("publication_confirmed"):
+        raise ValueError("Место передачи ещё не подтверждено")
+    if record["destination_role"] == "analytics":
+        expected = project / EXCHANGE_DIR / feature / "manifest.json"
+        if manifest_path != expected.resolve():
+            raise ValueError("Подтверждённое место analytics не совпадает с каталогом проекта")
+        return manifest_path.parent
+    publication = manifest.get("publication", {})
+    if publication.get("state") != "merged" or not publication.get("target_commit"):
+        raise ValueError("Подтверждённое место code требует принятого merge")
+    code = resolve_code_root(project, None)
+    if code is None:
+        raise ValueError("Подтверждённое место code недоступно; обнови зарегистрированный code")
+    if publication.get("repository_url") != git_value(code, "remote", "get-url", "origin"):
+        raise ValueError("Зарегистрированный code не совпадает с местом публикации")
+    if git(code, "merge-base", "--is-ancestor", publication["target_commit"], "HEAD").returncode != 0:
+        raise ValueError("Клон code не содержит подтверждённую передачу; обнови code")
+    return code / EXCHANGE_DIR / feature
+
+
+def validate_result_review(project: Path, feature: str, return_id: str, review: dict[str, Any], *, publication: dict[str, Any] | None = None) -> None:
     parts = return_id.split(":", 3)
     if len(parts) != 4 or parts[0] != feature or not parts[1].isdigit():
         raise ValueError("Некорректный return_id итогового отчёта")
@@ -1024,8 +1161,28 @@ def validate_result_review(project: Path, feature: str, return_id: str, review: 
         raise ValueError("Решение должно ссылаться на точный return_id и schema_version 1")
     requirement_ids: set[str] = set()
     found = False
-    for _, exchange in exchange_roots(project, resolve_code_root(project, None)):
-        root = exchange / feature
+    roots = [exchange / feature for _, exchange in exchange_roots(project, resolve_code_root(project, None))]
+    if publication is not None:
+        authoritative = publication_root(project, feature, publication)
+        for root in set([*roots, authoritative]):
+            manifest_path = root / "manifest.json"
+            if not manifest_path.is_file():
+                if root == authoritative:
+                    raise ValueError("Манифест подтверждённой передачи недоступен")
+                continue
+            manifest = load_json(manifest_path)
+            entry = next((item for item in manifest.get("revisions", []) if item.get("revision") == revision), None)
+            if entry is None:
+                if root == authoritative:
+                    raise ValueError("Редакция отсутствует в подтверждённом месте передачи")
+                continue
+            if stages.immutable_entry(entry) != stages.immutable_entry(publication["entry"]):
+                raise ValueError("Расхождение копий переданной редакции")
+            summary = root / relative
+            if (root == authoritative or summary.is_file()) and (not summary.is_file() or sha256(summary) != parts[3]):
+                raise ValueError("Summary в подтверждённом месте передачи или его копии изменился; повтори проверку результата")
+        roots = [authoritative]
+    for root in roots:
         manifest_path = root / "manifest.json"
         summary = root / relative
         if not manifest_path.is_file() or not summary.is_file() or sha256(summary) != parts[3]:

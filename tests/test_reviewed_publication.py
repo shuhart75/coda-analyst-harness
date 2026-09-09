@@ -89,6 +89,7 @@ class ReviewedPublicationTests(unittest.TestCase):
         return module
 
     def test_lost_push_response_reuses_published_request(self) -> None:
+        self.fixture.authorize(self.project)
         module = self.load_module()
         original = module.git
         def lose_response(repository: Path, *arguments: str):
@@ -104,6 +105,7 @@ class ReviewedPublicationTests(unittest.TestCase):
         self.assertFalse((self.project / "requirements-exchange").exists())
 
     def test_rejected_push_can_be_retried_without_target_change(self) -> None:
+        self.fixture.authorize(self.project)
         module = self.load_module()
         original = module.git
         initial = self.fixture.git(self.remote, "rev-parse", "main")

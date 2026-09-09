@@ -31,6 +31,10 @@ def requirements(rule: str = "Система должна показать ре�
 
 ## Границы
 
+Этап поставки: stage-1
+
+Первый результат. Показать результат пользователю.
+
 В объём входит отображение результата. Другие действия не входят.
 
 ## Требования
@@ -57,12 +61,24 @@ def requirements(rule: str = "Система должна показать ре�
 """
 
 
+def register_stage(project: Path, feature: str = "demo") -> None:
+    result = run(
+        sys.executable, str(STATE_SCRIPT), "start-stage", str(project), feature,
+        "--stage-id", "stage-1", "--title", "Первый результат",
+        "--goal", "Показать результат пользователю",
+        "--analyst-confirmed",
+    )
+    if result.returncode:
+        raise AssertionError(result.stdout + result.stderr)
+
+
 class RequirementsExchangeTests(unittest.TestCase):
     def prepare_project(self, root: Path) -> tuple[Path, Path]:
         project = root / "documents"
         feature = project / "features" / "demo"
         feature.mkdir(parents=True)
         (feature / "requirements.md").write_text(requirements(), encoding="utf-8")
+        register_stage(project)
         return project, feature
 
     def command(self, *args: str, env: dict[str, str] | None = None) -> dict:
