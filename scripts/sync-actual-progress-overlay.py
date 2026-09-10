@@ -571,7 +571,12 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
             kind = clean_cell(row.get("Kind", "virtual")).lower()
             role = clean_cell(row.get("Role", ""))
             normalized_role = normalize_role(role)
-            task_id = explicit_id or (f"{tracker_key}/{normalized_role}" if kind == "real" and normalized_role in ROLE_COLORS else tracker_key)
+            legacy_key = re.fullmatch(r"([^/]+)/(AN|BE|FE|QA)", tracker_key, re.IGNORECASE)
+            if legacy_key:
+                if legacy_key.group(2).upper() != normalized_role:
+                    raise ValueError(f"{path}: роль в Jira {tracker_key} не совпадает с Role {role}")
+                tracker_key = legacy_key.group(1)
+            task_id = explicit_id or (f"{tracker_key}/{normalized_role}" if (kind == "real" or legacy_key) and normalized_role in ROLE_COLORS else tracker_key)
             if task_id in tasks:
                 raise ValueError(f"Duplicate execution work item: {task_id}")
             pair = (tracker_key, normalized_role)
@@ -796,6 +801,7 @@ def task_schedules(
     today: date,
     team_resources: dict[str, list[str]],
 ) -> dict[str, ScheduledTask]:
+    tasks = {task_id: task for task_id, task in tasks.items() if task.kind != "candidate"}
     schedules: dict[str, ScheduledTask] = {}
     occupied: dict[str, set[date]] = {}
 
@@ -957,7 +963,8 @@ def story_type(story: StoryMap, tasks: dict[str, Task]) -> str:
     prefix = normalize_role(re.split(r"[\s:]+", story.summary.strip("[] "), maxsplit=1)[0])
     if prefix in ROLE_COLORS:
         return prefix
-    roles = {role_for_task(tasks[task_id]) for task_id in mapped_task_ids(story, tasks)}
+    roles = {role_for_task(tasks[task_id]) for task_id in mapped_task_ids(story, tasks)
+             if tasks[task_id].kind != "candidate"}
     if len(roles) > 1:
         roles.discard("QA")
     if len(roles) == 1 and roles <= ROLE_COLORS.keys():
@@ -966,6 +973,8 @@ def story_type(story: StoryMap, tasks: dict[str, Task]) -> str:
 
 
 def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
+    if task.kind == "candidate":
+        return [f"' Candidate {task.task_id}: {task.status}; not scheduled"]
     alias = f"TASK_{to_alias(task.task_id)}"
     scheduled = schedules.get(task.task_id)
     if not scheduled:
@@ -1008,7 +1017,8 @@ def plan_task_ids(story: StoryMap, tasks: dict[str, Task]) -> list[str]:
     if role in ROLE_COLORS:
         return [task_id for task_id, task in tasks.items() if role_for_task(task) == role
                 and task.kind != "candidate" and task.status.lower() != "superseded"]
-    return [task_id for task_id in mapped_task_ids(story, tasks) if role_for_task(tasks[task_id]) != "QA"]
+    return [task_id for task_id in mapped_task_ids(story, tasks)
+            if tasks[task_id].kind != "candidate" and role_for_task(tasks[task_id]) != "QA"]
 
 
 def story_progress(story: StoryMap, tasks: dict[str, Task]) -> int:
@@ -1221,7 +1231,8 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             for task_id in tasks
             if f"{feature_slug}/{task_id}" in scoped_schedules
         }
-        if any(task.status.lower() != "superseded" and task_id not in schedules for task_id, task in tasks.items()):
+        if any(task.kind != "candidate" and task.status.lower() != "superseded"
+               and task_id not in schedules for task_id, task in tasks.items()):
             raise ValueError(f"{feature_dir}: не для каждой задачи определена дата начала; Гант сохранён")
         content = render_feature(feature_dir, feature_slug, closed_days, tasks, schedules)
         if content is None:

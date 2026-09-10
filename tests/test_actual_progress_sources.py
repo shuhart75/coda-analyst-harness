@@ -461,6 +461,90 @@ class ActualProgressSourcesTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "LOCAL-QA.*уточни оценку у аналитика"):
                     OVERLAY.load_tasks(self.feature)
 
+    def test_legacy_role_qualified_jira_keeps_one_role_suffix(self) -> None:
+        self.write_tasks([
+            "| | ITEM-100/FE | FE List | real | FE | 5 | F1 | 2026-09-01 | 2026-09-04 | 2026-09-01 | | in-review | 75 | STORY-COHORT |",
+            "| QA-COHORT | ITEM-100/QA | QA Check | real | QA | 2 | Q2 | 2026-09-03 | 2026-09-09 | 2026-09-03 | | in-progress | 30 | STORY-COHORT |",
+        ])
+        tasks = OVERLAY.load_tasks(self.feature)
+        self.assertEqual(set(tasks), {"ITEM-100/FE", "QA-COHORT"})
+        self.assertEqual({item.tracker_key for item in tasks.values()}, {"ITEM-100"})
+        story = OVERLAY.load_story_map(self.feature)[0]
+        story.replaced_by = ["ITEM-100"]
+        self.assertEqual(set(OVERLAY.mapped_task_ids(story, tasks)), set(tasks))
+        self.quarter()
+        self.assertIn("TASK_ITEM_100_FE]", self.target.read_text())
+        self.assertNotIn("TASK_ITEM_100_FE_FE]", self.target.read_text())
+
+    def test_legacy_qualified_qa_id_remains_a_valid_story_reference(self) -> None:
+        self.registry.write_text(self.registry.read_text().replace(
+            "| QA-COHORT | | Cross-feature check |", "| | ITEM-100/QA | QA Check |",
+        ), encoding="utf-8")
+        self.map.write_text(self.map.read_text().replace("QA-COHORT", "ITEM-100/QA"), encoding="utf-8")
+        self.quarter()
+        self.assertIn("TASK_ITEM_100_QA]", self.target.read_text())
+        self.assertNotIn("TASK_ITEM_100_QA_QA]", self.target.read_text())
+
+    def test_legacy_jira_role_conflict_blocks_without_writes(self) -> None:
+        self.registry.write_text(self.registry.read_text().replace(
+            "| | ITEM-100 |", "| | ITEM-100/BE |",
+        ), encoding="utf-8")
+        before = self.snapshot()
+        self.assertIn("Role", self.quarter(success=False).stderr)
+        self.assertEqual(before, self.snapshot())
+
+    def test_legacy_and_canonical_tracker_role_duplicates_block(self) -> None:
+        with self.registry.open("a", encoding="utf-8") as registry:
+            registry.write("| LOCAL-FE | ITEM-100/FE | FE Duplicate | real | FE | 1 | F1 | 2026-09-01 | 2026-09-01 | | | planned | 0 | STORY-COHORT |\n")
+        before = self.snapshot()
+        self.assertIn("Duplicate tracker role", self.quarter(success=False).stderr)
+        self.assertEqual(before, self.snapshot())
+
+    def test_candidates_do_not_get_dates_or_change_execution_schedules(self) -> None:
+        original = self.registry.read_text()
+        self.registry.write_text(original.replace("in-review | 75", "planned | 0").replace(
+            "in-progress | 30", "planned | 0",
+        ).replace("| 2026-09-01 | | planned", "| | | planned").replace(
+            "| 2026-09-03 | | planned", "| | | planned",
+        ), encoding="utf-8")
+        self.quarter()
+        expected = self.target.read_text()
+        candidate = self.feature / "execution/task-candidates.md"
+        candidate.write_text(
+            "| Candidate ID | Summary | Role | Estimate (дн) | Status |\n"
+            "|---|---|---|---|---|\n"
+            "| CAND-BE | Backend proposal | BE | 10 | proposed |\n"
+            "| CAND-FE | Frontend proposal | FE | 10 | proposed |\n"
+            "| CAND-QA | Testing proposal | QA | 10 | proposed |\n",
+            encoding="utf-8",
+        )
+        before = candidate.read_bytes()
+        self.quarter()
+        actual = self.target.read_text()
+        self.assertNotIn("as [TASK_CAND_", actual)
+        self.assertEqual(
+            [line for line in expected.splitlines() if line.startswith("[")],
+            [line for line in actual.splitlines() if line.startswith("[")],
+        )
+        self.assertIn("' Candidate CAND-BE: proposed; not scheduled", actual)
+        self.assertEqual(before, candidate.read_bytes())
+
+    def test_linked_candidate_does_not_change_plan_role_or_progress(self) -> None:
+        candidate = self.feature / "execution/task-candidates.md"
+        candidate.write_text(
+            "| Candidate ID | Summary | Role | Estimate (дн) | Status | Related Story |\n"
+            "|---|---|---|---|---|---|\n"
+            "| CAND-BE | Backend proposal | BE | 10 | proposed | STORY-COHORT |\n",
+            encoding="utf-8",
+        )
+        self.map.write_text(self.map.read_text().replace("ITEM-100/FE, QA-COHORT", "ITEM-100/FE, QA-COHORT, CAND-BE"), encoding="utf-8")
+        tasks = OVERLAY.load_tasks(self.feature)
+        story = OVERLAY.load_story_map(self.feature)[0]
+        self.assertEqual(OVERLAY.story_type(story, tasks), "FE")
+        self.assertEqual(OVERLAY.story_progress(story, tasks), 75)
+        story.replaced_by = ["CAND-BE"]
+        self.assertEqual(OVERLAY.plan_task_ids(story, tasks), [])
+
     def test_legacy_qa_estimate_is_never_defaulted(self) -> None:
         legacy = self.feature / "slices/legacy/execution/tasks.md"
         legacy.parent.mkdir(parents=True)

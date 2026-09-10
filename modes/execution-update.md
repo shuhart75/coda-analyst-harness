@@ -94,6 +94,8 @@ general estimate between roles, and do not add it when any role estimate exists.
 
 - Do not hand-edit generated actual-progress PlantUML for task dates. Update execution markdown, then regenerate the gantt.
 - Not-started execution tasks are tasks with `Progress % = 0` and no actual dates. They may be `real` or `virtual`.
+- Кандидаты из `task-candidates.md` не получают даты, дорожки и резерв ресурсов. Они остаются комментариями в actual-progress до явной материализации в реестр `real` или `virtual`; статус предложения сам по себе не разрешает планирование.
+- Legacy-значение `Jira = KEY/ROLE` читается как ключ `KEY` и ролевой идентификатор `KEY/ROLE`, без повторного суффикса. Несовпадение суффикса с колонкой `Role` и дубли после нормализации блокируют генерацию. Исходный реестр автоматически не переписывается.
 - Not-started tasks must not render before the current date marker. On each regeneration, if their planned date is stale, the generator shifts only the rendered bar to today or the next open day.
 - Inside a feature, not-started backend/API tasks lead frontend tasks. Frontend bars start no earlier than 3 open days after the earliest not-started backend/API bar in the same feature.
 - Not-started tasks must be capacity-scheduled by `documents/planning/team.md`: no resource lane above 100% on an open workday, and available resources should be used before pushing work later.
