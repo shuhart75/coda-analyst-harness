@@ -48,7 +48,8 @@ def expand_file(
         if not include_path.exists() and include_path not in contents:
             raise FileNotFoundError(f"Included file not found: {include_target} from {path}")
 
-        marker = include_path.relative_to(path.parent).as_posix() if include_path.is_relative_to(path.parent) else str(include_path)
+        include_root = path.parent.resolve()
+        marker = include_path.relative_to(include_root).as_posix() if include_path.is_relative_to(include_root) else str(include_path)
         lines.append(f"' BEGIN INCLUDE: {marker}")
         lines.extend(expand_file(include_path, next_stack, contents, dependencies))
         lines.append(f"' END INCLUDE: {marker}")
