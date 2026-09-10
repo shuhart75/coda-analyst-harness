@@ -2,7 +2,7 @@
 
 ## Plan Versus Actual
 
-| Feature | Role | Planned effort | Planned duration | Actual effort | Actual duration | Variance | Explanation |
+| Feature | Role | Planned team-days | Planned duration | Actual person-days | Actual duration | Duration variance | Explanation |
 |---|---|---:|---:|---:|---:|---:|---|
 |  |  |  |  |  |  |  |  |
 
@@ -18,5 +18,6 @@
 
 ## Rules
 
+- Командо-дни плана и человеко-дни задач не вычитаются друг из друга. Сравниваются длительности по рабочему календарю с учётом параллельного исполнения. Для legacy person-days единица исходной оценки указывается отдельно.
 - Never rewrite the approved historical plan.
 - Apply accepted calibration only to future draft plans.

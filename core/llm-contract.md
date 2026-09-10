@@ -178,7 +178,7 @@ continuing; never downgrade state to bypass stage gates.
 - A feature is the quarter-level outcome. Planning stories are role workstreams, with at most one story per `AN`, `BE`, `FE`, and `QA`.
 - Approved quarter and commander plans are immutable. Later scope belongs to task candidates and actual-progress.
 - Planning maximizes team utilization without exceeding 100 percent and honors personal closed intervals.
-- Default efficiency is `AN=0.80`, `BE=0.70`, `FE=0.65`, `QA=0.80`; story and personal overrides are explicit.
+- Новая экспертная оценка планирования задаётся в командо-днях (`team-days`); повторное деление на параллелизм или эффективность запрещено. `person-days` в старых таблицах не переинтерпретируются автоматически. Фактические задачи оцениваются в человеко-днях и распределяются по ресурсам.
 - FE starts no earlier than three open days after BE starts. If BE is absent, FE starts after AN or at the first available window.
 - Commander risk buffer is at least 20 percent and remains internal rather than a separate management-facing bar.
 - `commander-plan` is the quarter plan with management buffer, normally 20-30%.

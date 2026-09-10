@@ -30,7 +30,7 @@ A failed check does not advance the run. Repeated failure reaches the configured
 - Missing role work means the corresponding story is absent.
 - Approved quarter and commander plans are immutable baselines.
 - Later scope is represented by task candidates and actual tasks in actual-progress, never by rewriting the approved plan.
-- Default efficiency factors are `AN=0.80`, `BE=0.70`, `FE=0.65`, `QA=0.80`.
+- Новые плановые оценки задаются в командо-днях (`team-days`), где распараллеливание уже учтено; повторное деление на ресурсы/эффективность запрещено. Прежние `person-days` сохраняют отдельную явную семантику. Исполнение оценивается в человеко-днях и распределяется по ресурсам.
 - FE starts no earlier than three open days after BE starts. If BE is absent, FE starts after AN or at the first available planning window when AN is also absent.
 - Risk buffer is at least 20 percent. It changes commander-plan dates without being rendered as a separate management-facing bar.
 - Priority is top-to-bottom. Idle roles may pipeline into the next feature, but lower-priority work must not delay newly available higher-priority work.

@@ -15,27 +15,28 @@ Baseline: `<commander-plan / absent / mixed>`
 - `mixed` означает, что часть story уже заменена real tasks, а остаток ещё виден как virtual residual.
 - `Replaced By` заполняется по подтверждённому источнику связи story/task. Семантическая догадка LLM является предложением, а не подтверждённым составом истории; отсутствие источника требует одного вопроса аналитику.
 - Ссылки содержат внутренние `Task ID`; реальный базовый ключ Jira раскрывается во все ролевые задачи этого ключа. Не используй один идентификатор одновременно как локальный ID и ключ другой задачи.
-- Действующая формула генератора: `round(sum(max(estimate, 1.0) * progress) / sum(max(estimate, 1.0)))` по связанным задачам без `superseded`. Это взвешенное среднее, а не среднее процентов; Python `round` округляет точную половину к ближайшему чётному целому.
+- Формула ролевого PLAN: `round(sum(estimate * progress) / sum(estimate))` по всем задачам роли внутри фичи, без кандидатов и `superseded`. Оценки задаются в человеко-днях и должны быть положительными; дробные значения не повышаются до 1. Python `round` округляет точную половину к ближайшему чётному целому.
 - `progress` берётся в процентных пунктах: `round((5*75 + 6*100 + 7*100)/(5+6+7)) = 93`. Не округляй долю `0.93055...` до целого перед переводом в проценты.
-- QA связывается с историей только по подтверждённому составу. Если история покрывает только FE, перечисляй `<ключ>/FE`, а не базовый ключ, иначе в состав автоматически попадёт и `<ключ>/QA`.
-- Для `mixed` учитывается также `Residual Virtual Tasks`; для `virtual` без прямых ссылок используются `Related Stories` из реестра. Без связанных задач прогресс равен 0. Формула не доказывает состав конкретной истории.
+- QA относится к фиче целиком и входит только в PLAN QA. Карточка FE может хранить оценку тестирования, но это не ограничивает охват QA. Источники связей сохраняются, однако QA не включается в процент PLAN FE/BE.
+- `Role` определяет ролевой PLAN. Прямые связи, `Residual Virtual Tasks` и `Related Stories` сохраняются для трассировки; неполный список не исключает остальные задачи той же роли из расчёта. Без задач прогресс равен 0. Для старых смешанных историй без определимой роли сохраняется явно помеченный legacy-расчёт по прежним связям без QA, а роль не угадывается.
 - `Residual Virtual Tasks` заполняется только для `mixed`.
-- `Depends On` используем, если story без замещения должна в actual-progress стартовать после завершения другой story по логике commander-plan.
+- `Depends On` сохраняет плановую связь, но не растягивает и не сдвигает ролевой PLAN вслед за окончанием другой роли при актуализации.
 - Planning stories являются ролевыми: не более одной `AN`, `BE`, `FE`, `QA` на фичу.
 - После утверждения baseline start/duration неизменяемы; менять можно только mapping на task candidates и actual tasks.
 - Task candidates, обнаруженные после утверждения плана, показывают новый scope на actual-progress, не переписывая quarter/commander plan.
 - Не используем визуальные PlantUML-зависимости как source of truth для actual-progress; связи story/task фиксируются в этой таблице и в `tasks.md`.
-- Сдвиг не начатых execution tasks относительно текущей даты выполняет генератор actual-progress. Плановая baseline-дата story остаётся видимой как слой `PLAN ...`.
+- Сдвиг не начатых execution tasks относительно текущей даты выполняет генератор actual-progress. На диаграмме PLAN начинается с первой фактической задачи роли, иначе с первой прогнозной. Его длина всегда равна `Baseline Duration (дн)` по рабочему календарю. Без задач сохраняется исходное окно; baseline-ячейки документа не меняются.
+- Follow-up с известным ID добавляет связи, не переопределяя baseline. Список ID означает несколько ссылок; общий QA не становится частью FE/BE. Одиночный новый ID допустим без baseline и без PLAN-полосы. Не создавать или переименовывать истории ради генератора.
 
 ## Mapping
 
-| Story ID | Summary | Baseline Start | Baseline Duration (дн) | Actualization State | Mapping Mode | Replaced By | Residual Virtual Tasks | Depends On | Baseline State |
-|---|---|---|---:|---|---|---|---|---|---|
-| STORY-<FEATURE>-BE | <backend role outcome> | <YYYY-MM-DD> | <N> | virtual | explicit |  |  | STORY-<FEATURE>-AN | present |
+| Story ID | Summary | Baseline Start | Baseline Duration (дн) | Actualization State | Mapping Mode | Replaced By | Residual Virtual Tasks | Depends On | Baseline State | Role |
+|---|---|---|---:|---|---|---|---|---|---|---|
+| STORY-<FEATURE>-BE | <backend role outcome> | <YYYY-MM-DD> | <N> | virtual | explicit |  |  | STORY-<FEATURE>-AN | present | BE |
 
 Для истории с реальными задачами, но без baseline, вместо строки выше:
 
-`| STORY-<FEATURE>-FE | <подтверждённая история> | | | materialized | explicit | <ключ>/FE | | | absent |`
+`| STORY-<FEATURE>-FE | <подтверждённая история> | | | materialized | explicit | <ключ>/FE | | | absent | FE |`
 
 ## Notes
 

@@ -47,12 +47,16 @@ def validate_estimates(path: Path, root: Path, errors: list[str], warnings: list
         return
 
     indexes = {name: header.index(name) for name in required}
+    if "Estimate Unit" not in header:
+        warnings.append(f"{display}: Estimate Unit отсутствует; генерация нового плана требует явной единицы оценки")
     seen_roles: set[str] = set()
     for row in rows[1:]:
         if len(row) < len(header):
             continue
         role = row[indexes["Role"]].upper()
         story_id = row[indexes["Story ID"]]
+        if "Estimate Unit" in header and row[header.index("Estimate Unit")] not in {"team-days", "person-days"}:
+            errors.append(f"{display}: Estimate Unit должен быть team-days или person-days")
         if role not in ROLE_ORDER:
             errors.append(f"{display}: invalid role {role!r}")
             continue

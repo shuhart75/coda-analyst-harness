@@ -52,8 +52,10 @@ The planning mode starts with feature intake when the user brings a candidate ne
 
 - Keep analyst anchor, team, and final agreed effort. Never average them automatically.
 - Store effort, max parallelism, role efficiency, dependencies, and not-before constraints per role story.
-- Default efficiency: `AN=0.80`, `BE=0.70`, `FE=0.65`, `QA=0.80`.
-- Duration is `ceil(effort / effective parallel capacity)`.
+- Новые экспертные оценки задаются в командо-днях: `Estimate Unit = team-days`.
+- Длительность квартального плана: `ceil(agreed effort)`; командирского: `ceil(agreed effort * (1 + buffer / 100))`.
+- Распараллеливание и производительность уже учтены: повторно делить командо-дни на ресурсы, efficiency или персональные коэффициенты нельзя. `Max parallelism` фиксирует состав команды, который нужно зарезервировать на этот период; нехватка ресурсов блокирует расчёт.
+- Старые таблицы без `Estimate Unit` не переинтерпретируются: валидатор предупреждает, генератор нового плана требует явной единицы. Утверждённые планы не меняются; actual-only использует сохранённую длительность, а не пересчитывает оценки. Только явный `person-days` использует прежнюю формулу `ceil(effort / effective parallel capacity)` и коэффициенты `AN=0.80`, `BE=0.70`, `FE=0.65`, `QA=0.80`.
 - Personal coefficients and closed intervals come from `documents/planning/team.md`.
 
 ## Priority and capacity

@@ -17,11 +17,12 @@ Feature: `features/<feature-slug>/feature.md`
 
 ## Estimates
 
-- Analyst anchor effort: `<N>` person-days
-- Team effort: `<N>` person-days
-- Agreed effort: `<N>` person-days
+- Estimate Unit: `team-days` (командо-дни, распараллеливание уже учтено)
+- Analyst anchor effort: `<N>` team-days
+- Team effort: `<N>` team-days
+- Agreed effort: `<N>` team-days
 - Max parallelism: `<N>`
-- Efficiency: `<0..1>`
+- Efficiency: `1` (не применяется повторно к team-days)
 - Calculated duration: `<N>` open days
 
 ## Dependencies and assumptions

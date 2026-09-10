@@ -31,6 +31,7 @@ class Story:
     efficiency: float
     depends_on: list[str]
     not_before: date | None
+    estimate_unit: str = "team-days"
 
 
 @dataclass
@@ -102,6 +103,9 @@ def load_stories(project: Path, feature: str) -> list[Story]:
     rows = markdown_table(path, required)
     stories: list[Story] = []
     for row in rows:
+        unit = clean(row.get("Estimate Unit", ""))
+        if unit not in {"team-days", "person-days"}:
+            raise ValueError(f"{path}: требуется явный Estimate Unit: team-days или person-days")
         role = row["Role"].upper()
         if role not in ROLE_ORDER:
             continue
@@ -123,6 +127,7 @@ def load_stories(project: Path, feature: str) -> list[Story]:
                 efficiency=efficiency,
                 depends_on=[clean(item) for item in row.get("Depends On", "").split(",") if clean(item) and "+" not in item],
                 not_before=parse_date(row.get("Not before", "")),
+                estimate_unit=unit,
             )
         )
     return sorted(stories, key=lambda item: ROLE_ORDER.index(item.role))
@@ -227,12 +232,15 @@ def earliest_slot(
 ) -> Scheduled:
     candidates = role_resources or [f"TBD_{story.role}"]
     max_count = min(story.max_parallelism, len(candidates))
+    if story.estimate_unit == "team-days" and story.max_parallelism > len(candidates):
+        raise ValueError(f"{story.story_id}: недостаточно ресурсов для подтверждённого состава команды")
+    counts = [max_count] if story.estimate_unit == "team-days" else range(max_count, 0, -1)
     best: Scheduled | None = None
-    for count in range(max_count, 0, -1):
+    for count in counts:
         for group in itertools.combinations(candidates, count):
             capacity = story.efficiency * sum(coefficients.get(resource, 1.0) for resource in group)
             effort = story.effort * (1 + buffer_percent / 100)
-            duration = max(1, math.ceil(effort / capacity))
+            duration = max(1, math.ceil(effort if story.estimate_unit == "team-days" else effort / capacity))
             current = earliest
             while True:
                 span = open_span(current, duration, globally_closed)
@@ -321,7 +329,7 @@ def render_feature(feature: str, schedules: list[Scheduled], commander: bool) ->
                 f"[{scheduled.story.summary}] as [{task_alias}] on{resource_part} starts {scheduled.start:%Y/%m/%d}",
                 f"[{task_alias}] ends {scheduled.finish:%Y/%m/%d}",
                 f"[{task_alias}] is colored in {ROLE_COLORS[scheduled.story.role]}",
-                f"' effort={scheduled.story.effort}; duration={scheduled.duration}; role={scheduled.story.role}",
+                f"' effort={scheduled.story.effort}; unit={scheduled.story.estimate_unit}; duration={scheduled.duration}; role={scheduled.story.role}",
                 "",
             ]
         )
@@ -332,7 +340,7 @@ def write_actualization(project: Path, quarter: str, feature: str, schedules: li
     path = project / "features" / feature / "planning/actualization.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [
-        f"| {item.story.story_id} | {item.story.summary} | {item.start.isoformat()} | {item.duration} | virtual | explicit |  |  | {', '.join(item.story.depends_on)} |"
+        f"| {item.story.story_id} | {item.story.summary} | {item.start.isoformat()} | {item.duration} | virtual | explicit |  |  | {', '.join(item.story.depends_on)} | {item.story.role} |"
         for item in schedules
     ]
     path.write_text(
@@ -340,8 +348,8 @@ def write_actualization(project: Path, quarter: str, feature: str, schedules: li
         f"Feature: `features/{feature}/feature.md`  \nQuarter: `{quarter}`  \nBaseline: `commander-plan`\n\n"
         "Approved baseline dates and duration remain unchanged. Mapping fields may later materialize role stories into task candidates and actual tasks.\n\n"
         "## Mapping\n\n"
-        "| Story ID | Summary | Baseline Start | Baseline Duration (дн) | Actualization State | Mapping Mode | Replaced By | Residual Virtual Tasks | Depends On |\n"
-        "|---|---|---|---:|---|---|---|---|---|\n"
+        "| Story ID | Summary | Baseline Start | Baseline Duration (дн) | Actualization State | Mapping Mode | Replaced By | Residual Virtual Tasks | Depends On | Role |\n"
+        "|---|---|---|---:|---|---|---|---|---|---|\n"
         + "\n".join(rows)
         + "\n",
         encoding="utf-8",

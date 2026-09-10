@@ -85,7 +85,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         outputs = OVERLAY.prepare_outputs(self.root, "2026-Q3", ["cohorts"])
         self.assertIn("TASK_QA_COHORT", outputs[self.target])
         self.assertIn("30% completed", outputs[self.target])
-        self.assertEqual(OVERLAY.story_progress(OVERLAY.load_story_map(self.feature)[0], tasks), 62)
+        self.assertEqual(OVERLAY.story_progress(OVERLAY.load_story_map(self.feature)[0], tasks), 75)
 
     def follow_up_map(self) -> None:
         self.map.write_text("## Mapping\n\n" + self.map.read_text().replace(
@@ -142,8 +142,8 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIn("as [STORY_STORY_SECOND]", self.target.read_text())
 
     def test_duplicate_story_ids_across_tables_fail_without_writes(self) -> None:
-        self.follow_up_map()
-        self.map.write_text(self.map.read_text().replace("STORY-FOLLOW-UP", "STORY-COHORT"), encoding="utf-8")
+        original = self.map.read_text()
+        self.map.write_text(original + "\n## Duplicate mapping\n\n" + original, encoding="utf-8")
         before = self.snapshot()
         with self.assertRaisesRegex(ValueError, "Duplicate Story ID: STORY-COHORT"):
             OVERLAY.load_story_map(self.feature)
@@ -174,6 +174,27 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.map.write_text(self.map.read_text().replace("| QA-COHORT | Late scope |", "| UNKNOWN-TASK | Late scope |"), encoding="utf-8")
         before = self.snapshot()
         self.assertIn("STORY-FOLLOW-UP", self.quarter(success=False).stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_follow_up_existing_story_does_not_duplicate_plan_or_qa(self) -> None:
+        self.follow_up_map()
+        self.map.write_text(self.map.read_text().replace("STORY-FOLLOW-UP", "STORY-COHORT"), encoding="utf-8")
+        self.registry.write_text(self.registry.read_text().replace("STORY-FOLLOW-UP", "STORY-COHORT"), encoding="utf-8")
+        source = self.map.read_bytes()
+        self.quarter()
+        contents = self.target.read_text()
+        self.assertEqual(contents.count("as [STORY_STORY_COHORT]"), 1)
+        self.assertEqual(contents.count("as [TASK_QA_COHORT]"), 1)
+        self.assertIn("[STORY_STORY_COHORT] is 75% completed", contents)
+        self.assertEqual(self.map.read_bytes(), source)
+        expanded = "\n".join(EXPANDER.expand_file(self.gantt / "actual-progress.puml", [])).rstrip() + "\n"
+        self.assertEqual((self.gantt / "actual-progress-confluence.puml").read_text(), expanded)
+
+    def test_follow_up_unknown_target_in_list_blocks_without_writes(self) -> None:
+        self.follow_up_map()
+        self.map.write_text(self.map.read_text().replace("STORY-FOLLOW-UP", "STORY-COHORT, STORY-UNKNOWN"), encoding="utf-8")
+        before = self.snapshot()
+        self.assertIn("STORY-UNKNOWN", self.quarter(success=False).stderr)
         self.assertEqual(self.snapshot(), before)
 
     def test_unknown_story_error_names_the_missing_reference(self) -> None:
@@ -342,7 +363,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         content = self.target.read_text()
         self.assertNotIn("[PLAN ", content)
         self.assertNotIn("as [STORY_", content)
-        self.assertIn("No approved baseline: STORY-COHORT; progress=62%", content)
+        self.assertIn("No approved baseline: STORY-COHORT; progress=75%", content)
         self.assertIn("TASK_ITEM_100_FE", content)
         self.assertIn("TASK_QA_COHORT", content)
         self.assertEqual(self.map.read_bytes(), before)

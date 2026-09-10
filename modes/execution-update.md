@@ -44,6 +44,15 @@ analyst; never default it, copy the FE estimate or silently skip QA. In visible
 task titles use `QA <summary>`, without the tracker-number prefix; keep the source
 key and `<key>/QA` as metadata for traceability.
 
+QA относится к фиче целиком, а не к FE-карточке, содержащей «Оценку тестирования».
+Несколько QA-задач сохраняются отдельно. При отсутствии фактического начала
+прогноз QA ориентируется на первое завершение FE внутри фичи, независимо от ключа
+карточки-источника: по умолчанию за один рабочий день до него (консервативный край
+ориентира 1–2 дня), но не раньше начала этой FE-задачи, текущей даты и доступности
+QA-ресурса. Если FE нет, ориентир — следующий рабочий день после первого завершения
+другой роли фичи. Подтверждённые фактические даты не сдвигаются. Прогноз не записывается
+как факт; поздняя явная плановая дата QA остаётся ограничением снизу.
+
 ## Read-only tracker evidence
 
 Reading SberTrek and Jira follows `core/tracker-reading.md` and does not itself
@@ -66,7 +75,7 @@ general estimate between roles, and do not add it when any role estimate exists.
 - Read the canonical feature registry `features/<feature>/execution/tasks.md` and `planning/actualization.md`. Legacy slice registries remain supported; do not create slices or duplicate tasks merely to satisfy tooling.
 - Individual task cards and `execution/actual-progress.md` are supporting evidence, not interchangeable generator inputs. Prepare a missing registry only from confirmed facts and explicit authorization; do not guess missing estimates, dates, story membership or resource assignments.
 - Use `templates/execution/tasks.template.md` for internal `Task ID` and optional confirmed `Jira`. A local real QA task needs no tracker key. `QA-COHORT` renders as `TASK_QA_COHORT`; record the preserved alias in Notes, not as a tracker-issued identifier.
-- The existing weighted story formula and membership rules are documented in `templates/planning/actualization.template.md`. PlantUML comments, task titles and numerical coincidence do not prove membership. Show source paths and excerpts; ask one missing-rule question at a time.
+- Ролевой PLAN использует все задачи соответствующей роли внутри подтверждённой фичи; формула и legacy-совместимость описаны в `templates/planning/actualization.template.md` и `core/entity-model.md`. Принадлежность задачи к фиче не угадывается по похожему названию. Follow-up может описывать связи с существующими историями, включая список ID; это не повод создавать новые истории или дублировать QA.
 - A confirmed missing story baseline is represented by `Baseline State = absent` in actualization.md with both baseline cells empty. This is independent of virtual/materialized; it does not require retrospective plan approval. Keep explicit task links and source evidence. Missing actualization.md itself still blocks generation, except for a plan-only feature with an explicit decision under `core/forecast-exclusions.md` or `core/forecast-preservation.md`.
 - An absent-baseline story has no generated `PLAN` bar; its task links and computed progress remain in export comments, while the tasks render normally. Never label execution-derived dates as an approved plan. Existing approved baseline snapshots remain protected.
 - Missing task estimates or required scheduling dates still block the entire run without writing outputs. A known finish is not a known start; do not infer start from Created, Updated, duration or an unverified old Gantt bar.
@@ -92,7 +101,7 @@ general estimate between roles, and do not add it when any role estimate exists.
 - An executor lane whose role conflicts with the work-item role is not preserved; the generator chooses a resource from the correct role roster.
 - Strip square brackets from generated PlantUML labels. In particular, tracker summary `[FE] Списковая форма` must render as `FE Списковая форма`, never as nested PlantUML brackets.
 - Actual started or completed tasks keep their actual dates, even when those dates are in the past.
-- Keep `PLAN ...` story bars visible where a recorded baseline exists; do not fabricate them for `Baseline State = absent`.
+- Сохраняй серую полосу `PLAN` с исходной длительностью. Начало привязывается к первой фактической задаче этой роли в фиче, иначе к первой прогнозной; конец — только к длительности по рабочему календарю. Без задач сохраняется исходное окно. Процент — взвешенный по точным человеко-дням прогресс всех задач роли, без кандидатов и `superseded`. Полосы без записанного baseline не создаются.
 - Never rewrite approved quarter or commander plans to absorb later scope. Render later work as task candidates or actual tasks.
 - Regenerate actual-progress through `scripts/sync-quarter-gantt.py --actual-only`; it also refreshes `actual-progress-confluence.puml`.
 
