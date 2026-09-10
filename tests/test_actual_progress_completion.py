@@ -47,6 +47,16 @@ class ActualProgressCompletionTests(unittest.TestCase):
         self.quarter()
         self.assertIn("[TASK_QA_COHORT] happens at 2026/08/27", self.target.read_text())
 
+    def test_early_boundary_without_baseline_is_inside_project_scale(self):
+        self.bounded_tasks()
+        self.registry.write_text(self.registry.read_text().replace("2026-08-27", "2026-06-27"))
+        self.map.write_text(self.map.read_text().replace(
+            "| Baseline Start |", "| Baseline State | Baseline Start |",
+        ).replace("| Delivery | 2026-09-01 | 5 |", "| Delivery | absent | | |"))
+        self.quarter()
+        self.assertIn("Project starts 2026-06-27", (self.gantt / "actual-progress.puml").read_text())
+        self.assertNotIn("[PLAN ", self.target.read_text())
+
     def test_known_interval_is_preserved(self):
         self.bounded_tasks("2026-08-10", "2026-08-12")
         self.quarter()

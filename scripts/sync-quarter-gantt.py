@@ -24,7 +24,7 @@ QUARTER_START_MONTH = {
     4: 10,
 }
 
-START_RE = re.compile(r"\bstarts\s+(\d{4})[-/](\d{2})[-/](\d{2})\b", re.IGNORECASE)
+START_RE = re.compile(r"\b(?:starts|happens\s+at)\s+(\d{4})[-/](\d{2})[-/](\d{2})\b", re.IGNORECASE)
 FEATURE_COMMENT_RE = re.compile(r"^'\s*FEATURE:\s*(.+?)\s*$", re.MULTILINE)
 FEATURE_TITLE_RE = re.compile(r"^#\s+FEATURE-[A-Z0-9_-]+\s+[—-]\s+(.+?)\s*$", re.MULTILINE)
 CLOSED_DAY_RE = re.compile(r"^(\d{4})[-/](\d{2})[-/](\d{2})$")
