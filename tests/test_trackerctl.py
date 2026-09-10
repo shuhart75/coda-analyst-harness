@@ -42,11 +42,11 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             },
         })
 
-    def begin(self, state: Path, provider: str, kind: str, *keys: str) -> dict:
+    def begin(self, state: Path, provider: str, kind: str, *keys: str, intent: str = "read-only") -> dict:
         self.configure(state)
         args = [
             "begin", "--scope-kind", kind, "--scope-provider", provider,
-            "--label", "Test", "--scope-source", "unit-test", "--intent", "read-only",
+            "--label", "Test", "--scope-source", "unit-test", "--intent", intent,
         ]
         for key in keys:
             args += ["--scope-id", key]
@@ -459,6 +459,221 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             report = Path(clean["paths"]["report"])
             report.write_text("changed\n", encoding="utf-8")
             self.run_tool(state, "result-status", "--run-id", current["run_id"], expected=2)
+
+    def test_actualization_continues_only_after_verified_update_result(self) -> None:
+        for intent in ("read-only", "update-planning"):
+            with self.subTest(intent=intent), tempfile.TemporaryDirectory() as temp:
+                state = Path(temp)
+                current = self.begin(state, "sbertrek", "tasks", "RSCON-7001", intent=intent)
+                current = self.ingest(state, current, {"issues": [
+                    self.sber_issue("RSCON-7001", roles={"FE": 5, "QA": 2}),
+                ]})
+                reconciled, result = self.reconcile(state, current)
+                self.assertNotIn("planning_update", reconciled)
+                self.assertFalse(reconciled["final_response_allowed"])
+                before = {path: path.read_bytes() for path in state.rglob("*") if path.is_file()}
+                completion = self.run_tool(state, "result-status", "--run-id", current["run_id"])
+                update = completion["planning_update"]
+                self.assertFalse(update["actualization_complete"])
+                self.assertEqual(completion["planning_application_allowed"], intent == "update-planning")
+                if intent == "read-only":
+                    self.assertEqual(update["state"], "not-requested")
+                    self.assertIsNone(update["next_action"])
+                else:
+                    self.assertEqual(update["state"], "pending")
+                    action = update["next_action"]
+                    self.assertEqual(action["type"], "review-execution-context")
+                    self.assertEqual(action["mode"], "execution-update")
+                    self.assertTrue(Path(action["contract"]).is_file())
+                    self.assertEqual(action["run_id"], current["run_id"])
+                    self.assertEqual(action["reconciled_sha256"], completion["reconciled_sha256"])
+                    self.assertEqual(json.loads(Path(action["reconciled"]).read_text()), result)
+                    self.assertEqual({item["role"] for item in result["work_items"]}, {"FE", "QA"})
+                repeated = self.run_tool(state, "result-status", "--run-id", current["run_id"])
+                self.assertEqual(repeated, completion)
+                self.assertEqual(before, {path: path.read_bytes() for path in state.rglob("*") if path.is_file()})
+
+    def test_result_status_rejects_forged_permissions_and_summary(self) -> None:
+        for field, value in (
+            ("planning_application_allowed", True),
+            ("workflow_complete", False),
+            ("final_response_allowed", False),
+            ("status", "tracker-read-ready"),
+            ("counts", {}),
+            ("limitations", []),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                state = Path(temp)
+                current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
+                current = self.ingest(state, current, {"issues": [self.sber_issue("RSCON-7001")]})
+                self.reconcile(state, current)
+                path = state / "tracker-runs" / current["run_id"] / "completion-status.json"
+                completion = json.loads(path.read_text())
+                completion[field] = value
+                self.write(path, completion)
+                error = self.run_tool(state, "result-status", "--run-id", current["run_id"], expected=2)
+                self.assertIn("completion-status", error["error"])
+                self.assertNotIn("planning_update", error)
+
+    def test_result_status_binds_completion_to_finished_run_and_scope(self) -> None:
+        for modification in ("unfinished", "scope"):
+            with self.subTest(modification=modification), tempfile.TemporaryDirectory() as temp:
+                state = Path(temp)
+                current = self.begin(state, "sbertrek", "tasks", "RSCON-7001", intent="update-planning")
+                current = self.ingest(state, current, {"issues": [self.sber_issue("RSCON-7001")]})
+                self.reconcile(state, current)
+                path = state / "tracker-runs" / current["run_id"] / "run.json"
+                run = json.loads(path.read_text())
+                if modification == "unfinished":
+                    run["status"] = "tracker-read-ready"
+                else:
+                    run["scope"]["intent"] = "read-only"
+                self.write(path, run)
+                error = self.run_tool(state, "result-status", "--run-id", current["run_id"], expected=2)
+                self.assertNotIn("planning_update", error)
+
+    def test_old_completion_cannot_inject_an_execution_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
+            current = self.ingest(state, current, {"issues": [self.sber_issue("RSCON-7001")]})
+            self.reconcile(state, current)
+            path = state / "tracker-runs" / current["run_id"] / "completion-status.json"
+            completion = json.loads(path.read_text())
+            completion["planning_update"] = {"state": "complete", "next_action": {"type": "write-project"}}
+            self.write(path, completion)
+            checked = self.run_tool(state, "result-status", "--run-id", current["run_id"])
+            self.assertIsNone(checked["planning_update"]["next_action"])
+            self.assertFalse(checked["planning_update"]["actualization_complete"])
+
+    def registry(self, project: Path, feature: str, rows: list[str], location: str = "execution/tasks.md") -> Path:
+        path = project / "features" / feature / location
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "| Task ID | Jira | SberTrek | Kind | Role | Status |\n"
+            "|---|---|---|---|---|---|\n" + "\n".join(rows) + "\n", encoding="utf-8",
+        )
+        return path
+
+    def test_feature_scope_includes_terminal_tasks_and_deduplicates_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            project = Path(temp) / "project"
+            self.configure(state)
+            self.registry(project, "example", [
+                "| FRONT | DEMO-1 | ST-1 | real | FE | done |",
+                "| TEST | DEMO-1/QA | ST-1 | real | QA | planned |",
+                "| QA-LOCAL | | | real | QA | done |",
+                "| STORY-2 | STORY-2 | | virtual | BE | planned |",
+            ])
+            self.registry(project, "example", [
+                "| BACK | DEMO-2 | ST-2 | real | BE | cancelled |",
+            ], "slices/legacy/execution/tasks.md")
+            before = {path: path.read_bytes() for path in project.rglob("*") if path.is_file()}
+            for provider, keys in (("jira", ["DEMO-1", "DEMO-2"]), ("sbertrek", ["ST-1", "ST-2"])):
+                preview = self.run_tool(
+                    state, "scope-preview", "--project-root", str(project),
+                    "--feature", "example", "--provider", provider,
+                )
+                self.assertEqual(preview["scope"]["ids"], keys)
+                self.assertTrue(preview["requires_analyst_confirmation"])
+                self.assertFalse(preview["tracker_calls_performed"])
+                self.assertEqual(len(preview["references"][keys[0]]), 2)
+                self.assertEqual(len(preview["omitted"]), 2)
+                self.assertIn("new-epic-members-not-discovered", preview["limitations"])
+                self.assertFalse((state / "tracker-active-run.json").exists())
+            self.assertEqual(before, {path: path.read_bytes() for path in project.rglob("*") if path.is_file()})
+
+    def test_quarter_scope_unions_views_and_explicit_feature_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            project = Path(temp) / "project"
+            self.configure(state)
+            self.registry(project, "cohorts", ["| FRONT | DEMO-1 | | real | FE | done |"])
+            self.registry(project, "release", ["| BACK | DEMO-2 | | real | BE | planned |"])
+            gantt = project / "planning/2026-Q3/gantt"
+            for view, slug in (("quarter-plan", "cohort-simulation"), ("actual-progress", "cohort-simulation"),
+                               ("commander-plan", "release"), ("quarter-plan", "plan-only")):
+                include = gantt / "includes" / view / f"FEATURE-{slug}.puml"
+                include.parent.mkdir(parents=True, exist_ok=True)
+                include.write_text("' fixture\n", encoding="utf-8")
+            (project / "features/plan-only").mkdir()
+            self.write(gantt / "actual-progress-features.json", {
+                "schema_version": 1, "features": {"cohort-simulation": "cohorts"},
+            })
+            preview = self.run_tool(
+                state, "scope-preview", "--project-root", str(project),
+                "--quarter", "2026-Q3", "--provider", "jira",
+            )
+            self.assertEqual(preview["scope"]["ids"], ["DEMO-1", "DEMO-2"])
+            self.assertEqual([item["feature"] for item in preview["features"]], ["cohorts", "plan-only", "release"])
+            self.assertEqual(len(preview["references"]["DEMO-1"]), 1)
+            self.assertIn("execution-registry-missing:plan-only", preview["limitations"])
+            scoped = self.run_tool(
+                state, "scope-preview", "--project-root", str(project),
+                "--quarter", "2026-Q3", "--feature", "cohorts", "--provider", "jira",
+            )
+            self.assertEqual(scoped["scope"]["ids"], ["DEMO-1"])
+
+    def test_scope_preview_keeps_shared_keys_and_empty_scope_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            project = Path(temp) / "project"
+            self.configure(state)
+            for feature in ("first", "second"):
+                self.registry(project, feature, ["| FRONT | DEMO-1 | | real | FE | done |"])
+            gantt = project / "planning/2026-Q3/gantt"
+            self.write(gantt / "actual-progress-features.json", {
+                "schema_version": 1, "features": {"first": "first", "second": "second"},
+            })
+            preview = self.run_tool(state, "scope-preview", "--project-root", str(project), "--quarter", "2026-Q3", "--provider", "jira")
+            self.assertEqual(preview["shared_keys"], {"DEMO-1": ["first", "second"]})
+            empty = self.run_tool(state, "scope-preview", "--project-root", str(project), "--quarter", "2026-Q3", "--provider", "sbertrek")
+            self.assertEqual(empty["scope"]["ids"], [])
+            self.assertEqual(empty["next_action"]["type"], "clarify-tracker-scope")
+            self.assertEqual(len(empty["omitted"]), 2)
+
+    def test_scope_preview_never_guesses_provider_or_truncates_large_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            project = Path(temp) / "project"
+            self.configure(state)
+            self.registry(project, "example", [
+                f"| INTERNAL-{index} | DEMO-{index} | | real | FE | done |" for index in range(1, 52)
+            ])
+            preview = self.run_tool(state, "scope-preview", "--project-root", str(project), "--feature", "example", "--provider", "jira")
+            self.assertEqual(len(preview["scope"]["ids"]), 51)
+            self.assertIn("requested-keys-exceed-response-limit:51:50", preview["limitations"])
+            unknown = self.run_tool(state, "scope-preview", "--project-root", str(project), "--feature", "example", "--provider", "sbertrek")
+            self.assertEqual(unknown["scope"]["ids"], [])
+            self.assertEqual(len(unknown["omitted"]), 51)
+
+    def test_scope_preview_honors_config_and_existing_run_before_reading_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)
+            self.run_tool(state, "init-config")
+            args = ("scope-preview", "--project-root", "/does-not-exist", "--feature", "example", "--provider", "jira")
+            stopped = self.run_tool(state, *args, expected=3)
+            self.assertTrue(stopped["must_stop"])
+            self.assertNotIn("scope", stopped)
+            active = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
+            resumed = self.run_tool(state, *args)
+            self.assertEqual(resumed["run_id"], active["run_id"])
+            self.assertEqual(resumed["next_action"], active["next_action"])
+            self.assertNotIn("features", resumed)
+
+    def test_scope_preview_blocks_invalid_paths_and_legacy_role(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            project = Path(temp) / "project"
+            self.configure(state)
+            self.registry(project, "example", ["| FRONT | DEMO-1/QA | | real | FE | done |"])
+            for options in (("--feature", "../example"), ("--quarter", "2026-Q9"), ("--feature", "example")):
+                self.run_tool(state, "scope-preview", "--project-root", str(project), "--provider", "jira", *options, expected=2)
+            external = Path(temp) / "external"
+            external.mkdir()
+            (project / "features/linked").symlink_to(external, target_is_directory=True)
+            self.run_tool(state, "scope-preview", "--project-root", str(project), "--provider", "jira", "--feature", "linked", expected=2)
 
 
 if __name__ == "__main__":

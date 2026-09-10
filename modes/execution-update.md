@@ -58,9 +58,15 @@ QA-ресурса. Если FE нет, ориентир — следующий �
 
 Reading SberTrek and Jira follows `core/tracker-reading.md` and does not itself
 switch mode or authorize changes to execution artifacts. SberTrek is primary; Jira
-fills only missing values and contributes history. The read report groups the same
-tasks independently by epic and by release. Applying selected facts to
-actual-progress is a separate, not-yet-authorized operation.
+fills missing values, while conflicting populated assignees and estimates require
+the analyst's decision. This protocol does not read history.
+
+For an explicit actualization request, follow `core/tracker-actualization.md`.
+Use intent `update-planning`; after the verified read report, continue through
+`planning_update.next_action` to execution review, confirmed fact updates and
+`--actual-only` generation. The original actualization request authorizes this
+continuation, not guesses about dates, roles, feature membership or resources.
+A read-only request ends at the tracker report and never enters this phase.
 
 Tracker estimates are applied per role. For every populated `AN / BE / FE / QA`
 estimate, create one row in `execution/tasks.md`; the same tracker key may repeat,

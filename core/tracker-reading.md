@@ -25,7 +25,10 @@ python3 scripts/trackerctl.py config-status
 ```
 
 Код `3` и `must_stop: true` разрешают только дословный вывод
-`response_contract.text`. После готовой конфигурации создай run:
+`response_contract.text`. Для актуализации фичи или квартала без явных ключей
+после готовой конфигурации используй локальный `scope-preview` по
+`core/tracker-actualization.md` и подтверди область. Это не сбор из трекеров.
+После готовой конфигурации и подтверждённой области создай run:
 
 ```bash
 python3 scripts/trackerctl.py begin \
@@ -205,6 +208,13 @@ SberTrek.issue_key == Jira.key
 назначений, остаётся `unknown`, а результат содержит `history-not-collected`.
 
 ## Результат
+
+Команды актуализации продолжаются после фазы чтения по
+`core/tracker-actualization.md`. `result-status` повторно проверяет intent и
+разрешения по исходному run и возвращает отдельный `planning_update.next_action`
+только для `update-planning`. Дословный отчёт сверки выведи отдельным сообщением,
+затем продолжи исходную задачу; он не подтверждает обновление execution или Ганта.
+Для `read-only` продолжения нет.
 
 `reconcile` создаёт только машинные результаты:
 

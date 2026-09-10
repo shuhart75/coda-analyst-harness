@@ -1388,6 +1388,32 @@ def config_status_command(_: argparse.Namespace) -> int:
     return STOP_EXIT if payload.get("must_stop") else 0
 
 
+def scope_preview_command(args: argparse.Namespace) -> int:
+    config = load_config()
+    status = config_status_payload(config)
+    if status.get("must_stop"):
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        return STOP_EXIT
+    if active_path().is_file():
+        marker = load_json(active_path())
+        active = marker.get("run_id") if isinstance(marker, dict) else None
+        if not isinstance(active, str) or not RUN_ID.fullmatch(active):
+            raise ValueError("Повреждён tracker-active-run.json")
+        if run_root(active).exists():
+            existing = load_run(active)
+            if existing["status"] != "tracker-read-reconciled":
+                payload = status_payload(existing)
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+                return STOP_EXIT if payload.get("must_stop") else 0
+    if args.provider == "jira" and not config["jira_enabled"]:
+        raise ValueError("Jira отключена в tracker-config.json")
+    from tracker_scope import preview_scope
+
+    payload = preview_scope(Path(args.project_root), args.provider, args.quarter, args.feature)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def update_config_command(args: argparse.Namespace) -> int:
     config = load_config()
     if args.command == "set-projects":
@@ -1552,14 +1578,46 @@ def resolve_conflict_command(args: argparse.Namespace) -> int:
 
 def result_status_command(args: argparse.Namespace) -> int:
     root = run_root(args.run_id)
+    run = load_run(args.run_id)
+    if run.get("status") != "tracker-read-reconciled":
+        raise ValueError("Сверка tracker-run ещё не завершена")
     completion = load_json(root / "completion-status.json")
     if completion.get("protocol") != PROTOCOL or completion.get("run_id") != args.run_id:
         raise ValueError("Официальный completion-status повреждён")
     if completion.get("reconciled_sha256") != file_digest(root / "reconciled.json") or completion.get("report_sha256") != file_digest(root / "report.md"):
         raise ValueError("Итоговые файлы изменены после reconciliation")
     result = load_json(root / "reconciled.json")
+    if result.get("protocol") != PROTOCOL or result.get("run_id") != args.run_id or result.get("scope") != run["scope"]:
+        raise ValueError("Область результата не совпадает с tracker-run")
+    planning_allowed = run["scope"]["intent"] == "update-planning"
+    expected = {
+        "status": "tracker-read-reconciled",
+        "workflow_complete": True,
+        "final_response_allowed": True,
+        "planning_application_allowed": planning_allowed,
+        "counts": result["counts"],
+        "summary": result["summary"],
+        "limitations": result["limitations"],
+    }
+    if any(
+        completion.get(field) is not value if isinstance(value, bool) else completion.get(field) != value
+        for field, value in expected.items()
+    ):
+        raise ValueError("Разрешения или сводка completion-status не совпадают с результатом сверки")
     if completion.get("response_contract", {}).get("text") != official_text(result):
         raise ValueError("Официальный текст результата изменён")
+    completion["planning_update"] = {
+        "state": "pending" if planning_allowed else "not-requested",
+        "actualization_complete": False,
+        "next_action": {
+            "type": "review-execution-context",
+            "mode": "execution-update",
+            "contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-actualization.md"),
+            "run_id": args.run_id,
+            "reconciled": str(root / "reconciled.json"),
+            "reconciled_sha256": completion["reconciled_sha256"],
+        } if planning_allowed else None,
+    }
     print(json.dumps(completion, ensure_ascii=False, indent=2))
     return 0
 
@@ -1569,6 +1627,12 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init-config"); init.add_argument("--force", action="store_true"); init.set_defaults(handler=init_config_command)
     commands.add_parser("config-status").set_defaults(handler=config_status_command)
+    preview = commands.add_parser("scope-preview")
+    preview.add_argument("--project-root", required=True)
+    preview.add_argument("--provider", choices=PROVIDERS, required=True)
+    preview.add_argument("--quarter")
+    preview.add_argument("--feature")
+    preview.set_defaults(handler=scope_preview_command)
     projects = commands.add_parser("set-projects"); projects.add_argument("--provider", choices=PROVIDERS, required=True); projects.add_argument("projects", nargs="+"); projects.set_defaults(handler=update_config_command)
     jira = commands.add_parser("set-jira-mode"); jira.add_argument("mode", choices=("enabled", "disabled")); jira.set_defaults(handler=update_config_command)
     issue_types = commands.add_parser("set-issue-types"); issue_types.add_argument("issue_types", nargs="+"); issue_types.set_defaults(handler=update_config_command)
