@@ -94,6 +94,8 @@ general estimate between roles, and do not add it when any role estimate exists.
 
 - Do not hand-edit generated actual-progress PlantUML for task dates. Update execution markdown, then regenerate the gantt.
 - Not-started execution tasks are tasks with `Progress % = 0` and no actual dates. They may be `real` or `virtual`.
+- Подтверждённое завершение к релизу без точного интервала записывай как `done / 100%` и необязательное `Completed By = YYYY-MM-DD`, с источником в Notes/Details. Не записывай границу в `Actual Finish` и не восстанавливай даты по оценке. Без полного фактического интервала генератор выводит подписанную отметку границы без резервирования ресурса; сама граница не привязывает PLAN. Если фактический интервал известен полностью, он сохраняется и не может выходить за границу.
+- Отменённые `cancelled`/`canceled`, как и `superseded`, остаются в исходном реестре и комментариях экспорта, но не в расписании и не в проценте PLAN. Отмена задачи не утверждает отмену фичи и не изменяет baseline.
 - Кандидаты из `task-candidates.md` не получают даты, дорожки и резерв ресурсов. Они остаются комментариями в actual-progress до явной материализации в реестр `real` или `virtual`; статус предложения сам по себе не разрешает планирование.
 - Legacy-значение `Jira = KEY/ROLE` читается как ключ `KEY` и ролевой идентификатор `KEY/ROLE`, без повторного суффикса. Несовпадение суффикса с колонкой `Role` и дубли после нормализации блокируют генерацию. Исходный реестр автоматически не переписывается.
 - Not-started tasks must not render before the current date marker. On each regeneration, if their planned date is stale, the generator shifts only the rendered bar to today or the next open day.
@@ -103,7 +105,7 @@ general estimate between roles, and do not add it when any role estimate exists.
 - An executor lane whose role conflicts with the work-item role is not preserved; the generator chooses a resource from the correct role roster.
 - Strip square brackets from generated PlantUML labels. In particular, tracker summary `[FE] Списковая форма` must render as `FE Списковая форма`, never as nested PlantUML brackets.
 - Actual started or completed tasks keep their actual dates, even when those dates are in the past.
-- Сохраняй серую полосу `PLAN` с исходной длительностью. Начало привязывается к первой фактической задаче этой роли в фиче, иначе к первой прогнозной; конец — только к длительности по рабочему календарю. Без задач сохраняется исходное окно. Процент — взвешенный по точным человеко-дням прогресс всех задач роли, без кандидатов и `superseded`. Полосы без записанного baseline не создаются.
+- Сохраняй серую полосу `PLAN` с исходной длительностью. Начало привязывается к первой фактической задаче этой роли в фиче, иначе к первой прогнозной; конец — только к длительности по рабочему календарю. Без задач сохраняется исходное окно. Процент — взвешенный по точным человеко-дням прогресс всех задач роли, без кандидатов, `superseded` и `cancelled`/`canceled`. Полосы без записанного baseline не создаются.
 - Never rewrite approved quarter or commander plans to absorb later scope. Render later work as task candidates or actual tasks.
 - Regenerate actual-progress through `scripts/sync-quarter-gantt.py --actual-only`; it also refreshes `actual-progress-confluence.puml`.
 

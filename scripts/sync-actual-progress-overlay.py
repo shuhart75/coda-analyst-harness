@@ -93,6 +93,8 @@ ROLE_ALIASES = {
 }
 
 NOT_STARTED_STATUSES = {"proposed", "предложен", "planned", "todo", "open", "backlog"}
+DONE_STATUSES = {"done", "closed", "complete", "completed"}
+EXCLUDED_STATUSES = {"superseded", "cancelled", "canceled"}
 FE_AFTER_BE_OPEN_DAYS = 3
 QA_BEFORE_FE_FINISH_OPEN_DAYS = 1
 
@@ -131,6 +133,7 @@ class Task:
     status: str
     progress: int
     related_stories: list[str]
+    completed_by: str = ""
 
 
 @dataclass
@@ -384,9 +387,9 @@ def load_story_map(feature_dir: Path) -> list[StoryMap]:
 
 def progress_from_status(status: str) -> int:
     status = status.lower()
-    if status in {"done", "closed", "complete", "completed"}:
+    if status in DONE_STATUSES:
         return 100
-    if status in {"planned", "todo", "open", "backlog", "superseded"}:
+    if status in {"planned", "todo", "open", "backlog"} | EXCLUDED_STATUSES:
         return 0
     if status in {"in_progress", "in progress", "doing"}:
         return 50
@@ -541,8 +544,35 @@ def validate_task_row(row: dict[str, str], path: Path) -> None:
         finish = parse_date(row.get(f"{prefix} Finish", ""))
         if start and finish and finish < start:
             raise ValueError(f"{path}: окончание {prefix} раньше начала")
-    if int(progress) > 0 and not (parse_date(row.get("Actual Start", "")) or parse_date(row.get("Planned Start", ""))):
+    if int(progress) > 0 and not (parse_date(row.get("Actual Start", "")) or parse_date(row.get("Planned Start", "")) or row.get("Completed By", "")):
         raise ValueError(f"{path}: для начатой задачи требуется дата начала из источника")
+
+
+def validate_completion_bound(row: dict[str, str], path: Path) -> str:
+    value = clean_cell(row.get("Completed By", ""))
+    if not value:
+        return ""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError(f"{path}: Completed By требует дату YYYY-MM-DD")
+    boundary = parse_date(value)
+    if not boundary or clean_cell(row.get("Status", "")).lower() not in DONE_STATUSES or clean_cell(row.get("Progress %", "")) != "100":
+        raise ValueError(f"{path}: Completed By требует дату YYYY-MM-DD и завершённый Status / 100%")
+    for column in ("Actual Start", "Actual Finish"):
+        raw = clean_cell(row.get(column, ""))
+        actual = parse_date(raw)
+        if raw and not actual:
+            raise ValueError(f"{path}: неверная дата {column}")
+        if actual and actual > boundary:
+            raise ValueError(f"{path}: {column} позже Completed By")
+    start = parse_date(row.get("Actual Start", ""))
+    finish = parse_date(row.get("Actual Finish", ""))
+    if start and finish and finish < start:
+        raise ValueError(f"{path}: окончание Actual раньше начала")
+    return value
+
+
+def completion_bound_only(task: Task) -> bool:
+    return bool(task.completed_by and not (task.actual_start and task.actual_finish))
 
 
 def load_tasks(feature_dir: Path) -> dict[str, Task]:
@@ -555,6 +585,7 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
         if not rows:
             raise ValueError(f"{path}: нет непустого реестра Task ID/Jira; Гант сохранён")
         for row in rows:
+            completed_by = validate_completion_bound(row, path)
             tracker_key = clean_cell(row.get("Jira", ""))
             if tracker_key in {"-", "—"}:
                 tracker_key = ""
@@ -599,6 +630,7 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
                 status=status,
                 progress=progress,
                 related_stories=split_list(row.get("Related Stories", "")),
+                completed_by=completed_by,
             )
             if role_for_task(tasks[task_id]) == "QA":
                 validate_estimate(row.get("Estimate (дн)", ""), path, task_id)
@@ -801,7 +833,9 @@ def task_schedules(
     today: date,
     team_resources: dict[str, list[str]],
 ) -> dict[str, ScheduledTask]:
-    tasks = {task_id: task for task_id, task in tasks.items() if task.kind != "candidate"}
+    tasks = {task_id: task for task_id, task in tasks.items()
+             if task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES
+             and not completion_bound_only(task)}
     schedules: dict[str, ScheduledTask] = {}
     occupied: dict[str, set[date]] = {}
 
@@ -879,7 +913,7 @@ def task_schedules(
         feature_schedules = [
             (item, schedules[item_id]) for item_id, item in tasks.items()
             if item_id in schedules and task_scope(item_id) == task_scope(task_id)
-            and item.status.lower() != "superseded" and role_for_task(item) != "QA"
+            and item.status.lower() not in EXCLUDED_STATUSES and role_for_task(item) != "QA"
         ]
         frontend = [scheduled for item, scheduled in feature_schedules if role_for_task(item) == "FE" and scheduled.finish]
         if frontend:
@@ -973,9 +1007,18 @@ def story_type(story: StoryMap, tasks: dict[str, Task]) -> str:
 
 
 def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
+    if task.status.lower() in EXCLUDED_STATUSES:
+        return [f"' Excluded task: {task.task_id}; status={task.status}; {plantuml_label(task.summary)}"]
     if task.kind == "candidate":
         return [f"' Candidate {task.task_id}: {task.status}; not scheduled"]
     alias = f"TASK_{to_alias(task.task_id)}"
+    if completion_bound_only(task):
+        label = plantuml_label(f"{role_prefixed_summary(task)} (100%; завершено к {task.completed_by}; точный интервал неизвестен)")
+        return [
+            f"' Completion bound, not an actual date: {task.task_id}; completed_by={task.completed_by}",
+            f"[{label}] as [{alias}] happens at {fmt_date(parse_date(task.completed_by))}",
+            f"[{alias}] is colored in {role_color(role_for_task(task))}",
+        ]
     scheduled = schedules.get(task.task_id)
     if not scheduled:
         return [f"' Skip task without start date: {task.task_id}"]
@@ -994,7 +1037,7 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
     return lines
 
 
-def mapped_task_ids(story: StoryMap, tasks: dict[str, Task]) -> list[str]:
+def mapped_task_ids(story: StoryMap, tasks: dict[str, Task], include_excluded: bool = False) -> list[str]:
     references = story.replaced_by + story.additional_tasks
     if story.state == "mixed":
         references.extend(story.residual_virtual_tasks)
@@ -1007,7 +1050,7 @@ def mapped_task_ids(story: StoryMap, tasks: dict[str, Task]) -> list[str]:
         ids.extend(task_id for task_id, task in tasks.items() if story.story_id in task.related_stories)
     unique: list[str] = []
     for task_id in ids:
-        if task_id not in unique and task_id in tasks and tasks[task_id].status.lower() != "superseded":
+        if task_id not in unique and task_id in tasks and (include_excluded or tasks[task_id].status.lower() not in EXCLUDED_STATUSES):
             unique.append(task_id)
     return unique
 
@@ -1016,7 +1059,7 @@ def plan_task_ids(story: StoryMap, tasks: dict[str, Task]) -> list[str]:
     role = story_type(story, tasks)
     if role in ROLE_COLORS:
         return [task_id for task_id, task in tasks.items() if role_for_task(task) == role
-                and task.kind != "candidate" and task.status.lower() != "superseded"]
+                and task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES]
     return [task_id for task_id in mapped_task_ids(story, tasks)
             if tasks[task_id].kind != "candidate" and role_for_task(tasks[task_id]) != "QA"]
 
@@ -1125,7 +1168,7 @@ def render_feature(
         if finish:
             story_ends[story.story_id] = finish
 
-    active_tasks = [task for task in tasks.values() if task.status.lower() != "superseded"]
+    active_tasks = list(tasks.values())
     if active_tasks:
         task_order = {task_id: index for index, task_id in enumerate(tasks)}
         lines.append("' Execution task layer")
@@ -1201,7 +1244,9 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
                     raise ValueError(f"{feature_dir}: неоднозначная ссылка Task ID/Jira {reference}")
                 if reference not in tasks and not any(task.tracker_key == reference for task in tasks.values()):
                     raise ValueError(f"{feature_dir}: история {story.story_id} ссылается на отсутствующую задачу {reference}")
-            if (story.baseline_state != "present" or story.state in {"materialized", "mixed", "done", "real"}) and not plan_task_ids(story, tasks):
+            known_excluded = any(tasks[task_id].status.lower() in EXCLUDED_STATUSES
+                                 for task_id in mapped_task_ids(story, tasks, include_excluded=True))
+            if (story.baseline_state != "present" or story.state in {"materialized", "mixed", "done", "real"}) and not plan_task_ids(story, tasks) and not known_excluded:
                 raise ValueError(f"{feature_dir}: отсутствует состав истории {story.story_id}")
             if any(dependency not in story_ids for dependency in story.depends_on):
                 raise ValueError(f"{feature_dir}: неизвестная зависимость истории {story.story_id}")
@@ -1231,7 +1276,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             for task_id in tasks
             if f"{feature_slug}/{task_id}" in scoped_schedules
         }
-        if any(task.kind != "candidate" and task.status.lower() != "superseded"
+        if any(task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES and not completion_bound_only(task)
                and task_id not in schedules for task_id, task in tasks.items()):
             raise ValueError(f"{feature_dir}: не для каждой задачи определена дата начала; Гант сохранён")
         content = render_feature(feature_dir, feature_slug, closed_days, tasks, schedules)
