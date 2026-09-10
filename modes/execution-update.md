@@ -31,6 +31,7 @@ Track real work with or without a recorded planning baseline.
 - execution context notes that explain current fact state and plan-vs-fact decisions
 - analyst-confirmed quarter forecast exclusions under `core/forecast-exclusions.md`
 - analyst-confirmed preservation of existing forecast blocks under `core/forecast-preservation.md`
+- явно подтверждённые ролевые источники PLAN и документ решения по `core/role-plan-baselines.md`
 - confirmed or proposed task candidates discovered after planning approval
 - agreed developer task lists received through the exchange catalog
 - optional materialization of selected returned tasks into task candidates or actual execution tasks

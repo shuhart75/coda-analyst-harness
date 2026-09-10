@@ -7,6 +7,7 @@ from pathlib import Path
 
 from actualization_baseline import baseline_rows
 from actual_progress_scope import load_forecast_scope
+from role_plan_baselines import RoleBaseline
 from workspace_paths import approved_plans_path, team_path
 import math
 import json
@@ -1055,17 +1056,24 @@ def mapped_task_ids(story: StoryMap, tasks: dict[str, Task], include_excluded: b
     return unique
 
 
+def role_task_ids(role: str, tasks: dict[str, Task]) -> list[str]:
+    return [task_id for task_id, task in tasks.items() if role_for_task(task) == role
+            and task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES]
+
+
 def plan_task_ids(story: StoryMap, tasks: dict[str, Task]) -> list[str]:
     role = story_type(story, tasks)
     if role in ROLE_COLORS:
-        return [task_id for task_id, task in tasks.items() if role_for_task(task) == role
-                and task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES]
+        return role_task_ids(role, tasks)
     return [task_id for task_id in mapped_task_ids(story, tasks)
             if tasks[task_id].kind != "candidate" and role_for_task(tasks[task_id]) != "QA"]
 
 
 def story_progress(story: StoryMap, tasks: dict[str, Task]) -> int:
-    task_ids = plan_task_ids(story, tasks)
+    return task_progress(plan_task_ids(story, tasks), tasks)
+
+
+def task_progress(task_ids: list[str], tasks: dict[str, Task]) -> int:
     if not task_ids:
         return 0
     total = 0
@@ -1134,12 +1142,35 @@ def render_story(
     return lines, finish
 
 
+def render_role_baseline(baseline: RoleBaseline, feature_slug: str, tasks: dict[str, Task],
+                         schedules: dict[str, ScheduledTask], closed_days: set[date]) -> list[str]:
+    task_ids = role_task_ids(baseline.role, tasks)
+    actual_starts = [parse_date(tasks[task_id].actual_start) for task_id in task_ids if tasks[task_id].actual_start]
+    forecast_starts = [schedules[task_id].start for task_id in task_ids if task_id in schedules]
+    starts = actual_starts or forecast_starts
+    start = min(starts) if starts else baseline.start
+    finish = add_open_days(start, baseline.duration, closed_days) if starts else baseline.finish
+    alias = f"PLAN_{to_alias(feature_slug)}_{baseline.role}"
+    source_label = "квартальный план" if baseline.view == "quarter-plan" else "командирский план"
+    label = plantuml_label(f"PLAN {baseline.role} {feature_slug} ({source_label})")
+    return [
+        f"' Role baseline: {baseline.path}#{baseline.alias}; duration={baseline.duration} working days",
+        f"' Decision source: {baseline.decision_source}; tasks={', '.join(task_ids)}",
+        f"[{label}] as [{alias}] starts {fmt_date(start)}",
+        f"[{alias}] ends {fmt_date(finish)}",
+        f"[{alias}] is colored in Gainsboro",
+        f"[{alias}] is {task_progress(task_ids, tasks)}% completed",
+        "",
+    ]
+
+
 def render_feature(
     feature_dir: Path,
     feature_slug: str,
     closed_days: set[date],
     tasks: dict[str, Task] | None = None,
     schedules: dict[str, ScheduledTask] | None = None,
+    role_baselines: list[RoleBaseline] | None = None,
 ) -> str | None:
     stories = load_story_map(feature_dir)
     tasks = tasks if tasks is not None else load_tasks(feature_dir)
@@ -1158,15 +1189,23 @@ def render_feature(
 
     story_ends: dict[str, date] = {}
     for story in stories:
-        rendered, finish = render_story(story, tasks, schedules, story_ends, closed_days)
         lines.append(f"' Story {story.story_id}: {story.state}, mapping={story.mapping_mode}")
         lines.extend(f"' Follow-up link: {note}" for note in story.follow_up_notes)
+        if role_baselines:
+            lines.append(f"' Legacy mapping retained; PLAN replaced by explicit feature-role comparison; tasks={', '.join(mapped_task_ids(story, tasks, include_excluded=True))}")
+            continue
+        rendered, finish = render_story(story, tasks, schedules, story_ends, closed_days)
         if story_type(story, tasks) == "GEN":
             lines.append("' Legacy mixed-role baseline: role is unresolved; only recorded non-QA links are used")
         lines.extend(rendered)
         lines.append("")
         if finish:
             story_ends[story.story_id] = finish
+
+    if role_baselines:
+        lines.extend(["", "' Feature-role comparison layer"])
+        for baseline in role_baselines:
+            lines.extend(render_role_baseline(baseline, feature_slug, tasks, schedules, closed_days))
 
     active_tasks = list(tasks.values())
     if active_tasks:
@@ -1203,7 +1242,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             )
         } | {path.stem.removeprefix("FEATURE-") for path in target_dir.glob("FEATURE-*.puml")})
         feature_slugs = [slug for slug in feature_slugs if slug not in feature_map.values() or slug in feature_map]
-    feature_slugs = sorted(set(feature_slugs) | set(feature_map) | set(scope.exclusions) | set(scope.preserved))
+    feature_slugs = sorted(set(feature_slugs) | set(feature_map) | set(scope.exclusions) | set(scope.preserved) | set(scope.role_baselines))
     if any(not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug) for slug in feature_slugs):
         raise ValueError("Неверный slug функциональности")
     sources = [feature_map.get(slug, slug) for slug in feature_slugs]
@@ -1230,6 +1269,11 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             if expected is not None and baseline_rows(actualization_path) != expected:
                 raise ValueError(f"{actualization_path}: approved actualization baseline was modified")
         tasks = load_tasks(feature_dir)
+        for baseline in scope.role_baselines.get(feature_slug, []):
+            alias = f"PLAN_{to_alias(feature_slug)}_{baseline.role}"
+            if alias in aliases:
+                raise ValueError(f"Повторяющийся идентификатор PlantUML: {alias}")
+            aliases.add(alias)
         story_ids = {story.story_id for story in stories}
         for story in stories:
             alias = f"STORY_{to_alias(story.story_id)}"
@@ -1279,10 +1323,12 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         if any(task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES and not completion_bound_only(task)
                and task_id not in schedules for task_id, task in tasks.items()):
             raise ValueError(f"{feature_dir}: не для каждой задачи определена дата начала; Гант сохранён")
-        content = render_feature(feature_dir, feature_slug, closed_days, tasks, schedules)
+        content = render_feature(feature_dir, feature_slug, closed_days, tasks, schedules, scope.role_baselines.get(feature_slug))
         if content is None:
             raise ValueError(f"{feature_dir}: источники изменились во время генерации")
         outputs[target] = content
+    if scope.role_baselines and load_forecast_scope(project_root, quarter_id) != scope:
+        raise ValueError("Ролевой PLAN изменился во время генерации")
     return outputs
 
 

@@ -236,6 +236,8 @@ def main() -> int:
     overlay = load_tool("sync-actual-progress-overlay")
     outputs = sync_actual_progress_overlays(gantt_dir, overlay)
     scope = load_forecast_scope(project_root(gantt_dir), gantt_dir.parent.name)
+    if scope.role_baselines and not args.actual_only:
+        raise ValueError("Ролевой PLAN требует --actual-only; исходные планы нельзя перегенерировать")
 
     for slug, title in VIEWS:
         if args.actual_only and slug != "actual-progress":
@@ -319,6 +321,13 @@ def main() -> int:
             raise ValueError("Повторяющиеся идентификаторы PlantUML в сохранённом прогнозе и Ганте")
         if load_forecast_scope(project_root(gantt_dir), gantt_dir.parent.name) != scope:
             raise ValueError("Решение о сохранении прогноза изменилось во время генерации")
+    if scope.role_baselines:
+        expanded, _ = expanded_with_paths(gantt_dir / "actual-progress.puml", outputs)
+        aliases = declared_aliases(expanded)
+        if len(set(aliases)) != len(aliases):
+            raise ValueError("Повторяющиеся идентификаторы PlantUML в ролевом PLAN и Ганте")
+        if load_forecast_scope(project_root(gantt_dir), gantt_dir.parent.name) != scope:
+            raise ValueError("Ролевой PLAN изменился во время генерации")
     overlay.publish_outputs(outputs)
     for path in outputs:
         print(f"Wrote {path}", flush=True)

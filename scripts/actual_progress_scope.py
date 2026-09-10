@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
 import hashlib
@@ -8,6 +8,7 @@ import json
 import re
 
 from workspace_paths import approved_plans_path
+from role_plan_baselines import RoleBaseline, load_role_baselines
 
 
 @dataclass
@@ -17,6 +18,7 @@ class ForecastScope:
     baselines: dict[str, Path]
     preserved: dict[str, dict]
     includes: dict[str, Path]
+    role_baselines: dict[str, list[RoleBaseline]] = field(default_factory=dict)
 
 
 def declared_aliases(text: str) -> list[str]:
@@ -50,13 +52,15 @@ def load_forecast_scope(project_root: Path, quarter_id: str) -> ForecastScope:
     if not config_path.exists():
         return ForecastScope({}, {}, {}, {}, {})
     payload = json.loads(config_path.read_text(encoding="utf-8"), object_pairs_hook=unique_keys)
-    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] not in {1, 2, 3}:
-        raise ValueError(f"{config_path}: ожидается schema_version=1, 2 или 3")
+    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] not in {1, 2, 3, 4}:
+        raise ValueError(f"{config_path}: ожидается schema_version=1, 2, 3 или 4")
     allowed = {"schema_version", "features"}
     if payload["schema_version"] >= 2:
         allowed.add("forecast_exclusions")
-    if payload["schema_version"] == 3:
+    if payload["schema_version"] >= 3:
         allowed.add("preserved_forecasts")
+    if payload["schema_version"] >= 4:
+        allowed.add("role_baselines")
     if set(payload) - allowed or not isinstance(payload.get("features"), dict):
         raise ValueError(f"{config_path}: неверные поля конфигурации")
     feature_map = payload["features"]
@@ -70,6 +74,12 @@ def load_forecast_scope(project_root: Path, quarter_id: str) -> ForecastScope:
         raise ValueError(f"{config_path}: неверный preserved_forecasts")
     if set(exclusions) & set(preserved):
         raise ValueError(f"{config_path}: сохранение и исключение одной фичи несовместимы")
+    role_decisions = payload.get("role_baselines", {})
+    if not isinstance(role_decisions, dict) or any(not valid_slug(slug) for slug in role_decisions):
+        raise ValueError(f"{config_path}: неверный role_baselines")
+    if set(role_decisions) & (set(exclusions) | set(preserved)):
+        raise ValueError(f"{config_path}: ролевой PLAN несовместим с сохранением или исключением фичи")
+    role_baselines = load_role_baselines(project_root, quarter_id, role_decisions, expanded_with_paths)
 
     baselines = {}
     includes = {}
@@ -162,4 +172,4 @@ def load_forecast_scope(project_root: Path, quarter_id: str) -> ForecastScope:
         for path in set(includes.values()):
             if dependencies.count(path) != 1:
                 raise ValueError(f"{path}: прогноз должен быть подключён в существующий Гант ровно один раз")
-    return ForecastScope(feature_map, exclusions, baselines, preserved, includes)
+    return ForecastScope(feature_map, exclusions, baselines, preserved, includes, role_baselines)
