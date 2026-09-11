@@ -15,6 +15,7 @@ import test_trackerctl
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from tracker_execution import preview_execution
+from tracker_scope import preview_scope
 
 
 class TrackerExecutionPreviewTests(unittest.TestCase):
@@ -156,6 +157,60 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         payload = self.preview()
         self.assertIn("deleted-or-renamed-registry", self.reasons(payload))
         self.assertIn("task-owner-not-confirmed", self.reasons(payload))
+
+    def test_empty_root_and_slice_registries_do_not_block_either_preview(self) -> None:
+        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        for location in ("execution/tasks.md", "slices/empty/execution/tasks.md"):
+            self.registry(self.project, "empty", [], location)
+        self.save_sources()
+        payload = self.preview()
+        self.assertTrue(payload["ownership_ready"])
+        self.assertEqual([warning["reason"] for warning in payload["warnings"]], ["empty-registry"] * 2)
+        scope = preview_scope(self.project, "jira", None, "empty")
+        self.assertEqual(scope["scope"]["ids"], [])
+        self.assertEqual(scope["next_action"]["type"], "clarify-tracker-scope")
+        self.assertEqual(sum(value.startswith("empty-registry:") for value in scope["limitations"]), 2)
+
+    def test_exact_legacy_no_tasks_document_is_visible_but_not_a_blocker(self) -> None:
+        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        path = self.registry(self.project, "legacy", [])
+        path.write_text("# Implementation tasks\n\nЭтот slice зафиксирован как imported existing coverage.\n\n"
+                        "- Активных implementation tasks в рамках текущего harness не заведено.\n"
+                        "- Исторические task docs смотри в `../../references.md` и raw legacy snapshot.\n",
+                        encoding="utf-8")
+        self.save_sources()
+        payload = self.preview()
+        self.assertTrue(payload["ownership_ready"])
+        self.assertEqual(payload["warnings"][0]["reason"], "legacy-no-active-tasks")
+        scope = preview_scope(self.project, "jira", None, "legacy")
+        self.assertEqual(scope["scope"]["ids"], [])
+        path.write_text(path.read_text() + "\nTask: JIRA-1\n", encoding="utf-8")
+        self.assertIn("unreadable-registry", self.reasons(self.preview()))
+
+    def test_malformed_or_unknown_registry_still_blocks_global_ownership(self) -> None:
+        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        path = self.registry(self.project, "legacy", [])
+        self.save_sources()
+        for content in ("", "# Tasks\nNo data yet", "| Jira | Role |\n|---|\n",
+                        "| Jira | Role |\n|---|---|\n| JIRA-1 |\n",
+                        "| Jira | Jira |\n|---|---|\n",
+                        "| Task ID | Role |\n| no separator | BE |\n"):
+            with self.subTest(content=content):
+                path.write_text(content, encoding="utf-8")
+                self.assertIn("unreadable-registry", self.reasons(self.preview()))
+                with self.assertRaises(ValueError):
+                    preview_scope(self.project, "jira", None, "legacy")
+
+    def test_empty_first_table_does_not_hide_later_owner_or_duplicate(self) -> None:
+        path = self.registry(self.project, "owner", [])
+        header = path.read_text()
+        path.write_text(header + "\n" + header.rstrip() + "\n| CORE | JIRA-1 | ST-1 | real | BE | done |\n",
+                        encoding="utf-8")
+        self.save_sources()
+        self.assertTrue(self.preview()["ownership_ready"])
+        self.assertEqual(preview_scope(self.project, "jira", None, "owner")["scope"]["ids"], ["JIRA-1"])
+        self.registry(self.project, "other", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        self.assertIn("multiple-feature-owners", self.reasons(self.preview()))
 
     def test_completed_run_reuses_saved_pairs_without_new_mcp_or_state_writes(self) -> None:
         self.registry(self.project, "owner", ["| CORE | | ST-1 | real | BE | done |"])

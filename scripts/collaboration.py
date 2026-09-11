@@ -459,12 +459,19 @@ def start_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def recover_worktree_command(args: argparse.Namespace) -> int:
+    from worktree_recovery import recover_worktree
+    return recover_worktree(args, sys.modules[__name__])
+
+
 def require_active_work(root: Path, analytics: Path, state: dict) -> dict:
     work = state.get("active_work")
     if not isinstance(work, dict):
         raise ValueError("Активная работа над функциональностью не зарегистрирована")
     if work.get("status") == "recovery-pending":
         raise ValueError("Сначала заверши recover-main с теми же параметрами")
+    if work.get("status") == "worktree-recovery-pending":
+        raise ValueError("Сначала заверши recover-worktree с теми же параметрами")
     branch = current_branch(analytics)
     if branch != work.get("branch"):
         raise ValueError(
@@ -601,6 +608,8 @@ def finish_command(args: argparse.Namespace) -> int:
         raise ValueError("Активная работа над функциональностью не зарегистрирована")
     if work.get("status") == "recovery-pending":
         raise ValueError("Сначала заверши recover-main с теми же параметрами")
+    if work.get("status") == "worktree-recovery-pending":
+        raise ValueError("Сначала заверши recover-worktree с теми же параметрами")
     branch = current_branch(analytics)
     if branch not in {work.get("branch"), BRANCH}:
         raise ValueError(
@@ -700,6 +709,10 @@ def status_command(args: argparse.Namespace) -> int:
                 next_action = "проверить локальные коммиты и подтвердить функциональность для recover-main"
     if configured and (state.get("active_work") or {}).get("status") == "recovery-pending":
         next_action = "повторить recover-main с теми же параметрами"
+    if configured and (state.get("active_work") or {}).get("status") == "worktree-recovery-pending":
+        next_action = "повторить recover-worktree с теми же параметрами"
+    if configured and not state.get("active_work") and branch == BRANCH and changed_paths(analytics):
+        next_action = "проверить незакоммиченные изменения и подтвердить recover-worktree"
     print(json.dumps({
         "status": "configured" if configured else "migration-required",
         "analytics_repository": analytics_id,
@@ -726,6 +739,12 @@ def parser() -> argparse.ArgumentParser:
     recover.add_argument("--expected-head", required=True)
     recover.add_argument("--analyst-confirmed", action="store_true", required=True)
     recover.set_defaults(handler=recover_main_command)
+    worktree = commands.add_parser("recover-worktree")
+    worktree.add_argument("--feature", required=True)
+    worktree.add_argument("--expected-head", required=True)
+    worktree.add_argument("--expected-file", nargs=2, action="append", required=True, metavar=("PATH", "SHA256"))
+    worktree.add_argument("--analyst-confirmed", action="store_true", required=True)
+    worktree.set_defaults(handler=recover_worktree_command)
     start = commands.add_parser("start")
     start.add_argument("--feature", required=True)
     start.set_defaults(handler=start_command)

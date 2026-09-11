@@ -256,8 +256,8 @@ def is_separator_row(cells: list[str]) -> bool:
     return all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
 
 
-def parse_tables(path: Path) -> list[list[dict[str, str]]]:
-    tables: list[list[dict[str, str]]] = []
+def parse_table_blocks(path: Path) -> list[tuple[list[str], list[dict[str, str]]]]:
+    tables: list[tuple[list[str], list[dict[str, str]]]] = []
     lines = path.read_text(encoding="utf-8").splitlines()
     i = 0
     while i < len(lines):
@@ -280,8 +280,12 @@ def parse_tables(path: Path) -> list[list[dict[str, str]]]:
                 cells.extend([""] * (len(headers) - len(cells)))
             rows.append(dict(zip(headers, cells)))
             i += 1
-        tables.append(rows)
+        tables.append((headers, rows))
     return tables
+
+
+def parse_tables(path: Path) -> list[list[dict[str, str]]]:
+    return [rows for headers, rows in parse_table_blocks(path)]
 
 
 def first_table_with(path: Path, required_header: str) -> list[dict[str, str]]:

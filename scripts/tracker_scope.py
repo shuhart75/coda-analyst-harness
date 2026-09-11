@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from importlib import import_module
 from pathlib import Path
 import re
 
 from actual_progress_scope import load_forecast_scope, valid_slug
+from tracker_registry import read_registry
 
 
 def inside_project(project: Path, path: Path) -> Path:
@@ -64,7 +64,6 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
     if provider not in {"jira", "sbertrek"}:
         raise ValueError("Требуется явный провайдер jira или sbertrek")
     selected = select_features(project, quarter, feature)
-    overlay = import_module("sync-actual-progress-overlay")
     references: dict[str, list[dict]] = {}
     omitted = []
     limitations = ["known-registry-tasks-only", "new-epic-members-not-discovered"]
@@ -80,9 +79,10 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
             limitations.append(f"execution-registry-missing:{name}")
         for path in paths:
             inside_project(project, path)
-            rows = overlay.first_table_with(path, "Task ID") or overlay.first_table_with(path, "Jira")
-            if not rows:
-                raise ValueError(f"Нет непустого реестра Task ID/Jira: {path}")
+            tables, note = read_registry(path)
+            if note:
+                limitations.append(f"{note}:{path.relative_to(project).as_posix()}")
+            rows = [row for table in tables for row in table]
             for index, row in enumerate(rows, start=1):
                 reference = {
                     "feature": name, "registry": path.relative_to(project).as_posix(),

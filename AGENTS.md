@@ -15,6 +15,7 @@ This repository defines a reusable workflow harness.
 
 ## Recovery of unaccepted main history
 
+- For explicitly approved transfer of uncommitted tracked changes from configured analytics/main, use `collaboration.py recover-worktree` with the confirmed feature, full `--expected-head`, every exact `--expected-file PATH SHA256` and `--analyst-confirmed`. Follow `core/collaboration.md`; preserve the snapshot and resume `worktree-recovery-pending` with identical arguments. This does not commit, push, approve content or permit generation.
 - When analytics/main has unaccepted local commits, do not use start, repeat migrate in a configured workspace, remove collaboration.json, push main or offer sync --no-push as a bypass. Inspect collaboration status and local commit/path differences first.
 - After the analyst confirms one owning feature and the inspected commit, use `collaboration.py recover-main --feature <feature> --expected-head <commit> --analyst-confirmed`. It requires configured collaboration, clean main and no active session or merge; it registers a feature branch at the confirmed local commit without changing main, files or remote history.
 - A pending recovery may only be resumed with the same feature and commit. Do not delete its runtime state or adopt a different branch. Then review the preserved changes in their owning mode, update and submit the branch, wait for human merge (no squash/rebase), finish, and retry synchronization. Recovery does not approve content or publish a delivery revision.

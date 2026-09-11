@@ -8,6 +8,7 @@ import re
 import subprocess
 
 from tracker_scope import inside_project, select_features
+from tracker_registry import read_registry
 
 
 REGISTRY = re.compile(r"features/[^/]+/(?:slices/[^/]+/)?execution/tasks\.md")
@@ -69,9 +70,13 @@ def preview_execution(
         if not path.is_file():
             raise ValueError(f"Реестр недоступен: {relative}")
         sources[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-        tables = [table for table in overlay.parse_tables(path) if table and ("Task ID" in table[0] or "Jira" in table[0])]
-        if not tables:
+        try:
+            tables, note = read_registry(path)
+        except ValueError:
             blockers.append({"reason": "unreadable-registry", "registry": relative})
+            continue
+        if note:
+            warnings.append({"reason": note, "registry": relative})
         for table_number, table in enumerate(tables, start=1):
             for row_number, row in enumerate(table, start=1):
                 role = overlay.normalize_role(row.get("Role", ""))
