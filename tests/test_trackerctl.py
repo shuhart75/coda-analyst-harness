@@ -482,7 +482,8 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
                 else:
                     self.assertEqual(update["state"], "pending")
                     action = update["next_action"]
-                    self.assertEqual(action["type"], "review-execution-context")
+                    self.assertEqual(action["type"], "execution-preview")
+                    self.assertIn("execution-preview", action["command"])
                     self.assertEqual(action["mode"], "execution-update")
                     self.assertTrue(Path(action["contract"]).is_file())
                     self.assertEqual(action["run_id"], current["run_id"])

@@ -1576,19 +1576,21 @@ def resolve_conflict_command(args: argparse.Namespace) -> int:
     return STOP_EXIT if payload.get("must_stop") else 0
 
 
-def result_status_command(args: argparse.Namespace) -> int:
-    root = run_root(args.run_id)
-    run = load_run(args.run_id)
+def verified_result(run_id: str) -> tuple[dict, dict]:
+    root = run_root(run_id)
+    run = load_run(run_id)
     if run.get("status") != "tracker-read-reconciled":
         raise ValueError("Сверка tracker-run ещё не завершена")
     completion = load_json(root / "completion-status.json")
-    if completion.get("protocol") != PROTOCOL or completion.get("run_id") != args.run_id:
+    if completion.get("protocol") != PROTOCOL or completion.get("run_id") != run_id:
         raise ValueError("Официальный completion-status повреждён")
     if completion.get("reconciled_sha256") != file_digest(root / "reconciled.json") or completion.get("report_sha256") != file_digest(root / "report.md"):
         raise ValueError("Итоговые файлы изменены после reconciliation")
     result = load_json(root / "reconciled.json")
-    if result.get("protocol") != PROTOCOL or result.get("run_id") != args.run_id or result.get("scope") != run["scope"]:
+    if result.get("protocol") != PROTOCOL or result.get("run_id") != run_id or result.get("scope") != run["scope"]:
         raise ValueError("Область результата не совпадает с tracker-run")
+    if result != reconcile_data(run):
+        raise ValueError("Результат не воспроизводится из сохранённой сверки")
     planning_allowed = run["scope"]["intent"] == "update-planning"
     expected = {
         "status": "tracker-read-reconciled",
@@ -1606,11 +1608,24 @@ def result_status_command(args: argparse.Namespace) -> int:
         raise ValueError("Разрешения или сводка completion-status не совпадают с результатом сверки")
     if completion.get("response_contract", {}).get("text") != official_text(result):
         raise ValueError("Официальный текст результата изменён")
+    return completion, result
+
+
+def result_status_command(args: argparse.Namespace) -> int:
+    completion, result = verified_result(args.run_id)
+    root = run_root(args.run_id)
+    planning_allowed = completion["planning_application_allowed"]
     completion["planning_update"] = {
         "state": "pending" if planning_allowed else "not-requested",
         "actualization_complete": False,
         "next_action": {
-            "type": "review-execution-context",
+            "type": "execution-preview",
+            "command": [
+                sys.executable, str(Path(__file__).with_name("trackerctl.py")),
+                "execution-preview", "--run-id", args.run_id,
+                "--project-root", "<resolved-project-root>",
+            ],
+            "required_selection": "--quarter YYYY-QN or --feature feature",
             "mode": "execution-update",
             "contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-actualization.md"),
             "run_id": args.run_id,
@@ -1619,6 +1634,28 @@ def result_status_command(args: argparse.Namespace) -> int:
         } if planning_allowed else None,
     }
     print(json.dumps(completion, ensure_ascii=False, indent=2))
+    return 0
+
+
+def execution_preview_command(args: argparse.Namespace) -> int:
+    completion, result = verified_result(args.run_id)
+    if completion["planning_application_allowed"] is not True:
+        raise ValueError("Read-only сверка не разрешает фазу актуализации")
+    from tracker_execution import preview_execution
+
+    reviewed = dict(args.reviewed_registry)
+    if len(reviewed) != len(args.reviewed_registry):
+        raise ValueError("Реестр указан для подтверждения несколько раз")
+    if reviewed and (not args.analyst_confirmed or not args.expected_head):
+        raise ValueError("Проверка изменённых реестров требует явного подтверждения аналитика и --expected-head")
+    if not reviewed and (args.analyst_confirmed or args.expected_head):
+        raise ValueError("Подтверждение требует точных --reviewed-registry")
+    payload = preview_execution(
+        Path(args.project_root), args.quarter, args.feature, result, reviewed, args.expected_head,
+    )
+    payload["run_id"] = args.run_id
+    payload["reconciled_sha256"] = completion["reconciled_sha256"]
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1633,6 +1670,15 @@ def parser() -> argparse.ArgumentParser:
     preview.add_argument("--quarter")
     preview.add_argument("--feature")
     preview.set_defaults(handler=scope_preview_command)
+    execution = commands.add_parser("execution-preview")
+    execution.add_argument("--run-id", required=True)
+    execution.add_argument("--project-root", required=True)
+    execution.add_argument("--quarter")
+    execution.add_argument("--feature")
+    execution.add_argument("--reviewed-registry", nargs=2, action="append", default=[], metavar=("PATH", "SHA256"))
+    execution.add_argument("--expected-head")
+    execution.add_argument("--analyst-confirmed", action="store_true")
+    execution.set_defaults(handler=execution_preview_command)
     projects = commands.add_parser("set-projects"); projects.add_argument("--provider", choices=PROVIDERS, required=True); projects.add_argument("projects", nargs="+"); projects.set_defaults(handler=update_config_command)
     jira = commands.add_parser("set-jira-mode"); jira.add_argument("mode", choices=("enabled", "disabled")); jira.set_defaults(handler=update_config_command)
     issue_types = commands.add_parser("set-issue-types"); issue_types.add_argument("issue_types", nargs="+"); issue_types.set_defaults(handler=update_config_command)

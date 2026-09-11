@@ -39,8 +39,9 @@ Track real work with or without a recorded planning baseline.
 When a returned developer task is materialized into real work, keep `returns/tasks.md` as the factual source. The analyst may use or replace optional developer estimates and may link Jira keys, but does not edit the returned decomposition or block development.
 
 QA estimates come from an explicit analyst answer or the tracker's dedicated QA
-estimate. A source card with FE and QA estimates produces separate FE and QA
-execution rows, each with its own estimate. If the QA estimate is lost, ask the
+estimate. A source card with FE and QA estimates supplies separate role evidence.
+Map QA to existing feature-level work before creating any execution row; preserve
+its internal ID when the analyst confirms it is the same work. If the QA estimate is lost, ask the
 analyst; never default it, copy the FE estimate or silently skip QA. In visible
 task titles use `QA <summary>`, without the tracker-number prefix; keep the source
 key and `<key>/QA` as metadata for traceability.
@@ -62,19 +63,30 @@ fills missing values, while conflicting populated assignees and estimates requir
 the analyst's decision. This protocol does not read history.
 
 For an explicit actualization request, follow `core/tracker-actualization.md`.
+Before any registry edits, run the returned `execution-preview` for the same
+reconciled run and confirmed feature/quarter. Resolve every ownership blocker;
+never infer owners from key ranges or create slices to satisfy generation.
+Review dirty registry versions explicitly before using the hash-bound approval.
 Use intent `update-planning`; after the verified read report, continue through
 `planning_update.next_action` to execution review, confirmed fact updates and
 `--actual-only` generation. The original actualization request authorizes this
 continuation, not guesses about dates, roles, feature membership or resources.
 A read-only request ends at the tracker report and never enters this phase.
 
-Tracker estimates are applied per role. For every populated `AN / BE / FE / QA`
-estimate, create one row in `execution/tasks.md`; the same tracker key may repeat,
-but one `tracker key + role` pair may occur only once. The generator uses the
-internal id `<tracker-key>/<role>` and renders a separate bar whose summary starts
-with the role. If all role estimates are empty and only the general estimate is
+Tracker estimates are applied per role after confirmed mapping to execution work.
+AN and QA belong to the feature; a source role estimate is not automatic permission
+to create an additional row. The same tracker key may repeat across roles, but one
+`tracker key + role` pair may occur only once. Preserve existing internal IDs;
+new role work may use `<tracker-key>/<role>`. Its summary starts with the role.
+If all role estimates are empty and only the general estimate is
 present, use it only for one unambiguous `AN`, `BE` or `FE` prefix. Do not split a
 general estimate between roles, and do not add it when any role estimate exists.
+
+The agreed lifecycle rules are in `core/tracker-lifecycle.md`. A developer-to-QA
+handoff closes development and starts QA; returns continue QA without reopening
+development. The calculation module is currently offline and has no verified
+SberTrek history adapter. It must not be used to claim collected history, assign
+resources, invent dates, or bypass the source and branch gates.
 
 ## Source and generation gate
 

@@ -13,12 +13,10 @@ def inside_project(project: Path, path: Path) -> Path:
     return path
 
 
-def preview_scope(project: Path, provider: str, quarter: str | None, feature: str | None) -> dict:
+def select_features(project: Path, quarter: str | None, feature: str | None) -> dict[str, dict]:
     project = project.expanduser().resolve()
     if not project.is_dir():
         raise ValueError(f"Проект не найден: {project}")
-    if provider not in {"jira", "sbertrek"}:
-        raise ValueError("Требуется явный провайдер jira или sbertrek")
     if not quarter and not feature:
         raise ValueError("Укажи --quarter или --feature")
     if feature and not valid_slug(feature):
@@ -58,7 +56,14 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
             selected = {feature: selected[feature]}
     else:
         selected[feature] = {"feature": feature, "sources": ["explicit-feature"], "forecast_state": None}
+    return selected
 
+
+def preview_scope(project: Path, provider: str, quarter: str | None, feature: str | None) -> dict:
+    project = project.expanduser().resolve()
+    if provider not in {"jira", "sbertrek"}:
+        raise ValueError("Требуется явный провайдер jira или sbertrek")
+    selected = select_features(project, quarter, feature)
     overlay = import_module("sync-actual-progress-overlay")
     references: dict[str, list[dict]] = {}
     omitted = []
