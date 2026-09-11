@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from actualization_baseline import baseline_rows
-from actual_progress_scope import load_forecast_scope
+from actual_progress_scope import load_forecast_scope, unique_keys
 from role_plan_baselines import RoleBaseline
 from workspace_paths import approved_plans_path, team_path
 import math
@@ -692,11 +692,56 @@ def task_finish(task: Task) -> date | None:
 def is_not_started(task: Task) -> bool:
     status = task.status.lower()
     return (
-        task.progress == 0
+        task.progress in (0, None)
         and not parse_date(task.actual_start)
         and not parse_date(task.actual_finish)
         and status in NOT_STARTED_STATUSES
     )
+
+
+def needs_forecast_schedule(task: Task) -> bool:
+    return is_not_started(task) or (
+        not task.actual_start and not task.actual_finish
+        and task.status.lower() not in DONE_STATUSES | EXCLUDED_STATUSES
+        and (task.progress is None or task.status.lower() == "unknown")
+    )
+
+
+def load_role_starts(feature_dir: Path, tasks: dict[str, Task]) -> dict[str, date]:
+    path = feature_dir / "execution/role-starts.json"
+    if path.is_symlink():
+        raise ValueError(f"{path}: символическая ссылка недопустима")
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_keys)
+    if (not isinstance(payload, dict) or set(payload) != {"schema_version", "roles"}
+            or type(payload["schema_version"]) is not int or payload["schema_version"] != 1
+            or not isinstance(payload["roles"], dict) or not payload["roles"]):
+        raise ValueError(f"{path}: нужна схема 1 и непустой объект roles")
+    starts = {}
+    for role, record in payload["roles"].items():
+        if (role not in ROLE_COLORS or not isinstance(record, dict)
+                or set(record) != {"actual_start", "analyst_confirmed", "source"}
+                or record["analyst_confirmed"] is not True):
+            raise ValueError(f"{path}: {role}: требуется подтверждённый старт роли и источник")
+        raw_start, raw_source = record["actual_start"], record["source"]
+        if not isinstance(raw_start, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_start):
+            raise ValueError(f"{path}: {role}: нужна дата YYYY-MM-DD")
+        start = date.fromisoformat(raw_start)
+        if not isinstance(raw_source, str) or not raw_source.strip():
+            raise ValueError(f"{path}: {role}: отсутствует источник")
+        source = feature_dir / raw_source
+        if (Path(raw_source).is_absolute() or ".." in Path(raw_source).parts
+                or source.resolve() != source or not source.is_file()
+                or not source.read_text(encoding="utf-8").strip()):
+            raise ValueError(f"{path}: {role}: нужен существующий источник внутри фичи")
+        for task_id in role_task_ids(role, tasks):
+            task = tasks[task_id]
+            known_dates = [parse_date(value) for value in (task.actual_start, task.actual_finish, task.completed_by) if value]
+            if any(value and value < start for value in known_dates):
+                raise ValueError(f"{path}: {role}: дата противоречит фактам задачи {task_id}")
+        starts[role] = start
+    return starts
 
 
 def task_duration(task: Task) -> int:
@@ -759,7 +804,7 @@ def earliest_task_start(task: Task, closed_days: set[date], today: date) -> tupl
     raw_start = task_start(task)
     shifted = False
 
-    if is_not_started(task):
+    if needs_forecast_schedule(task):
         min_start = next_open_day(today, closed_days)
         if raw_start is None or raw_start < min_start:
             raw_start = min_start
@@ -849,7 +894,7 @@ def task_schedules(
         return task_key.removesuffix(tasks[task_key].task_id).rstrip("/")
 
     for task_id, task in tasks.items():
-        if is_not_started(task):
+        if needs_forecast_schedule(task):
             continue
         scheduled = fixed_task_schedule(task, closed_days, today, team_resources)
         if scheduled:
@@ -866,7 +911,7 @@ def task_schedules(
     not_started = [
         (task_id, task, *earliest_task_start(task, closed_days, today))
         for task_id, task in tasks.items()
-        if is_not_started(task)
+        if needs_forecast_schedule(task)
     ]
     not_started = [(task_id, task, start, shifted) for task_id, task, start, shifted in not_started if start]
 
@@ -893,7 +938,7 @@ def task_schedules(
 
     be_starts_by_scope: dict[str, list[date]] = {}
     for task_id, task in tasks.items():
-        if task_id in schedules and is_not_started(task) and role_for_task(task) == "BE":
+        if task_id in schedules and needs_forecast_schedule(task) and role_for_task(task) == "BE":
             be_starts_by_scope.setdefault(task_scope(task_id), []).append(schedules[task_id].start)
 
     for task_id, task, start, shifted in sorted(
@@ -1033,6 +1078,8 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
     label = role_prefixed_summary(task)
     if task.progress is None:
         label += " (прогресс неизвестен)"
+    if needs_forecast_schedule(task) and not is_not_started(task):
+        label += " (прогноз; фактическое начало неизвестно)"
     lines = [
         f"[{label}] as [{alias}]{assignee_part} starts {fmt_date(scheduled.start)}",
         f"[{alias}] ends {fmt_date(scheduled.finish)}" if scheduled.finish else f"[{alias}] lasts {task_duration(task)} days",
@@ -1040,7 +1087,9 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
     ]
     if task.progress is not None:
         lines.append(f"[{alias}] is {max(0, min(task.progress, 100))}% completed")
-    if scheduled.shifted:
+    if needs_forecast_schedule(task) and not is_not_started(task):
+        lines.append(f"' Forecast only; full estimate, not confirmed remaining work: {task.task_id}; status={task.status}")
+    elif scheduled.shifted:
         lines.append(f"' Shifted not-started task from stale/non-open plan: {task.task_id}")
     if scheduled.resource_note:
         lines.append(f"' {scheduled.resource_note}: {task.task_id}")
@@ -1109,6 +1158,7 @@ def story_dates(
     schedules: dict[str, ScheduledTask],
     story_ends: dict[str, date],
     closed_days: set[date],
+    role_start: date | None = None,
 ) -> tuple[date | None, date | None]:
     baseline_start = parse_date(story.baseline_start)
     if story.baseline_duration is None:
@@ -1116,7 +1166,7 @@ def story_dates(
     task_ids = plan_task_ids(story, tasks)
     actual_starts = [parse_date(tasks[task_id].actual_start) for task_id in task_ids if tasks[task_id].actual_start]
     starts = [schedules[task_id].start for task_id in task_ids if task_id in schedules]
-    start = min(actual_starts or starts, default=baseline_start)
+    start = role_start or min(actual_starts or starts, default=baseline_start)
     return start, add_open_days(start, story.baseline_duration, closed_days) if start else None
 
 
@@ -1126,6 +1176,7 @@ def render_story(
     schedules: dict[str, ScheduledTask],
     story_ends: dict[str, date],
     closed_days: set[date],
+    role_start: date | None = None,
 ) -> tuple[list[str], date | None]:
     if story.baseline_state != "present":
         task_ids = plan_task_ids(story, tasks)
@@ -1136,7 +1187,7 @@ def render_story(
         return [
             f"' {label}: {story.story_id}; progress={progress_text}; tasks={', '.join(task_ids)}",
         ], max(finishes, default=None)
-    start, finish = story_dates(story, tasks, schedules, story_ends, closed_days)
+    start, finish = story_dates(story, tasks, schedules, story_ends, closed_days, role_start)
     if not start:
         return [f"' Skip story without start date: {story.story_id}"], None
     alias = f"STORY_{to_alias(story.story_id)}"
@@ -1159,13 +1210,14 @@ def render_story(
 
 
 def render_role_baseline(baseline: RoleBaseline, feature_slug: str, tasks: dict[str, Task],
-                         schedules: dict[str, ScheduledTask], closed_days: set[date]) -> list[str]:
+                         schedules: dict[str, ScheduledTask], closed_days: set[date],
+                         role_start: date | None = None) -> list[str]:
     task_ids = role_task_ids(baseline.role, tasks)
     actual_starts = [parse_date(tasks[task_id].actual_start) for task_id in task_ids if tasks[task_id].actual_start]
     forecast_starts = [schedules[task_id].start for task_id in task_ids if task_id in schedules]
     starts = actual_starts or forecast_starts
-    start = min(starts) if starts else baseline.start
-    finish = add_open_days(start, baseline.duration, closed_days) if starts else baseline.finish
+    start = role_start or (min(starts) if starts else baseline.start)
+    finish = add_open_days(start, baseline.duration, closed_days) if role_start or starts else baseline.finish
     alias = f"PLAN_{to_alias(feature_slug)}_{baseline.role}"
     source_label = "квартальный план" if baseline.view == "quarter-plan" else "командирский план"
     label = plantuml_label(f"PLAN {baseline.role} {feature_slug} ({source_label})")
@@ -1196,6 +1248,7 @@ def render_feature(
     if not stories:
         return None
     schedules = schedules or {}
+    role_starts = load_role_starts(feature_dir, tasks)
 
     lines = [
         f"' FEATURE: {feature_slug}",
@@ -1207,13 +1260,16 @@ def render_feature(
     ]
 
     story_ends: dict[str, date] = {}
+    for role, start in role_starts.items():
+        lines.append(f"' Analyst-confirmed role start: {role}={start}; source=execution/role-starts.json")
     for story in stories:
         lines.append(f"' Story {story.story_id}: {story.state}, mapping={story.mapping_mode}")
         lines.extend(f"' Follow-up link: {note}" for note in story.follow_up_notes)
         if role_baselines:
             lines.append(f"' Legacy mapping retained; PLAN replaced by explicit feature-role comparison; tasks={', '.join(mapped_task_ids(story, tasks, include_excluded=True))}")
             continue
-        rendered, finish = render_story(story, tasks, schedules, story_ends, closed_days)
+        rendered, finish = render_story(story, tasks, schedules, story_ends, closed_days,
+                                        role_starts.get(story_type(story, tasks)))
         if story_type(story, tasks) == "GEN":
             lines.append("' Legacy mixed-role baseline: role is unresolved; only recorded non-QA links are used")
         lines.extend(rendered)
@@ -1224,7 +1280,8 @@ def render_feature(
     if role_baselines:
         lines.extend(["", "' Feature-role comparison layer"])
         for baseline in role_baselines:
-            lines.extend(render_role_baseline(baseline, feature_slug, tasks, schedules, closed_days))
+            lines.extend(render_role_baseline(baseline, feature_slug, tasks, schedules, closed_days,
+                                              role_starts.get(baseline.role)))
 
     active_tasks = list(tasks.values())
     if active_tasks:

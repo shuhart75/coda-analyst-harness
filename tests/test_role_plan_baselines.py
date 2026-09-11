@@ -96,6 +96,22 @@ class RolePlanBaselinesTests(unittest.TestCase):
         for path, original in before.items():
             self.assertEqual(path.read_bytes(), original)
 
+    def test_confirmed_role_start_survives_forecast_rescheduling(self):
+        self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |").replace(
+            "| 2026-09-01 | | in-review |", "| | | in-review |"), encoding="utf-8")
+        source = self.feature / "execution/role-starts.json"
+        source.write_text(json.dumps({"schema_version": 1, "roles": {"FE": {
+            "actual_start": "2026-09-07", "analyst_confirmed": True, "source": "execution/tasks.md",
+        }}}))
+        before = self.plan.read_bytes()
+        self.quarter()
+        content = self.target.read_text()
+        self.assertIn("[PLAN_COHORTS_FE] starts 2026/09/07", content)
+        self.assertIn("[PLAN_COHORTS_FE] ends 2026/09/11", content)
+        self.assertIn("[TASK_ITEM_100_FE] ends 2026/09/15", content)
+        self.assertIn("[PLAN_COHORTS_QA] starts 2026/09/03", content)
+        self.assertEqual(self.plan.read_bytes(), before)
+
     def test_missing_role_tasks_retain_exact_source_window(self):
         self.write_tasks(["| | ITEM-100 | List | real | FE | 5 | F1 | 2026-09-01 | 2026-09-04 | 2026-09-01 | | in-review | 75 | STORY-COHORT |"])
         self.map.write_text(self.map.read_text().replace("ITEM-100/FE, QA-COHORT", "ITEM-100/FE"))
