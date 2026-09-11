@@ -60,6 +60,20 @@ class PlanFactRoleTests(unittest.TestCase):
                          (date(2026, 4, 1), date(2026, 4, 3)))
         self.assertEqual(OVERLAY.story_progress(story("FE"), {}), 0)
 
+    def test_unknown_progress_propagates_without_counting_excluded_or_other_roles(self):
+        tasks = {"FE": task("FE", "FE", 3, "2026-09-07", 100),
+                 "UNKNOWN": task("UNKNOWN", "FE", 2, "2026-09-07"),
+                 "QA": task("QA", "QA", 5, "2026-09-07")}
+        tasks["UNKNOWN"].progress = None
+        tasks["QA"].progress = None
+        self.assertIsNone(OVERLAY.story_progress(story("FE"), tasks))
+        for status in ("cancelled", "superseded"):
+            tasks["UNKNOWN"].status = status
+            self.assertEqual(OVERLAY.story_progress(story("FE"), tasks), 100)
+        tasks["UNKNOWN"].status = "planned"
+        tasks["UNKNOWN"].kind = "candidate"
+        self.assertEqual(OVERLAY.story_progress(story("FE"), tasks), 100)
+
     def test_qa_uses_earliest_fe_in_feature_not_card_with_qa_estimate(self):
         tasks = {"feature/LONG/FE": task("LONG/FE", "FE", 10, "2026-09-07", executor="F1"),
                  "feature/SHORT/FE": task("SHORT/FE", "FE", 3, "2026-09-07", executor="F2"),

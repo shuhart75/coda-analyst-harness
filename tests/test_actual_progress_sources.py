@@ -87,6 +87,40 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIn("30% completed", outputs[self.target])
         self.assertEqual(OVERLAY.story_progress(OVERLAY.load_story_map(self.feature)[0], tasks), 75)
 
+    def test_unknown_progress_is_not_inferred_from_status_and_export_preserves_it(self) -> None:
+        self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |"), encoding="utf-8")
+        before = self.registry.read_bytes()
+        tasks = OVERLAY.load_tasks(self.feature)
+        self.assertIsNone(tasks["ITEM-100/FE"].progress)
+        self.assertIsNone(OVERLAY.story_progress(OVERLAY.load_story_map(self.feature)[0], tasks))
+        self.quarter()
+        content = self.target.read_text()
+        self.assertIn("прогресс неизвестен", content)
+        self.assertNotRegex(content, r"\[TASK_ITEM_100_FE\] is \d+% completed")
+        self.assertNotRegex(content, r"\[STORY_STORY_COHORT\] is \d+% completed")
+        self.assertIn("[TASK_QA_COHORT] is 30% completed", content)
+        self.assertEqual(self.registry.read_bytes(), before)
+        expanded = "\n".join(EXPANDER.expand_file(self.gantt / "actual-progress.puml", [])).rstrip() + "\n"
+        self.assertEqual((self.gantt / "actual-progress-confluence.puml").read_text(), expanded)
+
+    def test_explicit_unknown_progress_supported_in_legacy_registry(self) -> None:
+        legacy = self.feature / "slices/demo/execution/tasks.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(
+            "| Jira | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
+            "|---|---|---|---|---|---|---|---|\n"
+            "| ITEM-200 | FE extra | real | FE | 2 | 2026-09-07 | in_progress | unknown |\n",
+            encoding="utf-8",
+        )
+        self.assertIsNone(OVERLAY.load_tasks(self.feature)["ITEM-200/FE"].progress)
+
+    def test_unknown_progress_does_not_allow_invalid_completed_by(self) -> None:
+        self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |").replace(
+            "| Related Stories |", "| Completed By | Related Stories |",
+        ).replace("| in-review | unknown |", "| done | unknown | 2026-09-09 |"), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Completed By"):
+            OVERLAY.load_tasks(self.feature)
+
     def follow_up_map(self) -> None:
         self.map.write_text("## Mapping\n\n" + self.map.read_text().replace(
             "ITEM-100/FE, QA-COHORT", "ITEM-100/FE",

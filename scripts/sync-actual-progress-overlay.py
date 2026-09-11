@@ -132,7 +132,7 @@ class Task:
     actual_start: str
     actual_finish: str
     status: str
-    progress: int
+    progress: int | None
     related_stories: list[str]
     completed_by: str = ""
 
@@ -538,8 +538,8 @@ def validate_task_row(row: dict[str, str], path: Path) -> None:
     task_id = clean_cell(row.get("Task ID", "")) or f"{row.get('Jira', '')}/{row.get('Role', '')}"
     validate_estimate(row.get("Estimate (дн)", ""), path, task_id)
     progress = clean_cell(row["Progress %"])
-    if not re.fullmatch(r"\d+", progress) or not 0 <= int(progress) <= 100:
-        raise ValueError(f"{path}: Progress % должен быть целым числом от 0 до 100")
+    if progress != "unknown" and (not re.fullmatch(r"\d+", progress) or not 0 <= int(progress) <= 100):
+        raise ValueError(f"{path}: Progress % должен быть целым числом от 0 до 100 или unknown")
     for column in ("Planned Start", "Planned Finish", "Actual Start", "Actual Finish"):
         value = clean_cell(row.get(column, ""))
         if value and not parse_date(value):
@@ -549,7 +549,7 @@ def validate_task_row(row: dict[str, str], path: Path) -> None:
         finish = parse_date(row.get(f"{prefix} Finish", ""))
         if start and finish and finish < start:
             raise ValueError(f"{path}: окончание {prefix} раньше начала")
-    if int(progress) > 0 and not (parse_date(row.get("Actual Start", "")) or parse_date(row.get("Planned Start", "")) or row.get("Completed By", "")):
+    if progress != "unknown" and int(progress) > 0 and not (parse_date(row.get("Actual Start", "")) or parse_date(row.get("Planned Start", "")) or row.get("Completed By", "")):
         raise ValueError(f"{path}: для начатой задачи требуется дата начала из источника")
 
 
@@ -603,7 +603,8 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
                 validate_task_row(row, path)
             status = clean_cell(row.get("Status", "planned"))
             progress_value = row.get("Progress %", "")
-            progress = parse_int(progress_value, progress_from_status(status)) if progress_value else progress_from_status(status)
+            progress = (None if clean_cell(progress_value) == "unknown" else
+                        parse_int(progress_value, progress_from_status(status)) if progress_value else progress_from_status(status))
             kind = clean_cell(row.get("Kind", "virtual")).lower()
             role = clean_cell(row.get("Role", ""))
             normalized_role = normalize_role(role)
@@ -1029,12 +1030,16 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
         return [f"' Skip task without start date: {task.task_id}"]
     assignee = scheduled.assignee
     assignee_part = f" on {{{assignee}}}" if assignee else ""
+    label = role_prefixed_summary(task)
+    if task.progress is None:
+        label += " (прогресс неизвестен)"
     lines = [
-        f"[{role_prefixed_summary(task)}] as [{alias}]{assignee_part} starts {fmt_date(scheduled.start)}",
+        f"[{label}] as [{alias}]{assignee_part} starts {fmt_date(scheduled.start)}",
         f"[{alias}] ends {fmt_date(scheduled.finish)}" if scheduled.finish else f"[{alias}] lasts {task_duration(task)} days",
         f"[{alias}] is colored in {role_color(role_for_task(task))}",
-        f"[{alias}] is {max(0, min(task.progress, 100))}% completed",
     ]
+    if task.progress is not None:
+        lines.append(f"[{alias}] is {max(0, min(task.progress, 100))}% completed")
     if scheduled.shifted:
         lines.append(f"' Shifted not-started task from stale/non-open plan: {task.task_id}")
     if scheduled.resource_note:
@@ -1073,22 +1078,28 @@ def plan_task_ids(story: StoryMap, tasks: dict[str, Task]) -> list[str]:
             if tasks[task_id].kind != "candidate" and role_for_task(tasks[task_id]) != "QA"]
 
 
-def story_progress(story: StoryMap, tasks: dict[str, Task]) -> int:
+def story_progress(story: StoryMap, tasks: dict[str, Task]) -> int | None:
     return task_progress(plan_task_ids(story, tasks), tasks)
 
 
-def task_progress(task_ids: list[str], tasks: dict[str, Task]) -> int:
+def task_progress(task_ids: list[str], tasks: dict[str, Task]) -> int | None:
     if not task_ids:
         return 0
     total = 0
     weighted = 0
+    unknown = False
     for task_id in task_ids:
         task = tasks[task_id]
         estimate = task.estimate
         if not math.isfinite(estimate) or estimate <= 0:
             raise ValueError(f"{task_id}: требуется положительная оценка для расчёта прогресса")
         total += estimate
-        weighted += estimate * max(0, min(task.progress, 100))
+        if task.progress is None:
+            unknown = True
+        else:
+            weighted += estimate * max(0, min(task.progress, 100))
+    if unknown:
+        return None
     return round(weighted / total) if total else 0
 
 
@@ -1120,8 +1131,10 @@ def render_story(
         task_ids = plan_task_ids(story, tasks)
         finishes = [schedules[task_id].finish for task_id in task_ids if task_id in schedules and schedules[task_id].finish]
         label = f"Follow-up {story.follow_up_quarter}; baseline not declared" if story.follow_up_quarter else "No approved baseline"
+        progress = story_progress(story, tasks)
+        progress_text = "unknown" if progress is None else f"{progress}%"
         return [
-            f"' {label}: {story.story_id}; progress={story_progress(story, tasks)}%; tasks={', '.join(task_ids)}",
+            f"' {label}: {story.story_id}; progress={progress_text}; tasks={', '.join(task_ids)}",
         ], max(finishes, default=None)
     start, finish = story_dates(story, tasks, schedules, story_ends, closed_days)
     if not start:
@@ -1129,6 +1142,8 @@ def render_story(
     alias = f"STORY_{to_alias(story.story_id)}"
     label = plantuml_label(f"PLAN {story_type(story, tasks)} {story.summary}")
     progress = story_progress(story, tasks)
+    if progress is None:
+        label += " (прогресс неизвестен)"
     color = "Gainsboro"
     lines = [
         f"[{label}] as [{alias}] starts {fmt_date(start)}",
@@ -1137,12 +1152,9 @@ def render_story(
         lines.append(f"[{alias}] ends {fmt_date(finish)}")
     else:
         lines.append(f"[{alias}] lasts {max(story.baseline_duration, 1)} days")
-    lines.extend(
-        [
-            f"[{alias}] is colored in {color}",
-            f"[{alias}] is {progress}% completed",
-        ]
-    )
+    lines.append(f"[{alias}] is colored in {color}")
+    if progress is not None:
+        lines.append(f"[{alias}] is {progress}% completed")
     return lines, finish
 
 
@@ -1157,13 +1169,16 @@ def render_role_baseline(baseline: RoleBaseline, feature_slug: str, tasks: dict[
     alias = f"PLAN_{to_alias(feature_slug)}_{baseline.role}"
     source_label = "квартальный план" if baseline.view == "quarter-plan" else "командирский план"
     label = plantuml_label(f"PLAN {baseline.role} {feature_slug} ({source_label})")
+    progress = task_progress(task_ids, tasks)
+    if progress is None:
+        label += " (прогресс неизвестен)"
     return [
         f"' Role baseline: {baseline.path}#{baseline.alias}; duration={baseline.duration} working days",
         f"' Decision source: {baseline.decision_source}; tasks={', '.join(task_ids)}",
         f"[{label}] as [{alias}] starts {fmt_date(start)}",
         f"[{alias}] ends {fmt_date(finish)}",
         f"[{alias}] is colored in Gainsboro",
-        f"[{alias}] is {task_progress(task_ids, tasks)}% completed",
+        *([f"[{alias}] is {progress}% completed"] if progress is not None else []),
         "",
     ]
 

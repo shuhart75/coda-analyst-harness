@@ -83,6 +83,19 @@ class RolePlanBaselinesTests(unittest.TestCase):
         self.assertEqual(self.target.read_text().count("[PLAN "), 2)
         self.assertIn("| absent |", self.map.read_text())
 
+    def test_unknown_role_progress_preserves_plan_window_and_known_other_role(self):
+        self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |"), encoding="utf-8")
+        before = {path: path.read_bytes() for path in (self.plan, self.map, self.config_path)}
+        self.quarter()
+        content = self.target.read_text()
+        self.assertIn("[PLAN_COHORTS_FE] starts 2026/09/01", content)
+        self.assertIn("[PLAN_COHORTS_FE] ends 2026/09/07", content)
+        self.assertNotRegex(content, r"\[PLAN_COHORTS_FE\] is \d+% completed")
+        self.assertIn("прогресс неизвестен", content)
+        self.assertIn("[PLAN_COHORTS_QA] is 30% completed", content)
+        for path, original in before.items():
+            self.assertEqual(path.read_bytes(), original)
+
     def test_missing_role_tasks_retain_exact_source_window(self):
         self.write_tasks(["| | ITEM-100 | List | real | FE | 5 | F1 | 2026-09-01 | 2026-09-04 | 2026-09-01 | | in-review | 75 | STORY-COHORT |"])
         self.map.write_text(self.map.read_text().replace("ITEM-100/FE, QA-COHORT", "ITEM-100/FE"))
