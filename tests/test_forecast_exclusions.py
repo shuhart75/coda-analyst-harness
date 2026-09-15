@@ -341,7 +341,7 @@ class ForecastExclusionTests(unittest.TestCase):
         self.assertEqual(view.count("!include includes/actual-progress/FORECAST-shared.puml"), 1)
         self.assertIn(self.forecast.read_text(), export)
         self.assertIn("TASK_OTHER_AN", export)
-        self.assertIn("[OPT_PLAN] starts 2026/08/03", export)
+        self.assertNotIn("OPT_PLAN", export)
         self.assertNotIn("вне прогноза", view)
         self.assertIn("Preserved forecast: optimizer", view)
         self.assertFalse((self.feature / "planning/actualization.md").exists())
@@ -498,10 +498,15 @@ class ForecastExclusionTests(unittest.TestCase):
         ), encoding="utf-8")
         self.assert_blocked_without_writes("прежние FORECAST-подключения")
 
-    def test_preservation_rejects_alias_collision_with_plan(self) -> None:
+    def test_preservation_does_not_render_unused_baseline_aliases(self) -> None:
         self.preserve_forecast()
         self.plan.write_text(self.plan.read_text().replace("OPT_PLAN", "FORECAST_OPT_BE"), encoding="utf-8")
-        self.assert_blocked_without_writes("Повторяющиеся идентификаторы PlantUML")
+        original = self.plan.read_bytes()
+        self.run_generator()
+        export = (self.gantt / "actual-progress-confluence.puml").read_text()
+        self.assertEqual(export.count("as [FORECAST_OPT_BE]"), 1)
+        self.assertNotIn("Original plan", export)
+        self.assertEqual(self.plan.read_bytes(), original)
 
     def test_preservation_configuration_removal_restores_missing_map_gate(self) -> None:
         self.preserve_forecast()
@@ -530,6 +535,32 @@ class ForecastExclusionTests(unittest.TestCase):
     def test_preservation_rejects_collision_with_generated_task(self) -> None:
         self.preserve_forecast()
         self.add_active_feature("OTHER-AN")
+        self.assert_blocked_without_writes("Повторяющиеся идентификаторы PlantUML")
+
+    def test_layout_preserves_shared_forecast_once_and_omits_raw_plan(self) -> None:
+        self.preserve_forecast()
+        self.add_active_feature()
+        (self.gantt / "layout-decision.md").write_text("Confirmed section order.\n")
+        forecast = "includes/actual-progress/FORECAST-shared.puml"
+        layout = {"schema_version": 1, "analyst_confirmed": True, "source": "layout-decision.md",
+                  "project_start": "2026-07-01", "sections": [
+                      {"feature": "active-plan", "title": "Active", "include": "includes/actual-progress/FEATURE-active-plan.puml"},
+                      {"feature": "other", "title": "Other feature", "include": forecast},
+                      {"feature": "optimizer", "title": "Optimizer", "include": forecast}]}
+        (self.gantt / "actual-progress-layout.json").write_text(json.dumps(layout))
+        original = self.forecast.read_bytes()
+        self.run_generator()
+        export = (self.gantt / "actual-progress-confluence.puml").read_text()
+        headings = [line for line in export.splitlines() if line.startswith("-- ")]
+        self.assertEqual(headings, ["-- Active --", "-- Other feature --", "-- Optimizer --"])
+        self.assertNotIn("OPT_PLAN", export)
+        self.assertEqual(export.count("as [FORECAST_OPT_BE]"), 1)
+        self.assertEqual(self.forecast.read_bytes(), original)
+        snapshot = self.snapshot()
+        self.run_generator()
+        self.assertEqual(snapshot, self.snapshot())
+        for path in (self.root / "features/active/planning/actualization.md", self.root / "features/active/execution/tasks.md"):
+            path.write_text(path.read_text().replace("LOCAL-FE", "OTHER-AN"))
         self.assert_blocked_without_writes("Повторяющиеся идентификаторы PlantUML")
 
     def test_preservation_rejects_forecast_symlink(self) -> None:

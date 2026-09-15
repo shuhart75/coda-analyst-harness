@@ -83,6 +83,19 @@ class RolePlanBaselinesTests(unittest.TestCase):
         self.assertEqual(self.target.read_text().count("[PLAN "), 2)
         self.assertIn("| absent |", self.map.read_text())
 
+    def test_layout_supplies_display_title_without_changing_role_duration(self):
+        (self.gantt / "actual-progress-layout.json").write_text(json.dumps({
+            "schema_version": 1, "analyst_confirmed": True, "source": "role-baseline-decision.md",
+            "project_start": "2026-07-01", "sections": [{"feature": "cohorts", "title": "Справочник когорт",
+            "include": "includes/actual-progress/FEATURE-cohorts.puml"}],
+        }), encoding="utf-8")
+        self.quarter()
+        content = self.target.read_text()
+        self.assertIn("PLAN FE Справочник когорт (квартальный план)", content)
+        self.assertNotIn("PLAN FE cohorts", content)
+        self.assertIn("[PLAN_COHORTS_FE] starts 2026/09/01", content)
+        self.assertIn("[PLAN_COHORTS_FE] ends 2026/09/07", content)
+
     def test_unknown_role_progress_preserves_plan_window_and_known_other_role(self):
         self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |"), encoding="utf-8")
         before = {path: path.read_bytes() for path in (self.plan, self.map, self.config_path)}

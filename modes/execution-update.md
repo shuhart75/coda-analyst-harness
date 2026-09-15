@@ -16,6 +16,7 @@ Track real work with or without a recorded planning baseline.
 - `planning/*/gantt/actual-progress.puml`
 - `planning/*/gantt/actual-progress-confluence.puml`
 - `planning/*/gantt/actual-progress-features.json`
+- `planning/*/gantt/actual-progress-layout.json` и источник решения
 
 ## Allowed changes
 
@@ -124,6 +125,8 @@ resources, invent dates, or bypass the source and branch gates.
 - An executor lane whose role conflicts with the work-item role is not preserved; the generator chooses a resource from the correct role roster.
 - Strip square brackets from generated PlantUML labels. In particular, tracker summary `[FE] Списковая форма` must render as `FE Списковая форма`, never as nested PlantUML brackets.
 - Actual started or completed tasks keep their actual dates, even when those dates are in the past.
+- Подтверждённые аналитиком исторические даты выше выводов трекера, даже без legacy-метаданных подтверждения. Граница завершения к релизу не заменяет известный точный интервал. Переноси подтверждённые legacy-факты в реестр с источником; конец незавершённой полосы не является фактическим завершением.
+- Подтверждённый состав, названия и порядок фич сохраняются по `core/actual-progress-layout.md`. Порядок участвует в распределении будущей работы по ресурсам; он не сдвигает фактические даты. Не добавляй второе представление сохранённой FORECAST-фичи из исходного PLAN.
 - Сохраняй серую полосу `PLAN` с исходной длительностью. Начало привязывается к первой фактической задаче этой роли в фиче, иначе к первой прогнозной; конец — только к длительности по рабочему календарю. Без задач сохраняется исходное окно. Процент — взвешенный по точным человеко-дням прогресс всех задач роли, без кандидатов, `superseded` и `cancelled`/`canceled`. Полосы без записанного baseline не создаются.
 - Never rewrite approved quarter or commander plans to absorb later scope. Render later work as task candidates or actual tasks.
 - Regenerate actual-progress through `scripts/sync-quarter-gantt.py --actual-only`; it also refreshes `actual-progress-confluence.puml`.

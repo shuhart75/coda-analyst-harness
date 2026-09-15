@@ -9,6 +9,7 @@ import re
 import sys
 
 from actual_progress_scope import declared_aliases, expanded_with_paths, load_forecast_scope
+from actual_progress_layout import load_layout, validate_layout
 
 
 VIEWS = [
@@ -207,6 +208,9 @@ def load_tool(name: str):
 
 
 def sync_actual_progress_overlays(gantt_dir: Path, overlay) -> dict[Path, str]:
+    layout = load_layout(gantt_dir)
+    if layout:
+        return overlay.prepare_outputs(project_root(gantt_dir), gantt_dir.parent.name, layout.execution_features)
     feature_slugs = sorted(
         {
             feature_slug(path)
@@ -236,6 +240,11 @@ def main() -> int:
     overlay = load_tool("sync-actual-progress-overlay")
     outputs = sync_actual_progress_overlays(gantt_dir, overlay)
     scope = load_forecast_scope(project_root(gantt_dir), gantt_dir.parent.name)
+    layout = load_layout(gantt_dir)
+    if layout:
+        if not args.actual_only:
+            raise ValueError("Описание actual-progress требует --actual-only")
+        validate_layout(layout, gantt_dir, outputs, set(scope.includes.values()))
     if scope.role_baselines and not args.actual_only:
         raise ValueError("Ролевой PLAN требует --actual-only; исходные планы нельзя перегенерировать")
 
@@ -246,7 +255,8 @@ def main() -> int:
         include_files = sorted(
             set(include_dir.glob("FEATURE-*.puml"))
             | {path for path in outputs if path.parent == include_dir}
-            | (set(scope.baselines.values()) if slug == "actual-progress" else set()),
+            | ({path for feature, path in scope.baselines.items() if feature not in scope.preserved}
+               if slug == "actual-progress" else set()),
             key=lambda path: (
                 order.get(feature_slug(path), len(order)),
                 feature_slug(path),
@@ -254,7 +264,11 @@ def main() -> int:
         )
         preambles = preamble_files(gantt_dir, slug)
         preserved_paths = sorted(set(scope.includes.values())) if slug == "actual-progress" else []
+        if layout and slug == "actual-progress":
+            include_files = layout.includes(gantt_dir)
         start = view_start(quarter_start, preambles + include_files + preserved_paths, outputs)
+        if layout and slug == "actual-progress":
+            start = layout.project_start
         lines = header_lines(
             gantt_dir,
             title,
@@ -269,7 +283,13 @@ def main() -> int:
 
         if include_files:
             for path in include_files:
+                if layout and path in preserved_paths:
+                    lines.append(f'!include {path.relative_to(gantt_dir).as_posix()}')
+                    lines.append("")
+                    continue
                 title = feature_title(gantt_dir, path, outputs)
+                if layout:
+                    title = layout.titles[feature_slug(path)]
                 excluded_slug = feature_slug(path)
                 if slug == "actual-progress" and excluded_slug in scope.exclusions:
                     decision = scope.exclusions[excluded_slug]
@@ -304,6 +324,12 @@ def main() -> int:
         outputs[target] = "\n".join(lines).rstrip() + "\n"
 
     sync_confluence_export(gantt_dir, outputs)
+    if layout:
+        exported = outputs[gantt_dir / "actual-progress-confluence.puml"]
+        if re.findall(r"^-- (.+?) --\s*$", exported, re.MULTILINE) != [section["title"] for section in layout.sections]:
+            raise ValueError("Итоговый состав разделов отличается от подтверждённого описания")
+        if load_layout(gantt_dir) != layout:
+            raise ValueError("Описание диаграммы изменилось во время генерации")
     if scope.preserved:
         expanded, dependencies = expanded_with_paths(gantt_dir / "actual-progress.puml", outputs)
         _, previous_dependencies = expanded_with_paths(gantt_dir / "actual-progress.puml")

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from actualization_baseline import baseline_rows
 from actual_progress_scope import load_forecast_scope, unique_keys
+from actual_progress_layout import load_layout
 from role_plan_baselines import RoleBaseline
 from workspace_paths import approved_plans_path, team_path
 import math
@@ -883,6 +884,7 @@ def task_schedules(
     closed_days: set[date],
     today: date,
     team_resources: dict[str, list[str]],
+    feature_priorities: dict[str, int] | None = None,
 ) -> dict[str, ScheduledTask]:
     tasks = {task_id: task for task_id, task in tasks.items()
              if task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES
@@ -892,6 +894,9 @@ def task_schedules(
 
     def task_scope(task_key: str) -> str:
         return task_key.removesuffix(tasks[task_key].task_id).rstrip("/")
+
+    def priority(task_key: str) -> int:
+        return (feature_priorities or {}).get(task_scope(task_key), len(feature_priorities or {}))
 
     for task_id, task in tasks.items():
         if needs_forecast_schedule(task):
@@ -923,7 +928,7 @@ def task_schedules(
         ]
         for task_id, task, start, shifted in sorted(
             phase_items,
-            key=lambda item: (item[2] or date.max, ROLE_ORDER.get(role_for_task(item[1]), 90), item[0]),
+            key=lambda item: (priority(item[0]), item[2] or date.max, ROLE_ORDER.get(role_for_task(item[1]), 90), item[0]),
         ):
             schedules[task_id] = schedule_not_started_task(
                 task,
@@ -943,7 +948,7 @@ def task_schedules(
 
     for task_id, task, start, shifted in sorted(
         [item for item in not_started if item[0] not in schedules and role_for_task(item[1]) == "FE"],
-        key=lambda item: (item[2] or date.max, item[0]),
+        key=lambda item: (priority(item[0]), item[2] or date.max, item[0]),
     ):
         be_starts = be_starts_by_scope.get(task_scope(task_id), [])
         fe_min_start = add_open_day_offset(min(be_starts), FE_AFTER_BE_OPEN_DAYS, closed_days) if be_starts else None
@@ -959,7 +964,7 @@ def task_schedules(
 
     for task_id, task, start, shifted in sorted(
         [item for item in not_started if item[0] not in schedules and role_for_task(item[1]) == "QA"],
-        key=lambda item: (item[2] or date.max, item[0]),
+        key=lambda item: (priority(item[0]), item[2] or date.max, item[0]),
     ):
         feature_schedules = [
             (item, schedules[item_id]) for item_id, item in tasks.items()
@@ -993,7 +998,7 @@ def task_schedules(
     schedule_phase({"QA"})
     for task_id, task, start, shifted in sorted(
         [item for item in not_started if item[0] not in schedules],
-        key=lambda item: (item[2] or date.max, ROLE_ORDER.get(role_for_task(item[1]), 90), item[0]),
+        key=lambda item: (priority(item[0]), item[2] or date.max, ROLE_ORDER.get(role_for_task(item[1]), 90), item[0]),
     ):
         schedules[task_id] = schedule_not_started_task(
             task,
@@ -1211,7 +1216,7 @@ def render_story(
 
 def render_role_baseline(baseline: RoleBaseline, feature_slug: str, tasks: dict[str, Task],
                          schedules: dict[str, ScheduledTask], closed_days: set[date],
-                         role_start: date | None = None) -> list[str]:
+                         role_start: date | None = None, feature_title: str | None = None) -> list[str]:
     task_ids = role_task_ids(baseline.role, tasks)
     actual_starts = [parse_date(tasks[task_id].actual_start) for task_id in task_ids if tasks[task_id].actual_start]
     forecast_starts = [schedules[task_id].start for task_id in task_ids if task_id in schedules]
@@ -1220,7 +1225,7 @@ def render_role_baseline(baseline: RoleBaseline, feature_slug: str, tasks: dict[
     finish = add_open_days(start, baseline.duration, closed_days) if role_start or starts else baseline.finish
     alias = f"PLAN_{to_alias(feature_slug)}_{baseline.role}"
     source_label = "квартальный план" if baseline.view == "quarter-plan" else "командирский план"
-    label = plantuml_label(f"PLAN {baseline.role} {feature_slug} ({source_label})")
+    label = plantuml_label(f"PLAN {baseline.role} {feature_title or feature_slug} ({source_label})")
     progress = task_progress(task_ids, tasks)
     if progress is None:
         label += " (прогресс неизвестен)"
@@ -1242,6 +1247,7 @@ def render_feature(
     tasks: dict[str, Task] | None = None,
     schedules: dict[str, ScheduledTask] | None = None,
     role_baselines: list[RoleBaseline] | None = None,
+    feature_title: str | None = None,
 ) -> str | None:
     stories = load_story_map(feature_dir)
     tasks = tasks if tasks is not None else load_tasks(feature_dir)
@@ -1281,7 +1287,7 @@ def render_feature(
         lines.extend(["", "' Feature-role comparison layer"])
         for baseline in role_baselines:
             lines.extend(render_role_baseline(baseline, feature_slug, tasks, schedules, closed_days,
-                                              role_starts.get(baseline.role)))
+                                              role_starts.get(baseline.role), feature_title))
 
     active_tasks = list(tasks.values())
     if active_tasks:
@@ -1309,6 +1315,9 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
     target_dir = project_root / "planning" / quarter_id / "gantt/includes/actual-progress"
     scope = load_forecast_scope(project_root, quarter_id)
     feature_map = scope.features
+    layout = load_layout(target_dir.parent.parent)
+    if layout and feature_slugs is None:
+        feature_slugs = layout.execution_features
     if feature_slugs is None:
         feature_slugs = sorted({
             path.name for path in (project_root / "features").iterdir()
@@ -1384,7 +1393,10 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         for task_id, task in tasks.items():
             scoped_tasks[f"{feature_slug}/{task_id}"] = task
 
-    scoped_schedules = task_schedules(scoped_tasks, closed_days, harness_today(), team_resources)
+    if layout and set(feature_slugs) != set(layout.execution_features):
+        raise ValueError("Состав задач не совпадает с подтверждённым описанием диаграммы")
+    scoped_schedules = task_schedules(scoped_tasks, closed_days, harness_today(), team_resources,
+                                     layout.priorities if layout else None)
 
     outputs: dict[Path, str] = {}
     for feature_slug in feature_slugs:
@@ -1399,7 +1411,8 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         if any(task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES and not completion_bound_only(task)
                and task_id not in schedules for task_id, task in tasks.items()):
             raise ValueError(f"{feature_dir}: не для каждой задачи определена дата начала; Гант сохранён")
-        content = render_feature(feature_dir, feature_slug, closed_days, tasks, schedules, scope.role_baselines.get(feature_slug))
+        content = render_feature(feature_dir, feature_slug, closed_days, tasks, schedules, scope.role_baselines.get(feature_slug),
+                                 layout.titles[feature_slug] if layout else None)
         if content is None:
             raise ValueError(f"{feature_dir}: источники изменились во время генерации")
         outputs[target] = content
