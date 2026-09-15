@@ -166,7 +166,7 @@ def preview_execution(
     return {
         "status": "tracker-execution-preview",
         "project_root": str(project), "head": before["head"], "quarter": quarter,
-        "selected_features": sorted(selected), "items": items,
+        "selected_features": list(selected), "items": items,
         "registry_sha256": sources, "reviewed_registry_sha256": reviewed,
         "blockers": blockers, "warnings": warnings,
         "ownership_ready": not blockers, "writes_performed": False,

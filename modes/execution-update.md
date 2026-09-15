@@ -74,6 +74,11 @@ Use intent `update-planning`; after the verified read report, continue through
 continuation, not guesses about dates, roles, feature membership or resources.
 A read-only request ends at the tracker report and never enters this phase.
 
+Before writing, follow the feature-by-feature review in `core/tracker-actualization.md`:
+preserve the confirmed roster and priority, show proposed changes with evidence,
+accept the analyst's chat corrections, then wait for the command to apply the
+reviewed changes. A completion date alone never supplies a start date or resource.
+
 Tracker estimates are applied per role after confirmed mapping to execution work.
 AN and QA belong to the feature; a source role estimate is not automatic permission
 to create an additional row. The same tracker key may repeat across roles, but one

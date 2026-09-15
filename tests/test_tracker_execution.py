@@ -75,6 +75,53 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
     def reasons(self, payload: dict) -> set[str]:
         return {item["reason"] for item in payload["blockers"]}
 
+    def test_quarter_layout_preserves_roster_titles_order_and_mapping(self) -> None:
+        gantt = self.project / "planning/2026-Q3/gantt"
+        for name, key in (("zeta", 1), ("alpha", 2), ("obsolete", 3)):
+            self.registry(self.project, name, [f"| CORE | JIRA-{key} | ST-{key} | real | BE | done |"])
+            path = gantt / f"includes/actual-progress/FEATURE-{name}.puml"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("' existing\n")
+        self.write(gantt / "actual-progress-features.json", {
+            "schema_version": 1, "features": {"display-zeta": "zeta"},
+        })
+        (gantt / "decision.md").write_text("Confirmed roster\n")
+        self.write(gantt / "actual-progress-layout.json", {
+            "schema_version": 1, "analyst_confirmed": True, "source": "decision.md",
+            "project_start": "2026-07-01", "sections": [
+                {"feature": slug, "title": title,
+                 "include": f"includes/actual-progress/FEATURE-{slug}.puml"}
+                for slug, title in (("display-zeta", "First feature"), ("alpha", "Second feature"))
+            ],
+        })
+        before = self.snapshot()
+        payload = preview_scope(self.project, "jira", "2026-Q3", None)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual([entry["feature"] for entry in payload["features"]], ["zeta", "alpha"])
+        self.assertEqual([entry["title"] for entry in payload["features"]], ["First feature", "Second feature"])
+        self.assertEqual([entry["priority"] for entry in payload["features"]], [1, 2])
+        self.assertEqual(payload["scope"]["ids"], ["JIRA-1", "JIRA-2"])
+        self.save_sources()
+        execution = preview_execution(self.project, "2026-Q3", None, self.result())
+        self.assertEqual(execution["selected_features"], ["zeta", "alpha"])
+        single = preview_scope(self.project, "jira", "2026-Q3", "zeta")
+        self.assertEqual([entry["feature"] for entry in single["features"]], ["zeta"])
+        with self.assertRaisesRegex(ValueError, "не включена"):
+            preview_scope(self.project, "jira", "2026-Q3", "obsolete")
+        layout = json.loads((gantt / "actual-progress-layout.json").read_text())
+        layout["analyst_confirmed"] = False
+        self.write(gantt / "actual-progress-layout.json", layout)
+        with self.assertRaises(ValueError):
+            preview_scope(self.project, "jira", "2026-Q3", None)
+
+    def test_legacy_quarter_order_is_not_claimed_as_confirmed_priority(self) -> None:
+        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        self.write(self.project / "planning/2026-Q3/gantt/actual-progress-features.json", {
+            "schema_version": 1, "features": {"owner": "owner"},
+        })
+        payload = preview_scope(self.project, "jira", "2026-Q3", None)
+        self.assertIn("feature-order-and-roster-need-confirmation", payload["limitations"])
+
     def test_exact_pair_and_roles_find_existing_root_and_legacy_rows(self) -> None:
         self.registry(self.project, "owner", ["| CORE | JIRA-1/BE | ST-1 | real | BE | done |"])
         self.registry(self.project, "owner", ["| QA-LOCAL | JIRA-1 | ST-1 | real | QA | planned |"],

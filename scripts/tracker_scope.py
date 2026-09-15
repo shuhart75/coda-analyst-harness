@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 
 from actual_progress_scope import load_forecast_scope, valid_slug
+from actual_progress_layout import load_layout
 from tracker_registry import read_registry
 
 
@@ -48,6 +49,18 @@ def select_features(project: Path, quarter: str | None, feature: str | None) -> 
                 entry["forecast_state"] = "outside-quarter"
             elif slug in scope.preserved:
                 entry["forecast_state"] = "preserve-existing"
+        layout = load_layout(gantt)
+        if layout is not None:
+            ordered = {}
+            for priority, section in enumerate(layout.sections, start=1):
+                name = scope.features.get(section["feature"], section["feature"])
+                if name in ordered:
+                    raise ValueError(f"Несколько разделов соответствуют одной фиче: {name}")
+                entry = selected.get(name, {"feature": name, "sources": [], "forecast_state": None})
+                entry["sources"].append((gantt / "actual-progress-layout.json").relative_to(project).as_posix())
+                entry.update(title=section["title"], priority=priority, order_confirmed=True)
+                ordered[name] = entry
+            selected = ordered
         if not selected:
             raise ValueError("В квартале нет явной выборки FEATURE/includes или конфигурации")
         if feature:
@@ -68,7 +81,9 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
     omitted = []
     limitations = ["known-registry-tasks-only", "new-epic-members-not-discovered"]
     column = "Jira" if provider == "jira" else "SberTrek"
-    for name, entry in sorted(selected.items()):
+    if quarter and any(not entry.get("order_confirmed") for entry in selected.values()):
+        limitations.append("feature-order-and-roster-need-confirmation")
+    for name, entry in selected.items():
         directory = inside_project(project, project / "features" / name)
         if not directory.is_dir():
             raise ValueError(f"Фича не найдена: {directory}")
@@ -117,7 +132,7 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
         "status": "tracker-scope-preview",
         "project_root": str(project), "quarter": quarter,
         "scope": {"kind": "tasks", "provider": provider, "ids": sorted(references), "intent": "update-planning"},
-        "features": [selected[name] for name in sorted(selected)],
+        "features": list(selected.values()),
         "references": {key: references[key] for key in sorted(references)},
         "omitted": omitted, "shared_keys": shared, "limitations": sorted(set(limitations)),
         "requires_analyst_confirmation": True, "tracker_calls_performed": False,
