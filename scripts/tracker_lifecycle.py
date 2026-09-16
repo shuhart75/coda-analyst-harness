@@ -141,8 +141,8 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
         handoff = old_role == history.development_role and new_role == "QA"
         qa_return = old_role == "QA" and new_role == history.development_role
         assigned_developer = role(effective_assignee) == history.development_role
+        start_development = not developer_seen and new_role == history.development_role and old_role != "QA"
         developer_seen = developer_seen or assigned_developer or old_role == history.development_role
-        start_development = new_role == history.development_role and old_role not in {history.development_role, "QA"}
         finish_development = handoff or (
             new_status in codes["development_completed"] | codes["qa_started"]
             and new_status not in codes["qa_completed"]

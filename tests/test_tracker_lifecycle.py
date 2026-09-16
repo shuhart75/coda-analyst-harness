@@ -336,6 +336,12 @@ class TrackerLifecycleTests(unittest.TestCase):
             self.assigned('unassign', 3, 'developer', None)], None))
         self.assertEqual(result['development']['state'], 'in-progress')
 
+    def test_reassignment_does_not_replace_unknown_original_start(self):
+        result = self.task(self.history([self.assigned('unassign', 2, 'developer', None),
+            self.assigned('reassign', 3, None, 'other-developer')], 'other-developer'))
+        self.assertEqual(result['development']['state'], 'in-progress')
+        self.assertIsNone(result['development']['started_at'])
+
     def test_qa_progress_counts_all_fe_be_tasks_without_role_estimates(self):
         histories = [self.finished(f'ST-{index}') for index in range(1, 7)]
         histories.extend(replace(self.history(key=f'ST-{index}'), development_role='BE') for index in range(7, 11))
