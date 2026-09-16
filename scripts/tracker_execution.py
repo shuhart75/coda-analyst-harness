@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from decimal import Decimal
 from importlib import import_module
 import os
 from pathlib import Path
@@ -14,6 +15,31 @@ from tracker_registry import read_registry
 REGISTRY = re.compile(r"features/[^/]+/(?:slices/[^/]+/)?execution/tasks\.md")
 KEY = re.compile(r"([A-Z][A-Z0-9_]*-[1-9][0-9]*)(?:/(AN|BE|FE|QA))?")
 ROLES = {"AN", "BE", "FE", "QA"}
+
+
+def feature_qa_estimate(issues: list[dict]) -> dict:
+    total = Decimal("0")
+    sources, missing, seen = [], [], set()
+    for issue in issues:
+        identity = (issue.get("jira_key"), issue.get("sbertrek_key"))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        key = issue.get("jira_key") or issue.get("sbertrek_key")
+        estimate = issue.get("role_estimates", {}).get("QA")
+        if estimate is None:
+            missing.append(key)
+            continue
+        if estimate.get("unit") not in {"story-points", "person-days"}:
+            raise ValueError("QA estimate requires the agreed person-day unit")
+        value = Decimal(str(estimate["value"]))
+        if not value.is_finite() or value < 0:
+            raise ValueError("Invalid QA estimate")
+        total += value
+        sources.append({"key": key, "value": float(value)})
+    return {"value": float(total) if sources else None, "unit": "person-days",
+            "sources": sources, "unestimated_keys": missing,
+            "basis": "sum-of-populated-card-qa-estimates", "target_count": 1}
 
 
 def git(project: Path, *args: str) -> str:
@@ -137,6 +163,8 @@ def preview_execution(
             if sum(row["role"] == role for row in matched) > 1:
                 reasons.append(f"duplicate-registry-role:{role}")
         for item in roles:
+            if item["role"] == "QA" and result.get("scope", {}).get("tracker_mode") == "single":
+                continue
             if not any(row["role"] == item["role"] for row in matched):
                 reasons.append(f"new-role-needs-confirmation:{item['role']}")
         identities = {item["work_item_id"] for item in roles} | {key for key in (jira_key, sbertrek_key) if key}
@@ -149,12 +177,45 @@ def preview_execution(
             "tracker_key": identity, "jira_key": jira_key, "sbertrek_key": sbertrek_key,
             "owners": owners, "targets": matched, "work_item_ids": [item["work_item_id"] for item in roles],
             "internal_id_collisions": local_collisions, "blockers": sorted(set(reasons)),
+            "proposed_action": "delete-current-execution" if issue.get("reason") == "confirmed-source-deletion" else "update",
+            "deletion_evidence": issue.get("evidence") if issue.get("reason") == "confirmed-source-deletion" else None,
         }
         items.append(entry)
         blockers.extend({"tracker_key": identity, "reason": reason} for reason in entry["blockers"])
 
     if not items:
         blockers.append({"reason": "no-reconciled-tasks"})
+    qa_proposals = []
+    for selected_feature in selected:
+        owned = [issue for issue, item in zip([*result["issues"], *result["excluded"]], items)
+                 if item["owners"] == [selected_feature] and issue in result["issues"]]
+        targets = [row for row in rows if row["feature"] == selected_feature and row["role"] == "QA"]
+        provider = result.get("scope", {}).get("provider")
+        provider_field = str(provider) + "_key"
+        expected_keys = {row[provider_field] for row in rows
+                         if row["feature"] == selected_feature and row.get(provider_field)}
+        observed_keys = {issue.get(provider_field) for issue in owned}
+        deleted_keys = {issue.get(provider_field) for issue in result["excluded"]
+                        if issue.get("reason") == "confirmed-source-deletion"}
+        missing_keys = sorted(expected_keys - observed_keys - deleted_keys)
+        qa_proposals.append({"feature": selected_feature, "estimate": feature_qa_estimate(owned),
+                             "missing_card_keys": missing_keys,
+                             "collection_limitations": result.get("limitations", []),
+                             "full_feature_estimate_proven": False,
+                             "existing_targets": targets,
+                             "action": "consolidate" if len(targets) > 1 else "update" if targets else "create",
+                             "requires_analyst_review": True})
+    scope = result.get("scope", {})
+    provider = scope.get("provider")
+    returned = {issue.get(str(provider) + "_key") for issue in result["issues"]}
+    returned.update(issue.get(str(provider) + "_key") for issue in result["excluded"]
+                    if issue.get("reason") == "confirmed-source-deletion")
+    missing_candidates = [
+        {"key": key, "provider": provider, "absence_proven": False,
+         "targets": [row for row in rows if row["feature"] in selected and row.get(str(provider) + "_key") == key],
+         "next_action": "verify-absence-or-access", "deletion_allowed": False}
+        for key in scope.get("ids", []) if scope.get("kind") == "tasks" and key not in returned
+    ]
     if select_features(project, quarter, feature) != selected:
         raise ValueError("Область изменилась во время проверки; повтори execution-preview")
     if repository_state(project) != before or registry_paths(project) != paths or any(
@@ -167,6 +228,7 @@ def preview_execution(
         "status": "tracker-execution-preview",
         "project_root": str(project), "head": before["head"], "quarter": quarter,
         "selected_features": list(selected), "items": items,
+        "feature_qa_proposals": qa_proposals, "missing_task_candidates": missing_candidates,
         "registry_sha256": sources, "reviewed_registry_sha256": reviewed,
         "blockers": blockers, "warnings": warnings,
         "ownership_ready": not blockers, "writes_performed": False,

@@ -336,6 +336,9 @@ def advance(run: dict) -> None:
     if pending_step(run) or run["status"] != "tracker-read-collecting":
         return
     scope = run["scope"]
+    if scope.get("tracker_mode") == "single":
+        run["status"] = "tracker-read-ready"
+        return
     stages = {step["stage"] for step in run["steps"] if step["state"] == "complete"}
     if scope["provider"] == "sbertrek":
         if "jira-counterparts" not in stages:
@@ -1049,6 +1052,47 @@ def ingest_error_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def confirm_absence_command(args: argparse.Namespace) -> int:
+    from tracker_history import validate_call
+
+    run = load_run(args.run_id)
+    scope = run["scope"]
+    if scope.get("tracker_mode") != "single" or scope["kind"] != "tasks":
+        raise ValueError("Подтверждение отсутствия требует однотрекерной области tasks")
+    if run["status"] not in {"tracker-read-collecting", "tracker-read-ready", "tracker-read-failed"}:
+        raise ValueError("Нельзя менять завершённый run")
+    key = normalize_key(args.key)
+    if key not in scope["ids"] or key in card_keys(run, scope["provider"]):
+        raise ValueError("Ключ вне области или карточка уже получена")
+    if not args.analyst_confirmed or not args.decision_source.strip():
+        raise ValueError("Требуется явное подтверждение удаления аналитиком и источник решения")
+    _, raw, _ = response_file(args.response_file, args.run_id, require_json=False)
+    if not re.search(r"(?<![A-Z0-9_-])" + re.escape(key) + r"(?![A-Z0-9_-])", raw.decode("utf-8")):
+        raise ValueError("Ответ не содержит подтверждаемого ключа")
+    _, _, call = response_file(args.call_file, args.run_id)
+    validate_call(call, scope["provider"])
+    confirmation = {"key": key, "provider": scope["provider"], "sha256": digest_bytes(raw),
+                    "call": call, "decision_source": args.decision_source,
+                    "analyst_confirmed": True}
+    previous = run.setdefault("confirmed_absent", {}).get(key)
+    if previous and previous != confirmation:
+        raise ValueError("Подтверждение уже сохранено с другим доказательством")
+    run["confirmed_absent"][key] = confirmation
+    step = pending_step(run)
+    if step:
+        remaining = [item for item in step["requested_keys"] if item not in run["confirmed_absent"]]
+        step["requested_keys"] = remaining
+        step["query"] = jql_keys(remaining) if scope["provider"] == "jira" else tql_units(remaining)
+        if not remaining:
+            step.update(state="complete", returned_count=0, completed_at=now())
+    run["status"] = "tracker-read-collecting"
+    run["failure"] = None
+    advance(run)
+    save_run(run)
+    print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
+    return 0
+
+
 def canonical_estimate(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
@@ -1268,6 +1312,10 @@ def reconcile_data(run: dict) -> dict:
         })
         issues.append(issue)
     issues.sort(key=lambda item: (item.get("sbertrek_key") or "", item.get("jira_key") or ""))
+    for key, evidence in run.get("confirmed_absent", {}).items():
+        excluded.append({"jira_key": key if evidence["provider"] == "jira" else None,
+                         "sbertrek_key": key if evidence["provider"] == "sbertrek" else None,
+                         "reason": "confirmed-source-deletion", "evidence": evidence})
     role_totals = {role: 0.0 for role in ROLES}
     overall_total = 0.0
     for issue in issues:
@@ -1473,11 +1521,17 @@ def begin_command(args: argparse.Namespace) -> int:
     if args.scope_kind == "epic" and len(ids) != 1:
         raise ValueError("Для epic требуется ровно один scope-id")
     scope = {"kind": args.scope_kind, "provider": args.scope_provider, "ids": ids, "label": args.label, "source": args.scope_source, "intent": args.intent}
+    if args.compare_trackers and not args.adaptive:
+        raise ValueError("--compare-trackers требует --adaptive")
+    if args.adaptive:
+        scope["tracker_mode"] = "compare" if args.compare_trackers else "single"
     active = active_run_id()
     if active:
         existing = load_run(active)
         identity_fields = ("kind", "provider", "ids", "intent")
         if all(existing["scope"].get(field) == scope[field] for field in identity_fields):
+            if existing["scope"].get("tracker_mode", "compare") != scope.get("tracker_mode", "compare"):
+                raise ValueError("Режим существующего run отличается; не заменяй его без явного abandon-run")
             payload = status_payload(existing)
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return STOP_EXIT if payload.get("must_stop") else 0
@@ -1675,8 +1729,12 @@ def execution_preview_command(args: argparse.Namespace) -> int:
     payload["run_id"] = args.run_id
     payload["reconciled_sha256"] = completion["reconciled_sha256"]
     if payload["ownership_ready"] and load_run(args.run_id).get("collection_mode") == "adaptive":
+        payload["date_proposals_allowed"] = False
+        payload["fact_priority"] = ["analyst-confirmation", "assignment-and-status-history", "current-state-only"]
         payload["next_action"] = {
             "type": "collect-history", "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
+            "provider": result["scope"]["provider"],
+            "required_before_date_proposals": True,
             "command": [sys.executable, str(Path(__file__).with_name("trackerctl.py")), "history-review",
                         "--run-id", args.run_id, "--project-root", args.project_root,
                         "--manifest", "<history-manifest-json>"],
@@ -1712,6 +1770,15 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("complete-config").set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
     begin.add_argument("--adaptive", action="store_true")
+    begin.add_argument("--compare-trackers", action="store_true")
+    absence = commands.add_parser("confirm-absence")
+    absence.add_argument("--run-id", required=True)
+    absence.add_argument("--key", required=True)
+    absence.add_argument("--response-file", required=True)
+    absence.add_argument("--call-file", required=True)
+    absence.add_argument("--decision-source", required=True)
+    absence.add_argument("--analyst-confirmed", action="store_true")
+    absence.set_defaults(handler=confirm_absence_command)
     status = commands.add_parser("run-status"); status.add_argument("--run-id", required=True); status.set_defaults(handler=run_status_command)
     ingest = commands.add_parser("ingest"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--step-id", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.set_defaults(handler=ingest_command)
     ingest.add_argument("--call-file")

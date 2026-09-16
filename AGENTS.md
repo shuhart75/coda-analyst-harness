@@ -22,6 +22,8 @@ This repository defines a reusable workflow harness.
 
 ## Mandatory tracker stop gate
 
+- Для новых адаптивных сеансов приоритет имеет `core/tracker-adaptive.md`: только выбранный трекер; второй исключительно по явной команде сравнения с `--compare-trackers`. Старые требования pairing ниже не требуют второго провайдера в однотрекерном режиме. Предложения дат требуют `history-review`; подтверждения аналитика выше истории, текущий статус не задаёт даты. На фичу одна QA-работа с суммой QA-оценок уникальных карточек. Подтверждённо удалённые задачи удаляются из текущего исполнения после просмотра diff; неполученная карточка сама по себе не доказывает удаления.
+
 - New sessions use `begin --adaptive` and `core/tracker-adaptive.md`. In this mode the main agent selects read-only MCP tools and arguments from their current capabilities, records actual calls, and follows `collect-tracker-data`, then `collect-history` and `history-review` after ownership checks. The exact-tool/query and no-history restrictions below apply only to legacy runs. Configuration stop gates, confirmed scope, pairing, conflict resolution and analyst approval before application remain mandatory. Never replace or rewrite an existing run to adopt the new mode.
 
 - Before any tracker MCP discovery or read, run `python3 scripts/trackerctl.py config-status` as a standalone command. Do not pipe or filter it: the exit code is part of the guard contract.

@@ -13,6 +13,7 @@ import test_tracker_execution
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from tracker_history import JIRA_MAPPING, decode_history, pointer, validate_call
 from tracker_lifecycle import StatusRules, calculate_task
+from tracker_execution import feature_qa_estimate
 
 
 class AdaptiveHistoryTests(unittest.TestCase):
@@ -51,7 +52,6 @@ class AdaptiveHistoryTests(unittest.TestCase):
         self.save_sources()
         run = self.begin(intent)
         run = self.ingest(run, {'issues': [self.jira_issue('JIRA-1', roles={'BE': 2})]})
-        run = self.ingest(run, [])
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         return run['run_id']
 
@@ -83,7 +83,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
         self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, bad, expected=2)
         self.assertEqual(self.begin()['run_id'], run['run_id'])
         result = self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]})
-        self.assertEqual(result['next_action']['provider'], 'sbertrek')
+        self.assertEqual(result['status'], 'tracker-read-ready')
 
     def test_real_response_to_bound_review_without_project_writes(self):
         run_id = self.reconciled()
@@ -169,6 +169,102 @@ class AdaptiveHistoryTests(unittest.TestCase):
                         {'captured_at': '2999-01-01T00:00:00+00:00'}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 validate_call({**self.call('jira'), **changes}, 'jira')
+
+    def test_explicit_comparison_still_collects_second_tracker(self):
+        run = self.run_tool(self.state, 'begin', '--scope-kind', 'tasks', '--scope-provider', 'jira',
+                            '--scope-id', 'JIRA-1', '--label', 'Test', '--scope-source', 'analyst',
+                            '--adaptive', '--compare-trackers')
+        run = self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]})
+        self.assertEqual(run['next_action']['provider'], 'sbertrek')
+        self.run_tool(self.state, 'begin', '--scope-kind', 'tasks', '--scope-provider', 'jira',
+                      '--scope-id', 'JIRA-1', '--label', 'Test', '--scope-source', 'analyst',
+                      '--adaptive', expected=2)
+
+    def test_sbertrek_single_does_not_collect_jira(self):
+        run = self.run_tool(self.state, 'begin', '--scope-kind', 'tasks', '--scope-provider', 'sbertrek',
+                            '--scope-id', 'ST-1', '--label', 'Test', '--scope-source', 'analyst', '--adaptive')
+        card = test_trackerctl.DirectTrackerWorkflowTests.sber_issue(self, 'ST-1', jira_key='JIRA-1')
+        run = self.ingest(run, [card])
+        self.assertEqual(run['status'], 'tracker-read-ready')
+
+    def test_missing_history_cannot_skip_to_date_review(self):
+        run_id = self.reconciled()
+        manifest = self.manifest()
+        manifest['responses'] = []
+        path = self.write(self.state / 'manifest.json', manifest)
+        args = ('history-review', '--run-id', run_id, '--project-root', str(self.project), '--manifest', str(path))
+        review = self.run_tool(self.state, *args)
+        self.assertEqual(review['next_action']['type'], 'collect-history')
+        self.assertFalse(review['date_proposals_allowed'])
+        manifest['unavailable_history'] = {'JIRA-1/BE': 'History endpoint unavailable'}
+        self.write(path, manifest)
+        review = self.run_tool(self.state, *args)
+        self.assertEqual(review['next_action']['type'], 'review-with-analyst')
+        self.assertIsNone(review['features'][0]['qa']['finished_at'])
+
+    def test_wrong_history_provider_is_rejected(self):
+        run_id = self.reconciled()
+        manifest = self.manifest()
+        manifest['provider'] = 'sbertrek'
+        path = self.write(self.state / 'manifest.json', manifest)
+        result = self.run_tool(self.state, 'history-review', '--run-id', run_id,
+                               '--project-root', str(self.project), '--manifest', str(path), expected=2)
+        self.assertIn('selected single tracker', result['error'])
+
+    def test_qa_estimates_are_summed_once_and_missing_is_not_zero(self):
+        first = {'jira_key': 'JIRA-1', 'role_estimates': {'QA': {'value': 2.5, 'unit': 'story-points'}}}
+        second = {'jira_key': 'JIRA-2', 'role_estimates': {'QA': {'value': 1, 'unit': 'person-days'}}}
+        missing = {'jira_key': 'JIRA-3'}
+        estimate = feature_qa_estimate([first, second, first, missing])
+        self.assertEqual(estimate['value'], 3.5)
+        self.assertEqual(estimate['target_count'], 1)
+        self.assertEqual(estimate['unestimated_keys'], ['JIRA-3'])
+        self.assertIsNone(feature_qa_estimate([missing])['value'])
+        with self.assertRaises(ValueError):
+            feature_qa_estimate([{'jira_key': 'JIRA-1', 'role_estimates': {'QA': {'value': 2, 'unit': 'hours'}}}])
+
+    def test_absence_confirmation_keeps_run_and_proposes_deletion(self):
+        self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |'])
+        self.save_sources()
+        run = self.begin()
+        response = self.write(self.state / 'absent.json', {'error': 'Issue JIRA-1 does not exist'})
+        call = self.write(self.state / 'absence-call.json', self.call('jira', 'JIRA-1'))
+        args = ('confirm-absence', '--run-id', run['run_id'], '--key', 'JIRA-1',
+                '--response-file', str(response), '--call-file', str(call), '--decision-source', 'analyst reply')
+        self.run_tool(self.state, *args, expected=2)
+        confirmed = self.run_tool(self.state, *args, '--analyst-confirmed')
+        self.assertEqual(confirmed['run_id'], run['run_id'])
+        self.assertEqual(confirmed['status'], 'tracker-read-ready')
+        self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
+        preview = self.run_tool(self.state, 'execution-preview', '--run-id', run['run_id'],
+                                '--project-root', str(self.project), '--feature', 'owner')
+        self.assertEqual(preview['items'][0]['proposed_action'], 'delete-current-execution')
+        self.assertFalse(preview['writes_performed'])
+
+    def test_empty_page_does_not_prove_deletion(self):
+        self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |'])
+        self.save_sources()
+        run = self.ingest(self.begin(), {'issues': []})
+        self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
+        preview = self.run_tool(self.state, 'execution-preview', '--run-id', run['run_id'],
+                                '--project-root', str(self.project), '--feature', 'owner')
+        self.assertFalse(preview['missing_task_candidates'][0]['deletion_allowed'])
+
+    def test_one_feature_qa_proposal_replaces_per_card_role_creation(self):
+        self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |',
+                                              '| QA-ONE | - | - | real | QA | planned |',
+                                              '| QA-TWO | - | - | real | QA | planned |'])
+        self.save_sources()
+        run = self.ingest(self.begin(), {'issues': [self.jira_issue('JIRA-1', roles={'BE': 2, 'QA': 3})]})
+        self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
+        preview = self.run_tool(self.state, 'execution-preview', '--run-id', run['run_id'],
+                                '--project-root', str(self.project), '--feature', 'owner')
+        self.assertTrue(preview['ownership_ready'])
+        self.assertEqual(len(preview['feature_qa_proposals']), 1)
+        proposal = preview['feature_qa_proposals'][0]
+        self.assertEqual(proposal['action'], 'consolidate')
+        self.assertEqual(proposal['estimate']['value'], 3)
+        self.assertEqual(preview['next_action']['type'], 'collect-history')
 
 
 if __name__ == '__main__':

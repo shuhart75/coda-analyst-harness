@@ -162,6 +162,8 @@ def review_history(args) -> int:
     provider = manifest["provider"]
     if provider not in {"jira", "sbertrek"}:
         raise ValueError("Explicit history provider is required")
+    if result["scope"].get("tracker_mode") == "single" and provider != result["scope"]["provider"]:
+        raise ValueError("History provider must match the selected single tracker")
     if provider == "jira" and not load_run(args.run_id)["config"]["jira_enabled"]:
         raise ValueError("Jira is disabled for this run")
     for entry in manifest["responses"]:
@@ -187,7 +189,9 @@ def review_history(args) -> int:
         evidence.append({"key": entry["key"], "role": entry["role"], "sha256": entry["sha256"], "call": entry["call"],
                          "mapping": entry.get("mapping", JIRA_MAPPING), "status_aliases": entry.get("status_aliases", {})})
         limitations.extend(f"{entry['key']}:{limit}" for limit in limits)
-    reviews = []
+    reviews, missing_history = [], []
+    deleted_keys = {issue.get(provider + "_key") for issue in result["excluded"]
+                    if issue.get("reason") == "confirmed-source-deletion"}
     for feature in preview["selected_features"]:
         expected, local_missing = set(), []
         for path in registry_paths(project):
@@ -198,25 +202,44 @@ def review_history(args) -> int:
                 if row.get("Role", "").upper() not in {"FE", "BE"}:
                     continue
                 key = row.get("Jira" if provider == "jira" else "SberTrek", "").split("/")[0].strip()
+                if key in deleted_keys:
+                    continue
                 if not key or key in {"-", "—"}:
                     local_missing.append(row.get("Task ID", "unmapped-work"))
                 else:
                     expected.add(f"{key}/{row['Role'].upper()}")
         selected = tuple(history for owner, history in histories.values() if owner == feature)
+        missing_history.extend(sorted(expected - {history.task_key for history in selected}))
         review = calculate_feature(feature, selected, participants, rules, tuple(sorted(expected)), not local_missing)
         review["limitations"].extend(f"unmapped-feature-work:{key}" for key in local_missing)
         reviews.append(review)
+    unavailable = manifest.get("unavailable_history", {})
+    if not isinstance(unavailable, dict) or any(
+        key not in missing_history or not isinstance(reason, str) or not reason.strip()
+        for key, reason in unavailable.items()
+    ):
+        raise ValueError("Unavailable history requires a reason for each missing work item")
+    pending_history = sorted(set(missing_history) - set(unavailable))
     rechecked = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
                                   manifest.get("reviewed_registries", {}), manifest.get("expected_head"))
     if rechecked != preview:
         raise ValueError("Execution sources changed during review")
-    output = {"schema_version": 1, "run_id": args.run_id, "status": "history-review-ready",
+    output = {"schema_version": 1, "run_id": args.run_id,
+              "status": "history-collection-incomplete" if pending_history else "history-review-ready",
               "reconciled_sha256": completion["reconciled_sha256"], "manifest_sha256": digest_bytes(manifest_raw),
               "head": preview["head"], "registry_sha256": preview["registry_sha256"],
               "features": reviews, "evidence": evidence, "limitations": limitations,
+              "feature_qa_proposals": preview["feature_qa_proposals"],
+              "missing_task_candidates": preview["missing_task_candidates"],
+              "deletion_proposals": [item for item in preview["items"]
+                                     if item["proposed_action"] == "delete-current-execution"],
+              "pending_history": pending_history, "unavailable_history": unavailable,
+              "date_proposals_allowed": not pending_history,
+              "fact_priority": ["analyst-confirmation", "assignment-and-status-history", "current-state-only"],
               "history_processed": bool(histories), "adapter": "json-pointer-history-v1",
               "writes_performed": False, "planning_application_allowed": False,
-              "next_action": {"type": "review-with-analyst", "application_requires_analyst_command": True}}
+              "next_action": {"type": "collect-history" if pending_history else "review-with-analyst",
+                              "provider": provider, "application_requires_analyst_command": True}}
     destination = run_root(args.run_id) / "history" / (digest_object(output) + ".json")
     save_json(destination, output)
     print(json.dumps({**output, "review_file": str(destination)}, ensure_ascii=False, indent=2))
