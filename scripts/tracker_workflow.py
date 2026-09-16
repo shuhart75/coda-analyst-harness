@@ -404,6 +404,15 @@ def next_action(run: dict) -> dict:
         tool, arguments = "jira_search", {"jql": step["query"], "fields": ",".join(JIRA_FIELDS), "limit": MAX_RESULTS}
     else:
         tool, arguments = "issue.exportJson", {"query": step["query"], "fields": list(SBER_FIELDS), "max_results": MAX_RESULTS}
+    if run.get("collection_mode") == "adaptive":
+        return {
+            "type": "collect-tracker-data", "provider": step["provider"],
+            "step_id": step["step_id"], "stage": step["stage"],
+            "selection": {"query_semantics": step["query"], "requested_keys": step["requested_keys"], "epic_key": step["epic_key"]},
+            "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
+            "requirements": ["read-only", "exact-scope", "all-statuses", "full-response", "report-pagination"],
+            "ingest_command": [sys.executable, ctl, "ingest", "--run-id", run["run_id"], "--step-id", step["step_id"], "--response-file", "<full-json-path>", "--response-source", "mcp-file", "--call-file", "<call-json-path>"],
+        }
     return {
         "type": "mcp-query", "provider": step["provider"], "stage": step["stage"],
         "step_id": step["step_id"], "tool": tool, "arguments": arguments,
@@ -924,6 +933,15 @@ def ingest_command(args: argparse.Namespace) -> int:
             raise ValueError("Для уже завершённого шага передан другой ответ")
         if step is not pending_step(working):
             raise ValueError("Можно импортировать только ответ текущего next_action")
+        if working.get("collection_mode") == "adaptive":
+            from tracker_history import validate_call
+            if not args.call_file:
+                raise ValueError("Adaptive collection requires --call-file")
+            _, _, call = response_file(args.call_file, args.run_id)
+            validate_call(call, step["provider"])
+            if call.get("selection") != step["query"]:
+                raise ValueError("Call must preserve the returned selection semantics")
+            step["call"] = call
         records, record_path = full_issue_records(payload)
         if step["stage"] == "sbertrek-epic-discovery":
             if len(records) > 1:
@@ -1471,6 +1489,7 @@ def begin_command(args: argparse.Namespace) -> int:
         "config": config, "steps": [primary_step(scope)], "cards": {provider: [] for provider in PROVIDERS},
         "absent_jira_keys": [], "limitations": [], "failure": None,
         "conflict_resolutions": {}, "following_conflict_choice": None,
+        "collection_mode": "adaptive" if args.adaptive else "legacy",
     }
     root = run_root(run_id)
     root.mkdir(parents=True)
@@ -1655,6 +1674,13 @@ def execution_preview_command(args: argparse.Namespace) -> int:
     )
     payload["run_id"] = args.run_id
     payload["reconciled_sha256"] = completion["reconciled_sha256"]
+    if payload["ownership_ready"] and load_run(args.run_id).get("collection_mode") == "adaptive":
+        payload["next_action"] = {
+            "type": "collect-history", "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
+            "command": [sys.executable, str(Path(__file__).with_name("trackerctl.py")), "history-review",
+                        "--run-id", args.run_id, "--project-root", args.project_root,
+                        "--manifest", "<history-manifest-json>"],
+        }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
@@ -1685,8 +1711,16 @@ def parser() -> argparse.ArgumentParser:
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config_command)
     commands.add_parser("complete-config").set_defaults(handler=complete_config_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
+    begin.add_argument("--adaptive", action="store_true")
     status = commands.add_parser("run-status"); status.add_argument("--run-id", required=True); status.set_defaults(handler=run_status_command)
     ingest = commands.add_parser("ingest"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--step-id", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.set_defaults(handler=ingest_command)
+    ingest.add_argument("--call-file")
+    history = commands.add_parser("history-review")
+    history.add_argument("--run-id", required=True)
+    history.add_argument("--project-root", required=True)
+    history.add_argument("--manifest", required=True)
+    from tracker_history import history_review_command
+    history.set_defaults(handler=history_review_command)
     error = commands.add_parser("ingest-error"); error.add_argument("--run-id", required=True); error.add_argument("--step-id", required=True); error.add_argument("--error-file", required=True); error.set_defaults(handler=ingest_error_command)
     reconcile = commands.add_parser("reconcile"); reconcile.add_argument("--run-id", required=True); reconcile.set_defaults(handler=reconcile_command)
     resolve = commands.add_parser("resolve-conflict"); resolve.add_argument("--run-id", required=True); resolve.add_argument("--task-key", required=True); resolve.add_argument("--choice", choices=RESOLUTION_CHOICES, required=True); resolve.add_argument("--apply-to-following", action="store_true"); resolve.add_argument("--custom-file"); resolve.set_defaults(handler=resolve_conflict_command)

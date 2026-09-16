@@ -93,9 +93,9 @@ general estimate between roles, and do not add it when any role estimate exists.
 
 The agreed lifecycle rules are in `core/tracker-lifecycle.md`. A developer-to-QA
 handoff closes development and starts QA; returns continue QA without reopening
-development. The calculation module is currently offline and has no verified
-SberTrek history adapter. It must not be used to claim collected history, assign
-resources, invent dates, or bypass the source and branch gates.
+development. `core/tracker-adaptive.md` connects full history responses to the
+calculation through `history-review`. Legacy runs remain unchanged. Do not claim
+collected history without source evidence, invent dates, or bypass source/branch gates.
 
 ## Source and generation gate
 

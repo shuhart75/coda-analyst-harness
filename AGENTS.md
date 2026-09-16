@@ -22,6 +22,8 @@ This repository defines a reusable workflow harness.
 
 ## Mandatory tracker stop gate
 
+- New sessions use `begin --adaptive` and `core/tracker-adaptive.md`. In this mode the main agent selects read-only MCP tools and arguments from their current capabilities, records actual calls, and follows `collect-tracker-data`, then `collect-history` and `history-review` after ownership checks. The exact-tool/query and no-history restrictions below apply only to legacy runs. Configuration stop gates, confirmed scope, pairing, conflict resolution and analyst approval before application remain mandatory. Never replace or rewrite an existing run to adopt the new mode.
+
 - Before any tracker MCP discovery or read, run `python3 scripts/trackerctl.py config-status` as a standalone command. Do not pipe or filter it: the exit code is part of the guard contract.
 - Exit code `3` with `must_stop: true` from any `trackerctl` command permits exactly one next action: ask the analyst the single returned `next_question`. Emit the exact `response_contract.text` and nothing else: no preface, explanation, examples, suggested answers or summary. Do not call MCP tools, search analytical files for tasks, create a task list, delegate work or present tracker facts until the answer is saved and the gate becomes ready.
 - Commands that save one configuration answer return exit code `0` and another status payload. When that payload still has `must_stop: true`, ask only its `next_question`; do not bypass it with discovery or reading.
