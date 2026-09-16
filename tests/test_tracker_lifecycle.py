@@ -22,6 +22,7 @@ class TrackerLifecycleTests(unittest.TestCase):
             not_started=frozenset({'created'}), development_started=frozenset({'development'}),
             development_completed=frozenset({'ready_for_test'}), qa_started=frozenset({'testing'}),
             qa_completed=frozenset({'done', 'ready_ift', 'ready_psi', 'ift', 'psi'}),
+            development_review=frozenset({'review'}), cancelled=frozenset({'cancelled'}),
         )
 
     def history(self, events=(), current_assignee='analyst', current_status='created', complete=True, key='ST-1'):
@@ -89,9 +90,10 @@ class TrackerLifecycleTests(unittest.TestCase):
         self.assertEqual(result['development']['started_at'], moment(2).isoformat())
 
     def test_explicit_status_rules_also_supply_transitions(self):
-        history = self.history([self.status('start', 2, 'created', 'development'),
+        history = self.history([HistoryEvent('start', moment(2), ('analyst', 'developer'), ('created', 'development')),
             self.status('end', 3, 'development', 'ready_for_test'),
-            self.status('qa', 4, 'ready_for_test', 'testing'), self.status('done', 5, 'testing', 'done')], 'tester', 'done')
+            HistoryEvent('qa', moment(4), ('developer', 'tester'), ('ready_for_test', 'testing')),
+            self.status('done', 5, 'testing', 'done')], 'tester', 'done')
         result = self.task(history)
         self.assertEqual(result['development']['started_at'], moment(2).isoformat())
         self.assertEqual(result['development']['finished_at'], moment(3).isoformat())
@@ -290,6 +292,108 @@ class TrackerLifecycleTests(unittest.TestCase):
         self.assertEqual(result['qa']['state'], 'in-progress')
         self.assertEqual(result['qa']['started_at'], moment(3).isoformat())
         self.assertIsNone(result['qa']['finished_at'])
+
+    def test_assignment_from_unassigned_starts_development_in_todo(self):
+        result = self.task(self.history([self.assigned('start', 2, None, 'developer')], 'developer'))
+        self.assertEqual(result['development']['started_at'], moment(2).isoformat())
+        self.assertIsNone(result['development']['progress_percent'])
+
+    def test_status_on_analyst_does_not_start_development(self):
+        for status in ('created', 'development', 'review'):
+            with self.subTest(status=status):
+                result = self.task(self.history([self.status('change', 2, 'todo', status)], 'analyst', status))
+                self.assertEqual(result['development']['state'], 'not-started')
+                self.assertEqual(result['development']['progress_percent'], 0)
+                self.assertIsNone(result['development']['started_at'])
+
+    def test_snapshot_assignment_proves_state_without_inventing_start(self):
+        for assignee, state, progress in [('developer', 'in-progress', None), ('tester', 'completed', 100)]:
+            result = self.task(self.history(current_assignee=assignee, complete=False))
+            self.assertEqual(result['development']['state'], state)
+            self.assertEqual(result['development']['progress_percent'], progress)
+            self.assertIsNone(result['development']['started_at'])
+
+    def test_review_on_developer_is_ninety_until_handoff(self):
+        events = [self.assigned('start', 2, None, 'developer'), self.status('review', 3, 'created', 'review')]
+        result = self.task(self.history(events, 'developer', 'review'))
+        self.assertEqual(result['development']['progress_percent'], 90)
+        handed = self.task(self.history([*events, self.assigned('qa', 4, 'developer', 'tester')], 'tester', 'review'))
+        self.assertEqual(handed['development']['progress_percent'], 100)
+        returned = self.task(self.history([*events, self.assigned('qa', 4, 'developer', 'tester'),
+            self.assigned('return', 5, 'tester', 'developer')], 'developer', 'review'))
+        self.assertEqual(returned['development']['progress_percent'], 100)
+        self.assertEqual(returned['qa']['state'], 'in-progress')
+
+    def test_review_without_assignment_event_does_not_invent_start(self):
+        result = self.task(self.history([self.status('review', 3, 'created', 'review')], 'developer', 'review'))
+        self.assertEqual(result['development']['progress_percent'], 90)
+        self.assertIsNone(result['development']['started_at'])
+
+    def test_unassigned_before_first_developer_is_zero(self):
+        result = self.task(self.history(current_assignee=None))
+        self.assertEqual(result['development']['progress_percent'], 0)
+        result = self.task(self.history([self.assigned('start', 2, None, 'developer'),
+            self.assigned('unassign', 3, 'developer', None)], None))
+        self.assertEqual(result['development']['state'], 'in-progress')
+
+    def test_qa_progress_counts_all_fe_be_tasks_without_role_estimates(self):
+        histories = [self.finished(f'ST-{index}') for index in range(1, 7)]
+        histories.extend(replace(self.history(key=f'ST-{index}'), development_role='BE') for index in range(7, 11))
+        result = self.feature(histories, tuple(history.task_key for history in histories))
+        self.assertEqual(result['qa']['progress_percent'], 60)
+        self.assertEqual(result['qa']['completed_tasks'], 6)
+        self.assertEqual(result['qa']['total_tasks'], 10)
+        self.assertNotIn('estimate', result['qa'])
+
+    def test_cancelled_tasks_are_excluded_even_if_assigned_to_tester(self):
+        cancelled = self.history(current_assignee='tester', current_status='cancelled', key='ST-2')
+        result = self.feature([self.finished(), cancelled], ('ST-1', 'ST-2'))
+        self.assertEqual(result['qa']['progress_percent'], 100)
+        self.assertEqual(result['qa']['total_tasks'], 1)
+        self.assertEqual(result['excluded_task_keys'], ['ST-2'])
+        self.assertEqual(result['tasks']['ST-2']['development']['state'], 'cancelled')
+        empty = self.feature([cancelled], ('ST-2',))
+        self.assertIsNone(empty['qa']['progress_percent'])
+        self.assertNotEqual(empty['qa']['state'], 'completed')
+
+    def test_missing_unconfirmed_or_selective_scope_cannot_report_full_qa_progress(self):
+        for histories, keys, confirmed in [
+            ([self.finished()], ('ST-1', 'ST-2'), True),
+            ([self.finished()], ('ST-1',), False),
+            ([self.finished(), self.history(key='ST-2')], ('ST-1',), True),
+        ]:
+            result = self.feature(histories, keys, confirmed)
+            self.assertIsNone(result['qa']['progress_percent'])
+            self.assertNotEqual(result['qa']['state'], 'completed')
+
+    def test_terminal_snapshot_difference_preserves_state_but_discloses_missing_history(self):
+        result = self.task(replace(self.finished(), current_status='ready_psi'))
+        self.assertEqual(result['qa']['state'], 'completed')
+        self.assertIsNone(result['qa']['finished_at'])
+        self.assertIn('terminal-status-transition-not-collected', result['limitations'])
+
+    def test_analyst_qa_completion_overrides_progress_without_changing_card_counts(self):
+        result = self.feature([self.history()], decision=AnalystCompletion('decision', moment(20), True))
+        self.assertEqual(result['qa']['progress_percent'], 100)
+        self.assertEqual(result['qa']['completed_tasks'], 0)
+        self.assertEqual(result['qa']['progress_basis'], 'analyst-confirmation')
+        self.assertIsNone(result['qa']['started_at'])
+
+    def test_qa_return_reduces_feature_progress_without_reopening_development(self):
+        returned = self.finished('ST-2')
+        returned = replace(returned, current_assignee='developer', events=(
+            *returned.events, self.assigned('return', 7, 'tester', 'developer')))
+        result = self.feature([self.finished(), returned], ('ST-1', 'ST-2'))
+        self.assertEqual(result['qa']['progress_percent'], 50)
+        self.assertEqual(result['tasks']['ST-2']['development']['progress_percent'], 100)
+
+    def test_malformed_assignment_and_overlapping_review_or_cancel_codes_are_rejected(self):
+        with self.assertRaises(ValueError):
+            self.task(self.history([HistoryEvent('bad', moment(2), ())]))
+        for rules in (replace(self.rules, cancelled=frozenset({'done'})),
+                      replace(self.rules, development_review=frozenset({'created'}))):
+            with self.assertRaises(ValueError):
+                calculate_task(self.history(), self.people, rules)
 
 
 if __name__ == '__main__':

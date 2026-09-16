@@ -34,6 +34,8 @@ class StatusRules:
     development_completed: frozenset[str] = field(default_factory=frozenset)
     qa_started: frozenset[str] = field(default_factory=frozenset)
     qa_completed: frozenset[str] = field(default_factory=frozenset)
+    development_review: frozenset[str] = field(default_factory=frozenset)
+    cancelled: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,9 @@ def status_code(value: str) -> str:
 
 def status_sets(rules: StatusRules) -> dict[str, set[str]]:
     values = {name: {status_code(code) for code in getattr(rules, name)} for name in rules.__dataclass_fields__}
+    for exclusive in ("cancelled", "development_review"):
+        if values[exclusive] & set().union(*(codes for name, codes in values.items() if name != exclusive)):
+            raise ValueError("Cancellation and review statuses must be separate lifecycle groups")
     if values["not_started"] & set().union(*(codes for name, codes in values.items() if name != "not_started")):
         raise ValueError("Not-started statuses conflict with lifecycle transitions")
     if values["development_started"] & (values["development_completed"] | values["qa_started"] | values["qa_completed"]):
@@ -92,7 +97,14 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
             limitations.add(f"participant-role-unknown:{identity}")
         return participants.get(identity)
 
-    role(history.current_assignee)
+    current_role = role(history.current_assignee)
+    if current_role in {"BE", "FE"} and current_role != history.development_role:
+        raise ValueError("Assignment role conflicts with the confirmed task role")
+    initial_assignment = next((event.assignee for event in history.events if event.assignee is not None), None)
+    if initial_assignment is not None and len(initial_assignment) != 2:
+        raise ValueError("An assignment change needs old and new identities")
+    effective_assignee = initial_assignment[0] if initial_assignment is not None else history.current_assignee
+    developer_seen = role(effective_assignee) == history.development_role
     for event in history.events:
         moment = timestamp(event.at)
         if not event.event_id or (event.assignee is None and event.status is None):
@@ -113,6 +125,7 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
             if assignee_seen and old_assignee != last_assignee:
                 raise ValueError("Discontinuous assignment history")
             last_assignee, assignee_seen = new_assignee, True
+            effective_assignee = new_assignee
             old_role, new_role = role(old_assignee), role(new_assignee)
             if any(value in {"BE", "FE"} and value != history.development_role for value in (old_role, new_role)):
                 raise ValueError("Assignment role conflicts with the confirmed task role")
@@ -127,7 +140,9 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
 
         handoff = old_role == history.development_role and new_role == "QA"
         qa_return = old_role == "QA" and new_role == history.development_role
-        start_development = (old_role == "AN" and new_role == history.development_role) or new_status in codes["development_started"]
+        assigned_developer = role(effective_assignee) == history.development_role
+        developer_seen = developer_seen or assigned_developer or old_role == history.development_role
+        start_development = new_role == history.development_role and old_role not in {history.development_role, "QA"}
         finish_development = handoff or (
             new_status in codes["development_completed"] | codes["qa_started"]
             and new_status not in codes["qa_completed"]
@@ -174,7 +189,10 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
     if assignee_seen and last_assignee != history.current_assignee:
         raise ValueError("Assignment history does not reach the supplied snapshot")
     if status_seen and last_status != current_status:
-        raise ValueError("Status history does not reach the supplied snapshot")
+        if last_status in codes["qa_completed"] and current_status in codes["qa_completed"]:
+            limitations.add("terminal-status-transition-not-collected")
+        else:
+            raise ValueError("Status history does not reach the supplied snapshot")
     if current_status in codes["qa_completed"] and not returned:
         qa_completed = True
         development_closed = True
@@ -185,22 +203,32 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
     if current_status in codes["qa_started"]:
         qa_active = True
         qa_start_bound = qa_start_bound or observed
+    if current_role == "QA":
+        development_closed = qa_active = True
+        development_bound = development_bound or observed
+        qa_start_bound = qa_start_bound or observed
     if current_status not in set().union(*codes.values()):
         limitations.add(f"current-status-unmapped:{history.current_status}")
-    exact = history.complete and not any(item.startswith("participant-role-unknown:") for item in limitations)
+    exact = history.complete and "terminal-status-transition-not-collected" not in limitations and not any(item.startswith("participant-role-unknown:") for item in limitations)
 
     def formatted(value: datetime | None) -> str | None:
         return value.isoformat() if value else None
 
-    not_started = current_status in codes["not_started"] and role(history.current_assignee) == "AN"
-    development_state = "completed" if development_closed else "in-progress" if development_start or current_status in codes["development_started"] else "not-started" if not_started else "unknown"
-    before_qa = codes["not_started"] | codes["development_started"] | codes["development_completed"]
-    qa_not_started = not_started or (exact and current_status in before_qa and role(history.current_assignee) in {"AN", "BE", "FE"})
+    cancelled = current_status in codes["cancelled"]
+    not_started = exact and not developer_seen and current_role in {None, "AN"}
+    development_state = "completed" if development_closed else "in-progress" if development_start or developer_seen else "not-started" if not_started else "unknown"
+    before_qa = codes["not_started"] | codes["development_started"] | codes["development_completed"] | codes["development_review"]
+    qa_not_started = (not_started and current_status in before_qa) or (exact and current_status in before_qa and current_role in {"AN", "BE", "FE"})
     qa_state = "completed" if qa_completed else "in-progress" if qa_active else "not-started" if qa_not_started else "unknown"
+    progress = 100 if development_closed else 0 if development_state == "not-started" else 90 if current_role == history.development_role and current_status in codes["development_review"] else None
+    if cancelled:
+        development_state = qa_state = "cancelled"
+        progress = None
     return {
         "task_key": history.task_key, "development_role": history.development_role,
         "development": {
             "state": development_state,
+            "progress_percent": progress,
             "started_at": formatted(development_start) if exact else None,
             "finished_at": formatted(development_finish) if exact else None,
             "started_by": formatted(development_start or (observed if development_state == "in-progress" else None)),
@@ -219,27 +247,35 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
 
 def calculate_feature(
     feature: str, histories: tuple[TaskHistory, ...], participants: Mapping[str, str],
-    rules: StatusRules, qa_task_keys: tuple[str, ...], scope_confirmed: bool,
+    rules: StatusRules, feature_task_keys: tuple[str, ...], scope_confirmed: bool,
     analyst_completion: AnalystCompletion | None = None,
 ) -> dict:
     if not feature or type(scope_confirmed) is not bool:
         raise ValueError("A feature and explicit scope confirmation are required")
-    if len(set(qa_task_keys)) != len(qa_task_keys) or any(not key for key in qa_task_keys):
-        raise ValueError("QA scope must contain unique nonempty task keys")
+    if len(set(feature_task_keys)) != len(feature_task_keys) or any(not key for key in feature_task_keys):
+        raise ValueError("Feature scope must contain unique nonempty FE/BE task keys")
     tasks = {}
     for history in histories:
         if history.task_key in tasks:
             raise ValueError("Duplicate task history")
         tasks[history.task_key] = calculate_task(history, participants, rules)
-    missing = sorted(set(qa_task_keys) - set(tasks))
+    missing = sorted(set(feature_task_keys) - set(tasks))
+    unlisted = sorted(set(tasks) - set(feature_task_keys))
     limitations = {f"{key}:{item}" for key, task in tasks.items() for item in task["limitations"]}
     if not scope_confirmed:
         limitations.add("qa-scope-not-confirmed")
-    if not qa_task_keys:
+    if not feature_task_keys:
         limitations.add("qa-scope-empty")
     limitations.update(f"qa-task-history-missing:{key}" for key in missing)
-    members = [tasks[key]["qa"] for key in qa_task_keys if key in tasks]
-    complete_scope = scope_confirmed and bool(qa_task_keys) and not missing
+    limitations.update(f"feature-task-outside-confirmed-scope:{key}" for key in unlisted)
+    qa_task_keys = [key for key, task in tasks.items() if task["qa"]["state"] != "cancelled"]
+    excluded = [key for key, task in tasks.items() if task["qa"]["state"] == "cancelled"]
+    members = [tasks[key]["qa"] for key in qa_task_keys]
+    complete_scope = scope_confirmed and bool(members) and not missing and not unlisted
+    passed = sum(member["state"] == "completed" for member in members)
+    progress_known = complete_scope and all(member["state"] != "unknown" for member in members)
+    if not members:
+        limitations.add("qa-active-scope-empty")
     completed = complete_scope and all(member["state"] == "completed" for member in members)
     started = [member["started_at"] for member in members if member["started_at"]]
     known_starts = all(member["started_at"] or member["state"] == "not-started" for member in members)
@@ -255,6 +291,10 @@ def calculate_feature(
         "finished_on": None,
         "completed_by": extreme([member["completed_by"] for member in members if member["completed_by"]], max) if completed else None,
         "completion_source": "all-qa-members" if completed else None,
+        "progress_percent": 100 * passed / len(members) if progress_known else None,
+        "progress_basis": "passed-testing-task-ratio",
+        "completed_tasks": passed,
+        "total_tasks": len(members) if not missing else None,
     }
     if analyst_completion is not None:
         confirmation = analyst_completion
@@ -269,9 +309,11 @@ def calculate_feature(
             raise ValueError("The analyst decision predates the supplied snapshots; review newer evidence")
         qa.update(state="completed", finished_at=qa["finished_at"] if confirmation.finished_on is None else None,
                   finished_on=confirmation.finished_on.isoformat() if confirmation.finished_on else None,
-                  completed_by=confirmed_at.isoformat(), completion_source=confirmation.source)
+                  completed_by=confirmed_at.isoformat(), completion_source=confirmation.source,
+                  progress_percent=100, progress_basis="analyst-confirmation")
     return {
         "feature": feature, "tasks": tasks, "qa_task_keys": list(qa_task_keys), "qa": qa,
+        "feature_task_keys": list(feature_task_keys), "excluded_task_keys": excluded,
         "limitations": sorted(limitations), "writes_performed": False,
         "planning_application_allowed": False, "history_adapter_verified": False,
     }
