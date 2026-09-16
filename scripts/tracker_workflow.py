@@ -332,6 +332,13 @@ def sber_jira_keys(run: dict) -> list[str]:
     return sorted({item["jira_key"] for item in run["cards"]["sbertrek"] if item.get("jira_key_state") == "value"})
 
 
+def missing_source_keys(run: dict) -> list[str]:
+    scope = run["scope"]
+    if scope.get("tracker_mode") != "single" or scope["kind"] != "tasks":
+        return []
+    return sorted(set(scope["ids"]) - card_keys(run, scope["provider"]) - set(run.get("confirmed_absent", {})))
+
+
 def advance(run: dict) -> None:
     if pending_step(run) or run["status"] != "tracker-read-collecting":
         return
@@ -399,6 +406,12 @@ def next_action(run: dict) -> dict:
                 },
             }
         if run["status"] == "tracker-read-ready":
+            missing = missing_source_keys(run)
+            if missing:
+                return {"type": "verify-missing-tasks", "provider": run["scope"]["provider"],
+                        "keys": missing, "absence_proven": False, "deletion_allowed": False,
+                        "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
+                        "retry_command": [sys.executable, ctl, "retry-missing", "--run-id", run["run_id"]]}
             return {"type": "reconcile", "command": [sys.executable, ctl, "reconcile", "--run-id", run["run_id"]]}
         if run["status"] == "tracker-read-reconciled":
             return {"type": "result-status", "command": [sys.executable, ctl, "result-status", "--run-id", run["run_id"]]}
@@ -891,7 +904,7 @@ def fail_run(run: dict, reason: str) -> None:
 
 
 def validate_records_for_step(step: dict, cards: list[dict]) -> None:
-    if step["stage"].endswith("source-tasks"):
+    if step["stage"].endswith("source-tasks") or step["stage"].startswith(("jira-missing-", "sbertrek-missing-")):
         unexpected = sorted({item["key"] for item in cards} - set(step["requested_keys"]))
         if unexpected:
             raise ValueError(f"Ответ содержит задачи вне исходной области: {', '.join(unexpected)}")
@@ -1049,6 +1062,20 @@ def ingest_error_command(args: argparse.Namespace) -> int:
         fail_run(run, str(error))
         raise
     print(json.dumps(status_payload(working), ensure_ascii=False, indent=2))
+    return 0
+
+
+def retry_missing_command(args: argparse.Namespace) -> int:
+    run = load_run(args.run_id)
+    missing = missing_source_keys(run)
+    if run["status"] != "tracker-read-ready" or not missing:
+        raise ValueError("Нет неполученных ключей завершённого чтения")
+    provider = run["scope"]["provider"]
+    query = jql_keys(missing) if provider == "jira" else tql_units(missing)
+    add_step(run, make_step(provider, f"{provider}-missing-{len(run['steps'])}", query, requested_keys=missing))
+    run["status"] = "tracker-read-collecting"
+    save_run(run)
+    print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1590,7 +1617,7 @@ def abandon_command(args: argparse.Namespace) -> int:
 
 def reconcile_command(args: argparse.Namespace) -> int:
     run = load_run(args.run_id)
-    if run["status"] != "tracker-read-ready":
+    if run["status"] != "tracker-read-ready" or missing_source_keys(run):
         print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
         return 2
     result = reconcile_data(run)
@@ -1779,6 +1806,9 @@ def parser() -> argparse.ArgumentParser:
     absence.add_argument("--decision-source", required=True)
     absence.add_argument("--analyst-confirmed", action="store_true")
     absence.set_defaults(handler=confirm_absence_command)
+    retry = commands.add_parser("retry-missing")
+    retry.add_argument("--run-id", required=True)
+    retry.set_defaults(handler=retry_missing_command)
     status = commands.add_parser("run-status"); status.add_argument("--run-id", required=True); status.set_defaults(handler=run_status_command)
     ingest = commands.add_parser("ingest"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--step-id", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.set_defaults(handler=ingest_command)
     ingest.add_argument("--call-file")

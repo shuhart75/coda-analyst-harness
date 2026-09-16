@@ -245,10 +245,14 @@ class AdaptiveHistoryTests(unittest.TestCase):
         self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |'])
         self.save_sources()
         run = self.ingest(self.begin(), {'issues': []})
-        self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
-        preview = self.run_tool(self.state, 'execution-preview', '--run-id', run['run_id'],
-                                '--project-root', str(self.project), '--feature', 'owner')
-        self.assertFalse(preview['missing_task_candidates'][0]['deletion_allowed'])
+        blocked = self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'], expected=2)
+        self.assertEqual(blocked['next_action']['type'], 'verify-missing-tasks')
+        self.assertFalse(blocked['next_action']['deletion_allowed'])
+        retry = self.run_tool(self.state, 'retry-missing', '--run-id', run['run_id'])
+        self.assertEqual(retry['run_id'], run['run_id'])
+        self.ingest(retry, {'issues': [self.jira_issue('OTHER-1')]}, expected=2)
+        collected = self.ingest(retry, {'issues': [self.jira_issue('JIRA-1')]})
+        self.assertEqual(collected['next_action']['type'], 'reconcile')
 
     def test_one_feature_qa_proposal_replaces_per_card_role_creation(self):
         self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |',
