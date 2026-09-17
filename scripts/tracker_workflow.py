@@ -1820,6 +1820,11 @@ def parser() -> argparse.ArgumentParser:
     history.add_argument("--manifest", required=True)
     from tracker_history import history_review_command
     history.set_defaults(handler=history_review_command)
+    qa_check = commands.add_parser('qa-application-check')
+    qa_check.add_argument('--review-file', required=True)
+    qa_check.add_argument('--project-root', required=True)
+    from tracker_qa_application import check_qa_application
+    qa_check.set_defaults(handler=check_qa_application)
     error = commands.add_parser("ingest-error"); error.add_argument("--run-id", required=True); error.add_argument("--step-id", required=True); error.add_argument("--error-file", required=True); error.set_defaults(handler=ingest_error_command)
     reconcile = commands.add_parser("reconcile"); reconcile.add_argument("--run-id", required=True); reconcile.set_defaults(handler=reconcile_command)
     resolve = commands.add_parser("resolve-conflict"); resolve.add_argument("--run-id", required=True); resolve.add_argument("--task-key", required=True); resolve.add_argument("--choice", choices=RESOLUTION_CHOICES, required=True); resolve.add_argument("--apply-to-following", action="store_true"); resolve.add_argument("--custom-file"); resolve.set_defaults(handler=resolve_conflict_command)

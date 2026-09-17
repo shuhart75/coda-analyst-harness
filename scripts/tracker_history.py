@@ -224,6 +224,10 @@ def review_history(args) -> int:
     pending_history = sorted(set(missing_history) - set(unavailable))
     from tracker_comparison import build_comparison
     comparison = build_comparison(preview, reviews, provider) if not pending_history else None
+    from tracker_qa_application import confirmed_qa_updates
+    if pending_history and manifest.get('qa_confirmations'):
+        raise ValueError('Collect or document unavailable history before QA application review')
+    qa_application = confirmed_qa_updates(comparison, manifest.get('qa_confirmations', [])) if comparison else []
     rechecked = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
                                   manifest.get("reviewed_registries", {}), manifest.get("expected_head"))
     if rechecked != preview:
@@ -240,6 +244,7 @@ def review_history(args) -> int:
                                      if item["proposed_action"] == "delete-current-execution"],
               "pending_history": pending_history, "unavailable_history": unavailable,
               "comparison": comparison,
+              "project_root": str(project), "qa_application": qa_application,
               "date_proposals_allowed": not pending_history,
               "fact_priority": ["analyst-confirmation", "assignment-and-status-history", "current-state-only"],
               "history_processed": bool(histories), "adapter": "json-pointer-history-v1",
@@ -248,5 +253,12 @@ def review_history(args) -> int:
                               "provider": provider, "application_requires_analyst_command": True}}
     destination = run_root(args.run_id) / "history" / (digest_object(output) + ".json")
     save_json(destination, output)
-    print(json.dumps({**output, "review_file": str(destination)}, ensure_ascii=False, indent=2))
+    payload = {**output, "review_file": str(destination)}
+    if qa_application:
+        payload['after_registry_application'] = {
+            'type': 'qa-application-check', 'required': True,
+            'command': ['python3', str(Path(__file__).with_name('trackerctl.py')), 'qa-application-check',
+                        '--project-root', str(project), '--review-file', str(destination)],
+        }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0

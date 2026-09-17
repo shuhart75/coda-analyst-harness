@@ -290,6 +290,49 @@ class AdaptiveHistoryTests(unittest.TestCase):
         self.assertEqual(proposal['estimate']['value'], 3)
         self.assertEqual(preview['next_action']['type'], 'collect-history')
 
+    def test_explicit_qa_interval_requires_both_registry_dates(self):
+        run_id = self.reconciled()
+        registry = self.project / 'features/owner/execution/tasks.md'
+        template = ('| Task ID | Jira | Kind | Role | Status | Actual Start | Actual Finish | Completed By |\n'
+                    '|---|---|---|---|---|---|---|---|\n'
+                    '| CORE | JIRA-1 | real | BE | done | | | |\n'
+                    '| QA-LOCAL | | real | QA | done | 2026-08-02 | FINISH | 2026-08-03 |\n')
+        registry.write_text(template.replace('FINISH', ''))
+        self.save_sources()
+        source = self.state / 'analyst-answer.txt'
+        quote = 'QA exactly 2026-08-02 through 2026-08-03'
+        source.write_text(quote)
+        manifest = self.manifest()
+        confirmation = {'feature': 'owner', 'task_id': 'QA-LOCAL', 'analyst_confirmed': True,
+                        'kind': 'exact-interval', 'fields': {'Actual Start': '2026-08-02', 'Actual Finish': '2026-08-03'},
+                        'source': {'file': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(), 'quote': quote}}
+        manifest['qa_confirmations'] = [confirmation]
+        path = self.write(self.state / 'manifest.json', manifest)
+        review = self.run_tool(self.state, 'history-review', '--run-id', run_id,
+                               '--project-root', str(self.project), '--manifest', str(path))
+        self.assertEqual(review['qa_application'][0]['expected_rendering'], 'actual-interval')
+        args = ('qa-application-check', '--project-root', str(self.project), '--review-file', review['review_file'])
+        failed = self.run_tool(self.state, *args, expected=2)
+        self.assertEqual(failed['errors'][0]['field'], 'Actual Finish')
+        registry.write_text(template.replace('FINISH', '2026-08-03'))
+        self.assertEqual(self.run_tool(self.state, *args)['status'], 'qa-application-verified')
+        registry.write_text(template.replace('FINISH', ''))
+        confirmation['kind'] = 'completed-by'
+        confirmation['fields'] = {'Completed By': '2026-08-03'}
+        self.write(path, manifest)
+        bounded = self.run_tool(self.state, 'history-review', '--run-id', run_id,
+                                '--project-root', str(self.project), '--manifest', str(path))
+        self.assertNotIn('Actual Finish', bounded['qa_application'][0]['fields_to_write'])
+        self.assertEqual(bounded['qa_application'][0]['expected_rendering'], 'no-exact-interval')
+        registry.write_text(template.replace('FINISH', '2026-08-03'))
+        self.run_tool(self.state, 'qa-application-check', '--project-root', str(self.project),
+                      '--review-file', bounded['review_file'], expected=2)
+        registry.write_text(template.replace('FINISH', ''))
+        confirmation['fields'] = {'Actual Finish': '2026-08-03'}
+        self.write(path, manifest)
+        self.run_tool(self.state, 'history-review', '--run-id', run_id,
+                      '--project-root', str(self.project), '--manifest', str(path), expected=2)
+
 
 if __name__ == '__main__':
     unittest.main()
