@@ -73,13 +73,26 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
             [row for row in rows if row['feature'] == proposal['feature']], proposal.get('missing_card_keys', []))
         for proposal in preview['feature_qa_proposals']
     }
+    qa_checks = []
     for feature, start in current_qa_starts.items():
+        qa_rows = [row for row in rows if row['feature'] == feature and row['role'] == 'QA']
+        qa_checks.append({'feature': feature, 'required': True,
+                          'fields': ['Actual Start', 'Actual Finish', 'Completed By', 'Status', 'Progress %', 'Estimate'],
+                          'start_from_current_execution': start,
+                          'start_change_required': bool(start['started_on']) and any(
+                              row['current'].get('Actual Start') != start['started_on'] for row in qa_rows),
+                          'targets': [{'task_id': row['task_id'], 'registry': row['registry'],
+                                       'current': row['current'], 'history': row['history']} for row in qa_rows],
+                          'decision_required': True, 'application_verified': False})
         lines.append(f"\nQA {cell(feature)}: начало по сохранённым фактическим окончаниям разработки — "
                      f"{cell(start['started_on'])}; задача-источник {cell(start['source_task'])}. "
                      f"Неизвестные окончания/неполученные задачи: {cell(', '.join(start['unresolved']))}. "
                      "После выбора новых сроков разработки пересчитать; отдельное подтверждение QA не перезаписывать.")
+        if qa_checks[-1]['start_change_required']:
+            lines.append("**QA: начало в реестре отличается; совпадение сроков BE/FE не означает отсутствие изменений.**")
     return {"rows": rows, "table": "\n".join(lines),
             "qa_start_from_current_execution": current_qa_starts,
+            "required_qa_application_checks": qa_checks,
             "decision_required": True,
             "choices": [{"id": identity, "label": label, "fields": selected}
                         for identity, label, selected in zip(DECISIONS, choices, fields)],

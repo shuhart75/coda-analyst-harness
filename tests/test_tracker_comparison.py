@@ -29,6 +29,9 @@ class TrackerComparisonTests(unittest.TestCase):
         self.assertEqual(result['choices'][2]['fields'], [])
         self.assertFalse(result['application_allowed'])
         self.assertEqual(result['qa_start_from_current_execution']['feature']['started_on'], '2026-08-02')
+        self.assertTrue(result['required_qa_application_checks'][0]['start_change_required'])
+        self.assertFalse(result['required_qa_application_checks'][0]['application_verified'])
+        self.assertIn('QA: начало в реестре отличается', result['table'])
 
     def test_saved_development_end_not_estimate_or_completion_bound_drives_qa(self):
         rows = [{'task_id': 'DEV', 'role': 'BE', 'current': {'Status': 'done', 'Actual Finish': '2026-07-31'}},
