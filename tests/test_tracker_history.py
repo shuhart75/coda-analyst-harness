@@ -36,7 +36,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
     def begin(self, intent='update-planning'):
         return self.run_tool(self.state, 'begin', '--scope-kind', 'tasks', '--scope-provider', 'jira',
                              '--scope-id', 'JIRA-1', '--label', 'Test', '--scope-source', 'analyst',
-                             '--intent', intent, '--adaptive')
+                             '--intent', intent)
 
     def ingest(self, run, data, call=None, expected=0):
         action = run['next_action']
@@ -96,6 +96,11 @@ class AdaptiveHistoryTests(unittest.TestCase):
         review = self.run_tool(self.state, *args)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(review['features'][0]['qa']['progress_percent'], 100)
+        self.assertEqual(len(review['comparison']['choices']), 4)
+        self.assertTrue(review['comparison']['bounds_are_not_exact_dates'])
+        self.assertIn('Actual Start', review['comparison']['rows'][0]['current'])
+        self.assertIn('начато не позднее', review['comparison']['table'])
+        self.assertEqual(review['features'][0]['qa']['started_by'], '2026-08-02T12:00:00+03:00')
         self.assertIsNone(review['features'][0]['qa']['finished_at'])
         self.assertFalse(review['planning_application_allowed'])
         self.assertEqual(self.run_tool(self.state, *args)['review_file'], review['review_file'])
@@ -131,6 +136,21 @@ class AdaptiveHistoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_history(source, bad, history.observed_at)
         self.assertEqual(pointer({'text': '{"value": 3}'}, '/text/value'), 3)
+
+    def test_status_names_do_not_replace_assignee_ids(self):
+        source = self.raw_history()
+        source['changelogs'][-1]['items'][0].update(from_id='1', to_id='2',
+                                                 from_string='To Do', to_string='Done')
+        source.update(total=3, start=0)
+        entry = {'key': 'JIRA-1', 'role': 'BE', 'provider': 'jira',
+                 'mapping': {**JIRA_MAPPING, 'status_from': '/from_string', 'status_to': '/to_string',
+                             'total': '/total', 'start': '/start'},
+                 'status_aliases': {'Done': 'done', 'To Do': 'todo'}}
+        history, limits = decode_history(source, entry, datetime.fromisoformat('2026-08-10T12:00:00+03:00'))
+        result = calculate_task(history, {'dev': 'BE', 'qa': 'QA'}, StatusRules(qa_completed=frozenset({'done'})))
+        self.assertEqual(result['development']['finished_at'], '2026-08-02T12:00:00+03:00')
+        self.assertEqual(history.events[1].assignee, ('dev', 'qa'))
+        self.assertEqual(limits, [])
 
     def test_read_only_run_cannot_enter_history_application(self):
         run_id = self.reconciled('read-only')

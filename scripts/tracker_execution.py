@@ -115,6 +115,8 @@ def preview_execution(
                     "role": role, "kind": row.get("Kind", "").casefold(),
                     "jira_key": jira, "sbertrek_key": sbertrek,
                     "invalid_key": jira_invalid or sber_invalid,
+                    "saved_facts": {name: row.get(name, "") for name in
+                                    ("Actual Start", "Actual Finish", "Completed By", "Status", "Progress %", "Details", "Notes")},
                     "uncommitted": relative not in before["tracked"] or relative in before["changed"],
                 }
                 rows.append(reference)

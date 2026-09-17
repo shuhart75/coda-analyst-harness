@@ -40,6 +40,32 @@ class TrackerLifecycleTests(unittest.TestCase):
         self.assertEqual((history, self.people, self.rules), before)
         return result
 
+    def test_feature_qa_starts_at_first_assignment_even_while_unfinished(self):
+        first = self.history([self.assigned('dev', 1, None, 'developer'),
+                              self.status('testing', 2, 'created', 'testing'),
+                              self.assigned('qa', 3, 'developer', 'tester')],
+                             current_assignee='tester', current_status='testing')
+        second = self.history(key='ST-2')
+        result = calculate_feature('feature', (first, second), self.people, self.rules,
+                                   ('ST-1', 'ST-2'), True)
+        self.assertEqual(result['qa']['started_at'], moment(3).isoformat())
+        self.assertIsNone(result['qa']['finished_at'])
+        self.assertEqual(result['qa']['state'], 'in-progress')
+
+    def test_partial_history_exposes_first_qa_assignment_as_bound_only(self):
+        first = self.history([self.assigned('qa', 3, 'developer', 'tester')],
+                             current_assignee='tester', complete=False)
+        result = calculate_feature('feature', (first,), self.people, self.rules, ('ST-1',), True)
+        self.assertIsNone(result['qa']['started_at'])
+        self.assertEqual(result['qa']['started_by'], moment(3).isoformat())
+
+    def test_assignment_from_unassigned_also_starts_feature_qa(self):
+        history = self.history([self.assigned('qa', 3, None, 'tester'),
+                                self.assigned('unassign', 4, 'tester', None)], current_assignee=None)
+        result = calculate_feature('feature', (history,), self.people, self.rules, ('ST-1',), True)
+        self.assertEqual(result['qa']['started_at'], moment(3).isoformat())
+        self.assertEqual(result['qa']['state'], 'in-progress')
+
     def finished(self, key='ST-1', finish=5):
         return self.history([
             self.assigned('dev', 2, 'analyst', 'developer'),

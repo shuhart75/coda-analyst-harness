@@ -100,7 +100,9 @@ def decode_history(payload: dict, entry: dict, observed: datetime) -> tuple[Task
                 continue
             if field in fields:
                 raise ValueError("Ambiguous repeated field in one history event")
-            before, after = optional(change, mapping["from"]), optional(change, mapping["to"])
+            prefix = "status" if field == mapping["status_field"] else "assignment"
+            before = optional(change, mapping.get(prefix + "_from", mapping["from"]))
+            after = optional(change, mapping.get(prefix + "_to", mapping["to"]))
             if field == mapping["status_field"]:
                 if before is None or after is None:
                     raise ValueError("Status transition requires both values")
@@ -220,6 +222,8 @@ def review_history(args) -> int:
     ):
         raise ValueError("Unavailable history requires a reason for each missing work item")
     pending_history = sorted(set(missing_history) - set(unavailable))
+    from tracker_comparison import build_comparison
+    comparison = build_comparison(preview, reviews, provider) if not pending_history else None
     rechecked = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
                                   manifest.get("reviewed_registries", {}), manifest.get("expected_head"))
     if rechecked != preview:
@@ -229,11 +233,13 @@ def review_history(args) -> int:
               "reconciled_sha256": completion["reconciled_sha256"], "manifest_sha256": digest_bytes(manifest_raw),
               "head": preview["head"], "registry_sha256": preview["registry_sha256"],
               "features": reviews, "evidence": evidence, "limitations": limitations,
+              "status_rules": manifest["status_rules"],
               "feature_qa_proposals": preview["feature_qa_proposals"],
               "missing_task_candidates": preview["missing_task_candidates"],
               "deletion_proposals": [item for item in preview["items"]
                                      if item["proposed_action"] == "delete-current-execution"],
               "pending_history": pending_history, "unavailable_history": unavailable,
+              "comparison": comparison,
               "date_proposals_allowed": not pending_history,
               "fact_priority": ["analyst-confirmation", "assignment-and-status-history", "current-state-only"],
               "history_processed": bool(histories), "adapter": "json-pointer-history-v1",

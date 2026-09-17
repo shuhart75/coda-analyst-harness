@@ -45,7 +45,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
     def begin(self, state: Path, provider: str, kind: str, *keys: str, intent: str = "read-only") -> dict:
         self.configure(state)
         args = [
-            "begin", "--scope-kind", kind, "--scope-provider", provider,
+            "begin", "--legacy", "--scope-kind", kind, "--scope-provider", provider,
             "--label", "Test", "--scope-source", "unit-test", "--intent", intent,
         ]
         for key in keys:
@@ -315,7 +315,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             state = Path(temp)
             first = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
             second = self.run_tool(
-                state, "begin", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
+                state, "begin", "--legacy", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
                 "--scope-id", "RSCON-7001", "--label", "Other label", "--scope-source", "rephrased-request", "--intent", "read-only",
             )
             self.assertEqual(first["run_id"], second["run_id"])
@@ -357,7 +357,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             self.assertEqual(marker["previous_protocol"], "legacy-protocol")
             self.assertFalse((state / "tracker-active-run.json").exists())
             started = self.run_tool(
-                state, "begin", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
+                state, "begin", "--legacy", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
                 "--scope-id", "RSCON-7001", "--label", "Test", "--scope-source", "unit-test",
             )
             self.assertEqual(started["protocol"], "direct-tracker-v1")
@@ -372,7 +372,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             self.assertIn("явного подтверждения аналитика", rejected["error"])
             self.assertTrue((state / "tracker-active-run.json").is_file())
             resumed = self.run_tool(
-                state, "begin", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
+                state, "begin", "--legacy", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
                 "--scope-id", "RSCON-7001", "--label", "Retry", "--scope-source", "unit-test", "--intent", "read-only",
             )
             self.assertEqual(resumed["run_id"], current["run_id"])
@@ -384,7 +384,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             orphaned_run = "20260901T100946Z-1e1af32a"
             self.write(state / "tracker-active-run.json", {"run_id": orphaned_run})
             started = self.run_tool(
-                state, "begin", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
+                state, "begin", "--legacy", "--scope-kind", "tasks", "--scope-provider", "sbertrek",
                 "--scope-id", "RSCON-7001", "--label", "Test", "--scope-source", "unit-test", "--intent", "read-only",
             )
             self.assertNotEqual(started["run_id"], orphaned_run)

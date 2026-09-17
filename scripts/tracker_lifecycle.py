@@ -86,6 +86,7 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
     evidence = []
     development_start = development_finish = development_bound = None
     qa_start = qa_start_bound = qa_finish = None
+    first_qa_assignment = None
     development_closed = qa_completed = qa_active = returned = False
     last_assignee = last_status = None
     assignee_seen = status_seen = False
@@ -139,6 +140,8 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
             last_status, status_seen = new_status, True
 
         handoff = old_role == history.development_role and new_role == "QA"
+        if new_role == "QA" and first_qa_assignment is None:
+            first_qa_assignment = moment
         qa_return = old_role == "QA" and new_role == history.development_role
         assigned_developer = role(effective_assignee) == history.development_role
         start_development = not developer_seen and new_role == history.development_role and old_role != "QA"
@@ -147,7 +150,7 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
             new_status in codes["development_completed"] | codes["qa_started"]
             and new_status not in codes["qa_completed"]
         )
-        start_qa = handoff or new_status in codes["qa_started"]
+        start_qa = new_role == "QA" or new_status in codes["qa_started"]
         finish_qa = new_status in codes["qa_completed"]
         if qa_return and finish_qa:
             raise ValueError("The same event cannot return work to development and complete QA")
@@ -236,6 +239,8 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
         },
         "qa": {
             "state": qa_state,
+            "first_assignment_at": formatted(first_qa_assignment) if exact else None,
+            "first_assignment_by": formatted(first_qa_assignment),
             "started_at": formatted(qa_start) if exact else None,
             "finished_at": formatted(qa_finish) if exact and qa_completed else None,
             "started_by": formatted(qa_start_bound),
@@ -277,8 +282,8 @@ def calculate_feature(
     if not members:
         limitations.add("qa-active-scope-empty")
     completed = complete_scope and all(member["state"] == "completed" for member in members)
-    started = [member["started_at"] for member in members if member["started_at"]]
-    known_starts = all(member["started_at"] or member["state"] == "not-started" for member in members)
+    started = [member["first_assignment_at"] for member in members if member["first_assignment_at"]]
+    known_starts = all(member["first_assignment_at"] or member["state"] == "not-started" for member in members)
     finished = [member["finished_at"] for member in members if member["finished_at"]]
 
     def extreme(values: list[str], operation) -> str | None:
@@ -287,6 +292,7 @@ def calculate_feature(
     qa = {
         "state": "completed" if completed else "in-progress" if any(member["state"] in {"in-progress", "completed"} for member in members) else "not-started" if complete_scope and all(member["state"] == "not-started" for member in members) else "unknown",
         "started_at": extreme(started, min) if complete_scope and known_starts else None,
+        "started_by": extreme([member["first_assignment_by"] for member in members if member["first_assignment_by"]], min),
         "finished_at": extreme(finished, max) if completed and len(finished) == len(members) else None,
         "finished_on": None,
         "completed_by": extreme([member["completed_by"] for member in members if member["completed_by"]], max) if completed else None,
