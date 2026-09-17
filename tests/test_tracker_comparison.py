@@ -3,7 +3,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from tracker_comparison import build_comparison
+from tracker_comparison import build_comparison, qa_start_from_current
 
 
 class TrackerComparisonTests(unittest.TestCase):
@@ -28,6 +28,15 @@ class TrackerComparisonTests(unittest.TestCase):
         self.assertIn('Status', result['choices'][1]['fields'])
         self.assertEqual(result['choices'][2]['fields'], [])
         self.assertFalse(result['application_allowed'])
+        self.assertEqual(result['qa_start_from_current_execution']['feature']['started_on'], '2026-08-02')
+
+    def test_saved_development_end_not_estimate_or_completion_bound_drives_qa(self):
+        rows = [{'task_id': 'DEV', 'role': 'BE', 'current': {'Status': 'done', 'Actual Finish': '2026-07-31'}},
+                {'task_id': 'NEXT', 'role': 'FE', 'current': {'Status': 'planned'}},
+                {'task_id': 'CANCELLED', 'role': 'BE', 'current': {'Status': 'cancelled', 'Actual Finish': '2026-07-01'}}]
+        self.assertEqual(qa_start_from_current(rows, [])['started_on'], '2026-07-31')
+        rows[0]['current'] = {'Status': 'done', 'Completed By': '2026-07-31'}
+        self.assertIsNone(qa_start_from_current(rows, [])['started_on'])
 
 
 if __name__ == '__main__':

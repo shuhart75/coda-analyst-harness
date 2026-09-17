@@ -40,7 +40,7 @@ class TrackerLifecycleTests(unittest.TestCase):
         self.assertEqual((history, self.people, self.rules), before)
         return result
 
-    def test_feature_qa_starts_at_first_assignment_even_while_unfinished(self):
+    def test_feature_qa_starts_at_first_development_completion_even_while_unfinished(self):
         first = self.history([self.assigned('dev', 1, None, 'developer'),
                               self.status('testing', 2, 'created', 'testing'),
                               self.assigned('qa', 3, 'developer', 'tester')],
@@ -48,7 +48,7 @@ class TrackerLifecycleTests(unittest.TestCase):
         second = self.history(key='ST-2')
         result = calculate_feature('feature', (first, second), self.people, self.rules,
                                    ('ST-1', 'ST-2'), True)
-        self.assertEqual(result['qa']['started_at'], moment(3).isoformat())
+        self.assertEqual(result['qa']['started_at'], moment(2).isoformat())
         self.assertIsNone(result['qa']['finished_at'])
         self.assertEqual(result['qa']['state'], 'in-progress')
 
@@ -59,11 +59,11 @@ class TrackerLifecycleTests(unittest.TestCase):
         self.assertIsNone(result['qa']['started_at'])
         self.assertEqual(result['qa']['started_by'], moment(3).isoformat())
 
-    def test_assignment_from_unassigned_also_starts_feature_qa(self):
+    def test_assignment_without_development_finish_does_not_invent_exact_feature_start(self):
         history = self.history([self.assigned('qa', 3, None, 'tester'),
                                 self.assigned('unassign', 4, 'tester', None)], current_assignee=None)
         result = calculate_feature('feature', (history,), self.people, self.rules, ('ST-1',), True)
-        self.assertEqual(result['qa']['started_at'], moment(3).isoformat())
+        self.assertIsNone(result['qa']['started_at'])
         self.assertEqual(result['qa']['state'], 'in-progress')
 
     def finished(self, key='ST-1', finish=5):

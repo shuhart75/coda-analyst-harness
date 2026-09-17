@@ -282,8 +282,10 @@ def calculate_feature(
     if not members:
         limitations.add("qa-active-scope-empty")
     completed = complete_scope and all(member["state"] == "completed" for member in members)
-    started = [member["first_assignment_at"] for member in members if member["first_assignment_at"]]
-    known_starts = all(member["first_assignment_at"] or member["state"] == "not-started" for member in members)
+    development_members = [tasks[key]["development"] for key in qa_task_keys]
+    started = [member["finished_at"] for member in development_members if member["finished_at"]]
+    known_starts = all(member["finished_at"] or member["state"] in {"not-started", "in-progress"}
+                       for member in development_members)
     finished = [member["finished_at"] for member in members if member["finished_at"]]
 
     def extreme(values: list[str], operation) -> str | None:
@@ -292,7 +294,8 @@ def calculate_feature(
     qa = {
         "state": "completed" if completed else "in-progress" if any(member["state"] in {"in-progress", "completed"} for member in members) else "not-started" if complete_scope and all(member["state"] == "not-started" for member in members) else "unknown",
         "started_at": extreme(started, min) if complete_scope and known_starts else None,
-        "started_by": extreme([member["first_assignment_by"] for member in members if member["first_assignment_by"]], min),
+        "started_by": extreme([member["completed_by"] for member in development_members if member["completed_by"]], min),
+        "start_basis": "first-development-completion",
         "finished_at": extreme(finished, max) if completed and len(finished) == len(members) else None,
         "finished_on": None,
         "completed_by": extreme([member["completed_by"] for member in members if member["completed_by"]], max) if completed else None,
