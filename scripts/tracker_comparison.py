@@ -42,19 +42,30 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                 calculation = review["tasks"].get(identity)
                 rows.append({"feature": feature, "task_id": target["task_id"], "role": target["role"],
                              "registry": target["registry"], "current": target["saved_facts"],
+                             "role_estimates": item.get("role_estimates", {}),
                              "history": calculation["development"] if calculation else None,
                              "limitations": calculation["limitations"] if calculation else ["history-not-collected"]})
         proposal = next(item for item in preview["feature_qa_proposals"] if item["feature"] == feature)
-        for target in proposal["existing_targets"] or [{"task_id": "QA (new)", "registry": None, "saved_facts": {}}]:
+        qa_targets = proposal["existing_targets"] or [{"task_id": "QA (new)", "registry": None, "saved_facts": {}}]
+        if "qa_groups" in review:
+            existing = {target["task_id"]: target for target in proposal["existing_targets"]}
+            qa_targets = [{**existing.get(group["task_id"], {"saved_facts": {}}),
+                           "task_id": group["task_id"], "registry": group["registry"], "group": group}
+                          for group in review["qa_groups"]]
+        for target in qa_targets:
+            group = target.get("group")
             rows.append({"feature": feature, "task_id": target["task_id"], "role": "QA",
                          "registry": target["registry"], "current": target["saved_facts"],
-                         "history": review["qa"], "limitations": review["limitations"]})
+                         "history": group["qa"] if group else review["qa"],
+                         "members": group["members"] if group else None,
+                         "role_estimates": {"QA": {"value": group["estimate"] if group else proposal.get("estimate", {}).get("value")}},
+                         "limitations": group["limitations"] if group else review["limitations"]})
 
     def cell(value):
         return str(value if value not in (None, "") else "-").replace("|", "\\|").replace("\n", " ")
 
-    lines = ["| Фича / задача | Текущие начало / конец / статус | По истории: начало / конец / состояние | Границы и ограничения |",
-             "|---|---|---|---|"]
+    lines = ["| Фича / задача | Текущие начало / конец / статус | По истории: начало / конец / состояние | Границы и ограничения | FE | BE | QA |",
+             "|---|---|---|---|---:|---:|---:|"]
     for row in rows:
         current, history = row["current"], row["history"] or {}
         previous = " / ".join(cell(current.get(name)) for name in ("Actual Start", "Actual Finish", "Status"))
@@ -63,7 +74,8 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
         bounds = f"начато не позднее {cell(history.get('started_by'))}; завершено не позднее {cell(history.get('completed_by'))}"
         notes = cell("; ".join(row["limitations"]))
         notes += "; прежнее основание: " + cell(current.get("Details") or current.get("Notes"))
-        lines.append(f"| {cell(row['feature'])} / {cell(row['task_id'])} | {previous} | {proposed} | {bounds}; {notes} |")
+        estimates = " | ".join(cell(row.get("role_estimates", {}).get(role, {}).get("value")) for role in ("FE", "BE", "QA"))
+        lines.append(f"| {cell(row['feature'])} / {cell(row['task_id'])} | {previous} | {proposed} | {bounds}; {notes} | {estimates} |")
     name = "Jira" if provider == "jira" else "SberTrek"
     choices = [f"Принять сроки {name} для всех задач", f"Принять сроки и статусы {name} для всех задач",
                "Оставить текущие сроки и статусы для всех задач", "Свой вариант"]
@@ -84,6 +96,21 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                           'targets': [{'task_id': row['task_id'], 'registry': row['registry'],
                                        'current': row['current'], 'history': row['history']} for row in qa_rows],
                           'decision_required': True, 'application_verified': False})
+        for row, target in zip(qa_rows, qa_checks[-1]['targets']):
+            if row.get('members') is not None:
+                target['start_from_current_execution'] = qa_start_from_current(
+                    [candidate for candidate in rows if candidate['feature'] == feature
+                     and candidate['role'] in {'BE', 'FE'} and candidate['task_id'] in row['members']], [])
+                target['members'] = row['members']
+        if any(row.get('members') is not None for row in qa_rows):
+            qa_checks[-1]['start_from_current_execution'] = None
+            qa_checks[-1]['start_change_required'] = any(
+                target.get('start_from_current_execution', {}).get('started_on')
+                and target['current'].get('Actual Start') != target['start_from_current_execution']['started_on']
+                for target in qa_checks[-1]['targets'])
+            current_qa_starts[feature] = {'basis': 'per-qa-group', 'targets': qa_checks[-1]['targets']}
+            lines.append(f"\nQA {cell(feature)}: начало, окончание и прогресс проверяются отдельно для каждой группы; общий интервал не переносить в части.")
+            continue
         lines.append(f"\nQA {cell(feature)}: начало по сохранённым фактическим окончаниям разработки — "
                      f"{cell(start['started_on'])}; задача-источник {cell(start['source_task'])}. "
                      f"Неизвестные окончания/неполученные задачи: {cell(', '.join(start['unresolved']))}. "

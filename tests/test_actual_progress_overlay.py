@@ -63,7 +63,7 @@ class ActualProgressRoleWorkItemsTests(unittest.TestCase):
             schedules = OVERLAY.task_schedules(
                 tasks, set(), date(2026, 9, 1), OVERLAY.DEFAULT_TEAM_RESOURCES,
             )
-            self.assertEqual(schedules["RSCON-100/FE"].assignee, "F1")
+            self.assertEqual(schedules["RSCON-100/FE"].assignee, "B1")
             content = OVERLAY.render_feature(feature, "sample", set(), tasks, schedules)
             assert content
             self.assertIn("TASK_RSCON_100_AN", content)

@@ -30,7 +30,7 @@ def confirmed_qa_updates(comparison: dict, confirmations: list[dict]) -> list[di
         field_names = {'exact-interval': ('Actual Start', 'Actual Finish'),
                        'exact-start': ('Actual Start',), 'exact-finish': ('Actual Finish',),
                        'completed-by': ('Completed By',), 'keep-current': ()}
-        reviewed_fields = {'Actual Start', 'Actual Finish', 'Completed By', 'Status', 'Progress %', 'Estimate'}
+        reviewed_fields = {'Actual Start', 'Actual Finish', 'Completed By', 'Status', 'Progress %', 'Estimate', 'Estimate (дн)'}
         if kind == 'reviewed-fields':
             valid_fields = bool(confirmation['fields']) and set(confirmation['fields']) <= reviewed_fields
         else:
@@ -41,10 +41,14 @@ def confirmed_qa_updates(comparison: dict, confirmations: list[dict]) -> list[di
         for name, value in fields.items():
             if not isinstance(value, str) or not value.strip():
                 raise ValueError('QA fields require explicit nonempty registry strings')
+            if value == '-' and kind == 'reviewed-fields' and name in {'Actual Start', 'Actual Finish', 'Completed By'}:
+                continue
+            if value == 'unknown' and kind == 'reviewed-fields' and name == 'Progress %':
+                continue
             if name in {'Actual Start', 'Actual Finish', 'Completed By'}:
                 if date.fromisoformat(value).isoformat() != value:
                     raise ValueError('QA dates require YYYY-MM-DD')
-            elif name in {'Progress %', 'Estimate'}:
+            elif name in {'Progress %', 'Estimate', 'Estimate (дн)'}:
                 try:
                     number = Decimal(value)
                 except InvalidOperation as error:
@@ -63,7 +67,7 @@ def confirmed_qa_updates(comparison: dict, confirmations: list[dict]) -> list[di
         updates.append({'feature': identity[0], 'task_id': identity[1], 'registry': target['registry'],
                         'fields_to_write': fields,
                         'expected_registry_fields': {name: expected.get(name, '') for name in
-                                                     ('Actual Start', 'Actual Finish', 'Completed By', 'Status', 'Progress %', 'Estimate')},
+                                                     ('Actual Start', 'Actual Finish', 'Completed By', 'Status', 'Progress %', 'Estimate', 'Estimate (дн)')},
                         'previous': target['current'],
                         'confirmation': confirmation, 'verification_required': True,
                         'expected_rendering': 'actual-interval' if start not in (None, '', '-', '—') and finish not in (None, '', '-', '—') else 'no-exact-interval'})
@@ -86,10 +90,18 @@ def check_qa_application(args) -> int:
     updates = review.get('qa_application', [])
     if not updates:
         raise ValueError('No explicit QA confirmations in this review')
-    required = {row['feature'] for row in review.get('comparison', {}).get('rows', []) if row['role'] == 'QA'}
-    if required - {update['feature'] for update in updates}:
+    required = {(row['feature'], row['task_id']) for row in review.get('comparison', {}).get('rows', []) if row['role'] == 'QA'}
+    if required - {(update['feature'], update['task_id']) for update in updates}:
         raise ValueError('Every feature QA requires a reviewed application or keep-current decision')
     errors = []
+    for proposal in review.get('feature_qa_proposals', []):
+        partition = proposal.get('partition')
+        if partition and partition.get('ready'):
+            group_path = (project / partition['path']).resolve()
+            if not group_path.is_relative_to(project):
+                raise ValueError('QA partition is outside project')
+            if not group_path.is_file() or load_json(group_path) != partition['document']:
+                errors.append({'feature': proposal['feature'], 'reason': 'QA partition not applied as reviewed'})
     for update in updates:
         registry = (project / update['registry']).resolve()
         if not registry.is_relative_to(project):
@@ -104,6 +116,18 @@ def check_qa_application(args) -> int:
             if matches[0].get(field, '') != value:
                 errors.append({'task_id': update['task_id'], 'field': field,
                                'expected': value, 'actual': matches[0].get(field)})
+        for proposal in review.get('feature_qa_proposals', []):
+            if proposal['feature'] != update['feature']:
+                continue
+            for group in proposal.get('partition', {}).get('groups', []):
+                if group['task_id'] == update['task_id']:
+                    actual = matches[0].get('Estimate (дн)', matches[0].get('Estimate', ''))
+                    try:
+                        equal = Decimal(actual.replace(',', '.')) == Decimal(group['estimate'])
+                    except InvalidOperation:
+                        equal = False
+                    if not equal:
+                        errors.append({'task_id': update['task_id'], 'reason': 'QA partition estimate differs'})
     print(json.dumps({'status': 'qa-application-mismatch' if errors else 'qa-application-verified',
                       'errors': errors, 'writes_performed': False,
                       'gantt_verified': False, 'next_action': 'fix-registry' if errors else 'generate-actual-only-and-check-gantt'}, ensure_ascii=False, indent=2))

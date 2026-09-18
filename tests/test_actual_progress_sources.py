@@ -87,6 +87,31 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIn("30% completed", outputs[self.target])
         self.assertEqual(OVERLAY.story_progress(OVERLAY.load_story_map(self.feature)[0], tasks), 75)
 
+    def test_release_qa_groups_generate_and_reject_overlapping_members(self) -> None:
+        self.write_tasks([
+            "| FIRST | ITEM-100 | FE First | real | FE | 2 | B2 | 2026-09-01 | 2026-09-02 | 2026-09-01 | 2026-09-02 | done | 100 | STORY-COHORT |",
+            "| SECOND | ITEM-200 | FE Second | real | FE | 2 | F1 | 2026-09-07 | 2026-09-08 | 2026-09-07 | 2026-09-08 | done | 100 | STORY-COHORT |",
+            "| QA-COHORT | | QA Release | real | QA | 1 | Q2 | 2026-09-02 | 2026-09-03 | 2026-09-02 | 2026-09-03 | done | 100 | STORY-COHORT |",
+            "| QA-REST | | QA Remainder | real | QA | 1 | Q2 | 2026-09-08 | 2026-09-09 | 2026-09-08 | | in-progress | unknown | STORY-COHORT |",
+        ])
+        self.map.write_text(self.map.read_text().replace('ITEM-100/FE, QA-COHORT', 'FIRST, SECOND, QA-COHORT, QA-REST'))
+        config = {'schema_version': 1, 'provider': 'jira', 'total_estimate': '2', 'groups': [
+            {'task_id': 'QA-COHORT', 'members': ['FIRST'], 'release': 'one', 'estimate': '1'},
+            {'task_id': 'QA-REST', 'members': ['SECOND'], 'release': None, 'estimate': '1'}]}
+        path = self.feature / 'execution/qa-groups.json'
+        path.write_text(json.dumps(config))
+        before = (self.gantt / 'quarter-plan.puml').read_bytes()
+        self.quarter()
+        self.assertEqual((self.gantt / 'quarter-plan.puml').read_bytes(), before)
+        self.assertIn('TASK_QA_REST', self.target.read_text())
+        self.assertIn('TASK_QA_COHORT', self.target.read_text())
+        self.assertEqual(OVERLAY.load_tasks(self.feature)['QA-REST'].qa_members, ('SECOND',))
+        config['groups'][1]['members'] = ['FIRST']
+        path.write_text(json.dumps(config))
+        generated = self.target.read_bytes()
+        self.quarter(success=False)
+        self.assertEqual(self.target.read_bytes(), generated)
+
     def test_unknown_progress_is_not_inferred_from_status_and_export_preserves_it(self) -> None:
         self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |"), encoding="utf-8")
         before = self.registry.read_bytes()

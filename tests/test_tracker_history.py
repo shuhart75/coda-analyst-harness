@@ -159,16 +159,15 @@ class AdaptiveHistoryTests(unittest.TestCase):
                               '--project-root', str(self.project), '--manifest', str(path), expected=2)
         self.assertIn('Read-only', result['error'])
 
-    def test_another_role_on_same_card_remains_in_feature_qa_denominator(self):
+    def test_another_development_role_on_same_card_requires_registry_correction(self):
         run_id = self.reconciled()
         self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |',
                                               '| FRONT | JIRA-1 | - | real | FE | planned |'])
         self.save_sources()
         manifest = self.write(self.state / 'manifest.json', self.manifest())
         review = self.run_tool(self.state, 'history-review', '--run-id', run_id,
-                               '--project-root', str(self.project), '--manifest', str(manifest))
-        self.assertIsNone(review['features'][0]['qa']['progress_percent'])
-        self.assertIn('qa-task-history-missing:JIRA-1/FE', review['features'][0]['limitations'])
+                               '--project-root', str(self.project), '--manifest', str(manifest), expected=2)
+        self.assertIn('ownership blockers', review['error'])
 
     def test_unknown_assignee_and_partial_metadata_do_not_prove_exact_dates(self):
         source = self.raw_history()

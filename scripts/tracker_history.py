@@ -171,6 +171,10 @@ def review_history(args) -> int:
     if manifest.get("schema_version") != 1 or manifest.get("analyst_confirmed") is not True or not manifest.get("decision_source"):
         raise ValueError("Confirmed role/status mapping and decision source are required")
     project = Path(args.project_root).resolve()
+    if result["scope"]["kind"] == "release":
+        from tracker_release import supplement_result
+        result = supplement_result(args.run_id, project, result, manifest.get("supplemental_responses", []))
+        result["scope"] = {**result["scope"], "release_decisions": manifest.get("release_decisions", {})}
     preview = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
                                 manifest.get("reviewed_registries", {}), manifest.get("expected_head"))
     if not preview["ownership_ready"]:
@@ -219,6 +223,7 @@ def review_history(args) -> int:
     reviews, missing_history = [], []
     deleted_keys = {issue.get(provider + "_key") for issue in result["excluded"]
                     if issue.get("reason") == "confirmed-source-deletion"}
+    skipped_keys = {issue.get(provider + "_key") for issue in result.get("skipped", [])}
     for feature in preview["selected_features"]:
         expected, local_missing = set(), []
         for path in registry_paths(project):
@@ -229,7 +234,7 @@ def review_history(args) -> int:
                 if row.get("Role", "").upper() not in {"FE", "BE"}:
                     continue
                 key = row.get("Jira" if provider == "jira" else "SberTrek", "").split("/")[0].strip()
-                if key in deleted_keys:
+                if key in deleted_keys | skipped_keys:
                     continue
                 if not key or key in {"-", "—"}:
                     local_missing.append(row.get("Task ID", "unmapped-work"))
@@ -239,6 +244,17 @@ def review_history(args) -> int:
         missing_history.extend(sorted(expected - {history.task_key for history in selected}))
         review = calculate_feature(feature, selected, participants, rules, tuple(sorted(expected)), not local_missing)
         review["limitations"].extend(f"unmapped-feature-work:{key}" for key in local_missing)
+        proposal = next(item for item in preview["feature_qa_proposals"] if item["feature"] == feature)
+        partition = proposal.get("partition")
+        if partition is not None:
+            if not partition.get("ready"):
+                raise ValueError(f"Resolve QA partition before history review: {partition['reason']}")
+            review["qa_groups"] = []
+            for group in partition["groups"]:
+                keys = tuple(group["history_keys"])
+                calculated = calculate_feature(feature, tuple(history for history in selected if history.task_key in keys),
+                                               participants, rules, keys, True)
+                review["qa_groups"].append({**group, "qa": calculated["qa"], "limitations": calculated["limitations"]})
         reviews.append(review)
     unavailable = manifest.get("unavailable_history", {})
     if not isinstance(unavailable, dict) or any(

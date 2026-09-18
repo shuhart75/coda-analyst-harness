@@ -213,7 +213,6 @@ class TrackerLifecycleTests(unittest.TestCase):
             [replace(start, at=moment(21))],
             [start, self.assigned('earlier', 1, 'developer', 'tester')],
             [start, self.assigned('same-time', 2, 'developer', 'tester')],
-            [self.assigned('wrong-role', 2, 'analyst', 'backend')],
         ]
         for events in invalid:
             with self.subTest(events=events), self.assertRaises(ValueError):
@@ -221,6 +220,19 @@ class TrackerLifecycleTests(unittest.TestCase):
         result = self.task(self.history([start], 'tester'))
         self.assertIn('assignment-snapshot-gap', result['limitations'])
         self.assertIsNone(result['development']['started_at'])
+
+    def test_backend_developer_can_execute_frontend_task_without_changing_role(self):
+        events = [self.assigned('start', 2, 'analyst', 'backend')]
+        started = self.task(self.history(events, 'backend'))
+        self.assertEqual(started['development_role'], 'FE')
+        self.assertEqual(started['development']['state'], 'in-progress')
+        self.assertEqual(started['development']['started_at'], moment(2).isoformat())
+        review = self.task(self.history(events + [self.status('review', 3, 'created', 'review')], 'backend', 'review'))
+        self.assertEqual(review['development']['progress_percent'], 90)
+        returned = self.task(self.history(events + [self.assigned('handoff', 4, 'backend', 'tester'),
+                                                   self.assigned('return', 5, 'tester', 'developer')], 'developer'))
+        self.assertEqual(returned['development']['finished_at'], moment(4).isoformat())
+        self.assertEqual(returned['qa']['state'], 'in-progress')
 
     def test_feature_completion_requires_every_confirmed_qa_member(self):
         done = self.finished()

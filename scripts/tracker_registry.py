@@ -22,6 +22,8 @@ def read_registry(path: Path) -> tuple[list[list[dict[str, str]]], str | None]:
         headers = [overlay.clean_cell(cell) for cell in line.strip().strip("|").split("|")]
         if not ({"Task ID", "Jira"} & set(headers)):
             continue
+        if any(re.fullmatch(r"Estimate\s+(AN|BE|FE|QA)(?:\s.*)?", header) for header in headers):
+            raise ValueError(f"Ролевые оценки допустимы в отчёте, не вместо Estimate (дн) в реестре: {path}")
         separator = lines[index + 1].strip().strip("|").split("|") if index + 1 < len(lines) else []
         if (not separator or len(separator) != len(headers) or len(set(headers)) != len(headers)
                 or not overlay.is_separator_row(separator)):

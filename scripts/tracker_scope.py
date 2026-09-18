@@ -128,6 +128,9 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
                     "role": row.get("Role", ""), "status": row.get("Status", ""),
                 }
                 kind = row.get("Kind", "").casefold()
+                if row.get("Role", "").upper() not in {"AN", "BE", "FE", "QA"}:
+                    omitted.append({**reference, "reason": "outside-supported-roles"})
+                    continue
                 if kind != "real":
                     omitted.append({**reference, "reason": "virtual-work" if kind == "virtual" else "kind-not-confirmed"})
                     continue

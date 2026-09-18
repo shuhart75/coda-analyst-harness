@@ -87,7 +87,12 @@ def preview_execution(
     reviewed = reviewed or {}
     if reviewed and before["head"] != expected_head:
         raise ValueError("HEAD изменился после проверки реестров")
-    selected = select_features(project, quarter, feature)
+    def selection():
+        if result.get("scope", {}).get("kind") == "release" and not quarter and not feature:
+            from tracker_release import release_owners
+            return dict.fromkeys(release_owners(project, result)["selected_features"])
+        return select_features(project, quarter, feature)
+    selected = selection()
     overlay = import_module("sync-actual-progress-overlay")
     paths = registry_paths(project)
     sources, rows, warnings, blockers = {}, [], [], []
@@ -116,7 +121,7 @@ def preview_execution(
                     "jira_key": jira, "sbertrek_key": sbertrek,
                     "invalid_key": jira_invalid or sber_invalid,
                     "saved_facts": {name: row.get(name, "") for name in
-                                    ("Actual Start", "Actual Finish", "Completed By", "Status", "Progress %", "Estimate", "Details", "Notes")},
+                                    ("Actual Start", "Actual Finish", "Completed By", "Status", "Progress %", "Estimate", "Estimate (дн)", "Details", "Notes")},
                     "uncommitted": relative not in before["tracked"] or relative in before["changed"],
                 }
                 rows.append(reference)
@@ -155,6 +160,10 @@ def preview_execution(
             reasons.append("materialization-not-confirmed")
         if any(row["role"] not in ROLES for row in matched):
             reasons.append("registry-role-not-confirmed")
+        if issue.get("task_role") in {"FE", "BE"} and any(
+            row["role"] in {"FE", "BE"} and row["role"] != issue["task_role"] for row in matched
+        ):
+            reasons.append("registry-role-conflicts-with-task-prefix")
         if any(
             (jira_key and row["jira_key"] and row["jira_key"] != jira_key)
             or (sbertrek_key and row["sbertrek_key"] and row["sbertrek_key"] != sbertrek_key)
@@ -181,11 +190,12 @@ def preview_execution(
             "internal_id_collisions": local_collisions, "blockers": sorted(set(reasons)),
             "proposed_action": "delete-current-execution" if issue.get("reason") == "confirmed-source-deletion" else "update",
             "deletion_evidence": issue.get("evidence") if issue.get("reason") == "confirmed-source-deletion" else None,
+            "role_estimates": issue.get("role_estimates", {}),
         }
         items.append(entry)
         blockers.extend({"tracker_key": identity, "reason": reason} for reason in entry["blockers"])
 
-    if not items:
+    if not items and not result.get("skipped"):
         blockers.append({"reason": "no-reconciled-tasks"})
     qa_proposals = []
     for selected_feature in selected:
@@ -197,6 +207,7 @@ def preview_execution(
         expected_keys = {row[provider_field] for row in rows
                          if row["feature"] == selected_feature and row.get(provider_field)}
         observed_keys = {issue.get(provider_field) for issue in owned}
+        observed_keys.update(issue.get(provider_field) for issue in result.get("skipped", []))
         deleted_keys = {issue.get(provider_field) for issue in result["excluded"]
                         if issue.get("reason") == "confirmed-source-deletion"}
         missing_keys = sorted(expected_keys - observed_keys - deleted_keys)
@@ -207,9 +218,22 @@ def preview_execution(
                              "existing_targets": targets,
                              "action": "consolidate" if len(targets) > 1 else "update" if targets else "create",
                              "requires_analyst_review": True})
+        from tracker_release import qa_groups
+        skipped_keys = {issue.get(provider_field) for issue in result.get("skipped", [])}
+        group_rows = [row for row in rows if not row.get(provider_field) or row.get(provider_field) not in skipped_keys]
+        groups = qa_groups(project, selected_feature, group_rows, owned, result.get("scope", {}),
+                           set(result.get("release_member_keys", [issue.get(provider_field) for issue in result["issues"]])))
+        if groups is not None:
+            if result.get("scope", {}).get("kind") == "release" and any(
+                "result-limit" in limit or "result-incomplete" in limit for limit in result.get("limitations", [])
+            ):
+                groups = {"ready": False, "reason": "release-collection-incomplete", "path": groups["path"]}
+            qa_proposals[-1]["partition"] = groups
+            qa_proposals[-1]["action"] = "review-partition" if groups.get("changed") else "update-groups"
     scope = result.get("scope", {})
     provider = scope.get("provider")
     returned = {issue.get(str(provider) + "_key") for issue in result["issues"]}
+    returned.update(issue.get(str(provider) + "_key") for issue in result.get("skipped", []))
     returned.update(issue.get(str(provider) + "_key") for issue in result["excluded"]
                     if issue.get("reason") == "confirmed-source-deletion")
     missing_candidates = [
@@ -218,7 +242,7 @@ def preview_execution(
          "next_action": "verify-absence-or-access", "deletion_allowed": False}
         for key in scope.get("ids", []) if scope.get("kind") == "tasks" and key not in returned
     ]
-    if select_features(project, quarter, feature) != selected:
+    if selection() != selected:
         raise ValueError("Область изменилась во время проверки; повтори execution-preview")
     if repository_state(project) != before or registry_paths(project) != paths or any(
         not (project / relative).is_file()

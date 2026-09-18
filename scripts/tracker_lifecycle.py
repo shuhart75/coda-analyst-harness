@@ -6,6 +6,7 @@ from typing import Mapping
 
 
 ROLES = {"AN", "BE", "FE", "QA"}
+DEVELOPERS = {"BE", "FE"}
 
 
 @dataclass(frozen=True)
@@ -99,13 +100,11 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
         return participants.get(identity)
 
     current_role = role(history.current_assignee)
-    if current_role in {"BE", "FE"} and current_role != history.development_role:
-        raise ValueError("Assignment role conflicts with the confirmed task role")
     initial_assignment = next((event.assignee for event in history.events if event.assignee is not None), None)
     if initial_assignment is not None and len(initial_assignment) != 2:
         raise ValueError("An assignment change needs old and new identities")
     effective_assignee = initial_assignment[0] if initial_assignment is not None else history.current_assignee
-    developer_seen = role(effective_assignee) == history.development_role
+    developer_seen = role(effective_assignee) in DEVELOPERS
     for event in history.events:
         moment = timestamp(event.at)
         if not event.event_id or (event.assignee is None and event.status is None):
@@ -131,8 +130,6 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
             last_assignee, assignee_seen = new_assignee, True
             effective_assignee = new_assignee
             old_role, new_role = role(old_assignee), role(new_assignee)
-            if any(value in {"BE", "FE"} and value != history.development_role for value in (old_role, new_role)):
-                raise ValueError("Assignment role conflicts with the confirmed task role")
         old_status = new_status = None
         if event.status is not None:
             if len(event.status) != 2:
@@ -146,13 +143,13 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
                     old_status = last_status
             last_status, status_seen = new_status, True
 
-        handoff = old_role == history.development_role and new_role == "QA"
+        handoff = old_role in DEVELOPERS and new_role == "QA"
         if new_role == "QA" and first_qa_assignment is None:
             first_qa_assignment = moment
-        qa_return = old_role == "QA" and new_role == history.development_role
-        assigned_developer = role(effective_assignee) == history.development_role
-        start_development = not developer_seen and new_role == history.development_role and old_role != "QA"
-        developer_seen = developer_seen or assigned_developer or old_role == history.development_role
+        qa_return = old_role == "QA" and new_role in DEVELOPERS
+        assigned_developer = role(effective_assignee) in DEVELOPERS
+        start_development = not developer_seen and new_role in DEVELOPERS and old_role != "QA"
+        developer_seen = developer_seen or assigned_developer or old_role in DEVELOPERS
         finish_development = handoff or (
             new_status in codes["development_completed"] | codes["qa_started"]
             and new_status not in codes["qa_completed"]
@@ -232,7 +229,7 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
     before_qa = codes["not_started"] | codes["development_started"] | codes["development_completed"] | codes["development_review"]
     qa_not_started = (not_started and current_status in before_qa) or (exact and current_status in before_qa and current_role in {"AN", "BE", "FE"})
     qa_state = "completed" if qa_completed else "in-progress" if qa_active else "not-started" if qa_not_started else "unknown"
-    progress = 100 if development_closed else 0 if development_state == "not-started" else 90 if current_role == history.development_role and current_status in codes["development_review"] else None
+    progress = 100 if development_closed else 0 if development_state == "not-started" else 90 if current_role in DEVELOPERS and current_status in codes["development_review"] else None
     if cancelled:
         development_state = qa_state = "cancelled"
         progress = None

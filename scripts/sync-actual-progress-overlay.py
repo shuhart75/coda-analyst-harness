@@ -136,6 +136,7 @@ class Task:
     progress: int | None
     related_stories: list[str]
     completed_by: str = ""
+    qa_members: tuple[str, ...] = ()
 
 
 @dataclass
@@ -517,7 +518,7 @@ def explicit_executor(task: Task, team_resources: dict[str, list[str]]) -> str:
         return ""
     role = resource_role(normalized)
     task_role = role_for_task(task)
-    if role and task_role in ROLE_COLORS and role != task_role:
+    if role and task_role in ROLE_COLORS and role != task_role and {role, task_role} != {"BE", "FE"}:
         return ""
     if role and normalized not in team_resources.get(role, []):
         return ""
@@ -673,6 +674,35 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
             )
             if role_for_task(tasks[task_id]) == "QA":
                 validate_estimate(row.get("Оценка (дн)" if russian else "Estimate (дн)", ""), path, task_id)
+    groups_path = feature_dir / "execution/qa-groups.json"
+    if groups_path.exists():
+        from decimal import Decimal
+        groups = json.loads(groups_path.read_text(encoding="utf-8"))
+        if groups.get("schema_version") != 1:
+            raise ValueError(f"{groups_path}: неизвестная схема QA-групп")
+        seen, qa_ids, total = set(), set(), Decimal(0)
+        for group in groups["groups"]:
+            task_id, members = group["task_id"], group["members"]
+            task = tasks.get(task_id)
+            if not task or role_for_task(task) != "QA" or task_id in qa_ids:
+                raise ValueError(f"{groups_path}: QA-задача отсутствует или повторяется")
+            if not members or len(set(members)) != len(members) or seen & set(members):
+                raise ValueError(f"{groups_path}: состав QA-групп пуст или пересекается")
+            if any(member not in tasks or role_for_task(tasks[member]) not in {"BE", "FE"} for member in members):
+                raise ValueError(f"{groups_path}: неизвестная BE/FE-задача")
+            estimate = Decimal(str(group["estimate"]))
+            if not estimate.is_finite() or estimate <= 0 or estimate != Decimal(str(task.estimate)):
+                raise ValueError(f"{groups_path}: оценка QA не совпадает с реестром")
+            total += estimate
+            seen.update(members)
+            qa_ids.add(task_id)
+            task.qa_members = tuple(members)
+        expected = {task.task_id for task in tasks.values() if task.kind == "real"
+                    and role_for_task(task) in {"BE", "FE"} and task.status.lower() not in EXCLUDED_STATUSES}
+        if seen != expected or qa_ids != {task.task_id for task in tasks.values() if task.kind == "real" and role_for_task(task) == "QA"}:
+            raise ValueError(f"{groups_path}: состав QA не покрывает текущее исполнение")
+        if total != Decimal(str(groups["total_estimate"])):
+            raise ValueError(f"{groups_path}: сумма QA-оценок изменилась")
     return tasks
 
 
@@ -970,6 +1000,7 @@ def task_schedules(
             (item, schedules[item_id]) for item_id, item in tasks.items()
             if item_id in schedules and task_scope(item_id) == task_scope(task_id)
             and item.status.lower() not in EXCLUDED_STATUSES and role_for_task(item) != "QA"
+            and (not task.qa_members or item.task_id in task.qa_members)
         ]
         frontend = [scheduled for item, scheduled in feature_schedules if role_for_task(item) == "FE" and scheduled.finish]
         if frontend:

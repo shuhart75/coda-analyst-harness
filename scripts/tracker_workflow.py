@@ -21,7 +21,7 @@ STOP_EXIT = 3
 MAX_RESULTS = 50
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 PROVIDERS = ("sbertrek", "jira")
-SCOPE_KINDS = ("epic", "tasks", "combined")
+SCOPE_KINDS = ("epic", "tasks", "combined", "release")
 RESPONSE_SOURCES = ("mcp-file", "inline-json-capture")
 ROLES = ("AN", "BE", "FE", "QA")
 RESOLUTION_CHOICES = ("sbertrek", "jira", "custom")
@@ -311,6 +311,10 @@ def make_step(provider: str, stage: str, query: str, *, requested_keys: list[str
 
 def primary_step(scope: dict) -> dict:
     provider, kind, ids = scope["provider"], scope["kind"], scope["ids"]
+    if kind == "release":
+        value = json.dumps(ids[0], ensure_ascii=False)
+        query = f"fixVersion = {value}" if provider == "jira" else f"release-members:{value}"
+        return make_step(provider, f"{provider}-source-release", query)
     if kind == "combined" or (kind == "epic" and len(ids) > 1):
         epics = scope.get("epic_ids", []) if kind == "combined" else ids
         clauses = [(jql_epic(key) if provider == "jira" else tql_epic(key)) for key in epics]
@@ -433,7 +437,9 @@ def next_action(run: dict) -> dict:
             "selection": {"query_semantics": step["query"], "requested_keys": step["requested_keys"], "epic_key": step["epic_key"]},
             "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
             "requirements": ["read-only", "exact-scope", "all-statuses", "full-response", "report-pagination",
-                             "request-all-role-estimates", "missing-field-is-not-zero", "preserve-raw-response"],
+                             "request-all-role-estimates", "missing-field-is-not-zero", "preserve-raw-response",
+                             "task-role-from-prefix-not-assignee", "skip-outside-supported-roles",
+                             "history-before-status-or-date-application"],
             "ingest_command": [sys.executable, ctl, "ingest", "--run-id", run["run_id"], "--step-id", step["step_id"], "--response-file", "<full-json-path>", "--response-source", "mcp-file", "--call-file", "<call-json-path>"],
         }
     return {
@@ -717,7 +723,8 @@ def normalized_role_marker(value: str) -> str | None:
 
 
 def role_from_summary(summary: str) -> str | None:
-    bracketed = re.findall(r"\[\s*([^\]]+)\s*\]", summary[:64])
+    prefix = re.match(r"\s*((?:\[[^\]]+\]\s*)+)", summary)
+    bracketed = re.findall(r"\[\s*([^\]]+)\s*\]", prefix.group(1)) if prefix else []
     if bracketed:
         roles = {role for item in bracketed if (role := normalized_role_marker(item))}
         return next(iter(roles)) if len(roles) == 1 else None
@@ -987,6 +994,10 @@ def ingest_command(args: argparse.Namespace) -> int:
             cards: list[dict] = []
         else:
             cards = [compact_issue(record, step["provider"], forced_epic=step.get("epic_key")) for record in records]
+            if step["stage"].endswith("source-release"):
+                release = working["scope"]["ids"][0]
+                if any(not any(release in {item.get("key"), item.get("name")} for item in card["releases"]) for card in cards):
+                    raise ValueError("Every release card must expose membership in the selected release")
             evidence = f"{step['step_id']}:{response_sha}"
             for card in cards:
                 card["evidence"] = evidence
@@ -1278,6 +1289,8 @@ def work_items(issues: list[dict]) -> list[dict]:
             continue
         identity = issue.get("jira_key") or issue.get("sbertrek_key")
         for role in ROLES:
+            if issue.get("task_role") and role in {"BE", "FE"} and role != issue["task_role"]:
+                continue
             estimate = issue.get("role_estimates", {}).get(role)
             if not isinstance(estimate, dict) or not isinstance(estimate.get("value"), (int, float)) or estimate["value"] <= 0:
                 continue
@@ -1347,6 +1360,16 @@ def reconcile_data(run: dict) -> dict:
             "development": development_state(None, jira, run["config"]),
         })
         issues.append(issue)
+    skipped = []
+    if run.get("role_policy") == "prefix-v1":
+        skipped = [{**issue, "reason": "outside-supported-roles"} for issue in issues
+                   if role_from_summary(issue.get("summary") or "") is None]
+        issues = [issue for issue in issues if role_from_summary(issue.get("summary") or "") is not None]
+        for issue in issues:
+            issue["task_role"] = role_from_summary(issue["summary"])
+        skipped_keys = {(issue.get("sbertrek_key"), issue.get("jira_key")) for issue in skipped}
+        discrepancies = [item for item in discrepancies
+                         if (item.get("sbertrek_key"), item.get("jira_key")) not in skipped_keys]
     issues.sort(key=lambda item: (item.get("sbertrek_key") or "", item.get("jira_key") or ""))
     for key, evidence in run.get("confirmed_absent", {}).items():
         excluded.append({"jira_key": key if evidence["provider"] == "jira" else None,
@@ -1379,6 +1402,7 @@ def reconcile_data(run: dict) -> dict:
         "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": run["run_id"],
         "scope": run["scope"], "issues": issues, "work_items": role_work_items,
         "excluded": excluded, "discrepancies": discrepancies, "counts": counts,
+        **({"skipped": skipped} if run.get("role_policy") == "prefix-v1" else {}),
         "summary": {"story_points_total": overall_total, "role_totals_person_days": role_totals},
         "limitations": limitations,
     }
@@ -1398,6 +1422,8 @@ def render_report(result: dict) -> str:
         assignee = (item.get("assignee") or {}).get("name") or "—"
         values = [str(item.get("role_estimates", {}).get(role, {}).get("value", "—")) for role in ROLES]
         lines.append(f"| {item.get('sbertrek_key') or '—'} | {item.get('jira_key') or '—'} | {item['summary']} | {item['status']} | {assignee} | {' | '.join(values)} |")
+    for item in result.get("skipped", []):
+        lines.append(f"Пропущено вне AN/BE/FE/QA: {item.get('jira_key') or item.get('sbertrek_key')} — {item.get('summary')}")
     lines.extend(["", f"## Ролевые задачи ({result['counts']['work_items']})", ""])
     for item in result["work_items"]:
         assignee = (item.get("assignee") or {}).get("name") or "—"
@@ -1432,6 +1458,8 @@ def official_text(result: dict) -> str:
             f"- SberTrek {sbertrek_key}; Jira {jira_key}; {summary}; "
             f"статус: {status}; исполнитель: {assignee}; оценки: {estimates}."
         )
+    for item in result.get("skipped", []):
+        lines.append(f"Пропущено вне AN/BE/FE/QA: {item.get('jira_key') or item.get('sbertrek_key')} — {item.get('summary')}")
     lines.append("Ролевые задачи:")
     for item in result["work_items"]:
         assignee = " ".join(str((item.get("assignee") or {}).get("name") or "-").split())
@@ -1553,7 +1581,14 @@ def begin_command(args: argparse.Namespace) -> int:
         return STOP_EXIT
     if args.scope_provider == "jira" and not config["jira_enabled"]:
         raise ValueError("Jira отключена в tracker-config.json")
-    ids = unique_keys(args.scope_id)
+    if args.scope_kind == "release":
+        if not args.adaptive or args.compare_trackers or len(args.scope_id) != 1:
+            raise ValueError("release requires one release and a single-provider adaptive run")
+        ids = args.scope_id
+        if not ids[0].strip() or ids[0] != ids[0].strip() or any(ord(char) < 32 for char in ids[0]):
+            raise ValueError("Release identity must be a nonempty single-line name or ID")
+    else:
+        ids = unique_keys(args.scope_id)
     if args.scope_kind == "epic" and len(ids) != 1 and (not args.adaptive or args.compare_trackers):
         raise ValueError("Для epic требуется ровно один scope-id")
     scope = {"kind": args.scope_kind, "provider": args.scope_provider, "ids": ids, "label": args.label, "source": args.scope_source, "intent": args.intent}
@@ -1586,6 +1621,7 @@ def begin_command(args: argparse.Namespace) -> int:
         "absent_jira_keys": [], "limitations": [], "failure": None,
         "conflict_resolutions": {}, "following_conflict_choice": None,
         "collection_mode": "adaptive" if args.adaptive else "legacy",
+        **({"role_policy": "prefix-v1"} if args.adaptive else {}),
     }
     root = run_root(run_id)
     root.mkdir(parents=True)
@@ -1730,17 +1766,18 @@ def result_status_command(args: argparse.Namespace) -> int:
     completion, result = verified_result(args.run_id)
     root = run_root(args.run_id)
     planning_allowed = completion["planning_application_allowed"]
+    preview_command = "release-preview" if result["scope"]["kind"] == "release" else "execution-preview"
     completion["planning_update"] = {
         "state": "pending" if planning_allowed else "not-requested",
         "actualization_complete": False,
         "next_action": {
-            "type": "execution-preview",
+            "type": preview_command,
             "command": [
                 sys.executable, str(Path(__file__).with_name("trackerctl.py")),
-                "execution-preview", "--run-id", args.run_id,
+                preview_command, "--run-id", args.run_id,
                 "--project-root", "<resolved-project-root>",
             ],
-            "required_selection": "--quarter YYYY-QN or --feature feature",
+            "required_selection": "release members" if preview_command == "release-preview" else "--quarter YYYY-QN or --feature feature",
             "mode": "execution-update",
             "contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-actualization.md"),
             "run_id": args.run_id,
@@ -1777,6 +1814,7 @@ def execution_preview_command(args: argparse.Namespace) -> int:
             "type": "collect-history", "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
             "provider": result["scope"]["provider"],
             "required_before_date_proposals": True,
+            "required_before_status_proposals": True,
             "command": [sys.executable, str(Path(__file__).with_name("trackerctl.py")), "history-review",
                         "--run-id", args.run_id, "--project-root", args.project_root,
                         "--manifest", "<history-manifest-json>"],
@@ -1852,6 +1890,11 @@ def parser() -> argparse.ArgumentParser:
     qa_check.add_argument('--project-root', required=True)
     from tracker_qa_application import check_qa_application
     qa_check.set_defaults(handler=check_qa_application)
+    release = commands.add_parser("release-preview")
+    release.add_argument("--run-id", required=True)
+    release.add_argument("--project-root", required=True)
+    from tracker_release import release_preview_command
+    release.set_defaults(handler=release_preview_command)
     error = commands.add_parser("ingest-error"); error.add_argument("--run-id", required=True); error.add_argument("--step-id", required=True); error.add_argument("--error-file", required=True); error.set_defaults(handler=ingest_error_command)
     reconcile = commands.add_parser("reconcile"); reconcile.add_argument("--run-id", required=True); reconcile.set_defaults(handler=reconcile_command)
     resolve = commands.add_parser("resolve-conflict"); resolve.add_argument("--run-id", required=True); resolve.add_argument("--task-key", required=True); resolve.add_argument("--choice", choices=RESOLUTION_CHOICES, required=True); resolve.add_argument("--apply-to-following", action="store_true"); resolve.add_argument("--custom-file"); resolve.set_defaults(handler=resolve_conflict_command)
