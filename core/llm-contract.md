@@ -8,6 +8,9 @@ Communicate with the analyst in Russian. This includes intermediate updates, que
 
 ## Session bootstrap
 
+При переносе серверов documents и coda следуй `core/documents-relocation.md`:
+проверяй историю и незавершённый импорт, сохраняй запрет push для роли code.
+
 Before changing artifacts, read:
 
 1. `AGENTS.md`

@@ -34,7 +34,7 @@ class HarnessTests(unittest.TestCase):
             ("git", "init", "-b", "main", str(documents)),
             ("git", "-C", str(documents), "config", "user.name", "Harness Test"),
             ("git", "-C", str(documents), "config", "user.email", "harness@example.test"),
-            ("git", "-C", str(documents), "remote", "add", "origin", "ssh://git@stash.delta.sbrf.ru:7999/rscon/documents.git"),
+            ("git", "-C", str(documents), "remote", "add", "origin", "ssh://sc@api.sc-ci.sber.ru:7998/RSCON/documents.git"),
             ("git", "-C", str(documents), "add", "."),
             ("git", "-C", str(documents), "commit", "-m", "initial"),
         ):
@@ -51,7 +51,7 @@ class HarnessTests(unittest.TestCase):
             ("git", "init", "-b", "main", str(coda)),
             ("git", "-C", str(coda), "config", "user.name", "Harness Test"),
             ("git", "-C", str(coda), "config", "user.email", "harness@example.test"),
-            ("git", "-C", str(coda), "remote", "add", "origin", "ssh://git@stash.delta.sbrf.ru:7999/rscon/coda.git"),
+            ("git", "-C", str(coda), "remote", "add", "origin", "ssh://sc@api.sc-ci.sber.ru:7998/RSCON/coda.git"),
             ("git", "-C", str(coda), "add", "."),
             ("git", "-C", str(coda), "commit", "-m", "initial"),
         ):

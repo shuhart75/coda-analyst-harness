@@ -6,8 +6,7 @@
       "id": "analytics",
       "repository_id": "documents",
       "accepted_remote_urls": [
-        "ssh://git@stash.delta.sbrf.ru:7999/rscon/documents.git",
-        "https://stash.delta.sbrf.ru/scm/rscon/documents.git"
+        "ssh://sc@api.sc-ci.sber.ru:7998/RSCON/documents.git"
       ]
     }
   },
@@ -34,8 +33,7 @@
         "relative_to_analytical": "../coda"
       },
       "accepted_remote_urls": [
-        "ssh://git@stash.delta.sbrf.ru:7999/rscon/coda.git",
-        "https://stash.delta.sbrf.ru/scm/rscon/coda.git"
+        "ssh://sc@api.sc-ci.sber.ru:7998/RSCON/coda.git"
       ],
       "expected_branch": null,
       "contours": {

@@ -19,8 +19,8 @@ from commit_message_policy import HOOK_MARKER
 
 
 DEFAULT_REPOSITORIES = {
-    "documents": "ssh://git@stash.delta.sbrf.ru:7999/rscon/documents.git",
-    "coda": "ssh://git@stash.delta.sbrf.ru:7999/rscon/coda.git",
+    "documents": "ssh://sc@api.sc-ci.sber.ru:7998/RSCON/documents.git",
+    "coda": "ssh://sc@api.sc-ci.sber.ru:7998/RSCON/coda.git",
     "changeswork-copy": "https://github.com/shuhart75/changeswork-copy.git",
 }
 ENVIRONMENT_URLS = {
