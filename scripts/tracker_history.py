@@ -139,6 +139,23 @@ def history_review_command(args) -> int:
         raise ValueError(f"Invalid history manifest or response: {error}") from error
 
 
+def pin_history_response(run_id: str, path: Path, raw: bytes, provenance: dict | None = None) -> None:
+    from tracker_workflow import run_root, digest_bytes, digest_object, load_json, save_json
+
+    root = run_root(run_id) / "history-sources"
+    receipts = [(root / (digest_object(str(path.resolve())) + ".json"),
+                 {"path": str(path.resolve()), "sha256": digest_bytes(raw)})]
+    if provenance is not None:
+        receipts.append((root / (digest_object(provenance) + ".json"),
+                         {"provenance": provenance, "sha256": digest_bytes(raw)}))
+    for receipt, expected in receipts:
+        if receipt.exists() and load_json(receipt) != expected:
+            raise ValueError("Previously reviewed raw history changed; keep the original response and record analyst decisions separately")
+    for receipt, expected in receipts:
+        if not receipt.exists():
+            save_json(receipt, expected)
+
+
 def review_history(args) -> int:
     from tracker_execution import preview_execution, registry_paths
     from tracker_registry import read_registry
@@ -168,6 +185,13 @@ def review_history(args) -> int:
         raise ValueError("History provider must match the selected single tracker")
     if provider == "jira" and not load_run(args.run_id)["config"]["jira_enabled"]:
         raise ValueError("Jira is disabled for this run")
+    known_roles = load_run(args.run_id)["config"].get("participants", {}).get(provider, {})
+    for identity, role in participants.items():
+        known = known_roles.get(identity)
+        if isinstance(known, dict):
+            known = known.get("role")
+        if known and known != role:
+            raise ValueError(f"Participant role contradicts the configured role: {identity}")
     for entry in manifest["responses"]:
         if entry["provider"] != provider:
             raise ValueError("Do not mix participant/status namespaces in one review")
@@ -182,9 +206,10 @@ def review_history(args) -> int:
         observed = timestamp(datetime.fromisoformat(entry["call"]["captured_at"]))
         if observed > datetime.now(timezone.utc):
             raise ValueError("Capture time is in the future")
-        _, raw, payload = response_file(entry["response_file"], args.run_id)
+        source_path, raw, payload = response_file(entry["response_file"], args.run_id)
         if digest_bytes(raw) != entry["sha256"]:
             raise ValueError("History response checksum changed")
+        pin_history_response(args.run_id, source_path, raw, {"provider": provider, "key": entry["key"], "call": entry["call"]})
         history, limits = decode_history(payload, entry, observed)
         history = replace(history, task_key=f"{entry['key']}/{entry['role']}")
         histories[identity] = (targets[0]["feature"], history)
@@ -254,11 +279,17 @@ def review_history(args) -> int:
     destination = run_root(args.run_id) / "history" / (digest_object(output) + ".json")
     save_json(destination, output)
     payload = {**output, "review_file": str(destination)}
-    if qa_application:
+    if not pending_history:
         payload['after_registry_application'] = {
             'type': 'qa-application-check', 'required': True,
             'command': ['python3', str(Path(__file__).with_name('trackerctl.py')), 'qa-application-check',
                         '--project-root', str(project), '--review-file', str(destination)],
+        }
+        payload['before_registry_application'] = {
+            'type': 'application-preflight', 'required': True,
+            'features': preview['selected_features'],
+            'command_template': ['python3', str(Path(__file__).with_name('trackerctl.py')),
+                                 'application-preflight', '--project-root', str(project), '--feature', '<owning-feature>'],
         }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0

@@ -116,7 +116,7 @@ def preview_execution(
                     "jira_key": jira, "sbertrek_key": sbertrek,
                     "invalid_key": jira_invalid or sber_invalid,
                     "saved_facts": {name: row.get(name, "") for name in
-                                    ("Actual Start", "Actual Finish", "Completed By", "Status", "Progress %", "Details", "Notes")},
+                                    ("Actual Start", "Actual Finish", "Completed By", "Status", "Progress %", "Estimate", "Details", "Notes")},
                     "uncommitted": relative not in before["tracked"] or relative in before["changed"],
                 }
                 rows.append(reference)
@@ -235,5 +235,10 @@ def preview_execution(
         "blockers": blockers, "warnings": warnings,
         "ownership_ready": not blockers, "writes_performed": False,
         "creation_allowed": False, "actualization_complete": False,
+        "before_any_registry_write": {
+            "type": "application-preflight", "required": True,
+            "features": list(selected), "main_allowed": False,
+            "includes": ["new-work-items", "identity-columns", "epic-associations", "facts"],
+        },
         "next_action": {"type": "resolve-ownership" if blockers else "review-execution-facts"},
     }

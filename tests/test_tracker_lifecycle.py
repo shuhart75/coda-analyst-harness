@@ -213,14 +213,14 @@ class TrackerLifecycleTests(unittest.TestCase):
             [replace(start, at=moment(21))],
             [start, self.assigned('earlier', 1, 'developer', 'tester')],
             [start, self.assigned('same-time', 2, 'developer', 'tester')],
-            [start, self.assigned('gap', 3, 'analyst', 'tester')],
             [self.assigned('wrong-role', 2, 'analyst', 'backend')],
         ]
         for events in invalid:
             with self.subTest(events=events), self.assertRaises(ValueError):
                 self.task(self.history(events, 'tester'))
-        with self.assertRaisesRegex(ValueError, 'snapshot'):
-            self.task(self.history([start], 'tester'))
+        result = self.task(self.history([start], 'tester'))
+        self.assertIn('assignment-snapshot-gap', result['limitations'])
+        self.assertIsNone(result['development']['started_at'])
 
     def test_feature_completion_requires_every_confirmed_qa_member(self):
         done = self.finished()
@@ -307,8 +307,10 @@ class TrackerLifecycleTests(unittest.TestCase):
             ([self.status('start', 2, 'created', 'development')], 'done'),
             ([self.status('start', 2, 'created', 'development'), self.status('gap', 3, 'created', 'done')], 'done'),
         ]:
-            with self.subTest(events=events), self.assertRaises(ValueError):
-                self.task(self.history(events, 'developer', current))
+            with self.subTest(events=events):
+                result = self.task(self.history(events, 'developer', current))
+                self.assertTrue(result['limitations'])
+                self.assertIsNone(result['qa']['finished_at'])
         with self.assertRaises(ValueError):
             self.task(replace(self.history(), observed_at=moment(20).replace(tzinfo=None)))
 

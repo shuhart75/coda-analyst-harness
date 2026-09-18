@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 import hashlib
 import json
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 
@@ -28,13 +29,30 @@ def confirmed_qa_updates(comparison: dict, confirmations: list[dict]) -> list[di
         kind = confirmation['kind']
         field_names = {'exact-interval': ('Actual Start', 'Actual Finish'),
                        'exact-start': ('Actual Start',), 'exact-finish': ('Actual Finish',),
-                       'completed-by': ('Completed By',)}
-        if kind not in field_names or set(confirmation['fields']) != set(field_names[kind]):
+                       'completed-by': ('Completed By',), 'keep-current': ()}
+        reviewed_fields = {'Actual Start', 'Actual Finish', 'Completed By', 'Status', 'Progress %', 'Estimate'}
+        if kind == 'reviewed-fields':
+            valid_fields = bool(confirmation['fields']) and set(confirmation['fields']) <= reviewed_fields
+        else:
+            valid_fields = kind in field_names and set(confirmation['fields']) == set(field_names[kind])
+        if not valid_fields:
             raise ValueError('Confirmation kind and date fields do not match')
         fields = confirmation['fields']
-        for value in fields.values():
-            if not isinstance(value, str) or date.fromisoformat(value).isoformat() != value:
-                raise ValueError('QA dates require YYYY-MM-DD')
+        for name, value in fields.items():
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError('QA fields require explicit nonempty registry strings')
+            if name in {'Actual Start', 'Actual Finish', 'Completed By'}:
+                if date.fromisoformat(value).isoformat() != value:
+                    raise ValueError('QA dates require YYYY-MM-DD')
+            elif name in {'Progress %', 'Estimate'}:
+                try:
+                    number = Decimal(value)
+                except InvalidOperation as error:
+                    raise ValueError('QA estimate/progress must be numeric') from error
+                if not number.is_finite() or number < 0 or (name == 'Progress %' and number > 100):
+                    raise ValueError('QA estimate/progress is outside its allowed range')
+            elif name == 'Status' and value not in {'not-started', 'in-progress', 'completed', 'done', 'cancelled'}:
+                raise ValueError('Unsupported QA status')
         target = targets[0]
         expected = {**target['current'], **fields}
         start, finish, bound = (expected.get(name) for name in ('Actual Start', 'Actual Finish', 'Completed By'))
@@ -45,7 +63,7 @@ def confirmed_qa_updates(comparison: dict, confirmations: list[dict]) -> list[di
         updates.append({'feature': identity[0], 'task_id': identity[1], 'registry': target['registry'],
                         'fields_to_write': fields,
                         'expected_registry_fields': {name: expected.get(name, '') for name in
-                                                     ('Actual Start', 'Actual Finish', 'Completed By')},
+                                                     ('Actual Start', 'Actual Finish', 'Completed By', 'Status', 'Progress %', 'Estimate')},
                         'previous': target['current'],
                         'confirmation': confirmation, 'verification_required': True,
                         'expected_rendering': 'actual-interval' if start not in (None, '', '-', '—') and finish not in (None, '', '-', '—') else 'no-exact-interval'})
@@ -68,6 +86,9 @@ def check_qa_application(args) -> int:
     updates = review.get('qa_application', [])
     if not updates:
         raise ValueError('No explicit QA confirmations in this review')
+    required = {row['feature'] for row in review.get('comparison', {}).get('rows', []) if row['role'] == 'QA'}
+    if required - {update['feature'] for update in updates}:
+        raise ValueError('Every feature QA requires a reviewed application or keep-current decision')
     errors = []
     for update in updates:
         registry = (project / update['registry']).resolve()

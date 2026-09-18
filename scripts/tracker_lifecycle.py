@@ -124,7 +124,10 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
                 raise ValueError("An assignment change needs old and new identities")
             old_assignee, new_assignee = event.assignee
             if assignee_seen and old_assignee != last_assignee:
-                raise ValueError("Discontinuous assignment history")
+                limitations.add("assignment-history-gap")
+                evidence.append({"event_id": event.event_id, "at": moment.isoformat(),
+                                 "signals": ["repeated-assignment" if new_assignee == last_assignee else "assignment-history-gap"]})
+                old_assignee = last_assignee
             last_assignee, assignee_seen = new_assignee, True
             effective_assignee = new_assignee
             old_role, new_role = role(old_assignee), role(new_assignee)
@@ -136,7 +139,11 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
                 raise ValueError("A status change needs old and new codes")
             old_status, new_status = map(status_code, event.status)
             if old_status == new_status or (status_seen and old_status != last_status):
-                raise ValueError("Discontinuous or unchanged status transition")
+                limitations.add("status-history-gap")
+                evidence.append({"event_id": event.event_id, "at": moment.isoformat(),
+                                 "signals": ["repeated-status" if new_status == last_status else "status-history-gap"]})
+                if status_seen:
+                    old_status = last_status
             last_status, status_seen = new_status, True
 
         handoff = old_role == history.development_role and new_role == "QA"
@@ -190,12 +197,14 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
             evidence.append({"event_id": event.event_id, "at": moment.isoformat(), "signals": signals})
 
     if assignee_seen and last_assignee != history.current_assignee:
-        raise ValueError("Assignment history does not reach the supplied snapshot")
+        limitations.add("assignment-snapshot-gap")
     if status_seen and last_status != current_status:
         if last_status in codes["qa_completed"] and current_status in codes["qa_completed"]:
             limitations.add("terminal-status-transition-not-collected")
         else:
-            raise ValueError("Status history does not reach the supplied snapshot")
+            limitations.add("status-snapshot-gap")
+            qa_completed = False
+            qa_finish = None
     if current_status in codes["qa_completed"] and not returned:
         qa_completed = True
         development_closed = True
@@ -212,7 +221,7 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
         qa_start_bound = qa_start_bound or observed
     if current_status not in set().union(*codes.values()):
         limitations.add(f"current-status-unmapped:{history.current_status}")
-    exact = history.complete and "terminal-status-transition-not-collected" not in limitations and not any(item.startswith("participant-role-unknown:") for item in limitations)
+    exact = history.complete and not limitations
 
     def formatted(value: datetime | None) -> str | None:
         return value.isoformat() if value else None

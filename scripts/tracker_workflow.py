@@ -21,7 +21,7 @@ STOP_EXIT = 3
 MAX_RESULTS = 50
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 PROVIDERS = ("sbertrek", "jira")
-SCOPE_KINDS = ("epic", "tasks")
+SCOPE_KINDS = ("epic", "tasks", "combined")
 RESPONSE_SOURCES = ("mcp-file", "inline-json-capture")
 ROLES = ("AN", "BE", "FE", "QA")
 RESOLUTION_CHOICES = ("sbertrek", "jira", "custom")
@@ -311,6 +311,12 @@ def make_step(provider: str, stage: str, query: str, *, requested_keys: list[str
 
 def primary_step(scope: dict) -> dict:
     provider, kind, ids = scope["provider"], scope["kind"], scope["ids"]
+    if kind == "combined" or (kind == "epic" and len(ids) > 1):
+        epics = scope.get("epic_ids", []) if kind == "combined" else ids
+        clauses = [(jql_epic(key) if provider == "jira" else tql_epic(key)) for key in epics]
+        if kind == "combined":
+            clauses.append(jql_keys(ids) if provider == "jira" else tql_units(ids))
+        return make_step(provider, f"{provider}-source-{kind}", " or ".join(f"({clause})" for clause in clauses))
     query = (jql_epic(ids[0]) if kind == "epic" else jql_keys(ids)) if provider == "jira" else (tql_epic(ids[0]) if kind == "epic" else tql_units(ids))
     return make_step(provider, f"{provider}-source-{kind}", query, requested_keys=ids if kind == "tasks" else [], epic_key=ids[0] if kind == "epic" else None)
 
@@ -334,7 +340,7 @@ def sber_jira_keys(run: dict) -> list[str]:
 
 def missing_source_keys(run: dict) -> list[str]:
     scope = run["scope"]
-    if scope.get("tracker_mode") != "single" or scope["kind"] != "tasks":
+    if scope.get("tracker_mode") != "single" or scope["kind"] not in {"tasks", "combined"}:
         return []
     return sorted(set(scope["ids"]) - card_keys(run, scope["provider"]) - set(run.get("confirmed_absent", {})))
 
@@ -426,7 +432,8 @@ def next_action(run: dict) -> dict:
             "step_id": step["step_id"], "stage": step["stage"],
             "selection": {"query_semantics": step["query"], "requested_keys": step["requested_keys"], "epic_key": step["epic_key"]},
             "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
-            "requirements": ["read-only", "exact-scope", "all-statuses", "full-response", "report-pagination"],
+            "requirements": ["read-only", "exact-scope", "all-statuses", "full-response", "report-pagination",
+                             "request-all-role-estimates", "missing-field-is-not-zero", "preserve-raw-response"],
             "ingest_command": [sys.executable, ctl, "ingest", "--run-id", run["run_id"], "--step-id", step["step_id"], "--response-file", "<full-json-path>", "--response-source", "mcp-file", "--call-file", "<call-json-path>"],
         }
     return {
@@ -1084,8 +1091,10 @@ def confirm_absence_command(args: argparse.Namespace) -> int:
 
     run = load_run(args.run_id)
     scope = run["scope"]
-    if scope.get("tracker_mode") != "single" or scope["kind"] != "tasks":
+    if scope.get("tracker_mode") != "single" or scope["kind"] not in {"tasks", "combined"}:
         raise ValueError("Подтверждение отсутствия требует однотрекерной области tasks")
+    if scope["kind"] == "combined" and pending_step(run) and pending_step(run)["stage"].endswith("source-combined"):
+        raise ValueError("Сначала получи объединённую область; отсутствие проверяется отдельным повторным чтением задач")
     if run["status"] not in {"tracker-read-collecting", "tracker-read-ready", "tracker-read-failed"}:
         raise ValueError("Нельзя менять завершённый run")
     key = normalize_key(args.key)
@@ -1545,9 +1554,15 @@ def begin_command(args: argparse.Namespace) -> int:
     if args.scope_provider == "jira" and not config["jira_enabled"]:
         raise ValueError("Jira отключена в tracker-config.json")
     ids = unique_keys(args.scope_id)
-    if args.scope_kind == "epic" and len(ids) != 1:
+    if args.scope_kind == "epic" and len(ids) != 1 and (not args.adaptive or args.compare_trackers):
         raise ValueError("Для epic требуется ровно один scope-id")
     scope = {"kind": args.scope_kind, "provider": args.scope_provider, "ids": ids, "label": args.label, "source": args.scope_source, "intent": args.intent}
+    if args.scope_kind == "combined":
+        if not args.adaptive or args.compare_trackers or not args.epic_id:
+            raise ValueError("combined требует однотрекерный adaptive run и --epic-id")
+        scope["epic_ids"] = unique_keys(args.epic_id)
+    elif args.epic_id:
+        raise ValueError("--epic-id используется только с combined")
     if args.compare_trackers and not args.adaptive:
         raise ValueError("--compare-trackers требует --adaptive")
     if args.adaptive:
@@ -1555,8 +1570,8 @@ def begin_command(args: argparse.Namespace) -> int:
     active = active_run_id()
     if active:
         existing = load_run(active)
-        identity_fields = ("kind", "provider", "ids", "intent")
-        if all(existing["scope"].get(field) == scope[field] for field in identity_fields):
+        identity_fields = ("kind", "provider", "ids", "intent", "epic_ids")
+        if all(existing["scope"].get(field) == scope.get(field) for field in identity_fields):
             if existing["scope"].get("tracker_mode", "compare") != scope.get("tracker_mode", "compare"):
                 raise ValueError("Режим существующего run отличается; не заменяй его без явного abandon-run")
             payload = status_payload(existing)
@@ -1800,6 +1815,18 @@ def parser() -> argparse.ArgumentParser:
     collection.add_argument("--adaptive", dest="adaptive", action="store_true", default=True)
     collection.add_argument("--legacy", dest="adaptive", action="store_false")
     begin.add_argument("--compare-trackers", action="store_true")
+    begin.add_argument("--epic-id", action="append", default=[])
+    from tracker_safety import application_preflight_command, identity_lookup_command
+    preflight = commands.add_parser("application-preflight")
+    preflight.add_argument("--project-root", required=True)
+    preflight.add_argument("--feature", required=True)
+    preflight.set_defaults(handler=application_preflight_command)
+    identity = commands.add_parser("identity-lookup")
+    identity.add_argument("--source-provider", choices=PROVIDERS, required=True)
+    identity.add_argument("--key", action="append", required=True)
+    identity.add_argument("--response-file")
+    identity.add_argument("--call-file")
+    identity.set_defaults(handler=identity_lookup_command)
     absence = commands.add_parser("confirm-absence")
     absence.add_argument("--run-id", required=True)
     absence.add_argument("--key", required=True)
