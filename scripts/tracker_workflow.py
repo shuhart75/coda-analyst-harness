@@ -896,6 +896,18 @@ def compact_issue(record: dict, provider: str, *, forced_epic: str | None = None
     }
 
 
+def response_json(raw: bytes, path: Path) -> Any:
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as error:
+        raise ValueError(f"Ответ MCP не является UTF-8: {path}, байт {error.start}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"Ответ MCP не является полным JSON: {path}, строка {error.lineno}, "
+            f"столбец {error.colno}: {error.msg}"
+        ) from error
+
+
 def response_file(path_value: str, run_id: str, *, require_json: bool = True) -> tuple[Path, bytes, Any | None]:
     path = Path(path_value).expanduser().resolve()
     try:
@@ -909,10 +921,7 @@ def response_file(path_value: str, run_id: str, *, require_json: bool = True) ->
         raise ValueError("Ответ MCP пуст или превышает допустимый размер")
     payload = None
     if require_json:
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError("Ответ MCP не является полным JSON") from error
+        payload = response_json(raw, path)
     return path, raw, payload
 
 

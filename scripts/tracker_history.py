@@ -5,7 +5,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 
-from tracker_lifecycle import HistoryEvent, StatusRules, TaskHistory, calculate_feature, timestamp
+from tracker_lifecycle import HistoryEvent, StatusRules, TaskHistory, calculate_feature, status_sets, timestamp
 
 
 def pointer(value, path: str):
@@ -95,32 +95,53 @@ JIRA_MAPPING = {
 }
 
 
-def decode_history(payload: dict, entry: dict, observed: datetime) -> tuple[TaskHistory, list[str]]:
+def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> tuple[TaskHistory, list[str]]:
     from tracker_workflow import digest_object
 
     mapping = entry.get("mapping", JIRA_MAPPING if entry["provider"] == "jira" else None)
-    if not isinstance(mapping, dict) or not set(JIRA_MAPPING).issubset(mapping):
-        raise ValueError("A complete source-path mapping is required for this provider")
-    key = pointer(payload, mapping["key"])
+    if not isinstance(mapping, dict):
+        raise ValueError("History mapping is required: select events or text and a task key source")
+    if "key" in mapping:
+        key = pointer(payload, mapping["key"])
+    elif "request_key" in mapping:
+        key = pointer(entry["call"]["arguments"], mapping["request_key"])
+    else:
+        raise ValueError("History mapping requires key or request_key from the actual call")
     if key != entry["key"]:
         raise ValueError("History response belongs to another task")
-    events = pointer(payload, mapping["events"])
-    if not isinstance(events, list):
-        raise ValueError("History events must be an array")
+    if "request_key" in mapping and pointer(entry["call"]["arguments"], mapping["request_key"]) != key:
+        raise ValueError("History request belongs to another task")
+    text_only = "text" in mapping
+    if text_only:
+        if "events" in mapping:
+            raise ValueError("Choose history events or text, not both")
+        text = pointer(payload, mapping["text"])
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("History text must be a nonempty verbatim response")
+        events = []
+    else:
+        required = {"events", "field", "assignment_field", "status_field"}
+        missing = sorted(required - mapping.keys())
+        if missing:
+            raise ValueError("History mapping is missing: " + ", ".join(missing))
+        if mapping["assignment_field"] == mapping["status_field"]:
+            raise ValueError("Assignment and status fields must differ")
+        events = pointer(payload, mapping["events"])
+        if not isinstance(events, list):
+            raise ValueError("History events must be an array")
     aliases = entry.get("status_aliases", {})
     if not isinstance(aliases, dict) or any(not isinstance(value, str) for value in aliases.values()):
         raise ValueError("Status aliases must map source values to explicit codes")
     limits = []
-    window = pagination_window(payload, mapping, entry.get("call", {}), len(events))
+    window = None if text_only else pagination_window(payload, mapping, entry.get("call", {}), len(events))
     complete = window == (0, len(events), len(events))
     if not complete:
         limits.append("history-completeness-not-proven")
+    if text_only:
+        limits.append("history-text-requires-dated-source")
     normalized = []
     for event in events:
-        at = timestamp(datetime.fromisoformat(pointer(event, mapping["at"])))
-        if at > observed:
-            raise ValueError("History event is newer than the captured snapshot")
-        changes = pointer(event, mapping["changes"])
+        changes = pointer(event, mapping["changes"]) if "changes" in mapping else [event]
         if not isinstance(changes, list):
             raise ValueError("History changes must be an array")
         fields = {}
@@ -131,11 +152,18 @@ def decode_history(payload: dict, entry: dict, observed: datetime) -> tuple[Task
             if field in fields:
                 raise ValueError("Ambiguous repeated field in one history event")
             prefix = "status" if field == mapping["status_field"] else "assignment"
-            before = optional(change, mapping.get(prefix + "_from", mapping["from"]))
-            after = optional(change, mapping.get(prefix + "_to", mapping["to"]))
+            values = []
+            for side in ("from", "to"):
+                path = mapping.get(prefix + "_" + side, mapping.get(side))
+                if path is None:
+                    raise ValueError(f"History mapping requires {prefix}_{side} or {side}")
+                values.append(optional(change, path))
+            before, after = values
             if field == mapping["status_field"]:
                 if before is None or after is None:
                     raise ValueError("Status transition requires both values")
+                if any(not isinstance(value, (str, int)) or isinstance(value, bool) for value in (before, after)):
+                    raise ValueError("Status transition requires scalar source values; map nested codes explicitly")
                 before, after = aliases.get(str(before), str(before)), aliases.get(str(after), str(after))
             elif any(value is not None and not isinstance(value, str) for value in (before, after)):
                 raise ValueError("Assignment identities must be strings or null")
@@ -143,23 +171,70 @@ def decode_history(payload: dict, entry: dict, observed: datetime) -> tuple[Task
                 raise ValueError("Assignment change contains neither old nor new identity")
             fields[field] = (before, after)
         if fields:
+            value = optional(event, mapping["at"]) if "at" in mapping else None
+            if value in (None, ""):
+                complete = False
+                if "history-event-timestamps-not-returned" not in limits:
+                    limits.append("history-event-timestamps-not-returned")
+                continue
+            try:
+                at = timestamp(datetime.fromisoformat(value))
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"Invalid history timestamp at {mapping['at']}: {value!r}") from error
+            if at > observed:
+                raise ValueError("History event is newer than the captured snapshot")
             normalized.append(HistoryEvent(
                 "source-sha256:" + digest_object(event), at,
                 fields.get(mapping["assignment_field"]), fields.get(mapping["status_field"]),
             ))
+    if "history-event-timestamps-not-returned" in limits:
+        normalized = []
     normalized.sort(key=lambda event: event.at)
-    status = pointer(payload, mapping["status"])
+    snapshot_mapping = entry["snapshot"]["mapping"] if snapshot is not None else mapping
+    snapshot_payload = snapshot if snapshot is not None else payload
+    if not isinstance(snapshot_mapping, dict):
+        raise ValueError("Snapshot mapping requires source paths")
+    if snapshot is not None and pointer(snapshot_payload, snapshot_mapping["key"]) != key:
+        raise ValueError("Snapshot response belongs to another task")
+    if "status" not in snapshot_mapping:
+        raise ValueError("A current snapshot status is required; use a separate snapshot response when needed")
+    status = pointer(snapshot_payload, snapshot_mapping["status"])
     try:
-        assignee = pointer(payload, mapping["assignee"])
-    except ValueError:
+        assignee = pointer(snapshot_payload, snapshot_mapping["assignee"])
+    except (KeyError, ValueError):
         assignee = None
         complete = False
         limits.append("snapshot-assignee-not-returned")
     if not isinstance(status, (str, int)) or isinstance(status, bool):
         raise ValueError("Snapshot status requires a source value")
+    if assignee is not None and (not isinstance(assignee, str) or not assignee):
+        raise ValueError("Snapshot assignee must be an identity string or null")
     history = TaskHistory(key, entry["role"], observed, assignee,
                           aliases.get(str(status), str(status)), tuple(normalized), complete)
     return history, limits
+
+
+def read_history_source(run_id: str, source: dict, provider: str, key: str, kind: str):
+    from tracker_workflow import response_file, response_json, digest_bytes
+
+    validate_call(source["call"], provider)
+    source_format = source.get("format", "json")
+    if source_format not in {"json", "text"}:
+        raise ValueError("History source format must be json or text")
+    path, raw, _ = response_file(source["response_file"], run_id, require_json=False)
+    if digest_bytes(raw) != source["sha256"]:
+        raise ValueError(f"History response checksum changed: {path}")
+    pin_history_response(run_id, path, raw, {"provider": provider, "key": key, "call": source["call"]})
+    if source_format == "json":
+        payload = response_json(raw, path)
+    else:
+        try:
+            payload = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"History text is not UTF-8: {path}, byte {error.start}") from error
+    evidence = {"kind": kind, "path": str(path), "sha256": source["sha256"],
+                "format": source_format, "call": source["call"], "mapping": source.get("mapping")}
+    return payload, evidence
 
 
 def history_review_command(args) -> int:
@@ -213,9 +288,10 @@ def review_history(args) -> int:
                                 manifest.get("reviewed_registries", {}), manifest.get("expected_head"))
     if not preview["ownership_ready"]:
         raise ValueError("Resolve execution-preview ownership blockers before history review")
-    histories, evidence, limitations = {}, [], []
+    histories, evidence, limitations, undated_history = {}, [], [], []
     participants = manifest["participants"]
     rules = StatusRules(**{name: frozenset(values) for name, values in manifest["status_rules"].items()})
+    status_sets(rules)
     provider = manifest["provider"]
     if provider not in {"jira", "sbertrek"}:
         raise ValueError("Explicit history provider is required")
@@ -240,19 +316,24 @@ def review_history(args) -> int:
                    if item.get(provider + "_key") == entry["key"] and target["role"] == entry["role"]]
         if len(targets) != 1 or entry["role"] not in {"FE", "BE"}:
             raise ValueError("History must map to exactly one confirmed FE/BE execution work item")
-        validate_call(entry["call"], provider)
         observed = timestamp(datetime.fromisoformat(entry["call"]["captured_at"]))
-        if observed > datetime.now(timezone.utc):
-            raise ValueError("Capture time is in the future")
-        source_path, raw, payload = response_file(entry["response_file"], args.run_id)
-        if digest_bytes(raw) != entry["sha256"]:
-            raise ValueError("History response checksum changed")
-        pin_history_response(args.run_id, source_path, raw, {"provider": provider, "key": entry["key"], "call": entry["call"]})
-        history, limits = decode_history(payload, entry, observed)
+        payload, source_evidence = read_history_source(args.run_id, entry, provider, entry["key"], "history")
+        sources = [source_evidence]
+        snapshot = None
+        if "snapshot" in entry:
+            snapshot, snapshot_evidence = read_history_source(args.run_id, entry["snapshot"], provider, entry["key"], "snapshot")
+            if snapshot is None:
+                raise ValueError("Snapshot response cannot be null")
+            sources.append(snapshot_evidence)
+            observed = timestamp(datetime.fromisoformat(entry["snapshot"]["call"]["captured_at"]))
+        history, limits = decode_history(payload, entry, observed, snapshot)
+        if {"history-text-requires-dated-source", "history-event-timestamps-not-returned"}.intersection(limits):
+            undated_history.append(f"{entry['key']}/{entry['role']}")
         history = replace(history, task_key=f"{entry['key']}/{entry['role']}")
         histories[identity] = (targets[0]["feature"], history)
         evidence.append({"key": entry["key"], "role": entry["role"], "sha256": entry["sha256"], "call": entry["call"],
-                         "mapping": entry.get("mapping", JIRA_MAPPING), "status_aliases": entry.get("status_aliases", {})})
+                         "mapping": entry.get("mapping", JIRA_MAPPING), "status_aliases": entry.get("status_aliases", {}),
+                         "sources": sources, "limitations": limits})
         limitations.extend(f"{entry['key']}:{limit}" for limit in limits)
     reviews, missing_history, qa_blockers = [], [], []
     deleted_keys = {issue.get(provider + "_key") for issue in result["excluded"]
@@ -300,7 +381,14 @@ def review_history(args) -> int:
         for key, reason in unavailable.items()
     ):
         raise ValueError("Unavailable history requires a reason for each missing work item")
-    pending_history = sorted(set(missing_history) - set(unavailable))
+    date_sources_unavailable = manifest.get("unavailable_history_dates", {})
+    if not isinstance(date_sources_unavailable, dict) or any(
+        key not in undated_history or not isinstance(reason, str) or not reason.strip()
+        for key, reason in date_sources_unavailable.items()
+    ):
+        raise ValueError("Unavailable history dates require a capability-check reason for each undated work item")
+    pending_dates = sorted(set(undated_history) - set(date_sources_unavailable))
+    pending_history = sorted((set(missing_history) - set(unavailable)) | set(pending_dates))
     from tracker_comparison import build_comparison
     comparison = build_comparison(preview, reviews, provider) if not pending_history else None
     from tracker_qa_application import confirmed_qa_updates
@@ -327,13 +415,16 @@ def review_history(args) -> int:
               "deletion_proposals": [item for item in preview["items"]
                                      if item["proposed_action"] == "delete-current-execution"],
               "pending_history": pending_history, "unavailable_history": unavailable,
+              "pending_history_dates": pending_dates, "unavailable_history_dates": date_sources_unavailable,
               "comparison": comparison,
               "project_root": str(project), "qa_application": qa_application,
               "date_proposals_allowed": not pending_history,
               "fact_priority": ["analyst-confirmation", "assignment-and-status-history", "current-state-only"],
-              "history_processed": bool(histories), "adapter": "json-pointer-history-v1",
+              "history_processed": bool(histories), "adapter": "source-mapped-history-v2",
               "writes_performed": False, "planning_application_allowed": False,
               "next_action": {"type": "collect-history" if pending_history else "review-with-analyst",
+                              "keys": pending_history, "dated_source_required": pending_dates,
+                              "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
                               "provider": provider, "application_requires_analyst_command": True}}
     destination = run_root(args.run_id) / "history" / (digest_object(output) + ".json")
     save_json(destination, output)

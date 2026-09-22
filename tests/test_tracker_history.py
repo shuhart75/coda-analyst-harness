@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime
 import hashlib
+import json
 import sys
 from pathlib import Path
 import unittest
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from tracker_history import JIRA_MAPPING, decode_history, pagination_window, pointer, validate_call
 from tracker_lifecycle import StatusRules, calculate_task
 from tracker_execution import feature_qa_estimate
+from tracker_workflow import response_json
 
 
 class AdaptiveHistoryTests(unittest.TestCase):
@@ -151,6 +153,180 @@ class AdaptiveHistoryTests(unittest.TestCase):
                          {'more': False, 'start': 0, 'size': None}):
             with self.subTest(metadata=metadata), self.assertRaises(ValueError):
                 pagination_window(metadata, {'has_next': '/more', 'start': '/start', 'total': '/size'}, {}, 3)
+
+    def test_flat_events_use_separate_snapshot_and_actual_request_key(self):
+        payload = {'events': [
+            {'when': '2026-08-01T12:00:00+03:00', 'attribute': 'assigned_to', 'old': None, 'new': 'dev'},
+            {'when': '2026-08-02T12:00:00+03:00', 'attribute': 'assigned_to', 'old': 'dev', 'new': 'qa'},
+            {'when': '2026-08-03T12:00:00+03:00', 'attribute': 'workflow_status', 'old': 'todo', 'new': 'done'},
+            {'attribute': 'description', 'old': {'text': 'old'}, 'new': {'text': 'new'}},
+        ], 'total': 4, 'start': 0}
+        entry = {'key': 'ST-1', 'provider': 'sbertrek', 'role': 'FE',
+                 'call': {**self.call('sbertrek'), 'arguments': {'task': 'ST-1'}},
+                 'mapping': {'request_key': '/task', 'events': '/events', 'at': '/when',
+                             'field': '/attribute', 'from': '/old', 'to': '/new',
+                             'assignment_field': 'assigned_to', 'status_field': 'workflow_status',
+                             'total': '/total', 'start': '/start'},
+                 'snapshot': {'mapping': {'key': '/id', 'assignee': '/assigned', 'status': '/state'}}}
+        snapshot = {'id': 'ST-1', 'assigned': 'qa', 'state': 'done'}
+        observed = datetime.fromisoformat('2026-08-10T12:00:00+03:00')
+        history, limits = decode_history(payload, entry, observed, snapshot)
+        self.assertTrue(history.complete)
+        self.assertEqual(limits, [])
+        self.assertEqual(len(history.events), 3)
+        result = calculate_task(history, {'dev': 'BE', 'qa': 'QA'}, StatusRules(qa_completed=frozenset({'done'})))
+        self.assertEqual(result['development']['finished_at'], '2026-08-02T12:00:00+03:00')
+        self.assertEqual(result['qa']['finished_at'], '2026-08-03T12:00:00+03:00')
+        with self.assertRaisesRegex(ValueError, 'newer than the captured snapshot'):
+            decode_history(payload, entry, datetime.fromisoformat('2026-08-02T12:00:00+03:00'), snapshot)
+        for wrong in ({**snapshot, 'id': 'ST-2'}, {**snapshot, 'assigned': {'id': 'qa'}}):
+            with self.subTest(wrong=wrong), self.assertRaises(ValueError):
+                decode_history(payload, entry, observed, wrong)
+        entry['call']['arguments'] = {'task': 'ST-2'}
+        with self.assertRaisesRegex(ValueError, 'another task'):
+            decode_history(payload, entry, observed, snapshot)
+        payload['key'] = 'ST-1'
+        entry['mapping']['key'] = '/key'
+        with self.assertRaisesRegex(ValueError, 'request belongs to another task'):
+            decode_history(payload, entry, observed, snapshot)
+
+    def test_nested_transition_values_have_independent_paths(self):
+        source = self.raw_history()
+        source.update(total=3, start=0)
+        for event in source['changelogs']:
+            for change in event['items']:
+                name = 'code' if change['field'] == 'status' else 'identity'
+                change['old'] = {name: change.get('from_id')}
+                change['new'] = {name: change.get('to_id')}
+        mapping = {name: value for name, value in JIRA_MAPPING.items() if name not in {'from', 'to'}}
+        mapping.update(status_from='/old/code', status_to='/new/code', assignment_from='/old/identity',
+                       assignment_to='/new/identity', total='/total', start='/start')
+        entry = {'provider': 'sbertrek', 'key': 'JIRA-1', 'role': 'BE', 'mapping': mapping,
+                 'status_aliases': {'Done': 'done'}}
+        history, limits = decode_history(source, entry, datetime.fromisoformat('2026-08-10T12:00:00+03:00'))
+        self.assertEqual(limits, [])
+        self.assertEqual(history.events[1].assignee, ('dev', 'qa'))
+        self.assertEqual(history.events[2].status, ('todo', 'done'))
+        entry['mapping']['status_to'] = '/new'
+        with self.assertRaisesRegex(ValueError, 'scalar source values'):
+            decode_history(source, entry, history.observed_at)
+
+    def test_undated_transition_cannot_leave_a_stale_dated_completion(self):
+        source = {**self.raw_history(), 'total': 4, 'start': 0}
+        source['changelogs'].append({'items': [{'field': 'status', 'from_id': 'done', 'to_id': 'todo'}]})
+        source['status']['name'] = 'todo'
+        source['assignee']['key'] = 'dev'
+        entry = {'key': 'JIRA-1', 'role': 'BE', 'provider': 'jira',
+                 'mapping': {**JIRA_MAPPING, 'total': '/total', 'start': '/start'}}
+        history, limits = decode_history(source, entry, datetime.fromisoformat('2026-08-10T12:00:00+03:00'))
+        self.assertFalse(history.complete)
+        self.assertEqual(history.events, ())
+        self.assertIn('history-event-timestamps-not-returned', limits)
+        result = calculate_task(history, {'dev': 'BE', 'qa': 'QA'}, StatusRules(qa_completed=frozenset({'done'})))
+        self.assertIsNone(result['qa']['finished_at'])
+        self.assertIsNone(result['qa']['completed_by'])
+        source['changelogs'][-1]['created'] = 'not-a-date'
+        with self.assertRaisesRegex(ValueError, 'Invalid history timestamp at /created'):
+            decode_history(source, entry, history.observed_at)
+
+    def text_manifest(self):
+        manifest = self.manifest()
+        entry = manifest['responses'][0]
+        source = self.state / 'history-display.json'
+        source.write_bytes((Path(__file__).parent / 'fixtures/tracker-history-text.json').read_bytes())
+        entry.update(response_file=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                     mapping={'request_key': '/key', 'text': '/output'})
+        entry['call'].update(tool='current-history-display', arguments={'key': 'JIRA-1'})
+        snapshot = self.write(self.state / 'card.json', {'key': 'JIRA-1', 'assignee': {'key': 'qa'},
+                                                       'status': {'name': 'Done'}})
+        entry['snapshot'] = {'response_file': str(snapshot), 'sha256': hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+                             'call': {**self.call('jira'), 'tool': 'current-card-reader', 'arguments': {'key': 'JIRA-1'}},
+                             'mapping': {name: JIRA_MAPPING[name] for name in ('key', 'assignee', 'status')}}
+        return manifest
+
+    def test_text_response_is_preserved_and_dated_capability_check_is_pending(self):
+        run_id = self.reconciled()
+        before = self.snapshot()
+        manifest = self.text_manifest()
+        raw_path = Path(manifest['responses'][0]['response_file'])
+        raw = raw_path.read_bytes()
+        path = self.write(self.state / 'manifest.json', manifest)
+        args = ('history-review', '--run-id', run_id, '--project-root', str(self.project), '--manifest', str(path))
+        review = self.run_tool(self.state, *args)
+        self.assertEqual(review['status'], 'history-collection-incomplete')
+        self.assertEqual(review['next_action']['dated_source_required'], ['JIRA-1/BE'])
+        self.assertIsNone(review['comparison'])
+        self.assertFalse(review['date_proposals_allowed'])
+        self.assertEqual(len(review['evidence'][0]['sources']), 2)
+        self.assertIsNone(review['features'][0]['qa']['started_at'])
+        self.assertIsNone(review['features'][0]['qa']['finished_at'])
+        manifest['unavailable_history_dates'] = {'JIRA-1/BE': 'Checked installed capabilities: only undated display available'}
+        self.write(path, manifest)
+        reviewed = self.run_tool(self.state, *args)
+        self.assertEqual(reviewed['next_action']['type'], 'review-with-analyst')
+        self.assertIn('JIRA-1:history-text-requires-dated-source', reviewed['limitations'])
+        self.assertFalse(reviewed['planning_application_allowed'])
+        self.assertEqual(reviewed['features'][0]['qa']['progress_percent'], 100)
+        self.assertIsNone(reviewed['features'][0]['qa']['finished_at'])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(raw_path.read_bytes(), raw)
+        self.assertEqual(self.run_tool(self.state, *args)['review_file'], reviewed['review_file'])
+        manifest['unavailable_history_dates'] = {'JIRA-1/BE': ''}
+        self.write(path, manifest)
+        self.assertIn('capability-check reason', self.run_tool(self.state, *args, expected=2)['error'])
+
+    def test_separate_snapshot_rejects_another_provider(self):
+        run_id = self.reconciled()
+        manifest = self.text_manifest()
+        manifest['responses'][0]['snapshot']['call']['provider'] = 'sbertrek'
+        path = self.write(self.state / 'manifest.json', manifest)
+        failure = self.run_tool(self.state, 'history-review', '--run-id', run_id,
+                                '--project-root', str(self.project), '--manifest', str(path), expected=2)
+        self.assertIn('Call provider does not match', failure['error'])
+
+    def test_plain_text_capture_and_snapshot_are_pinned(self):
+        run_id = self.reconciled()
+        manifest = self.text_manifest()
+        entry = manifest['responses'][0]
+        raw_path = self.state / 'history-display.txt'
+        raw_path.write_text(json.loads(Path(entry['response_file']).read_text())['output'])
+        entry.update(response_file=str(raw_path), sha256=hashlib.sha256(raw_path.read_bytes()).hexdigest(), format='text')
+        entry['mapping']['text'] = ''
+        path = self.write(self.state / 'manifest.json', manifest)
+        args = ('history-review', '--run-id', run_id, '--project-root', str(self.project), '--manifest', str(path))
+        review = self.run_tool(self.state, *args)
+        self.assertEqual(review['pending_history_dates'], ['JIRA-1/BE'])
+        for source in (entry, entry['snapshot']):
+            raw = Path(source['response_file'])
+            previous = raw.read_bytes()
+            raw.write_bytes(previous + b'\n')
+            checksum = source['sha256']
+            source['sha256'] = hashlib.sha256(raw.read_bytes()).hexdigest()
+            self.write(path, manifest)
+            failure = self.run_tool(self.state, *args, expected=2)
+            self.assertIn('Previously reviewed raw history changed', failure['error'])
+            raw.write_bytes(previous)
+            source['sha256'] = checksum
+
+    def test_invalid_json_reports_source_location_and_is_not_rewritten(self):
+        with self.assertRaisesRegex(ValueError, r'broken.json, .*2, .*8:'):
+            response_json(b'{\n  "x": }', Path('/capture/broken.json'))
+        with self.assertRaisesRegex(ValueError, r'broken.json, .*0'):
+            response_json(b'\xff', Path('/capture/broken.json'))
+        run_id = self.reconciled()
+        manifest = self.manifest()
+        entry = manifest['responses'][0]
+        raw = Path(entry['response_file'])
+        raw.write_text('{\n  "x": }')
+        entry['sha256'] = hashlib.sha256(raw.read_bytes()).hexdigest()
+        path = self.write(self.state / 'manifest.json', manifest)
+        args = ('history-review', '--run-id', run_id, '--project-root', str(self.project), '--manifest', str(path))
+        failure = self.run_tool(self.state, *args, expected=2)
+        self.assertIn(str(raw), failure['error'])
+        self.write(raw, self.raw_history())
+        entry['sha256'] = hashlib.sha256(raw.read_bytes()).hexdigest()
+        self.write(path, manifest)
+        self.assertIn('Previously reviewed raw history changed', self.run_tool(self.state, *args, expected=2)['error'])
 
     def test_history_terminal_flag_uses_actual_request_not_invented_offset(self):
         payload = {**self.raw_history(), 'more': False}

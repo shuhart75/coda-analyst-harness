@@ -381,6 +381,28 @@ class ReleaseWorkflowTests(unittest.TestCase):
         pending = self.run_tool(self.state, *review_args)
         self.assertEqual(pending['pending_history'], ['ST-1/BE', 'ST-2/BE'])
         self.assertIsNone(pending['comparison'])
+        text_fixture = (Path(__file__).parent / 'fixtures/tracker-history-text.json').read_bytes()
+        for key in keys[:2]:
+            source = self.state / f'{key}-display.json'
+            source.write_bytes(text_fixture)
+            snapshot = self.write(self.state / f'{key}-card.json',
+                                  {'key': key, 'status': 'done', 'assignee': 'qa'})
+            manifest['responses'].append({'provider': 'sbertrek', 'key': key, 'role': 'BE',
+                'response_file': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+                'call': {**self.call('sbertrek'), 'tool': 'current-history-display', 'arguments': {'key': key}},
+                'mapping': {'request_key': '/key', 'text': '/output'},
+                'snapshot': {'response_file': str(snapshot),
+                    'sha256': hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+                    'call': {**self.call('sbertrek'), 'tool': 'current-card-reader', 'arguments': {'key': key}},
+                    'mapping': {'key': '/key', 'status': '/status', 'assignee': '/assignee'}}})
+        self.write(manifest_file, manifest)
+        text_review = self.run_tool(self.state, *review_args)
+        self.assertEqual(text_review['pending_history_dates'], ['ST-1/BE', 'ST-2/BE'])
+        self.assertIsNone(text_review['comparison'])
+        self.assertIsNone(text_review['features'][0]['qa']['finished_at'])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(result_path.read_bytes(), original_result)
+        manifest['responses'] = []
         for key in keys[:2]:
             history = {**self.raw_history(), 'key': key, 'total': 3, 'has_next': False}
             source = self.write(self.state / f'{key}-inline.json', {'content': [{'text': json.dumps(history)}]})
