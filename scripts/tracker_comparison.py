@@ -42,6 +42,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                 calculation = review["tasks"].get(identity)
                 rows.append({"feature": feature, "task_id": target["task_id"], "role": target["role"],
                              "registry": target["registry"], "current": target["saved_facts"],
+                             "registration_required": target.get("registration_required", False),
                              "role_estimates": item.get("role_estimates", {}),
                              "history": calculation["development"] if calculation else None,
                              "limitations": calculation["limitations"] if calculation else ["history-not-collected"]})

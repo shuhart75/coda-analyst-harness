@@ -11,7 +11,7 @@ import test_trackerctl
 import test_tracker_execution
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from tracker_history import JIRA_MAPPING, decode_history, pointer, validate_call
+from tracker_history import JIRA_MAPPING, decode_history, pagination_window, pointer, validate_call
 from tracker_lifecycle import StatusRules, calculate_task
 from tracker_execution import feature_qa_estimate
 
@@ -136,6 +136,42 @@ class AdaptiveHistoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_history(source, bad, history.observed_at)
         self.assertEqual(pointer({'text': '{"value": 3}'}, '/text/value'), 3)
+
+    def test_terminal_page_requires_start_or_matching_total(self):
+        self.assertIsNone(pagination_window({'more': False}, {'has_next': '/more'}, {}, 3))
+        self.assertEqual(pagination_window({'more': False, 'size': 3},
+                         {'has_next': '/more', 'total': '/size'}, {}, 3), (0, 3, 3))
+        self.assertIsNone(pagination_window({'more': False, 'size': 7},
+                          {'has_next': '/more', 'total': '/size'}, {}, 3))
+        for metadata in ({'more': False, 'start': 0, 'size': 7},
+                         {'more': True, 'start': 0, 'size': 3},
+                         {'more': 'false', 'start': 0, 'size': 3},
+                         {'more': False, 'start': False, 'size': 3},
+                         {'more': False, 'start': None, 'size': 3},
+                         {'more': False, 'start': 0, 'size': None}):
+            with self.subTest(metadata=metadata), self.assertRaises(ValueError):
+                pagination_window(metadata, {'has_next': '/more', 'start': '/start', 'total': '/size'}, {}, 3)
+
+    def test_history_terminal_flag_uses_actual_request_not_invented_offset(self):
+        payload = {**self.raw_history(), 'more': False}
+        entry = {'key': 'JIRA-1', 'role': 'BE', 'provider': 'jira',
+                 'call': {**self.call('jira'), 'arguments': {'offset': 0}},
+                 'mapping': {**JIRA_MAPPING, 'has_next': '/more', 'request_start': '/offset'}}
+        observed = datetime.fromisoformat('2026-08-10T12:00:00+03:00')
+        history, limits = decode_history(payload, entry, observed)
+        self.assertTrue(history.complete)
+        self.assertEqual(limits, [])
+        self.assertNotIn('start', payload)
+        entry['call']['arguments']['offset'] = 10
+        history, limits = decode_history(payload, entry, observed)
+        self.assertFalse(history.complete)
+        self.assertIn('history-completeness-not-proven', limits)
+        entry['call']['arguments'] = {'cursor': None}
+        entry['mapping'].pop('request_start')
+        entry['mapping']['request_cursor'] = '/cursor'
+        self.assertTrue(decode_history(payload, entry, observed)[0].complete)
+        entry['call']['arguments']['cursor'] = 'last-page'
+        self.assertFalse(decode_history(payload, entry, observed)[0].complete)
 
     def test_status_names_do_not_replace_assignee_ids(self):
         source = self.raw_history()

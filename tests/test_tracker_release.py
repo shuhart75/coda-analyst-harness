@@ -150,6 +150,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     call = test_tracker_history.AdaptiveHistoryTests.call
     ingest = test_tracker_history.AdaptiveHistoryTests.ingest
     raw_history = test_tracker_history.AdaptiveHistoryTests.raw_history
+    snapshot = test_tracker_history.AdaptiveHistoryTests.snapshot
 
     def begin_release(self, provider='jira'):
         return self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', provider,
@@ -239,6 +240,33 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn('release-result-incomplete:membership-completeness-not-proven',
                          self.run_tool(self.state, 'result-status', '--run-id', run['run_id'])['limitations'])
 
+    def test_boolean_pagination_covers_all_link_pages(self):
+        run = self.begin_release()
+        call = self.linked_call(run, {'owner': 'REL-1', 'edges': [{'type': 'ships', 'target': 'JIRA-1'}],
+                                      'offset': 0, 'more': True, 'total': 2},
+                                {'records': '/edges', 'member_key': '/target', 'release_root': '/owner',
+                                 'relation': '/type', 'relation_value': 'ships', 'start': '/offset',
+                                 'has_next': '/more', 'total': '/total'})
+        second = copy.deepcopy(call['release_membership']['sources'][0])
+        second['mapping'].pop('total')
+        source = self.write(self.state / 'last-page.json', {'owner': 'REL-1',
+                            'edges': [{'type': 'ships', 'target': 'JIRA-2'}], 'offset': 1, 'more': False})
+        second.update(response_file=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+        second['call']['arguments']['offset'] = 1
+        call['release_membership']['sources'].append(second)
+        bad = copy.deepcopy(call)
+        inconsistent = self.write(self.state / 'inconsistent-last-page.json', {'owner': 'REL-1',
+                                 'edges': [{'type': 'ships', 'target': 'JIRA-2'}], 'offset': 1, 'more': True})
+        bad_source = bad['release_membership']['sources'][1]
+        bad_source.update(response_file=str(inconsistent), sha256=hashlib.sha256(inconsistent.read_bytes()).hexdigest())
+        bad_source['call']['tool'] = 'inconsistent-reader'
+        rejected = self.ingest(run, {'issues': [self.jira_issue('JIRA-1'), self.jira_issue('JIRA-2')]}, bad, expected=2)
+        self.assertIn('continuation', rejected['error'])
+        self.ingest(run, {'issues': [self.jira_issue('JIRA-1'), self.jira_issue('JIRA-2')]}, call)
+        self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
+        self.assertNotIn('release-result-incomplete:membership-completeness-not-proven',
+                         self.run_tool(self.state, 'result-status', '--run-id', run['run_id'])['limitations'])
+
     def test_wrong_relation_other_release_and_wrong_checksum_rejected(self):
         run = self.begin_release()
         for kind in ('relation', 'release', 'checksum'):
@@ -308,6 +336,148 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(unrelated.read_bytes(), original)
         self.run_tool(self.state, 'qa-application-check', '--project-root', str(self.project),
                       '--review-file', review['review_file'], expected=2)
+
+    def test_new_release_feature_history_before_any_registry_write(self):
+        from test_trackerctl import DirectTrackerWorkflowTests
+        from tracker_history import JIRA_MAPPING
+
+        self.write(self.project / 'features/owner/requirements.md', 'Existing feature')
+        self.save_sources()
+        before = self.snapshot()
+        run = self.begin_release('sbertrek')
+        keys = ['ST-1', 'ST-2', 'ST-3']
+        cards = [DirectTrackerWorkflowTests.sber_issue(self, key, jira_key=f'JIRA-{index}',
+                 summary='BE Work' if index < 3 else 'Unprefixed work') for index, key in enumerate(keys, 1)]
+        call = self.linked_call(run, {'items': [{'key': key} for key in keys]},
+                                {'records': '/items', 'member_key': '/key'}, 'selected-query')
+        self.ingest(run, {'issues': cards}, call)
+        self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
+        result_path = self.state / 'tracker-runs' / run['run_id'] / 'reconciled.json'
+        original_result = result_path.read_bytes()
+        quote = 'Both development tasks belong to owner.'
+        answer = self.write(self.state / 'answer.txt', quote)
+        decisions = {'schema_version': 1, 'provider': 'sbertrek', 'release': 'REL-1',
+                     'analyst_confirmed': True, 'source': {'file': str(answer),
+                     'sha256': hashlib.sha256(answer.read_bytes()).hexdigest(), 'quote': quote},
+                     'tasks': [{'key': key, 'feature': 'owner'} for key in keys[:2]]}
+        decision_file = self.write(self.state / 'decisions.json', decisions)
+        preview_args = ('release-preview', '--run-id', run['run_id'], '--project-root', str(self.project))
+        unresolved = self.run_tool(self.state, *preview_args)
+        self.assertFalse(unresolved['ownership_ready'])
+        preview = self.run_tool(self.state, *preview_args, '--decisions', str(decision_file))
+        self.assertEqual(preview['next_action']['type'], 'collect-history')
+        self.assertEqual(preview['next_action']['keys'], ['ST-1', 'ST-2'])
+        self.assertEqual(len(preview['execution']['proposed_registrations']), 2)
+        self.assertEqual(len(preview['skipped']), 1)
+        self.assertTrue(preview['execution']['ownership_ready'])
+        manifest = {'schema_version': 1, 'provider': 'sbertrek', 'analyst_confirmed': True,
+                    'decision_source': 'confirmed history rules', 'release_scope_decisions': decisions,
+                    'participants': {'dev': 'BE', 'qa': 'QA'},
+                    'status_rules': {'not_started': ['todo'], 'qa_completed': ['done']}, 'responses': []}
+        manifest_file = self.state / 'review.json'
+        review_args = ('history-review', '--run-id', run['run_id'], '--project-root', str(self.project),
+                       '--manifest', str(manifest_file))
+        self.write(manifest_file, manifest)
+        pending = self.run_tool(self.state, *review_args)
+        self.assertEqual(pending['pending_history'], ['ST-1/BE', 'ST-2/BE'])
+        self.assertIsNone(pending['comparison'])
+        for key in keys[:2]:
+            history = {**self.raw_history(), 'key': key, 'total': 3, 'has_next': False}
+            source = self.write(self.state / f'{key}-inline.json', {'content': [{'text': json.dumps(history)}]})
+            mapping = {**JIRA_MAPPING, **{name: '/content/0/text' + JIRA_MAPPING[name]
+                       for name in ('key', 'assignee', 'status', 'events')},
+                       'total': '/content/0/text/total', 'has_next': '/content/0/text/has_next'}
+            manifest['responses'].append({'provider': 'sbertrek', 'key': key, 'role': 'BE',
+                'call': self.call('sbertrek'), 'response_file': str(source),
+                'sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+                'mapping': mapping, 'status_aliases': {'Done': 'done'}})
+        self.write(manifest_file, manifest)
+        incomplete = self.run_tool(self.state, *review_args)
+        self.assertTrue(incomplete['history_processed'])
+        self.assertEqual(incomplete['qa_application_blockers'][0]['reason'], 'release-collection-incomplete')
+        edges = [{'type': 'ships', 'target': key} for key in keys] + [{'type': 'other', 'target': 'ST-99'}]
+        membership_call = self.call('sbertrek', run['next_action']['selection']['query_semantics'])
+        membership_call['tool'] = 'current-link-reader'
+        source = self.write(self.state / 'all-links.json', {'owner': 'REL-1', 'edges': edges,
+                                                           'total': 4, 'has_next': False})
+        membership = {'schema_version': 1, 'sources': [{'response_file': str(source),
+            'sha256': hashlib.sha256(source.read_bytes()).hexdigest(), 'call': membership_call, 'basis': 'links',
+            'mapping': {'records': '/edges', 'member_key': '/target', 'release_root': '/owner',
+                        'relation': '/type', 'relation_value': 'ships', 'total': '/total', 'has_next': '/has_next'}}]}
+        membership_file = self.write(self.state / 'membership.json', membership)
+        repaired = self.run_tool(self.state, *preview_args, '--decisions', str(decision_file),
+                                 '--membership', str(membership_file))
+        self.assertTrue(repaired['release_membership_evidence']['complete'])
+        manifest['release_membership'] = membership
+        self.write(manifest_file, manifest)
+        review = self.run_tool(self.state, *review_args)
+        self.assertTrue(review['release_membership_evidence']['complete'])
+        self.assertEqual(review['pending_history'], [])
+        self.assertEqual(review['qa_application_blockers'][0]['reason'], 'confirm-one-base-qa-before-partition')
+        rows = review['comparison']['rows']
+        self.assertEqual([row['role'] for row in rows], ['BE', 'BE', 'QA'])
+        self.assertTrue(rows[0]['registration_required'])
+        self.assertEqual(rows[0]['history']['finished_at'], '2026-08-02T12:00:00+03:00')
+        self.assertEqual(rows[-1]['history']['progress_percent'], 100)
+        self.assertFalse(review['planning_application_allowed'])
+        self.assertEqual(result_path.read_bytes(), original_result)
+        self.assertEqual(self.snapshot(), before)
+        self.run_tool(self.state, 'qa-application-check', '--project-root', str(self.project),
+                      '--review-file', review['review_file'], expected=2)
+        self.assertEqual(self.run_tool(self.state, *review_args)['review_file'], review['review_file'])
+        registry = self.project / 'features/owner/execution/tasks.md'
+        registry.parent.mkdir()
+        registry.write_text('| Task ID | Jira | SberTrek | Kind | Role | Status | Estimate (дн) |\n'
+                            '|---|---|---|---|---|---|---|\n'
+                            '| JIRA-1/BE | JIRA-1 | ST-1 | real | BE | unknown | - |\n'
+                            '| JIRA-2/BE | JIRA-2 | ST-2 | real | BE | unknown | - |\n'
+                            '| QA-OWNER | - | - | real | QA | unknown | 2 |\n')
+        manifest['reviewed_registries'] = {'features/owner/execution/tasks.md': hashlib.sha256(registry.read_bytes()).hexdigest()}
+        manifest['expected_head'] = self.git('rev-parse', 'HEAD').strip()
+        self.write(manifest_file, manifest)
+        registered = self.run_tool(self.state, *review_args)
+        self.assertEqual(registered['qa_application_blockers'], [])
+        self.assertEqual(registered['proposed_registrations'], [])
+        self.assertTrue(registered['feature_qa_proposals'][0]['partition']['ready'])
+        manifest['qa_confirmations'] = [{'feature': 'owner', 'task_id': 'QA-OWNER', 'kind': 'reviewed-fields',
+            'fields': {'Actual Start': '2026-08-02', 'Actual Finish': '2026-08-03',
+                       'Status': 'done', 'Progress %': '100'},
+            'analyst_confirmed': True, 'source': {'file': str(answer),
+                'sha256': hashlib.sha256(answer.read_bytes()).hexdigest(), 'quote': quote}}]
+        self.write(manifest_file, manifest)
+        approved = self.run_tool(self.state, *review_args)
+        self.write(self.project / approved['feature_qa_proposals'][0]['partition']['path'],
+                   approved['feature_qa_proposals'][0]['partition']['document'])
+        registry.write_text(registry.read_text().replace('| Estimate (дн) |',
+                            '| Estimate (дн) | Actual Start | Actual Finish | Progress % |')
+                            .replace('|---|---|---|---|---|---|---|', '|---|---|---|---|---|---|---|---|---|---|')
+                            .replace('| unknown | - |', '| unknown | - | - | - | unknown |')
+                            .replace('| unknown | 2 |', '| done | 2 | 2026-08-02 | 2026-08-03 | 100 |'))
+        checked = self.run_tool(self.state, 'qa-application-check', '--project-root', str(self.project),
+                                '--review-file', approved['review_file'])
+        self.assertEqual(checked['status'], 'qa-application-verified')
+        self.assertEqual(result_path.read_bytes(), original_result)
+
+    def test_confirmed_new_owner_cannot_override_existing_owner_or_id(self):
+        from tracker_execution import preview_execution
+
+        path = self.project / 'features/other/execution/tasks.md'
+        path.parent.mkdir(parents=True)
+        path.write_text('| Task ID | Jira | Kind | Role | Status |\n|---|---|---|---|---|\n'
+                        '| JIRA-1/BE | JIRA-1 | real | BE | unknown |\n')
+        self.write(self.project / 'features/owner/requirements.md', 'Existing feature')
+        self.save_sources()
+        result = {'scope': {'kind': 'release', 'provider': 'jira', 'ids': ['REL-1']},
+                  'issues': [{'jira_key': 'JIRA-1', 'task_role': 'BE', 'confirmed_feature': 'owner'}],
+                  'excluded': [], 'work_items': []}
+        preview = preview_execution(self.project, None, None, result)
+        self.assertFalse(preview['ownership_ready'])
+        self.assertIn('confirmed-owner-conflicts-with-registry', str(preview['blockers']))
+        path.write_text(path.read_text().replace('| JIRA-1 |', '| JIRA-2 |'))
+        self.save_sources()
+        preview = preview_execution(self.project, None, None, result)
+        self.assertFalse(preview['ownership_ready'])
+        self.assertIn('unconfirmed-internal-id-collision', str(preview['blockers']))
 
     def test_release_membership_is_checked_and_jira_id_is_not_a_task_key(self):
         run = self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', 'jira',

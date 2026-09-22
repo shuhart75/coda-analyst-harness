@@ -29,6 +29,40 @@ def optional(value, path):
         return None
 
 
+def pagination_window(payload: dict, mapping: dict, call: dict, count: int) -> tuple[int, int, int | None] | None:
+    total = pointer(payload, mapping["total"]) if "total" in mapping else None
+    start = pointer(payload, mapping["start"]) if "start" in mapping else None
+    for name, value in (("total", total), ("start", start)):
+        if name in mapping and (type(value) is not int or value < 0):
+            raise ValueError("Invalid pagination metadata")
+    if "request_start" in mapping:
+        requested = pointer(call["arguments"], mapping["request_start"])
+        if type(requested) is not int or requested < 0:
+            raise ValueError("Invalid request pagination offset")
+        if start is not None and start != requested:
+            raise ValueError("Response pagination contradicts the recorded request")
+        start = requested
+    if "request_cursor" in mapping:
+        cursor = pointer(call["arguments"], mapping["request_cursor"])
+        if cursor in (None, ""):
+            if start not in (None, 0):
+                raise ValueError("Initial cursor contradicts response pagination")
+            start = 0
+    has_next = pointer(payload, mapping["has_next"]) if "has_next" in mapping else None
+    if "has_next" in mapping and type(has_next) is not bool:
+        raise ValueError("Pagination has_next must be a boolean")
+    if start is None and total == count and has_next is False:
+        start = 0
+    if start is None:
+        return None
+    end = start + count
+    if total is not None and (end > total or (has_next is not None and has_next != (end < total))):
+        raise ValueError("Contradictory pagination metadata")
+    if total is None and has_next is False:
+        total = end
+    return (start, end, total) if total is not None or has_next is not None else None
+
+
 def validate_call(call: dict, provider: str) -> None:
     if not isinstance(call, dict) or call.get("provider") != provider:
         raise ValueError("Call provider does not match collection scope")
@@ -77,12 +111,8 @@ def decode_history(payload: dict, entry: dict, observed: datetime) -> tuple[Task
     if not isinstance(aliases, dict) or any(not isinstance(value, str) for value in aliases.values()):
         raise ValueError("Status aliases must map source values to explicit codes")
     limits = []
-    complete = False
-    if "total" in mapping and "start" in mapping:
-        total, start = pointer(payload, mapping["total"]), pointer(payload, mapping["start"])
-        if type(total) is not int or type(start) is not int or total < 0 or start < 0 or start + len(events) > total:
-            raise ValueError("Invalid history pagination metadata")
-        complete = start == 0 and total == len(events)
+    window = pagination_window(payload, mapping, entry.get("call", {}), len(events))
+    complete = window == (0, len(events), len(events))
     if not complete:
         limits.append("history-completeness-not-proven")
     normalized = []
@@ -177,6 +207,8 @@ def review_history(args) -> int:
         result = supplement_result(args.run_id, project, result, manifest.get("supplemental_responses", []))
         result = apply_scope_decisions(project, result, manifest.get("release_scope_decisions"))
         result["scope"] = {**result["scope"], "release_decisions": manifest.get("release_decisions", {})}
+        from tracker_release_evidence import review_membership
+        result = review_membership(args.run_id, result, manifest.get("release_membership"))
     preview = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
                                 manifest.get("reviewed_registries", {}), manifest.get("expected_head"))
     if not preview["ownership_ready"]:
@@ -228,6 +260,8 @@ def review_history(args) -> int:
     skipped_keys = {issue.get(provider + "_key") for issue in result.get("skipped", [])}
     for feature in preview["selected_features"]:
         expected, local_missing = set(), []
+        expected.update(f"{row[provider + '_key']}/{row['role']}"
+                        for row in preview["proposed_registrations"] if row["feature"] == feature)
         for path in registry_paths(project):
             if path.relative_to(project).parts[1] != feature:
                 continue
@@ -286,7 +320,9 @@ def review_history(args) -> int:
               "features": reviews, "evidence": evidence, "limitations": limitations,
               "status_rules": manifest["status_rules"],
               "feature_qa_proposals": preview["feature_qa_proposals"],
+              "proposed_registrations": preview["proposed_registrations"],
               "qa_application_blockers": qa_blockers,
+              "release_membership_evidence": result.get("release_membership_evidence"),
               "missing_task_candidates": preview["missing_task_candidates"],
               "deletion_proposals": [item for item in preview["items"]
                                      if item["proposed_action"] == "delete-current-execution"],

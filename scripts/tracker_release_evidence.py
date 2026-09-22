@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tracker_history import pin_history_response, pointer, validate_call
+from tracker_history import pagination_window, pin_history_response, pointer, validate_call
 
 
 def membership_evidence(run_id: str, provider: str, release: str, selection: str,
@@ -12,7 +12,7 @@ def membership_evidence(run_id: str, provider: str, release: str, selection: str
     sources = specification.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ValueError("Release membership evidence sources are required")
-    keys, evidence, windows, totals = set(), [], [], set()
+    keys, evidence, windows, totals, continuations = set(), [], [], set(), []
     complete_metadata = True
     for source in sources:
         call = source["call"]
@@ -43,13 +43,17 @@ def membership_evidence(run_id: str, provider: str, release: str, selection: str
             if key in keys:
                 raise ValueError("Repeated release member; inspect overlapping pages or links")
             keys.add(key)
-        if "total" in mapping and "start" in mapping:
-            total, start = pointer(payload, mapping["total"]), pointer(payload, mapping["start"])
-            if type(total) is not int or type(start) is not int or start < 0 or start + len(records) > total:
-                raise ValueError("Invalid release membership pagination")
-            totals.add(total)
-            windows.append((start, start + len(records)))
+        window = pagination_window(payload, mapping, call, len(records))
+        if window is not None:
+            start, end, total = window
+            if total is not None:
+                totals.add(total)
+            windows.append((start, end))
+            if "has_next" in mapping:
+                continuations.append((end, pointer(payload, mapping["has_next"])))
         elif len(sources) == 1 and source.get("unpaginated_contract"):
+            if "has_next" in mapping and pointer(payload, mapping["has_next"]):
+                raise ValueError("Unpaginated contract contradicts the returned continuation flag")
             contract = source["unpaginated_contract"]
             contract_path, contract_raw, _ = response_file(contract["response_file"], run_id)
             if (digest_bytes(contract_raw) != contract["sha256"] or not contract.get("quote", "").strip()
@@ -73,8 +77,33 @@ def membership_evidence(run_id: str, provider: str, release: str, selection: str
             complete_metadata = False
         position = end
     complete = complete_metadata and totals == {position}
+    if complete and any(has_next != (end < position) for end, has_next in continuations):
+        raise ValueError("Page continuation contradicts complete membership coverage")
     return {"release": release, "keys": sorted(keys), "sources": evidence, "complete": complete}, (
         [] if complete else ["release-result-incomplete:membership-completeness-not-proven"])
+
+
+def review_membership(run_id: str, result: dict, specification: dict | None) -> dict:
+    import copy
+    from tracker_workflow import load_run
+
+    if specification is None:
+        return result
+    run = load_run(run_id)
+    provider, release = result["scope"]["provider"], result["scope"]["ids"][0]
+    if result["scope"]["kind"] != "release" or run.get("collection_mode") != "adaptive":
+        raise ValueError("Supplementary membership evidence requires an adaptive release run")
+    step = next(step for step in run["steps"] if step["provider"] == provider)
+    evidence, limitations = membership_evidence(run_id, provider, release, step["query"],
+                                               run["cards"][provider], specification)
+    reviewed = copy.deepcopy(result)
+    reviewed["release_membership_evidence"] = evidence
+    if evidence["complete"]:
+        reviewed["limitations"] = [limit for limit in reviewed["limitations"]
+                                  if limit != "release-result-incomplete:membership-completeness-not-proven"]
+    else:
+        reviewed["limitations"] = sorted(set([*reviewed["limitations"], *limitations]))
+    return reviewed
 
 
 def validate_membership(run: dict, step: dict, cards: list[dict]) -> None:

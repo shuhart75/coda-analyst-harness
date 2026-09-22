@@ -98,10 +98,10 @@ def release_owners(project: Path, result: dict) -> dict:
                           "role": issue.get("task_role"),
                           "basis": "analyst-confirmed" if confirmed else "registry" if exact else "associated-epic" if candidates else "analyst-required",
                           "registration_required": not bool(exact) or conflict,
-                          "question_required": len(candidates) != 1 or conflict})
+                          "question_required": len(candidates) != 1 or conflict or not (exact or confirmed)})
     return {"items": proposals, "selected_features": sorted({feature for item in proposals for feature in item["features"]}),
             "blockers": blockers,
-            "ownership_ready": not blockers and all(not item["registration_required"] and not item["question_required"] for item in proposals)}
+            "ownership_ready": not blockers and all(not item["question_required"] for item in proposals)}
 
 
 def release_preview_command(args) -> int:
@@ -116,12 +116,19 @@ def release_preview_command(args) -> int:
         from tracker_workflow import response_file
         _, _, decisions = response_file(args.decisions, args.run_id)
         result = apply_scope_decisions(project, result, decisions)
+    if getattr(args, "membership", None):
+        from tracker_workflow import response_file
+        from tracker_release_evidence import review_membership
+        _, _, membership = response_file(args.membership, args.run_id)
+        result = review_membership(args.run_id, result, membership)
     ownership = release_owners(project, result)
     output = {"status": "release-ownership-preview", **ownership, "skipped": result.get("skipped", []),
               "writes_performed": False, "next_action": {"type": "resolve-release-ownership"},
+              "release_membership_evidence": result.get("release_membership_evidence"),
               "registration": {
                   "existing_features": sorted(path.name for path in (project / "features").glob("*") if path.is_dir()),
                   "gantt_presence_required": False, "before_write": "application-preflight",
+                  "before_history_write_required": False,
                   "registry": "features/<confirmed-feature>/execution/tasks.md",
                   "unknown_facts": {"Status": "unknown", "Progress %": "unknown", "Estimate (дн)": "-",
                                     "Actual Start": "-", "Actual Finish": "-"},
@@ -131,9 +138,14 @@ def release_preview_command(args) -> int:
     if ownership["ownership_ready"] and ownership["selected_features"]:
         output["execution"] = preview_execution(project, None, None, result)
         if output["execution"]["ownership_ready"]:
-            output["next_action"] = {"type": "collect-feature-remainder", "provider": result["scope"]["provider"],
-                                     "keys": sorted({key for proposal in output["execution"]["feature_qa_proposals"]
-                                                     for key in proposal["missing_card_keys"]}),
+            missing = sorted({key for proposal in output["execution"]["feature_qa_proposals"]
+                              for key in proposal["missing_card_keys"]})
+            provider_field = result["scope"]["provider"] + "_key"
+            history_keys = sorted({item[provider_field] for item in output["execution"]["items"]
+                                   if item.get(provider_field) and any(
+                                       target["role"] in {"BE", "FE"} for target in item["targets"])})
+            output["next_action"] = {"type": "collect-feature-remainder" if missing else "collect-history",
+                                     "provider": result["scope"]["provider"], "keys": missing or history_keys,
                                      "same_run": True, "then": "history-review"}
         else:
             output["next_action"] = {"type": "resolve-execution-ownership", "same_run": True}

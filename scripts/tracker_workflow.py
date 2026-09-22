@@ -1935,6 +1935,7 @@ def parser() -> argparse.ArgumentParser:
     release.add_argument("--run-id", required=True)
     release.add_argument("--project-root", required=True)
     release.add_argument("--decisions")
+    release.add_argument("--membership")
     from tracker_release import release_preview_command
     release.set_defaults(handler=release_preview_command)
     error = commands.add_parser("ingest-error"); error.add_argument("--run-id", required=True); error.add_argument("--step-id", required=True); error.add_argument("--error-file", required=True); error.set_defaults(handler=ingest_error_command)

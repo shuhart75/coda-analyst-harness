@@ -134,6 +134,26 @@ def preview_execution(
         if sources.get(relative) != checksum or not re.fullmatch(r"[0-9a-f]{64}", checksum):
             raise ValueError(f"Подтверждённая версия реестра не совпадает: {relative}")
 
+    proposed_rows = []
+    if result.get("scope", {}).get("kind") == "release":
+        for issue in result["issues"]:
+            owner, role = issue.get("confirmed_feature"), issue.get("task_role")
+            if not owner or role not in {"BE", "FE"}:
+                continue
+            if any(issue.get(field) and row.get(field) == issue[field]
+                   for row in rows for field in ("jira_key", "sbertrek_key")):
+                continue
+            identity = issue.get("jira_key") or issue.get("sbertrek_key")
+            reference = {
+                "feature": owner, "registry": f"features/{owner}/execution/tasks.md",
+                "table": None, "row": None, "task_id": f"{identity}/{role}",
+                "role": role, "kind": "real", "jira_key": issue.get("jira_key"),
+                "sbertrek_key": issue.get("sbertrek_key"), "invalid_key": False,
+                "saved_facts": {}, "uncommitted": False, "registration_required": True,
+            }
+            proposed_rows.append(reference)
+        rows.extend(proposed_rows)
+
     items = []
     for issue in [*result["issues"], *result["excluded"]]:
         jira_key, sbertrek_key = issue.get("jira_key"), issue.get("sbertrek_key")
@@ -150,6 +170,8 @@ def preview_execution(
             reasons.append("task-owner-not-confirmed")
         if len(owners) > 1:
             reasons.append("multiple-feature-owners")
+        if issue.get("confirmed_feature") and owners != [issue["confirmed_feature"]]:
+            reasons.append("confirmed-owner-conflicts-with-registry")
         if set(owners) - set(selected):
             reasons.append("owner-outside-selected-scope")
         if any(row["uncommitted"] and row["registry"] not in reviewed for row in matched):
@@ -176,9 +198,12 @@ def preview_execution(
         for item in roles:
             if item["role"] == "QA" and result.get("scope", {}).get("tracker_mode") == "single":
                 continue
+            if item["role"] == "AN" and any(row.get("registration_required") for row in matched):
+                continue
             if not any(row["role"] == item["role"] for row in matched):
                 reasons.append(f"new-role-needs-confirmation:{item['role']}")
         identities = {item["work_item_id"] for item in roles} | {key for key in (jira_key, sbertrek_key) if key}
+        identities.update(row["task_id"] for row in matched if row.get("registration_required"))
         local_collisions = [row for row in rows if row not in matched and row["task_id"] in identities]
         if local_collisions:
             reasons.append("unconfirmed-internal-id-collision")
@@ -256,6 +281,7 @@ def preview_execution(
         "selected_features": list(selected), "items": items,
         "feature_qa_proposals": qa_proposals, "missing_task_candidates": missing_candidates,
         "registry_sha256": sources, "reviewed_registry_sha256": reviewed,
+        "proposed_registrations": proposed_rows,
         "blockers": blockers, "warnings": warnings,
         "ownership_ready": not blockers, "writes_performed": False,
         "creation_allowed": False, "actualization_complete": False,
