@@ -13,7 +13,7 @@ LEGACY_NO_TASKS = re.compile(
 )
 
 
-def read_registry(path: Path) -> tuple[list[list[dict[str, str]]], str | None]:
+def read_registry(path: Path, *, identity_only: bool = False) -> tuple[list[list[dict[str, str]]], str | None]:
     overlay = import_module("sync-actual-progress-overlay")
     lines = path.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
@@ -22,7 +22,7 @@ def read_registry(path: Path) -> tuple[list[list[dict[str, str]]], str | None]:
         headers = [overlay.clean_cell(cell) for cell in line.strip().strip("|").split("|")]
         if not ({"Task ID", "Jira"} & set(headers)):
             continue
-        if any(re.fullmatch(r"Estimate\s+(AN|BE|FE|QA)(?:\s.*)?", header) for header in headers):
+        if not identity_only and any(re.fullmatch(r"Estimate\s+(AN|BE|FE|QA)(?:\s.*)?", header) for header in headers):
             raise ValueError(f"Ролевые оценки допустимы в отчёте, не вместо Estimate (дн) в реестре: {path}")
         separator = lines[index + 1].strip().strip("|").split("|") if index + 1 < len(lines) else []
         if (not separator or len(separator) != len(headers) or len(set(headers)) != len(headers)

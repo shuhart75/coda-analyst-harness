@@ -440,6 +440,11 @@ def next_action(run: dict) -> dict:
                              "request-all-role-estimates", "missing-field-is-not-zero", "preserve-raw-response",
                              "task-role-from-prefix-not-assignee", "skip-outside-supported-roles",
                              "history-before-status-or-date-application"],
+            **({"release_membership": {"accepted_evidence": ["card-fields", "selected-query", "links"],
+                                        "mapping_location": "call-file.release_membership",
+                                        "raw_response_edits_allowed": False,
+                                        "contract": "core/tracker-release.md"}}
+               if step["stage"].endswith("source-release") else {}),
             "ingest_command": [sys.executable, ctl, "ingest", "--run-id", run["run_id"], "--step-id", step["step_id"], "--response-file", "<full-json-path>", "--response-source", "mcp-file", "--call-file", "<call-json-path>"],
         }
     return {
@@ -995,9 +1000,8 @@ def ingest_command(args: argparse.Namespace) -> int:
         else:
             cards = [compact_issue(record, step["provider"], forced_epic=step.get("epic_key")) for record in records]
             if step["stage"].endswith("source-release"):
-                release = working["scope"]["ids"][0]
-                if any(not any(release in {item.get("key"), item.get("name")} for item in card["releases"]) for card in cards):
-                    raise ValueError("Every release card must expose membership in the selected release")
+                from tracker_release_evidence import validate_membership
+                validate_membership(working, step, cards)
             evidence = f"{step['step_id']}:{response_sha}"
             for card in cards:
                 card["evidence"] = evidence
@@ -1398,12 +1402,19 @@ def reconcile_data(run: dict) -> dict:
     }
     role_work_items = work_items(issues)
     counts["work_items"] = len(role_work_items)
+    summary = {"story_points_total": overall_total, "role_totals_person_days": role_totals}
+    if run.get("estimate_reporting") == "known-values-v1":
+        coverage = {role: sum(role in issue.get("role_estimates", {}) for issue in issues) for role in ROLES}
+        summary["estimate_coverage"] = coverage
+        summary["role_totals_person_days"] = {role: role_totals[role] if coverage[role] else None for role in ROLES}
+        if not any(coverage.values()) and not any(issue.get("estimate") for issue in issues):
+            summary["story_points_total"] = None
     return {
         "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": run["run_id"],
         "scope": run["scope"], "issues": issues, "work_items": role_work_items,
         "excluded": excluded, "discrepancies": discrepancies, "counts": counts,
         **({"skipped": skipped} if run.get("role_policy") == "prefix-v1" else {}),
-        "summary": {"story_points_total": overall_total, "role_totals_person_days": role_totals},
+        "summary": summary,
         "limitations": limitations,
     }
 
@@ -1414,7 +1425,7 @@ def render_report(result: dict) -> str:
         f"- SberTrek: {result['counts']['sbertrek']}", f"- Jira: {result['counts']['jira']}",
         f"- Склеено пар: {result['counts']['matched']}", f"- Итоговых задач: {result['counts']['issues']}",
         f"- Исключено: {result['counts']['excluded']}", f"- Расхождений: {result['counts']['discrepancies']}",
-        f"- Общая оценка: {result['summary']['story_points_total']} story-points", "",
+        f"- Общая оценка: {result['summary']['story_points_total'] if result['summary']['story_points_total'] is not None else 'неизвестна'} story-points", "",
         "| SberTrek | Jira | Название | Статус | Исполнитель | AN | BE | FE | QA |",
         "|---|---|---|---|---|---:|---:|---:|---:|",
     ]
@@ -1438,10 +1449,16 @@ def render_report(result: dict) -> str:
 
 def official_text(result: dict) -> str:
     counts, totals = result["counts"], result["summary"]["role_totals_person_days"]
+    estimate_line = f"Общая оценка: {result['summary']['story_points_total']} SP. Ролевые оценки: AN {totals['AN']}, BE {totals['BE']}, FE {totals['FE']}, QA {totals['QA']} человекодней."
+    if "estimate_coverage" in result["summary"]:
+        rendered = ", ".join(f"{role} {totals[role] if totals[role] is not None else 'неизвестно'}" for role in ROLES)
+        overall = result["summary"]["story_points_total"]
+        estimate_line = (f"Сумма известных оценок: {overall if overall is not None else 'неизвестно'} SP. "
+                         f"Ролевые оценки: {rendered} человекодней. Пустые оценки не равны нулю; полнота оценки не подтверждена.")
     lines = [
         f"Сверка завершена. Run ID: {result['run_id']}",
         f"SberTrek: {counts['sbertrek']}; Jira: {counts['jira']}; склеено: {counts['matched']}; исходных задач: {counts['issues']}; ролевых задач: {counts['work_items']}; исключено: {counts['excluded']}; расхождений: {counts['discrepancies']}.",
-        f"Общая оценка: {result['summary']['story_points_total']} SP. Ролевые оценки: AN {totals['AN']}, BE {totals['BE']}, FE {totals['FE']}, QA {totals['QA']} человекодней.",
+        estimate_line,
         "Задачи:",
     ]
     for item in result["issues"]:
@@ -1621,7 +1638,7 @@ def begin_command(args: argparse.Namespace) -> int:
         "absent_jira_keys": [], "limitations": [], "failure": None,
         "conflict_resolutions": {}, "following_conflict_choice": None,
         "collection_mode": "adaptive" if args.adaptive else "legacy",
-        **({"role_policy": "prefix-v1"} if args.adaptive else {}),
+        **({"role_policy": "prefix-v1", "estimate_reporting": "known-values-v1"} if args.adaptive else {}),
     }
     root = run_root(run_id)
     root.mkdir(parents=True)
@@ -1759,6 +1776,14 @@ def verified_result(run_id: str) -> tuple[dict, dict]:
         raise ValueError("Разрешения или сводка completion-status не совпадают с результатом сверки")
     if completion.get("response_contract", {}).get("text") != official_text(result):
         raise ValueError("Официальный текст результата изменён")
+    application = run_root(run_id) / "application-state.json"
+    if application.exists():
+        saved = load_json(application)
+        if saved.get("reconciled_sha256") != completion["reconciled_sha256"]:
+            raise ValueError("Application decision belongs to another reconciled result")
+        completion["application_state"] = saved
+        if saved["state"] == "paused":
+            completion["planning_application_allowed"] = False
     return completion, result
 
 
@@ -1768,7 +1793,7 @@ def result_status_command(args: argparse.Namespace) -> int:
     planning_allowed = completion["planning_application_allowed"]
     preview_command = "release-preview" if result["scope"]["kind"] == "release" else "execution-preview"
     completion["planning_update"] = {
-        "state": "pending" if planning_allowed else "not-requested",
+        "state": completion.get("application_state", {}).get("state", "pending" if planning_allowed else "not-requested"),
         "actualization_complete": False,
         "next_action": {
             "type": preview_command,
@@ -1786,6 +1811,22 @@ def result_status_command(args: argparse.Namespace) -> int:
         } if planning_allowed else None,
     }
     print(json.dumps(completion, ensure_ascii=False, indent=2))
+    return 0
+
+
+def application_state_command(args: argparse.Namespace) -> int:
+    if not args.analyst_confirmed or not args.reason.strip():
+        raise ValueError("Application state requires the analyst's explicit decision and reason")
+    completion, result = verified_result(args.run_id)
+    if result["scope"]["intent"] != "update-planning":
+        raise ValueError("Read-only run has no application phase")
+    decision = {"state": args.state, "reason": args.reason, "at": now(),
+                "reconciled_sha256": completion["reconciled_sha256"]}
+    root = run_root(args.run_id)
+    save_json(root / "application-decisions" / (digest_object(decision) + ".json"), decision)
+    save_json(root / "application-state.json", decision)
+    print(json.dumps({"status": "tracker-application-" + args.state, "collection_preserved": True,
+                      "analytics_writes_performed": False, "decision": decision}, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1893,12 +1934,19 @@ def parser() -> argparse.ArgumentParser:
     release = commands.add_parser("release-preview")
     release.add_argument("--run-id", required=True)
     release.add_argument("--project-root", required=True)
+    release.add_argument("--decisions")
     from tracker_release import release_preview_command
     release.set_defaults(handler=release_preview_command)
     error = commands.add_parser("ingest-error"); error.add_argument("--run-id", required=True); error.add_argument("--step-id", required=True); error.add_argument("--error-file", required=True); error.set_defaults(handler=ingest_error_command)
     reconcile = commands.add_parser("reconcile"); reconcile.add_argument("--run-id", required=True); reconcile.set_defaults(handler=reconcile_command)
     resolve = commands.add_parser("resolve-conflict"); resolve.add_argument("--run-id", required=True); resolve.add_argument("--task-key", required=True); resolve.add_argument("--choice", choices=RESOLUTION_CHOICES, required=True); resolve.add_argument("--apply-to-following", action="store_true"); resolve.add_argument("--custom-file"); resolve.set_defaults(handler=resolve_conflict_command)
     result = commands.add_parser("result-status"); result.add_argument("--run-id", required=True); result.set_defaults(handler=result_status_command)
+    application = commands.add_parser("application-state")
+    application.add_argument("--run-id", required=True)
+    application.add_argument("--state", choices=("paused", "pending"), required=True)
+    application.add_argument("--reason", required=True)
+    application.add_argument("--analyst-confirmed", action="store_true")
+    application.set_defaults(handler=application_state_command)
     abandon = commands.add_parser("abandon-run"); abandon.add_argument("--run-id", required=True); abandon.add_argument("--reason", required=True); abandon.add_argument("--analyst-confirmed", action="store_true"); abandon.set_defaults(handler=abandon_command)
     return root
 

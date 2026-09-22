@@ -102,7 +102,7 @@ def preview_execution(
             raise ValueError(f"Реестр недоступен: {relative}")
         sources[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         try:
-            tables, note = read_registry(path)
+            tables, note = read_registry(path, identity_only=path.relative_to(project).parts[1] not in selected)
         except ValueError:
             blockers.append({"reason": "unreadable-registry", "registry": relative})
             continue

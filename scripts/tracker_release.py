@@ -9,6 +9,47 @@ from pathlib import Path
 from tracker_scope import inside_project
 
 
+def apply_scope_decisions(project: Path, result: dict, decisions: dict | None) -> dict:
+    from actual_progress_scope import valid_slug
+    from tracker_workflow import work_items
+
+    if decisions is None:
+        return result
+    scope = result["scope"]
+    if (decisions.get("schema_version") != 1 or decisions.get("analyst_confirmed") is not True
+            or decisions.get("provider") != scope["provider"] or decisions.get("release") != scope["ids"][0]):
+        raise ValueError("Confirmed release scope decisions must match the selected provider and release")
+    source = decisions["source"]
+    raw = Path(source["file"]).read_bytes()
+    if (hashlib.sha256(raw).hexdigest() != source["sha256"] or not source.get("quote", "").strip()
+            or source["quote"] not in raw.decode("utf-8")):
+        raise ValueError("Invalid release scope analyst evidence")
+    reviewed = copy.deepcopy(result)
+    field = scope["provider"] + "_key"
+    known = {issue[field]: issue for issue in [*reviewed["issues"], *reviewed.get("skipped", [])]}
+    seen = set()
+    for decision in decisions["tasks"]:
+        key, feature = decision["key"], decision["feature"]
+        if key not in known or key in seen:
+            raise ValueError("Scope decision must name one unique collected task")
+        seen.add(key)
+        if not valid_slug(feature) or not inside_project(project, project / "features" / feature).is_dir():
+            raise ValueError("Confirm an existing analytical feature; a missing Gantt lane is not a missing feature")
+        issue = known[key]
+        role = decision.get("role", issue.get("task_role"))
+        if role not in {"AN", "BE", "FE", "QA"}:
+            raise ValueError("An unprefixed task requires an explicit supported role decision")
+        if issue.get("task_role") and role != issue["task_role"]:
+            raise ValueError("A role decision cannot silently override an explicit task prefix")
+        issue.update(confirmed_feature=feature, task_role=role)
+        if issue in reviewed.get("skipped", []):
+            reviewed["skipped"].remove(issue)
+            issue.pop("reason", None)
+            reviewed["issues"].append(issue)
+    reviewed["work_items"] = work_items(reviewed["issues"])
+    return reviewed
+
+
 def release_identity(value: dict) -> str:
     return str(value.get("key") or value.get("name") or "")
 
@@ -19,14 +60,20 @@ def release_owners(project: Path, result: dict) -> dict:
 
     provider = result["scope"]["provider"]
     column = "Jira" if provider == "jira" else "SberTrek"
-    owners, epics = {}, {}
+    owners, epics, blockers = {}, {}, []
     for path in registry_paths(project):
         feature = path.relative_to(project).parts[1]
-        tables, _ = read_registry(path)
+        try:
+            tables, _ = read_registry(path, identity_only=True)
+        except ValueError as error:
+            blockers.append({"reason": "ownership-index-unreadable", "registry": path.relative_to(project).as_posix(),
+                             "message": str(error)})
+            continue
         for row in (row for table in tables for row in table):
-            key = row.get(column, "").split("/")[0].strip()
-            if key and key not in {"-", "—"}:
-                owners.setdefault(key, set()).add(feature)
+            for key_column in ("Jira", "SberTrek"):
+                key = row.get(key_column, "").split("/")[0].strip()
+                if key and key not in {"-", "—"}:
+                    owners.setdefault((key_column, key), set()).add(feature)
     for path in sorted((project / "features").glob("*/execution/tracker-scope.json")):
         inside_project(project, path)
         config = json.loads(path.read_text(encoding="utf-8"))
@@ -37,16 +84,24 @@ def release_owners(project: Path, result: dict) -> dict:
     proposals = []
     for issue in result["issues"]:
         key = issue.get(provider + "_key")
-        exact = owners.get(key, set())
+        exact = owners.get((column, key), set()) | owners.get(
+            ("SberTrek" if provider == "jira" else "Jira", issue.get("sbertrek_key" if provider == "jira" else "jira_key")), set())
         epic = (issue.get("epic") or {}).get("key")
-        candidates = exact or epics.get(epic, set())
+        confirmed = issue.get("confirmed_feature")
+        candidates = {confirmed} if confirmed else exact or epics.get(epic, set())
+        conflict = bool(confirmed and exact and exact != {confirmed})
+        if conflict:
+            blockers.append({"reason": "confirmed-owner-conflicts-with-registry", "key": key,
+                             "confirmed_feature": confirmed, "registry_features": sorted(exact)})
         proposals.append({"key": key, "summary": issue.get("summary"),
                           "features": sorted(candidates),
-                          "basis": "registry" if exact else "associated-epic" if candidates else "analyst-required",
-                          "registration_required": not bool(exact),
-                          "question_required": len(candidates) != 1})
+                          "role": issue.get("task_role"),
+                          "basis": "analyst-confirmed" if confirmed else "registry" if exact else "associated-epic" if candidates else "analyst-required",
+                          "registration_required": not bool(exact) or conflict,
+                          "question_required": len(candidates) != 1 or conflict})
     return {"items": proposals, "selected_features": sorted({feature for item in proposals for feature in item["features"]}),
-            "ownership_ready": all(not item["registration_required"] and not item["question_required"] for item in proposals)}
+            "blockers": blockers,
+            "ownership_ready": not blockers and all(not item["registration_required"] and not item["question_required"] for item in proposals)}
 
 
 def release_preview_command(args) -> int:
@@ -57,15 +112,31 @@ def release_preview_command(args) -> int:
     if result["scope"]["kind"] != "release" or not completion["planning_application_allowed"]:
         raise ValueError("Expected a release actualization run")
     project = Path(args.project_root).resolve()
+    if getattr(args, "decisions", None):
+        from tracker_workflow import response_file
+        _, _, decisions = response_file(args.decisions, args.run_id)
+        result = apply_scope_decisions(project, result, decisions)
     ownership = release_owners(project, result)
     output = {"status": "release-ownership-preview", **ownership, "skipped": result.get("skipped", []),
-              "writes_performed": False, "next_action": {"type": "resolve-release-ownership"}}
+              "writes_performed": False, "next_action": {"type": "resolve-release-ownership"},
+              "registration": {
+                  "existing_features": sorted(path.name for path in (project / "features").glob("*") if path.is_dir()),
+                  "gantt_presence_required": False, "before_write": "application-preflight",
+                  "registry": "features/<confirmed-feature>/execution/tasks.md",
+                  "unknown_facts": {"Status": "unknown", "Progress %": "unknown", "Estimate (дн)": "-",
+                                    "Actual Start": "-", "Actual Finish": "-"},
+                  "new_feature_contract": "core/tracker-release.md#новая-фича-в-исполнении",
+                  "analyst_ownership_overrides_candidates": True,
+                  "skipped_roles_require_explicit_decision": True}}
     if ownership["ownership_ready"] and ownership["selected_features"]:
         output["execution"] = preview_execution(project, None, None, result)
-        output["next_action"] = {"type": "collect-feature-remainder", "provider": result["scope"]["provider"],
-                                 "keys": sorted({key for proposal in output["execution"]["feature_qa_proposals"]
-                                                 for key in proposal["missing_card_keys"]}),
-                                 "same_run": True, "then": "history-review"}
+        if output["execution"]["ownership_ready"]:
+            output["next_action"] = {"type": "collect-feature-remainder", "provider": result["scope"]["provider"],
+                                     "keys": sorted({key for proposal in output["execution"]["feature_qa_proposals"]
+                                                     for key in proposal["missing_card_keys"]}),
+                                     "same_run": True, "then": "history-review"}
+        else:
+            output["next_action"] = {"type": "resolve-execution-ownership", "same_run": True}
     print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0
 
@@ -101,7 +172,8 @@ def supplement_result(run_id: str, project: Path, result: dict, responses: list[
         append_cards(run, provider, cards)
     supplemented = reconcile_data(run)
     release = result["scope"]["ids"][0]
-    supplemented["release_member_keys"] = [issue.get(provider + "_key") for issue in supplemented["issues"]
+    supplemented["release_member_keys"] = [issue.get(provider + "_key")
+                                           for issue in [*supplemented["issues"], *supplemented.get("skipped", [])]
                                            if any(release in {item.get("key"), item.get("name")}
                                                   for item in issue.get("releases", []))]
     return supplemented
@@ -153,6 +225,8 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
         if len(targets) != 1:
             return {"ready": False, "reason": "confirm-one-base-qa-before-partition", "path": path.relative_to(project).as_posix()}
         value = targets[0]["saved_facts"].get("Estimate (дн)") or targets[0]["saved_facts"].get("Estimate")
+        if value in (None, "", "-", "—", "unknown"):
+            return {"ready": False, "reason": "qa-estimate-unknown", "path": path.relative_to(project).as_posix()}
         total = Decimal(str(value).replace(",", "."))
         groups = [{"task_id": targets[0]["task_id"], "members": sorted(members), "release": None, "estimate": str(total)}]
     if not total.is_finite() or total <= 0:

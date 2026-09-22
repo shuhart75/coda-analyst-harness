@@ -172,8 +172,10 @@ def review_history(args) -> int:
         raise ValueError("Confirmed role/status mapping and decision source are required")
     project = Path(args.project_root).resolve()
     if result["scope"]["kind"] == "release":
-        from tracker_release import supplement_result
+        from tracker_release import apply_scope_decisions, supplement_result
+        result = apply_scope_decisions(project, result, manifest.get("release_scope_decisions"))
         result = supplement_result(args.run_id, project, result, manifest.get("supplemental_responses", []))
+        result = apply_scope_decisions(project, result, manifest.get("release_scope_decisions"))
         result["scope"] = {**result["scope"], "release_decisions": manifest.get("release_decisions", {})}
     preview = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
                                 manifest.get("reviewed_registries", {}), manifest.get("expected_head"))
@@ -220,7 +222,7 @@ def review_history(args) -> int:
         evidence.append({"key": entry["key"], "role": entry["role"], "sha256": entry["sha256"], "call": entry["call"],
                          "mapping": entry.get("mapping", JIRA_MAPPING), "status_aliases": entry.get("status_aliases", {})})
         limitations.extend(f"{entry['key']}:{limit}" for limit in limits)
-    reviews, missing_history = [], []
+    reviews, missing_history, qa_blockers = [], [], []
     deleted_keys = {issue.get(provider + "_key") for issue in result["excluded"]
                     if issue.get("reason") == "confirmed-source-deletion"}
     skipped_keys = {issue.get(provider + "_key") for issue in result.get("skipped", [])}
@@ -248,13 +250,15 @@ def review_history(args) -> int:
         partition = proposal.get("partition")
         if partition is not None:
             if not partition.get("ready"):
-                raise ValueError(f"Resolve QA partition before history review: {partition['reason']}")
-            review["qa_groups"] = []
-            for group in partition["groups"]:
-                keys = tuple(group["history_keys"])
-                calculated = calculate_feature(feature, tuple(history for history in selected if history.task_key in keys),
-                                               participants, rules, keys, True)
-                review["qa_groups"].append({**group, "qa": calculated["qa"], "limitations": calculated["limitations"]})
+                qa_blockers.append({"feature": feature, "reason": partition["reason"]})
+                review["limitations"].append("qa-partition-pending:" + partition["reason"])
+            else:
+                review["qa_groups"] = []
+                for group in partition["groups"]:
+                    keys = tuple(group["history_keys"])
+                    calculated = calculate_feature(feature, tuple(history for history in selected if history.task_key in keys),
+                                                   participants, rules, keys, True)
+                    review["qa_groups"].append({**group, "qa": calculated["qa"], "limitations": calculated["limitations"]})
         reviews.append(review)
     unavailable = manifest.get("unavailable_history", {})
     if not isinstance(unavailable, dict) or any(
@@ -268,6 +272,8 @@ def review_history(args) -> int:
     from tracker_qa_application import confirmed_qa_updates
     if pending_history and manifest.get('qa_confirmations'):
         raise ValueError('Collect or document unavailable history before QA application review')
+    if qa_blockers and manifest.get('qa_confirmations'):
+        raise ValueError('Resolve QA partition blockers before approving QA application')
     qa_application = confirmed_qa_updates(comparison, manifest.get('qa_confirmations', [])) if comparison else []
     rechecked = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
                                   manifest.get("reviewed_registries", {}), manifest.get("expected_head"))
@@ -280,6 +286,7 @@ def review_history(args) -> int:
               "features": reviews, "evidence": evidence, "limitations": limitations,
               "status_rules": manifest["status_rules"],
               "feature_qa_proposals": preview["feature_qa_proposals"],
+              "qa_application_blockers": qa_blockers,
               "missing_task_candidates": preview["missing_task_candidates"],
               "deletion_proposals": [item for item in preview["items"]
                                      if item["proposed_action"] == "delete-current-execution"],

@@ -75,7 +75,7 @@ def confirmed_qa_updates(comparison: dict, confirmations: list[dict]) -> list[di
 
 
 def check_qa_application(args) -> int:
-    from tracker_workflow import load_json, digest_object, run_root
+    from tracker_workflow import load_json, digest_object, run_root, verified_result
     from tracker_registry import read_registry
     from tracker_execution import git
 
@@ -84,6 +84,11 @@ def check_qa_application(args) -> int:
     expected = (run_root(review['run_id']) / 'history' / (digest_object(review) + '.json')).resolve()
     if path != expected:
         raise ValueError('Expected an unchanged saved history review')
+    completion, _ = verified_result(review['run_id'])
+    if not completion['planning_application_allowed']:
+        raise ValueError('Tracker application is paused or was not requested')
+    if review.get('qa_application_blockers'):
+        raise ValueError('Resolve QA partition blockers before application')
     project = Path(args.project_root).resolve()
     if str(project) != review.get('project_root') or git(project, 'rev-parse', 'HEAD').strip() != review['head']:
         raise ValueError('Project or HEAD differs from the reviewed application')
