@@ -22,6 +22,12 @@ This repository defines a reusable workflow harness.
 
 ## Mandatory tracker stop gate
 
+- Полноту состава релиза можно подтвердить отдельным решением аналитика по
+  `core/tracker-release.md`: точный полный список, run, провайдер, релиз и
+  проверяемая цитата. Это не метаданные MCP и не подтверждение QA. Передавай
+  `analyst_confirmation` через новый release_membership в review того же run;
+  не редактируй raw/reconciled и не снимай остальные блокеры. `pending` не пауза.
+
 - Одна актуализация сохраняется одной рабочей веткой: `core/collaboration.md`,
   `set-execution-scope` с подтверждёнными фичами, кварталами и tracker-run.
   `application-preflight` допускает фичи этой области. Сдвиги производных полос

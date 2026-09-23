@@ -3,6 +3,33 @@ from __future__ import annotations
 from tracker_history import pagination_window, pin_history_response, pointer, validate_call
 
 
+def confirm_membership(run_id: str, provider: str, release: str, keys: set[str], confirmation: dict) -> dict:
+    from tracker_workflow import digest_bytes, normalize_key, response_file
+
+    if (not isinstance(confirmation, dict) or confirmation.get('analyst_confirmed') is not True
+            or confirmation.get('complete') is not True
+            or confirmation.get('run_id') != run_id or confirmation.get('provider') != provider
+            or confirmation.get('release') != release):
+        raise ValueError('Explicit full membership confirmation must match this run, provider and release')
+    members = confirmation.get('member_keys')
+    if not isinstance(members, list) or not all(isinstance(key, str) for key in members):
+        raise ValueError('Confirmed release membership requires an explicit key list')
+    normalized = [normalize_key(key) for key in members]
+    if len(set(normalized)) != len(normalized) or set(normalized) != keys:
+        raise ValueError('Confirmed full membership must match every collected key, including skipped roles')
+    source = confirmation.get('source', {})
+    quote = source.get('quote')
+    if not isinstance(quote, str) or not quote.strip():
+        raise ValueError('The actual analyst confirmation quote is required')
+    path, raw, _ = response_file(source['file'], run_id, require_json=False)
+    if digest_bytes(raw) != source.get('sha256') or quote not in raw.decode('utf-8'):
+        raise ValueError('Analyst membership confirmation evidence changed or quote is missing')
+    pin_history_response(run_id, path, raw, {'purpose': 'analyst-release-membership',
+                                          'source_file': str(path), 'member_keys': sorted(normalized)})
+    return {**confirmation, 'member_keys': sorted(normalized),
+            'source': {**source, 'file': str(path)}}
+
+
 def membership_evidence(run_id: str, provider: str, release: str, selection: str,
                         cards: list[dict], specification: dict) -> tuple[dict, list[str]]:
     from tracker_workflow import digest_bytes, normalize_key, response_file
@@ -13,7 +40,7 @@ def membership_evidence(run_id: str, provider: str, release: str, selection: str
     if not isinstance(sources, list) or not sources:
         raise ValueError("Release membership evidence sources are required")
     keys, evidence, windows, totals, continuations = set(), [], [], set(), []
-    complete_metadata = True
+    complete_metadata, explicitly_incomplete = True, False
     for source in sources:
         call = source["call"]
         validate_call(call, provider)
@@ -44,6 +71,9 @@ def membership_evidence(run_id: str, provider: str, release: str, selection: str
                 raise ValueError("Repeated release member; inspect overlapping pages or links")
             keys.add(key)
         window = pagination_window(payload, mapping, call, len(records))
+        if window is None:
+            explicitly_incomplete |= (('has_next' in mapping and pointer(payload, mapping['has_next']) is True)
+                                      or ('total' in mapping and pointer(payload, mapping['total']) > len(records)))
         if window is not None:
             start, end, total = window
             if total is not None:
@@ -71,16 +101,28 @@ def membership_evidence(run_id: str, provider: str, release: str, selection: str
     returned = {card["key"] for card in cards}
     if len(returned) != len(cards) or returned != keys:
         raise ValueError("Membership evidence and collected cards must cover the same unique keys")
-    position = 0
+    position, coverage_gap = 0, False
     for start, end in sorted(windows):
         if start != position:
             complete_metadata = False
+            coverage_gap = True
         position = end
     complete = complete_metadata and totals == {position}
     if complete and any(has_next != (end < position) for end, has_next in continuations):
         raise ValueError("Page continuation contradicts complete membership coverage")
-    return {"release": release, "keys": sorted(keys), "sources": evidence, "complete": complete}, (
-        [] if complete else ["release-result-incomplete:membership-completeness-not-proven"])
+    confirmation = None
+    if 'analyst_confirmation' in specification:
+        if (explicitly_incomplete or coverage_gap or (totals and totals != {position})
+                or any(has_next != (end < position) for end, has_next in continuations)):
+            raise ValueError('Resolve explicit pagination gaps before confirming release membership')
+        confirmation = confirm_membership(run_id, provider, release, keys, specification['analyst_confirmation'])
+    limitations = [] if complete else [
+        'release-membership:source-completeness-unproven:analyst-confirmed' if confirmation else
+        'release-result-incomplete:membership-completeness-not-proven']
+    return {"release": release, "keys": sorted(keys), "sources": evidence,
+            "complete": complete or confirmation is not None, "source_complete": complete,
+            "completeness_basis": 'source' if complete else 'analyst-confirmed' if confirmation else 'unproven',
+            "analyst_confirmation": confirmation}, limitations
 
 
 def review_membership(run_id: str, result: dict, specification: dict | None) -> dict:
@@ -101,8 +143,7 @@ def review_membership(run_id: str, result: dict, specification: dict | None) -> 
     if evidence["complete"]:
         reviewed["limitations"] = [limit for limit in reviewed["limitations"]
                                   if limit != "release-result-incomplete:membership-completeness-not-proven"]
-    else:
-        reviewed["limitations"] = sorted(set([*reviewed["limitations"], *limitations]))
+    reviewed["limitations"] = sorted(set([*reviewed["limitations"], *limitations]))
     return reviewed
 
 

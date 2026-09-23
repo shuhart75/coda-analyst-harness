@@ -5,6 +5,7 @@ import copy
 import hashlib
 from importlib import import_module
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -167,6 +168,72 @@ class ReleaseWorkflowTests(unittest.TestCase):
             'mapping': mapping or {'records': '/edges', 'member_key': '/target', 'release_root': '/owner',
                                   'relation': '/type', 'relation_value': 'ships', 'total': '/size', 'start': '/offset'}}]}
         return call
+
+    def membership_confirmation(self, run, keys):
+        quote = 'I confirm the complete release membership: ' + ', '.join(keys)
+        answer = self.write(self.state / 'membership-confirmation.txt', quote)
+        return {'run_id': run['run_id'], 'provider': run['next_action']['provider'], 'release': 'REL-1',
+                'analyst_confirmed': True, 'complete': True, 'member_keys': keys,
+                'source': {'file': str(answer), 'sha256': hashlib.sha256(answer.read_bytes()).hexdigest(),
+                           'quote': quote}}
+
+    def test_membership_confirmation_is_scoped_and_preserves_other_limitations(self):
+        run = self.begin_release()
+        call = self.linked_call(run, {'items': [{'key': 'JIRA-1'}]},
+                                {'records': '/items', 'member_key': '/key'}, 'selected-query')
+        self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, call)
+        self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
+        membership = copy.deepcopy(call['release_membership'])
+        confirmation = self.membership_confirmation(run, ['JIRA-1'])
+        membership['analyst_confirmation'] = confirmation
+        source_path = Path(membership['sources'][0]['response_file'])
+        original = source_path.read_bytes()
+        args = ('release-preview', '--run-id', run['run_id'], '--project-root', str(self.project),
+                '--membership', str(self.state / 'membership.json'))
+        for field, value in [('run_id', '20260922T085505Z-ffffffff'), ('provider', 'sbertrek'),
+                             ('release', 'REL-2'), ('analyst_confirmed', False), ('complete', False),
+                             ('member_keys', []), ('member_keys', ['JIRA-1', 'JIRA-1']),
+                             ('member_keys', ['JIRA-1', 'JIRA-2']),
+                             ('source', {**confirmation['source'], 'sha256': '0' * 64}),
+                             ('source', {**confirmation['source'], 'quote': 'invented approval'})]:
+            with self.subTest(field=field, value=value):
+                bad = copy.deepcopy(membership)
+                bad['analyst_confirmation'][field] = value
+                self.write(self.state / 'membership.json', bad)
+                self.run_tool(self.state, *args, expected=2)
+        self.write(self.state / 'membership.json', membership)
+        preview = self.run_tool(self.state, *args)
+        evidence = preview['release_membership_evidence']
+        self.assertTrue(evidence['complete'])
+        self.assertFalse(evidence['source_complete'])
+        self.assertEqual(evidence['completeness_basis'], 'analyst-confirmed')
+        self.assertEqual(source_path.read_bytes(), original)
+        from tracker_release_evidence import review_membership
+        from unittest.mock import patch
+        with patch.dict(os.environ, {'ANALYST_HARNESS_STATE_ROOT': str(self.state)}), patch('tracker_workflow.load_run', return_value={
+                'scope': {}, 'collection_mode': 'adaptive', 'steps': [{'provider': 'jira',
+                'query': run['next_action']['selection']['query_semantics']}], 'cards': {'jira': [{'key': 'JIRA-1'}]}}):
+            result = {'scope': {'kind': 'release', 'provider': 'jira', 'ids': ['REL-1']},
+                      'limitations': ['release-result-incomplete:membership-completeness-not-proven',
+                                      'jira-result-limit-reached:50', 'history-incomplete']}
+            reviewed = review_membership(run['run_id'], result, membership)
+        self.assertIn('jira-result-limit-reached:50', reviewed['limitations'])
+        self.assertIn('history-incomplete', reviewed['limitations'])
+        self.assertIn('release-membership:source-completeness-unproven:analyst-confirmed', reviewed['limitations'])
+        self.assertIn('release-result-incomplete:membership-completeness-not-proven', result['limitations'])
+
+    def test_analyst_confirmation_does_not_hide_explicit_missing_pages(self):
+        run = self.begin_release()
+        call = self.linked_call(run, {'items': [{'key': 'JIRA-1'}], 'total': 2, 'has_next': True},
+                                {'records': '/items', 'member_key': '/key', 'total': '/total',
+                                 'has_next': '/has_next'}, 'selected-query')
+        self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, call)
+        self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
+        membership = call['release_membership']
+        membership['analyst_confirmation'] = self.membership_confirmation(run, ['JIRA-1'])
+        path = self.write(self.state / 'membership.json', membership)
+        self.run_tool(self.state, 'release-preview', '--run-id', run['run_id'], '--project-root', str(self.project),
+                      '--membership', str(path), expected=2)
 
     def test_link_evidence_without_editing_cards_and_unknown_not_zero(self):
         run = self.begin_release()
@@ -338,6 +405,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
                       '--review-file', review['review_file'], expected=2)
 
     def test_new_release_feature_history_before_any_registry_write(self):
+        self.check_new_release_feature_history()
+
+    def test_analyst_membership_resumes_same_run_through_history_and_qa(self):
+        self.check_new_release_feature_history(analyst_membership=True)
+
+    def check_new_release_feature_history(self, analyst_membership=False):
         from test_trackerctl import DirectTrackerWorkflowTests
         from tracker_history import JIRA_MAPPING
 
@@ -427,6 +500,19 @@ class ReleaseWorkflowTests(unittest.TestCase):
             'mapping': {'records': '/edges', 'member_key': '/target', 'release_root': '/owner',
                         'relation': '/type', 'relation_value': 'ships', 'total': '/total', 'has_next': '/has_next'}}]}
         membership_file = self.write(self.state / 'membership.json', membership)
+        if analyst_membership:
+            membership = copy.deepcopy(call['release_membership'])
+            membership['analyst_confirmation'] = self.membership_confirmation(run, keys)
+            partial = copy.deepcopy(membership)
+            partial['analyst_confirmation']['member_keys'] = keys[:2]
+            self.write(membership_file, partial)
+            self.run_tool(self.state, *preview_args, '--membership', str(membership_file), expected=2)
+            self.write(membership_file, membership)
+            self.run_tool(self.state, 'application-state', '--run-id', run['run_id'], '--state', 'paused',
+                          '--reason', 'Wait for membership confirmation', '--analyst-confirmed')
+            self.run_tool(self.state, *preview_args, '--membership', str(membership_file), expected=2)
+            self.run_tool(self.state, 'application-state', '--run-id', run['run_id'], '--state', 'pending',
+                          '--reason', 'Resume with confirmed membership', '--analyst-confirmed')
         repaired = self.run_tool(self.state, *preview_args, '--decisions', str(decision_file),
                                  '--membership', str(membership_file))
         self.assertTrue(repaired['release_membership_evidence']['complete'])
