@@ -645,6 +645,9 @@ def finish_command(args: argparse.Namespace) -> int:
         "merged_at": utc_now(),
         "origin_main": head(analytics),
     }
+    from tracker_sessions import completed_executions
+    state['completed_execution_runs'] = completed_executions({
+        **state, 'completed_work': [*state.get('completed_work', []), completed]})
     state["completed_work"] = [*state.get("completed_work", []), completed][-50:]
     state["active_work"] = None
     write_state(root, state)

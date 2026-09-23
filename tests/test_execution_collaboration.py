@@ -126,6 +126,30 @@ class ExecutionCollaborationTests(unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn('outside confirmed execution scope', rejected.stdout)
 
+    def test_finish_records_run_completion_only_after_proven_merge(self):
+        self.scope()
+        run_id = '20260922T085505Z-12345678'
+        state = json.loads(self.state_path.read_text())
+        state['active_work']['execution_scope']['run_ids'] = [run_id]
+        self.state_path.write_text(json.dumps(state))
+        branch = self.git(self.project, 'branch', '--show-current')
+        self.git(self.project, 'push', '--set-upstream', 'origin', branch)
+        self.assertEqual(self.raw('finish').returncode, 2)
+        self.assertNotIn('completed_execution_runs', json.loads(self.state_path.read_text()))
+        integrator = self.workspace / 'integrator'
+        self.git(self.project, 'clone', str(self.remote), str(integrator))
+        self.git(integrator, 'config', 'user.name', 'Integrator')
+        self.git(integrator, 'config', 'user.email', 'integrator@example.test')
+        self.git(integrator, 'merge', '--no-ff', 'origin/' + branch, '-m', 'Accept execution fixtures')
+        self.git(integrator, 'push', 'origin', 'main')
+        finished = self.collaboration(self.workspace, self.environment, 'finish')
+        self.assertEqual(finished['status'], 'feature-work-finished')
+        state = json.loads(self.state_path.read_text())
+        self.assertIsNone(state['active_work'])
+        self.assertEqual(state['completed_execution_runs'][run_id]['state'], 'applied')
+        self.assertEqual(state['completed_execution_runs'][run_id]['origin_main'],
+                         self.git(self.remote, 'rev-parse', 'main'))
+
     def test_incomplete_export_and_partial_save_are_blocked_without_staging(self):
         self.scope()
         shifted = 'planning/2026-Q3/gantt/includes/actual-progress/FEATURE-other.puml'

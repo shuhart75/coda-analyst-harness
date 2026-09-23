@@ -22,6 +22,13 @@ This repository defines a reusable workflow harness.
 
 ## Mandatory tracker stop gate
 
+- Цель задаёт текущий запрос аналитика, не completed_work и не имя папки ответов.
+  После потери контекста и готового config-status используй trackerctl.py resume
+  с точными scope и intent по core/tracker-adaptive.md. Не подставляй старый run,
+  не объявляй исходный релиз ошибочным без решения аналитика. Завершённое применение
+  имеет эффективное состояние applied и не возобновляется. Для release begin
+  --intent обязателен; «актуализируй» означает update-planning, не read-only.
+
 - Полноту состава релиза можно подтвердить отдельным решением аналитика по
   `core/tracker-release.md`: точный полный список, run, провайдер, релиз и
   проверяемая цитата. Это не метаданные MCP и не подтверждение QA. Передавай

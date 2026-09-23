@@ -589,7 +589,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_release_membership_is_checked_and_jira_id_is_not_a_task_key(self):
         run = self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', 'jira',
-                            '--scope-id', '12345', '--label', 'Release', '--scope-source', 'analyst')
+                            '--scope-id', '12345', '--label', 'Release', '--scope-source', 'analyst', '--intent', 'read-only')
         self.assertEqual(run['next_action']['selection']['query_semantics'], 'fixVersion = "12345"')
         result = self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, expected=2)
         self.assertIn('membership', result['error'])

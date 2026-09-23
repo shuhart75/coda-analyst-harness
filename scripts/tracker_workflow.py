@@ -458,7 +458,7 @@ def next_action(run: dict) -> dict:
 def status_payload(run: dict) -> dict:
     action = next_action(run)
     payload = {
-        "protocol": PROTOCOL, "run_id": run["run_id"], "status": run["status"],
+        "protocol": PROTOCOL, "run_id": run["run_id"], "status": run["status"], "scope": run['scope'],
         "workflow_complete": run["status"] == "tracker-read-reconciled",
         "final_response_allowed": False,
         "must_stop": action["type"] == "resolve-conflict",
@@ -1605,6 +1605,9 @@ def begin_command(args: argparse.Namespace) -> int:
     if status.get("must_stop"):
         print(json.dumps(status, ensure_ascii=False, indent=2))
         return STOP_EXIT
+    if args.scope_kind == 'release' and args.intent is None:
+        raise ValueError('Release begin requires explicit --intent: update-planning for actualization, read-only for inspection')
+    args.intent = args.intent or 'read-only'
     if args.scope_provider == "jira" and not config["jira_enabled"]:
         raise ValueError("Jira отключена в tracker-config.json")
     if args.scope_kind == "release":
@@ -1793,6 +1796,12 @@ def verified_result(run_id: str) -> tuple[dict, dict]:
         completion["application_state"] = saved
         if saved["state"] == "paused":
             completion["planning_application_allowed"] = False
+    from tracker_sessions import applied_execution
+    applied = applied_execution(run_id)
+    if applied:
+        completion['application_state'] = applied
+        completion['planning_application_allowed'] = False
+    completion['scope'] = run['scope']
     return completion, result
 
 
@@ -1803,7 +1812,7 @@ def result_status_command(args: argparse.Namespace) -> int:
     preview_command = "release-preview" if result["scope"]["kind"] == "release" else "execution-preview"
     completion["planning_update"] = {
         "state": completion.get("application_state", {}).get("state", "pending" if planning_allowed else "not-requested"),
-        "actualization_complete": False,
+        "actualization_complete": completion.get('application_state', {}).get('state') == 'applied',
         "next_action": {
             "type": preview_command,
             "command": [
@@ -1827,6 +1836,8 @@ def application_state_command(args: argparse.Namespace) -> int:
     if not args.analyst_confirmed or not args.reason.strip():
         raise ValueError("Application state requires the analyst's explicit decision and reason")
     completion, result = verified_result(args.run_id)
+    if completion.get('application_state', {}).get('state') == 'applied':
+        raise ValueError('Run application was completed by collaboration finish; it cannot be resumed')
     if result["scope"]["intent"] != "update-planning":
         raise ValueError("Read-only run has no application phase")
     decision = {"state": args.state, "reason": args.reason, "at": now(),
@@ -1898,7 +1909,16 @@ def parser() -> argparse.ArgumentParser:
     issue_types = commands.add_parser("set-issue-types"); issue_types.add_argument("issue_types", nargs="+"); issue_types.set_defaults(handler=update_config_command)
     statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config_command)
     commands.add_parser("complete-config").set_defaults(handler=complete_config_command)
-    begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning"), default="read-only"); begin.set_defaults(handler=begin_command)
+    from tracker_sessions import resume_command
+    resume = commands.add_parser('resume')
+    resume.add_argument('--scope-kind', choices=SCOPE_KINDS, required=True)
+    resume.add_argument('--scope-provider', choices=PROVIDERS, required=True)
+    resume.add_argument('--scope-id', action='append', required=True)
+    resume.add_argument('--intent', choices=('read-only', 'update-planning'), required=True)
+    resume.add_argument('--epic-id', action='append', default=[])
+    resume.add_argument('--run-id')
+    resume.set_defaults(handler=resume_command)
+    begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning")); begin.set_defaults(handler=begin_command)
     collection = begin.add_mutually_exclusive_group()
     collection.add_argument("--adaptive", dest="adaptive", action="store_true", default=True)
     collection.add_argument("--legacy", dest="adaptive", action="store_false")
