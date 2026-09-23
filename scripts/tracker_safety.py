@@ -19,8 +19,9 @@ def application_preflight_command(args) -> int:
     state = load_json(state_root() / "collaboration.json")
     active = state.get("active_work") or {}
     branch = git(project, "branch", "--show-current").strip()
+    permitted_features = (active.get('execution_scope') or {}).get('features', [active.get('feature')])
     if (state.get("mode") != "multi-user-branches" or not branch or branch in {"main", "master"}
-            or active.get("branch") != branch or active.get("feature") != args.feature
+            or active.get("branch") != branch or args.feature not in permitted_features
             or active.get("status") != "active"):
         raise ValueError("Start or resume the owning feature through collaboration before any analytics write")
     mode = (state_root() / "active-mode.md").read_text(encoding="utf-8")

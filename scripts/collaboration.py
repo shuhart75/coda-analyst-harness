@@ -501,9 +501,14 @@ def save_command(args: argparse.Namespace) -> int:
             "reason": "exact-path-set-mismatch",
             "actual_paths": sorted(actual),
             "requested_paths": sorted(requested),
-            "message": "Перед сохранением нужно осознанно перечислить все и только изменённые пути",
+            "message": "Перечисли все и только изменённые пути относительно PROJECT_ROOT, без префикса documents/. Для актуализации используй save-preview; производный Гант сохраняется целиком.",
         }, ensure_ascii=False))
     require_valid_commit_message(args.message)
+    from execution_collaboration import check_save, execution_mode
+    if execution_mode(root) or work.get('execution_scope'):
+        check_save(root, analytics, work, actual, args.review_file, sys.modules[__name__])
+    elif args.review_file:
+        raise ValueError('History reviews require a registered execution scope')
     for path in sorted(requested):
         staged = git(analytics, "add", "--", path)
         if staged.returncode != 0:
@@ -748,9 +753,21 @@ def parser() -> argparse.ArgumentParser:
     start = commands.add_parser("start")
     start.add_argument("--feature", required=True)
     start.set_defaults(handler=start_command)
+    from execution_collaboration import set_scope, save_preview
+    scope = commands.add_parser('set-execution-scope')
+    scope.add_argument('--feature', action='append', required=True)
+    scope.add_argument('--quarter', action='append', required=True)
+    scope.add_argument('--run-id', action='append', default=[])
+    scope.add_argument('--reason', required=True)
+    scope.add_argument('--analyst-confirmed', action='store_true', required=True)
+    scope.set_defaults(handler=lambda args: set_scope(args, sys.modules[__name__]))
+    preview = commands.add_parser('save-preview')
+    preview.add_argument('--review-file', action='append', default=[])
+    preview.set_defaults(handler=lambda args: save_preview(args, sys.modules[__name__]))
     save = commands.add_parser("save")
     save.add_argument("--message", required=True)
     save.add_argument("--path", action="append", default=[], required=True)
+    save.add_argument('--review-file', action='append', default=[])
     save.set_defaults(handler=save_command)
     update = commands.add_parser("update")
     update.set_defaults(handler=update_command)
@@ -769,7 +786,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     try:
         args = parser().parse_args()
-        if args.command == "status":
+        if args.command in {"status", "save-preview"}:
             return args.handler(args)
         with workspace_operation_lock(root_path(args.root)):
             return args.handler(args)

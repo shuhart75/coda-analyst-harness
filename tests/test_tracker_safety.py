@@ -121,6 +121,10 @@ class TrackerScopeSafetyTests(unittest.TestCase):
         self.write(self.state / 'collaboration.json', state)
         self.assertEqual(self.run_tool(self.state, *args)['status'], 'tracker-application-preflight-ready')
         self.run_tool(self.state, *args[:-1], 'other', expected=2)
+        state['active_work']['execution_scope'] = {'features': ['owner', 'other'], 'quarters': ['2026-Q3']}
+        self.write(self.state / 'collaboration.json', state)
+        self.assertEqual(self.run_tool(self.state, *args[:-1], 'other')['status'], 'tracker-application-preflight-ready')
+        self.run_tool(self.state, *args[:-1], 'unconfirmed', expected=2)
         (self.state / 'active-mode.md').write_text('mode: requirements\n')
         self.run_tool(self.state, *args, expected=2)
 

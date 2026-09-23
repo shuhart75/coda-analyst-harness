@@ -105,6 +105,8 @@ collected history without source evidence, invent dates, or bypass source/branch
 
 ## Source and generation gate
 
+- One actualization session uses one review branch. Register the confirmed source features, quarters and tracker runs with `collaboration.py set-execution-scope`; follow `core/collaboration.md`. Generated quarter views may include shifts of other features without granting edits to their execution sources. Before save, use `save-preview` with the saved history reviews; commit the complete verified source/include/Confluence set together, not one branch per generated feature.
+
 - Resolve analytics through `workspace.py project-root`. Check Git state with `git -C "$PROJECT_ROOT"`, never from the harness root. An ignored analytics directory in the harness does not mean its files are untracked in their own repository.
 - Read the canonical feature registry `features/<feature>/execution/tasks.md` and `planning/actualization.md`. Legacy slice registries remain supported; do not create slices or duplicate tasks merely to satisfy tooling.
 - Individual task cards and `execution/actual-progress.md` are supporting evidence, not interchangeable generator inputs. Prepare a missing registry only from confirmed facts and explicit authorization; do not guess missing estimates, dates, story membership or resource assignments.
