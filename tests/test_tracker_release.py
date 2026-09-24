@@ -732,7 +732,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
                                '--project-root', str(self.project), '--manifest', str(manifest))
         self.assertEqual(path.read_bytes(), before)
         groups = review['features'][0]['qa_groups']
-        self.assertEqual([group['qa']['progress_percent'] for group in groups], [100, 0])
+        self.assertEqual(groups[0]['qa']['progress_percent'], 100)
+        self.assertIsNone(groups[1]['qa'])
+        self.assertEqual(groups[1]['application_mode'], 'partition-only')
+        self.assertNotIn('SECOND', [row['task_id'] for row in review['comparison']['rows']])
+        self.assertEqual(review['application_scope']['member_keys'], ['JIRA-1', 'JIRA-3'])
+        self.assertEqual([row['task_id'] for row in review['application_scope']['protected_rows']], ['SECOND'])
         self.assertEqual([Decimal(group['estimate']) for group in groups], [Decimal(4), Decimal(4)])
         self.assertEqual(len([row for row in review['comparison']['rows'] if row['role'] == 'QA']), 2)
         self.assertIn('| FE | BE | QA |', review['comparison']['table'])
@@ -740,28 +745,81 @@ class ReleaseWorkflowTests(unittest.TestCase):
                                 '--project-root', str(self.project), '--manifest', str(manifest))
         self.assertEqual(repeated['review_file'], review['review_file'])
         evidence = self.state / 'analyst.txt'
+        without_remainder = json.loads(manifest.read_text())
+        without_remainder['responses'] = histories[:1]
+        self.write(manifest, without_remainder)
+        scoped = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
+                               '--project-root', str(self.project), '--manifest', str(manifest))
+        self.assertEqual(scoped['pending_history'], [])
+        self.assertEqual(scoped['comparison']['rows'], review['comparison']['rows'])
+        no_cards = copy.deepcopy(without_remainder)
+        no_cards['supplemental_responses'] = []
+        self.write(manifest, no_cards)
+        incomplete = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
+                                   '--project-root', str(self.project), '--manifest', str(manifest))
+        self.assertIn('collect-all-feature-cards-before-partition',
+                      [blocker['reason'] for blocker in incomplete['qa_application_blockers']])
+        self.write(manifest, without_remainder)
         evidence.write_text('Approve both QA groups and their current states')
         document = review['feature_qa_proposals'][0]['partition']['document']
         confirmations = []
         for index, group in enumerate(groups):
             confirmations.append({'feature': 'owner', 'task_id': group['task_id'], 'kind': 'reviewed-fields',
-                                  'analyst_confirmed': True, 'fields': {'Status': 'done' if index == 0 else 'in-progress',
-                                                                      'Estimate (дн)': group['estimate']},
+                                  'analyst_confirmed': True, 'fields': {
+                                      **({'Status': 'done'} if index == 0 else {}),
+                                      'Estimate (дн)': group['estimate']},
                                   'source': {'file': str(evidence), 'sha256': hashlib.sha256(evidence.read_bytes()).hexdigest(),
                                              'quote': evidence.read_text()}})
         value = json.loads(manifest.read_text())
         value['qa_confirmations'] = confirmations
+        invalid = copy.deepcopy(value)
+        invalid['qa_confirmations'][1]['fields']['Status'] = 'done'
+        self.write(manifest, invalid)
+        blocked = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
+                                '--project-root', str(self.project), '--manifest', str(manifest), expected=2)
+        self.assertIn('partition estimates only', blocked['error'])
         self.write(manifest, value)
         approved = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
                                  '--project-root', str(self.project), '--manifest', str(manifest))
         path.write_text(path.read_text().replace('| QA-OWNER | - | real | QA | done | 8 |',
                                                 '| QA-OWNER | - | real | QA | done | 4.000000 |')
-                        + f"| {groups[1]['task_id']} | - | real | QA | in-progress | {groups[1]['estimate']} |\n")
+                        + f"| {groups[1]['task_id']} | - | real | QA | unknown | {groups[1]['estimate']} |\n")
         partition_path = self.project / 'features/owner/execution/qa-groups.json'
         self.write(partition_path, document)
         applied = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],
                                 '--project-root', str(self.project))
         self.assertEqual(applied['status'], 'qa-application-verified')
+        registered_manifest = self.write(self.state / 'registered-manifest.json', {
+            **value, 'expected_head': approved['head'],
+            'reviewed_registries': {path.relative_to(self.project).as_posix():
+                                    hashlib.sha256(path.read_bytes()).hexdigest()}})
+        registered = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
+                                   '--project-root', str(self.project), '--manifest', str(registered_manifest))
+        self.assertEqual([row['task_id'] for row in registered['application_scope']['protected_rows']],
+                          ['SECOND', groups[1]['task_id']])
+        self.assertEqual(registered['features'][0]['qa_groups'][1]['application_mode'], 'partition-only')
+        unchanged = path.read_text()
+        path.write_text(unchanged.replace(f"| {groups[1]['task_id']} | - | real | QA | unknown |",
+                                          f"| {groups[1]['task_id']} | - | real | QA | done |"))
+        remainder_update = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],
+                                         '--project-root', str(self.project), expected=2)
+        self.assertTrue(any(error.get('field') == 'Status' for error in remainder_update['errors']))
+        existing_remainder = self.run_tool(self.state, 'qa-application-check', '--review-file', registered['review_file'],
+                                           '--project-root', str(self.project), expected=2)
+        self.assertTrue(any(error.get('reason') == 'Task outside release changed or was removed'
+                            and error['task_id'] == groups[1]['task_id'] for error in existing_remainder['errors']))
+        path.write_text(unchanged.replace('| SECOND | JIRA-2 | real | BE | planned | 2 |',
+                                          '| SECOND | JIRA-2 | real | BE | done | 9 |'))
+        outside = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],
+                                '--project-root', str(self.project), expected=2)
+        self.assertTrue(any(error['reason'] == 'Task outside release changed or was removed'
+                            for error in outside['errors'] if 'reason' in error))
+        path.write_text(unchanged.replace('| SECOND | JIRA-2 | real | BE | planned | 2 |\n', ''))
+        removed = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],
+                                '--project-root', str(self.project), expected=2)
+        self.assertTrue(any(error.get('reason') == 'Task outside release changed or was removed'
+                            for error in removed['errors']))
+        path.write_text(unchanged)
         self.run_tool(self.state, 'application-state', '--run-id', run['run_id'], '--state', 'paused',
                       '--reason', 'analyst stopped after review', '--analyst-confirmed')
         paused = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],

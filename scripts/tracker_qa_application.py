@@ -38,6 +38,8 @@ def confirmed_qa_updates(comparison: dict, confirmations: list[dict]) -> list[di
         if not valid_fields:
             raise ValueError('Confirmation kind and date fields do not match')
         fields = confirmation['fields']
+        if targets[0].get('application_mode') == 'partition-only' and set(fields) - {'Estimate', 'Estimate (дн)'}:
+            raise ValueError('QA outside the release permits partition estimates only, not factual updates')
         for name, value in fields.items():
             if not isinstance(value, str) or not value.strip():
                 raise ValueError('QA fields require explicit nonempty registry strings')
@@ -84,11 +86,13 @@ def check_qa_application(args) -> int:
     expected = (run_root(review['run_id']) / 'history' / (digest_object(review) + '.json')).resolve()
     if path != expected:
         raise ValueError('Expected an unchanged saved history review')
-    completion, _ = verified_result(review['run_id'])
+    completion, result = verified_result(review['run_id'])
     if not completion['planning_application_allowed']:
         raise ValueError('Tracker application is paused or was not requested')
     if review.get('qa_application_blockers'):
         raise ValueError('Resolve QA partition blockers before application')
+    if result.get('scope', {}).get('kind') == 'release' and not review.get('application_scope'):
+        raise ValueError('Repeat history-review to verify release-only application scope')
     project = Path(args.project_root).resolve()
     if str(project) != review.get('project_root') or git(project, 'rev-parse', 'HEAD').strip() != review['head']:
         raise ValueError('Project or HEAD differs from the reviewed application')
@@ -99,6 +103,19 @@ def check_qa_application(args) -> int:
     if required - {(update['feature'], update['task_id']) for update in updates}:
         raise ValueError('Every feature QA requires a reviewed application or keep-current decision')
     errors = []
+    for protected in (review.get('application_scope') or {}).get('protected_rows', []):
+        registry = (project / protected['registry']).resolve()
+        if not registry.is_relative_to(project):
+            raise ValueError('Protected registry is outside project')
+        tables, _ = read_registry(registry)
+        matches = [row for table in tables for row in table
+                   if (row.get('Task ID') or row.get('Jira') or '') == protected['task_id']]
+        allowed = set(protected.get('allowed_fields', []))
+        if len(matches) != 1 or {key: value for key, value in matches[0].items() if key not in allowed} != {
+            key: value for key, value in protected['registry_fields'].items() if key not in allowed
+        }:
+            errors.append({'task_id': protected['task_id'], 'registry': protected['registry'],
+                           'reason': 'Task outside release changed or was removed'})
     for proposal in review.get('feature_qa_proposals', []):
         partition = proposal.get('partition')
         if partition and partition.get('ready'):

@@ -35,6 +35,8 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
     for review in reviews:
         feature = review["feature"]
         for item in preview["items"]:
+            if item.get("proposed_action") == "reference-only":
+                continue
             for target in item["targets"]:
                 if target["feature"] != feature or target["role"] not in {"BE", "FE"}:
                     continue
@@ -55,8 +57,16 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                           for group in review["qa_groups"]]
         for target in qa_targets:
             group = target.get("group")
+            partition_only = bool(group and group.get("application_mode") == "partition-only")
+            current = target["saved_facts"]
+            if partition_only and not current:
+                columns = proposal["existing_targets"][0].get("registry_fields", {})
+                current = {name: ("unknown" if name in {"Status", "Progress %"} else "-")
+                           for name in ("Status", "Progress %", "Actual Start", "Actual Finish", "Completed By")
+                           if name in columns}
             rows.append({"feature": feature, "task_id": target["task_id"], "role": "QA",
-                         "registry": target["registry"], "current": target["saved_facts"],
+                         "registry": target["registry"], "current": current,
+                         "application_mode": "partition-only" if partition_only else "update",
                          "history": group["qa"] if group else review["qa"],
                          "members": group["members"] if group else None,
                          "role_estimates": {"QA": {"value": group["estimate"] if group else proposal.get("estimate", {}).get("value")}},
@@ -74,6 +84,8 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
         proposed = " / ".join(cell(history.get(name)) for name in ("started_at", "finished_at", "state"))
         bounds = f"начато не позднее {cell(history.get('started_by'))}; завершено не позднее {cell(history.get('completed_by'))}"
         notes = cell("; ".join(row["limitations"]))
+        if row.get("application_mode") == "partition-only":
+            notes += "; вне релиза: только разделение оценки, без актуализации факта"
         notes += "; прежнее основание: " + cell(current.get("Details") or current.get("Notes"))
         estimates = " | ".join(cell(row.get("role_estimates", {}).get(role, {}).get("value")) for role in ("FE", "BE", "QA"))
         lines.append(f"| {cell(row['feature'])} / {cell(row['task_id'])} | {previous} | {proposed} | {bounds}; {notes} | {estimates} |")
@@ -98,6 +110,10 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                                        'current': row['current'], 'history': row['history']} for row in qa_rows],
                           'decision_required': True, 'application_verified': False})
         for row, target in zip(qa_rows, qa_checks[-1]['targets']):
+            if row.get('application_mode') == 'partition-only':
+                target['start_from_current_execution'] = {}
+                target['application_mode'] = 'partition-only'
+                continue
             if row.get('members') is not None:
                 target['start_from_current_execution'] = qa_start_from_current(
                     [candidate for candidate in rows if candidate['feature'] == feature
@@ -110,7 +126,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                 and target['current'].get('Actual Start') != target['start_from_current_execution']['started_on']
                 for target in qa_checks[-1]['targets'])
             current_qa_starts[feature] = {'basis': 'per-qa-group', 'targets': qa_checks[-1]['targets']}
-            lines.append(f"\nQA {cell(feature)}: начало, окончание и прогресс проверяются отдельно для каждой группы; общий интервал не переносить в части.")
+            lines.append(f"\nQA {cell(feature)}: общий интервал не переносить в части; для partition-only факт не актуализируется, разрешено только разделение оценки.")
             continue
         lines.append(f"\nQA {cell(feature)}: начало по сохранённым фактическим окончаниям разработки — "
                      f"{cell(start['started_on'])}; задача-источник {cell(start['source_task'])}. "
@@ -124,6 +140,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
             "decision_required": True,
             "choices": [{"id": identity, "label": label, "fields": selected}
                         for identity, label, selected in zip(DECISIONS, choices, fields)],
-            "scope": "shown-rows-only", "unknown_dates_preserve_current": True,
+            "scope": "shown-rows-only", "partition_only_excluded_from_fact_choices": True,
+            "unknown_dates_preserve_current": True,
             "bounds_are_not_exact_dates": True, "analyst_confirmation_requires_explicit_override": True,
             "application_allowed": False}

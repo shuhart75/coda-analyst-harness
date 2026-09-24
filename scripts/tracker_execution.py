@@ -122,6 +122,7 @@ def preview_execution(
                     "invalid_key": jira_invalid or sber_invalid,
                     "saved_facts": {name: row.get(name, "") for name in
                                     ("Actual Start", "Actual Finish", "Completed By", "Status", "Progress %", "Estimate", "Estimate (дн)", "Details", "Notes")},
+                    "registry_fields": dict(row),
                     "uncommitted": relative not in before["tracked"] or relative in before["changed"],
                 }
                 rows.append(reference)
@@ -257,6 +258,28 @@ def preview_execution(
             qa_proposals[-1]["action"] = "review-partition" if groups.get("changed") else "update-groups"
     scope = result.get("scope", {})
     provider = scope.get("provider")
+    application_scope = None
+    if scope.get("kind") == "release":
+        member_keys = set(result.get("release_member_keys", [
+            issue.get(str(provider) + "_key") for issue in [*result["issues"], *result.get("skipped", [])]
+            if issue.get(str(provider) + "_key")]))
+        for item in items:
+            if item.get(str(provider) + "_key") not in member_keys:
+                item["proposed_action"] = "reference-only"
+        application_scope = {
+            "kind": "release-members-only", "provider": provider, "release": scope["ids"][0],
+            "member_keys": sorted(member_keys),
+            "protected_rows": [row for row in rows if row["feature"] in selected
+                               and row["role"] != "QA" and row.get(str(provider) + "_key") not in member_keys
+                               and not row.get("registration_required")],
+        }
+        for proposal in qa_proposals:
+            partition = proposal.get("partition", {})
+            remainder_ids = {group["task_id"] for group in partition.get("groups", [])
+                             if group["release"] != scope["ids"][0]}
+            application_scope["protected_rows"].extend(
+                {**row, "allowed_fields": ["Estimate", "Estimate (дн)"]}
+                for row in proposal["existing_targets"] if row["task_id"] in remainder_ids)
     returned = {issue.get(str(provider) + "_key") for issue in result["issues"]}
     returned.update(issue.get(str(provider) + "_key") for issue in result.get("skipped", []))
     returned.update(issue.get(str(provider) + "_key") for issue in result["excluded"]
@@ -279,6 +302,7 @@ def preview_execution(
         "status": "tracker-execution-preview",
         "project_root": str(project), "head": before["head"], "quarter": quarter,
         "selected_features": list(selected), "items": items,
+        "application_scope": application_scope,
         "feature_qa_proposals": qa_proposals, "missing_task_candidates": missing_candidates,
         "registry_sha256": sources, "reviewed_registry_sha256": reviewed,
         "proposed_registrations": proposed_rows,

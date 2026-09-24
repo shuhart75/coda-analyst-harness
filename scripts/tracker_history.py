@@ -289,6 +289,11 @@ def review_history(args) -> int:
     if not preview["ownership_ready"]:
         raise ValueError("Resolve execution-preview ownership blockers before history review")
     histories, evidence, limitations, undated_history = {}, [], [], []
+    application_scope = preview.get("application_scope")
+    member_keys = set(application_scope["member_keys"]) if application_scope else None
+    reference_history = {f"{item.get(manifest['provider'] + '_key')}/{target['role']}"
+                         for item in preview['items'] if item.get('proposed_action') == 'reference-only'
+                         for target in item['targets'] if target['role'] in {'BE', 'FE'}}
     participants = manifest["participants"]
     rules = StatusRules(**{name: frozenset(values) for name, values in manifest["status_rules"].items()})
     status_sets(rules)
@@ -327,7 +332,7 @@ def review_history(args) -> int:
             sources.append(snapshot_evidence)
             observed = timestamp(datetime.fromisoformat(entry["snapshot"]["call"]["captured_at"]))
         history, limits = decode_history(payload, entry, observed, snapshot)
-        if {"history-text-requires-dated-source", "history-event-timestamps-not-returned"}.intersection(limits):
+        if (member_keys is None or entry["key"] in member_keys) and {"history-text-requires-dated-source", "history-event-timestamps-not-returned"}.intersection(limits):
             undated_history.append(f"{entry['key']}/{entry['role']}")
         history = replace(history, task_key=f"{entry['key']}/{entry['role']}")
         histories[identity] = (targets[0]["feature"], history)
@@ -351,13 +356,16 @@ def review_history(args) -> int:
                 if row.get("Role", "").upper() not in {"FE", "BE"}:
                     continue
                 key = row.get("Jira" if provider == "jira" else "SberTrek", "").split("/")[0].strip()
+                if member_keys is not None and key not in member_keys:
+                    continue
                 if key in deleted_keys | skipped_keys:
                     continue
                 if not key or key in {"-", "—"}:
                     local_missing.append(row.get("Task ID", "unmapped-work"))
                 else:
                     expected.add(f"{key}/{row['Role'].upper()}")
-        selected = tuple(history for owner, history in histories.values() if owner == feature)
+        selected = tuple(history for (source_provider, key, role), (owner, history) in histories.items()
+                         if owner == feature and (member_keys is None or key in member_keys))
         missing_history.extend(sorted(expected - {history.task_key for history in selected}))
         review = calculate_feature(feature, selected, participants, rules, tuple(sorted(expected)), not local_missing)
         review["limitations"].extend(f"unmapped-feature-work:{key}" for key in local_missing)
@@ -370,6 +378,10 @@ def review_history(args) -> int:
             else:
                 review["qa_groups"] = []
                 for group in partition["groups"]:
+                    if application_scope and group["release"] != application_scope["release"]:
+                        review["qa_groups"].append({**group, "qa": None, "limitations": [],
+                                                    "application_mode": "partition-only"})
+                        continue
                     keys = tuple(group["history_keys"])
                     calculated = calculate_feature(feature, tuple(history for history in selected if history.task_key in keys),
                                                    participants, rules, keys, True)
@@ -377,13 +389,15 @@ def review_history(args) -> int:
         reviews.append(review)
     unavailable = manifest.get("unavailable_history", {})
     if not isinstance(unavailable, dict) or any(
-        key not in missing_history or not isinstance(reason, str) or not reason.strip()
+        key not in set(missing_history) | reference_history
+        or not isinstance(reason, str) or not reason.strip()
         for key, reason in unavailable.items()
     ):
         raise ValueError("Unavailable history requires a reason for each missing work item")
     date_sources_unavailable = manifest.get("unavailable_history_dates", {})
     if not isinstance(date_sources_unavailable, dict) or any(
-        key not in undated_history or not isinstance(reason, str) or not reason.strip()
+        key not in set(undated_history) | reference_history
+        or not isinstance(reason, str) or not reason.strip()
         for key, reason in date_sources_unavailable.items()
     ):
         raise ValueError("Unavailable history dates require a capability-check reason for each undated work item")
@@ -418,6 +432,7 @@ def review_history(args) -> int:
               "pending_history_dates": pending_dates, "unavailable_history_dates": date_sources_unavailable,
               "comparison": comparison,
               "project_root": str(project), "qa_application": qa_application,
+              "application_scope": application_scope,
               "date_proposals_allowed": not pending_history,
               "fact_priority": ["analyst-confirmation", "assignment-and-status-history", "current-state-only"],
               "history_processed": bool(histories), "adapter": "source-mapped-history-v2",
