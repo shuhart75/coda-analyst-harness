@@ -248,9 +248,19 @@ def preview_execution(
                              "requires_analyst_review": True})
         from tracker_release import qa_groups
         skipped_keys = {issue.get(provider_field) for issue in result.get("skipped", [])}
-        group_rows = [row for row in rows if not row.get(provider_field) or row.get(provider_field) not in skipped_keys]
-        groups = qa_groups(project, selected_feature, group_rows, owned, result.get("scope", {}),
-                           set(result.get("release_member_keys", [issue.get(provider_field) for issue in result["issues"]])))
+        qa_member_keys = set(result.get("release_member_keys", [issue.get(provider_field)
+                             for issue in [*result["issues"], *result.get("skipped", [])]]))
+        protected_keys = {row[provider_field] for row in rows
+                          if result.get("scope", {}).get("kind") == "release"
+                          and row["feature"] == selected_feature and row["kind"] == "real"
+                          and row["role"] in {"BE", "FE"} and row.get(provider_field)
+                          and row[provider_field] not in qa_member_keys}
+        group_rows = [row for row in rows if not row.get(provider_field)
+                      or row[provider_field] not in skipped_keys - protected_keys]
+        group_issues = [*owned, *(issue for issue in result.get("skipped", [])
+                                 if issue.get(provider_field) in protected_keys)]
+        groups = qa_groups(project, selected_feature, group_rows, group_issues, result.get("scope", {}),
+                           qa_member_keys)
         if groups is not None:
             if result.get("scope", {}).get("kind") == "release" and any(
                 "result-limit" in limit or "result-incomplete" in limit for limit in result.get("limitations", [])

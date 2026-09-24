@@ -698,7 +698,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_cancelled_sbertrek_supplement_preserves_protected_qa_coverage(self):
         self.check_sbertrek_remainder('cancelled')
 
-    def check_sbertrek_remainder(self, status):
+    def test_skipped_sbertrek_supplement_preserves_protected_qa_coverage(self):
+        self.check_sbertrek_remainder('cancelled', summary='Task without role prefix')
+
+    def check_sbertrek_remainder(self, status, summary=None):
         from test_trackerctl import DirectTrackerWorkflowTests
         registry = self.project / 'features/owner/execution/tasks.md'
         registry.parent.mkdir(parents=True)
@@ -717,7 +720,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         original_result = result_path.read_bytes()
         from tracker_workflow import compact_issue, merged_value
         original_registry = registry.read_bytes()
-        remainder = DirectTrackerWorkflowTests.sber_issue(self, 'ST-2', status=status)
+        remainder = DirectTrackerWorkflowTests.sber_issue(self, 'ST-2', status=status, summary=summary)
         self.assertIsNone(merged_value('releases', compact_issue(remainder, 'sbertrek'), None)[0])
         source = self.write(self.state / 'remainder.json', {
             'issues': [remainder]})
@@ -726,7 +729,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         manifest = self.write(self.state / 'manifest.json', {
             'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'analyst rules',
             'provider': 'sbertrek', 'participants': {}, 'status_rules': {}, 'responses': [],
-            'unavailable_history': {'ST-1/BE': 'access unavailable', 'ST-2/BE': 'access unavailable'},
+            'unavailable_history': {'ST-1/BE': 'access unavailable'},
             'supplemental_responses': [{'keys': ['ST-2'], 'response_file': str(source),
                 'sha256': hashlib.sha256(original_source).hexdigest(),
                 'call': self.call('sbertrek', tql_units(['ST-2']))}]})
@@ -742,6 +745,35 @@ class ReleaseWorkflowTests(unittest.TestCase):
         repeated = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
                                 '--project-root', str(self.project), '--manifest', str(manifest))
         self.assertEqual(repeated['review_file'], review['review_file'])
+        if summary is not None:
+            partition = review['feature_qa_proposals'][0]['partition']
+            group_path = self.project / partition['path']
+            self.write(group_path, {'schema_version': 1, 'provider': 'sbertrek', 'total_estimate': '4',
+                                   'groups': [{'task_id': 'QA', 'members': ['FIRST'],
+                                               'release': 'REL-1', 'estimate': '4'}]})
+            broken_groups = group_path.read_bytes()
+            blocked = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
+                                    '--project-root', str(self.project), '--manifest', str(manifest))
+            diagnostic = blocked['feature_qa_proposals'][0]['partition']
+            self.assertEqual(diagnostic['reason'], 'qa-membership-changed-review-partition')
+            self.assertEqual(diagnostic['added'], ['REST'])
+            self.assertTrue(blocked['qa_application_blockers'])
+            self.assertEqual(group_path.read_bytes(), broken_groups)
+            self.assertEqual(registry.read_bytes(), original_registry)
+            self.write(group_path, partition['document'])
+            remainder_id = groups[1]['task_id']
+            registry.write_text(registry.read_text().replace('| QA | unknown | 4 |', '| QA | unknown | 2 |')
+                                + f'| {remainder_id} | - | real | QA | unknown | 2 |\n')
+            self.save_sources()
+            corrected = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
+                                      '--project-root', str(self.project), '--manifest', str(manifest))
+            self.assertEqual(corrected['qa_application_blockers'], [])
+            self.assertEqual([group['members'] for group in corrected['features'][0]['qa_groups']],
+                             [['FIRST'], ['REST']])
+            self.assertEqual([Decimal(group['estimate']) for group in corrected['features'][0]['qa_groups']],
+                             [Decimal(2), Decimal(2)])
+            self.assertEqual(result_path.read_bytes(), original_result)
+            self.assertEqual(source.read_bytes(), original_source)
 
     def test_release_remainder_history_and_independent_qa_groups(self):
         path = self.project / 'features/owner/execution/tasks.md'
