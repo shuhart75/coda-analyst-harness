@@ -187,7 +187,7 @@ def supplement_result(run_id: str, project: Path, result: dict, responses: list[
     supplemented["release_member_keys"] = [issue.get(provider + "_key")
                                            for issue in [*supplemented["issues"], *supplemented.get("skipped", [])]
                                            if any(release in {item.get("key"), item.get("name")}
-                                                  for item in issue.get("releases", []))]
+                                                  for item in (issue.get("releases") or []))]
     return supplemented
 
 
@@ -247,7 +247,7 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
         release = scope["ids"][0]
         choices = scope.get("release_decisions", {})
         for row in active:
-            releases = by_key[row[field]].get("releases", [])
+            releases = by_key[row[field]].get("releases") or []
             choice = choices.get(row[field])
             if len({release_identity(item) for item in releases}) > 1 or choice is not None:
                 if not choice or choice not in {item.get("key") for item in releases} | {item.get("name") for item in releases}:
@@ -255,7 +255,7 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
                             "releases": releases, "path": path.relative_to(project).as_posix()}
         selected_keys = {key for key in (release_members or set()) if key not in choices or any(
             release in {item.get("key"), item.get("name")} and choices[key] in {item.get("key"), item.get("name")}
-            for item in by_key.get(key, {}).get("releases", []))}
+            for item in (by_key.get(key, {}).get("releases") or []))}
         selected = {row["task_id"] for row in active if row[field] in selected_keys}
         if not selected:
             return {"ready": False, "reason": "release-has-no-development-members", "path": path.relative_to(project).as_posix()}

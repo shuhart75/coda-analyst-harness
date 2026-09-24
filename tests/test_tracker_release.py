@@ -57,6 +57,16 @@ class ReleasePartitionTests(unittest.TestCase):
         self.rows[0]['task_id'] = 'NEW'
         self.assertEqual(self.calculate()['reason'], 'qa-membership-changed-review-partition')
 
+    def test_nullable_releases_preserve_membership_and_require_valid_choices(self):
+        for issue in self.issues:
+            issue['releases'] = None
+        groups = self.calculate()['groups']
+        self.assertEqual(groups[0]['members'], ['TASK-1'])
+        self.assertEqual(groups[1]['members'], ['TASK-2', 'TASK-3'])
+        self.assertEqual(sum(Decimal(group['estimate']) for group in groups), Decimal(10))
+        self.scope['release_decisions'] = {'JIRA-1': 'release-1'}
+        self.assertEqual(self.calculate()['reason'], 'confirm-sole-release-owner')
+
     def test_missing_cards_and_multiple_releases_require_review(self):
         self.issues[0]['releases'].append({'key': 'release-2'})
         self.assertEqual(self.calculate()['reason'], 'confirm-sole-release-owner')
@@ -629,6 +639,49 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(groups[0]['members'], ['FIRST'])
         self.assertEqual(groups[1]['members'], ['REST'])
         self.assertIsNone(groups[0]['qa']['finished_at'])
+
+    def test_sbertrek_remainder_without_releases_preserves_run_and_qa_partition(self):
+        from test_trackerctl import DirectTrackerWorkflowTests
+        registry = self.project / 'features/owner/execution/tasks.md'
+        registry.parent.mkdir(parents=True)
+        registry.write_text('| Task ID | SberTrek | Kind | Role | Status | Estimate (дн) |\n'
+                            '|---|---|---|---|---|---|\n'
+                            '| FIRST | ST-1 | real | BE | unknown | - |\n'
+                            '| REST | ST-2 | real | BE | unknown | - |\n'
+                            '| QA | - | real | QA | unknown | 4 |\n')
+        self.save_sources()
+        run = self.begin_release('sbertrek')
+        call = self.linked_call(run, {'owner': 'REL-1', 'edges': [
+            {'type': 'ships', 'target': 'ST-1'}], 'size': 1, 'offset': 0})
+        self.ingest(run, {'issues': [DirectTrackerWorkflowTests.sber_issue(self, 'ST-1')]}, call)
+        self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
+        result_path = self.state / 'tracker-runs' / run['run_id'] / 'reconciled.json'
+        original_result = result_path.read_bytes()
+        from tracker_workflow import compact_issue, merged_value
+        remainder = DirectTrackerWorkflowTests.sber_issue(self, 'ST-2')
+        self.assertIsNone(merged_value('releases', compact_issue(remainder, 'sbertrek'), None)[0])
+        source = self.write(self.state / 'remainder.json', {
+            'issues': [DirectTrackerWorkflowTests.sber_issue(self, 'ST-2')]})
+        original_source = source.read_bytes()
+        from tracker_workflow import tql_units
+        manifest = self.write(self.state / 'manifest.json', {
+            'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'analyst rules',
+            'provider': 'sbertrek', 'participants': {}, 'status_rules': {}, 'responses': [],
+            'unavailable_history': {'ST-1/BE': 'access unavailable', 'ST-2/BE': 'access unavailable'},
+            'supplemental_responses': [{'keys': ['ST-2'], 'response_file': str(source),
+                'sha256': hashlib.sha256(original_source).hexdigest(),
+                'call': self.call('sbertrek', tql_units(['ST-2']))}]})
+        review = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
+                               '--project-root', str(self.project), '--manifest', str(manifest))
+        groups = review['features'][0]['qa_groups']
+        self.assertEqual([group['members'] for group in groups], [['FIRST'], ['REST']])
+        self.assertEqual([Decimal(group['estimate']) for group in groups], [Decimal(2), Decimal(2)])
+        self.assertIsNone(groups[0]['qa']['finished_at'])
+        self.assertEqual(result_path.read_bytes(), original_result)
+        self.assertEqual(source.read_bytes(), original_source)
+        repeated = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
+                                '--project-root', str(self.project), '--manifest', str(manifest))
+        self.assertEqual(repeated['review_file'], review['review_file'])
 
     def test_release_remainder_history_and_independent_qa_groups(self):
         path = self.project / 'features/owner/execution/tasks.md'
