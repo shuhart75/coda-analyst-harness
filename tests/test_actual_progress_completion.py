@@ -104,6 +104,66 @@ class ActualProgressCompletionTests(unittest.TestCase):
         self.quarter(success=False)
         self.assertEqual(self.snapshot(), before)
 
+    def test_exact_finish_without_start_estimate_or_completion_bound_column(self):
+        for role in ('BE', 'FE'):
+            for planned_start in ('', '2026-08-01', '2026-10-01'):
+                with self.subTest(role=role, planned_start=planned_start):
+                    self.write_tasks([
+                        f'| ITEM-100/FE | ITEM-100 | Completed work | real | {role} | - | TBD_B | {planned_start} | | - | 2026-09-22 | completed | 100 | STORY-COHORT |',
+                        '| QA-COHORT | | Check | real | QA | 2 | Q2 | | | 2026-09-22 | | in-progress | unknown | STORY-COHORT |',
+                    ])
+                    original = self.registry.read_bytes()
+                    tasks = OVERLAY.load_tasks(self.feature)
+                    task = tasks['ITEM-100/FE']
+                    self.assertIsNone(task.estimate)
+                    self.assertEqual(task.actual_start, '')
+                    self.assertEqual(task.completed_by, '')
+                    schedules = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 24), {'BE': ['B1'], 'FE': ['F1'], 'QA': ['Q2']})
+                    self.assertNotIn(task.task_id, schedules)
+                    self.quarter()
+                    content = self.target.read_text()
+                    self.assertIn('[TASK_ITEM_100_FE] happens at 2026/09/22', content)
+                    self.assertIn('завершено 2026-09-22; начало неизвестно', content)
+                    self.assertNotIn('[TASK_ITEM_100_FE] ends', content)
+                    self.assertNotIn('as [TASK_ITEM_100_FE] on', content)
+                    self.assertIn('завершено 2026-09-22', (self.gantt / 'actual-progress-confluence.puml').read_text())
+                    self.assertEqual(self.registry.read_bytes(), original)
+                    before = self.snapshot()
+                    self.quarter()
+                    self.assertEqual(self.snapshot(), before)
+
+    def test_finish_only_requires_confirmed_completion(self):
+        for status, progress in (('unknown', 'unknown'), ('in-progress', '50'), ('completed', '99')):
+            with self.subTest(status=status, progress=progress):
+                self.write_tasks([
+                    f'| ITEM-100/FE | ITEM-100 | Work | real | FE | - | F1 | | | | 2026-09-22 | {status} | {progress} | STORY-COHORT |',
+                ])
+                before = self.snapshot()
+                self.quarter(success=False)
+                self.assertEqual(self.snapshot(), before)
+
+    def test_decimal_hundred_is_completed_without_estimate(self):
+        self.bounded_tasks('', '2026-08-12')
+        self.registry.write_text(self.registry.read_text().replace('| FE | 5 |', '| FE | - |').replace('| 100 |', '| 100.0 |'))
+        self.quarter()
+        self.assertIn('[TASK_ITEM_100_FE] happens at 2026/08/12', self.target.read_text())
+
+    def test_fractional_qa_progress_is_preserved(self):
+        self.write_tasks()
+        original = self.registry.read_text()
+        self.registry.write_text(original.replace('| 30 |', '| 85.7 |'))
+        tasks = OVERLAY.load_tasks(self.feature)
+        self.assertEqual(tasks['QA-COHORT'].progress, 85.7)
+        self.quarter()
+        self.assertIn('(85.7%)', self.target.read_text())
+        self.assertIn('[TASK_QA_COHORT] is 86% completed', self.target.read_text())
+        for progress in ('100.1', '-0.1', 'nan', 'inf', '85.7%', '~85.7'):
+            with self.subTest(progress=progress):
+                self.registry.write_text(original.replace('| 30 |', f'| {progress} |'))
+                before = self.snapshot()
+                self.quarter(success=False)
+                self.assertEqual(self.snapshot(), before)
+
     def test_missing_date_markers_do_not_become_actual_interval(self):
         self.bounded_tasks('-', '-')
         self.registry.write_text(self.registry.read_text().replace('| FE | 5 |', '| FE | - |'))
@@ -122,7 +182,8 @@ class ActualProgressCompletionTests(unittest.TestCase):
                 self.assertEqual(OVERLAY.task_schedules(tasks, set(), date(2026, 9, 9), {}), {})
                 self.quarter()
                 content = self.target.read_text()
-                self.assertIn("[TASK_ITEM_100_FE] happens at 2026/08/27", content)
+                expected_finish = '2026/08/12' if finish else '2026/08/27'
+                self.assertIn(f"[TASK_ITEM_100_FE] happens at {expected_finish}", content)
                 self.assertNotIn("[TASK_ITEM_100_FE] ends", content)
                 if start:
                     self.assertIn("[STORY_STORY_COHORT] starts 2026/08/10", content)

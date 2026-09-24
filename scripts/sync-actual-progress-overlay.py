@@ -133,7 +133,7 @@ class Task:
     actual_start: str
     actual_finish: str
     status: str
-    progress: int | None
+    progress: float | None
     related_stories: list[str]
     completed_by: str = ""
     qa_members: tuple[str, ...] = ()
@@ -536,9 +536,8 @@ def unestimated_actual(row: dict[str, str]) -> bool:
             and clean_cell(row.get("Kind", "")).lower() == "real"
             and normalize_role(row.get("Role", "")) in {"BE", "FE"}
             and clean_cell(row.get("Status", "")).lower() in DONE_STATUSES
-            and clean_cell(row.get("Progress %", "")) == "100"
-            and bool((parse_date(row.get("Actual Start", "")) and parse_date(row.get("Actual Finish", "")))
-                     or parse_date(row.get("Completed By", ""))))
+            and bool(re.fullmatch(r"100(?:\.0+)?", clean_cell(row.get("Progress %", ""))))
+            and bool(parse_date(row.get("Actual Finish", "")) or parse_date(row.get("Completed By", ""))))
 
 
 def date_cell(value: str) -> str:
@@ -556,8 +555,8 @@ def validate_task_row(row: dict[str, str], path: Path) -> None:
     if not unestimated_actual(row):
         validate_estimate(row.get("Estimate (дн)", ""), path, task_id)
     progress = clean_cell(row["Progress %"])
-    if progress != "unknown" and (not re.fullmatch(r"\d+", progress) or not 0 <= int(progress) <= 100):
-        raise ValueError(f"{path}: Progress % должен быть целым числом от 0 до 100 или unknown")
+    if progress != "unknown" and (not re.fullmatch(r"\d+(?:\.\d+)?", progress) or not 0 <= float(progress) <= 100):
+        raise ValueError(f"{path}: Progress % должен быть числом от 0 до 100 или unknown")
     for column in ("Planned Start", "Planned Finish", "Actual Start", "Actual Finish"):
         value = date_cell(row.get(column, ""))
         if value and not parse_date(value):
@@ -567,7 +566,9 @@ def validate_task_row(row: dict[str, str], path: Path) -> None:
         finish = parse_date(row.get(f"{prefix} Finish", ""))
         if start and finish and finish < start:
             raise ValueError(f"{path}: окончание {prefix} раньше начала")
-    if progress != "unknown" and int(progress) > 0 and not (parse_date(row.get("Actual Start", "")) or parse_date(row.get("Planned Start", "")) or date_cell(row.get("Completed By", ""))):
+    completed_finish = (clean_cell(row.get("Status", "")).lower() in DONE_STATUSES and progress != "unknown" and float(progress) == 100
+                        and parse_date(row.get("Actual Finish", "")))
+    if progress != "unknown" and float(progress) > 0 and not (parse_date(row.get("Actual Start", "")) or parse_date(row.get("Planned Start", "")) or date_cell(row.get("Completed By", "")) or completed_finish):
         raise ValueError(f"{path}: для начатой задачи требуется дата начала из источника")
 
 
@@ -578,7 +579,7 @@ def validate_completion_bound(row: dict[str, str], path: Path) -> str:
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
         raise ValueError(f"{path}: Completed By требует дату YYYY-MM-DD")
     boundary = parse_date(value)
-    if not boundary or clean_cell(row.get("Status", "")).lower() not in DONE_STATUSES or clean_cell(row.get("Progress %", "")) != "100":
+    if not boundary or clean_cell(row.get("Status", "")).lower() not in DONE_STATUSES or not re.fullmatch(r"100(?:\.0+)?", clean_cell(row.get("Progress %", ""))):
         raise ValueError(f"{path}: Completed By требует дату YYYY-MM-DD и завершённый Status / 100%")
     for column in ("Actual Start", "Actual Finish"):
         raw = date_cell(row.get(column, ""))
@@ -596,6 +597,11 @@ def validate_completion_bound(row: dict[str, str], path: Path) -> str:
 
 def completion_bound_only(task: Task) -> bool:
     return bool(task.completed_by and not (task.actual_start and task.actual_finish))
+
+
+def completion_finish_only(task: Task) -> bool:
+    return bool(task.actual_finish and not task.actual_start
+                and task.status.lower() in DONE_STATUSES and task.progress == 100)
 
 
 def load_tasks(feature_dir: Path) -> dict[str, Task]:
@@ -622,7 +628,7 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
             status = clean_cell(row.get("Status", "planned"))
             progress_value = row.get("Progress %", "")
             progress = (None if clean_cell(progress_value) == "unknown" else
-                        parse_int(progress_value, progress_from_status(status)) if progress_value else progress_from_status(status))
+                        parse_number(progress_value, progress_from_status(status)) if progress_value else progress_from_status(status))
             kind = clean_cell(row.get("Kind", "virtual")).lower()
             role = clean_cell(row.get("Role", ""))
             normalized_role = normalize_role(role)
@@ -938,7 +944,7 @@ def task_schedules(
 ) -> dict[str, ScheduledTask]:
     tasks = {task_id: task for task_id, task in tasks.items()
              if task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES
-             and not completion_bound_only(task)}
+             and not completion_bound_only(task) and not completion_finish_only(task)}
     schedules: dict[str, ScheduledTask] = {}
     occupied: dict[str, set[date]] = {}
 
@@ -1119,6 +1125,13 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
     if task.kind == "candidate":
         return [f"' Candidate {task.task_id}: {task.status}; not scheduled"]
     alias = f"TASK_{to_alias(task.task_id)}"
+    if completion_finish_only(task):
+        label = plantuml_label(f"{role_prefixed_summary(task)} (100%; завершено {task.actual_finish}; начало неизвестно)")
+        return [
+            f"' Exact completion, not an actual interval: {task.task_id}; actual_finish={task.actual_finish}",
+            f"[{label}] as [{alias}] happens at {fmt_date(parse_date(task.actual_finish))}",
+            f"[{alias}] is colored in {role_color(role_for_task(task))}",
+        ]
     if completion_bound_only(task):
         label = plantuml_label(f"{role_prefixed_summary(task)} (100%; завершено к {task.completed_by}; точный интервал неизвестен)")
         return [
@@ -1136,6 +1149,8 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
         label += " (оценка неизвестна)"
     if task.progress is None:
         label += " (прогресс неизвестен)"
+    elif task.progress != round(task.progress):
+        label += f" ({task.progress:g}%)"
     if needs_forecast_schedule(task) and not is_not_started(task):
         label += " (прогноз; фактическое начало неизвестно)"
     lines = [
@@ -1144,7 +1159,7 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
         f"[{alias}] is colored in {role_color(role_for_task(task))}",
     ]
     if task.progress is not None:
-        lines.append(f"[{alias}] is {max(0, min(task.progress, 100))}% completed")
+        lines.append(f"[{alias}] is {round(max(0, min(task.progress, 100)))}% completed")
     if needs_forecast_schedule(task) and not is_not_started(task):
         lines.append(f"' Forecast only; full estimate, not confirmed remaining work: {task.task_id}; status={task.status}")
     elif scheduled.shifted:
@@ -1464,7 +1479,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             for task_id in tasks
             if f"{feature_slug}/{task_id}" in scoped_schedules
         }
-        if any(task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES and not completion_bound_only(task)
+        if any(task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES and not completion_bound_only(task) and not completion_finish_only(task)
                and task_id not in schedules for task_id, task in tasks.items()):
             raise ValueError(f"{feature_dir}: не для каждой задачи определена дата начала; Гант сохранён")
         content = render_feature(feature_dir, feature_slug, closed_days, tasks, schedules, scope.role_baselines.get(feature_slug),
