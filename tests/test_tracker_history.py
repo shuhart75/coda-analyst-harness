@@ -267,6 +267,37 @@ class AdaptiveHistoryTests(unittest.TestCase):
         self.assertEqual(raw_path.read_text(), history_text())
         self.assertEqual(self.snapshot(), before)
 
+    def test_evidenced_extraction_flows_through_full_review(self):
+        from test_tracker_history_extraction import extraction_fixture
+
+        run_id = self.reconciled()
+        manifest = self.text_manifest()
+        text, extraction = extraction_fixture()
+        raw_path = self.state / 'extraction-history.txt'
+        raw_path.write_text(text)
+        entry = manifest['responses'][0]
+        entry.update(response_file=str(raw_path), format='text',
+                     sha256=hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+                     mapping={'request_key': '/key', 'text': '', 'text_extraction': extraction})
+        manifest['participants']['analyst'] = 'AN'
+        path = self.write(self.state / 'extraction-manifest.json', manifest)
+        before = self.snapshot()
+        args = ('history-review', '--run-id', run_id, '--project-root', str(self.project), '--manifest', str(path))
+        review = self.run_tool(self.state, *args)
+        self.assertEqual(review['status'], 'history-review-ready')
+        self.assertEqual(review['pending_history_dates'], [])
+        self.assertEqual(review['features'][0]['tasks']['JIRA-1/BE']['development']['finished_at'],
+                         '2026-08-03T12:00:00+00:00')
+        self.assertEqual(review['evidence'][0]['mapping']['text_extraction'], extraction)
+        self.assertEqual(self.run_tool(self.state, *args)['review_file'], review['review_file'])
+        extraction['segments'][3].update(kind='unresolved', reason='Removal semantics require checking')
+        self.write(path, manifest)
+        pending = self.run_tool(self.state, *args)
+        self.assertEqual(pending['pending_history_dates'], ['JIRA-1/BE'])
+        self.assertIsNone(pending['comparison'])
+        self.assertEqual(raw_path.read_text(), text)
+        self.assertEqual(self.snapshot(), before)
+
     def test_text_response_is_preserved_and_dated_capability_check_is_pending(self):
         run_id = self.reconciled()
         before = self.snapshot()

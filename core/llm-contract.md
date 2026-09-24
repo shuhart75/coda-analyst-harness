@@ -60,6 +60,8 @@ When work is broad, long-running, or likely to exceed a small context window:
 
 External memory systems are optional accelerators. Repository markdown remains the source of truth.
 
+For source-backed extraction of tracker history text, follow `core/tracker-history-extraction.md`. The agent handles source format interpretation; never ask the analyst to configure regex or invent dates to bypass a parsing limitation.
+
 
 ## Command interpretation rules
 

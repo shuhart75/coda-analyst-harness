@@ -1,0 +1,148 @@
+{
+  "example_source_text": "Records: 4; offset: 0; more: False\n2026-08-03T12:00:00+00:00 assignee changed dev -> qa\n2026-08-02T12:00:00+00:00 assigned_to CREATE -> dev\n2026-08-01T12:00:00+00:00 DELETE assigned_to analyst\n2026-07-31T12:00:00+00:00 CREATE by actor",
+  "mapping": {
+    "request_key": "/key",
+    "text": "",
+    "text_extraction": {
+      "schema_version": 1,
+      "text_sha256": "60b1197f0cacad66442525a0fbeb277a5ad78e7911c4f3c4ae1e73a7f2f6dbdf",
+      "segments": [
+        {
+          "kind": "context",
+          "source": {
+            "start": 0,
+            "end": 34,
+            "sha256": "d51e813d96459ece71d445a6a2414b0221a5ccf19af282c2824b0d4490c94144"
+          },
+          "reason": "Pagination header"
+        },
+        {
+          "kind": "assignment",
+          "source": {
+            "start": 35,
+            "end": 87,
+            "sha256": "59875facf2e8dd949cd7754dd98da69ec37279f8a784f595acc3e57abffd7ae7"
+          },
+          "field": {
+            "start": 61,
+            "end": 69,
+            "quote": "assignee"
+          },
+          "at": {
+            "start": 35,
+            "end": 60,
+            "quote": "2026-08-03T12:00:00+00:00"
+          },
+          "before": {
+            "start": 78,
+            "end": 81,
+            "quote": "dev"
+          },
+          "after": {
+            "start": 85,
+            "end": 87,
+            "quote": "qa"
+          },
+          "operation": {
+            "kind": "change",
+            "source": {
+              "start": 70,
+              "end": 77,
+              "quote": "changed"
+            }
+          }
+        },
+        {
+          "kind": "assignment",
+          "source": {
+            "start": 88,
+            "end": 139,
+            "sha256": "9ca41d312e0191345d072b06d175a3dc86c2df1221d1bb7c0c8b98e16f0e2020"
+          },
+          "field": {
+            "start": 114,
+            "end": 125,
+            "quote": "assigned_to"
+          },
+          "at": {
+            "start": 88,
+            "end": 113,
+            "quote": "2026-08-02T12:00:00+00:00"
+          },
+          "before": null,
+          "after": {
+            "start": 136,
+            "end": 139,
+            "quote": "dev"
+          },
+          "operation": {
+            "kind": "add",
+            "source": {
+              "start": 126,
+              "end": 132,
+              "quote": "CREATE"
+            }
+          }
+        },
+        {
+          "kind": "assignment",
+          "source": {
+            "start": 140,
+            "end": 192,
+            "sha256": "b2a2847990617d31d4a1cab6a09f7784dd2c45f7141676cacacdcaa83988bd3f"
+          },
+          "field": {
+            "start": 173,
+            "end": 184,
+            "quote": "assigned_to"
+          },
+          "at": {
+            "start": 140,
+            "end": 165,
+            "quote": "2026-08-01T12:00:00+00:00"
+          },
+          "before": {
+            "start": 185,
+            "end": 192,
+            "quote": "analyst"
+          },
+          "after": null,
+          "operation": {
+            "kind": "remove",
+            "source": {
+              "start": 166,
+              "end": 172,
+              "quote": "DELETE"
+            }
+          }
+        },
+        {
+          "kind": "metadata",
+          "source": {
+            "start": 193,
+            "end": 234,
+            "sha256": "c5df940642ecf1e8c48facaded3e1d0982679206809e94db3592ac450ac617b3"
+          },
+          "reason": "Bare creation names its actor, not its assignee"
+        }
+      ],
+      "pagination": {
+        "count": {
+          "start": 9,
+          "end": 10,
+          "quote": "4"
+        },
+        "start": {
+          "start": 20,
+          "end": 21,
+          "quote": "0"
+        },
+        "has_next": {
+          "start": 29,
+          "end": 34,
+          "quote": "False"
+        }
+      }
+    }
+  }
+}

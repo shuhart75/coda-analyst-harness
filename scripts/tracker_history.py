@@ -112,7 +112,10 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> t
     if "request_key" in mapping and pointer(entry["call"]["arguments"], mapping["request_key"]) != key:
         raise ValueError("History request belongs to another task")
     text_only = "text" in mapping
+    if 'text_extraction' in mapping and not text_only:
+        raise ValueError('Text extraction requires a selected source text')
     text_window = None
+    extraction_limits = []
     if text_only:
         if "events" in mapping:
             raise ValueError("Choose history events or text, not both")
@@ -120,6 +123,15 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> t
         if not isinstance(text, str) or not text.strip():
             raise ValueError("History text must be a nonempty verbatim response")
         events = []
+        if 'text_extraction' in mapping:
+            from tracker_history_extraction import decode_text_extraction
+            if 'text_parser' in mapping or 'changes' in mapping:
+                raise ValueError('Choose one text history extraction method')
+            events, text_window, extraction_limits = decode_text_extraction(text, mapping['text_extraction'])
+            mapping = {**mapping, 'at': '/at', 'field': '/field', 'from': '/before', 'to': '/after',
+                       'assignment_field': 'assignment', 'status_field': 'status',
+                       'assignment_from': '/before', 'assignment_to': '/after',
+                       'status_from': '/before', 'status_to': '/after'}
         if "text_parser" in mapping:
             from tracker_history_text import decode_text_records
             events, text_window = decode_text_records(text, mapping)
@@ -139,12 +151,12 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> t
     aliases = entry.get("status_aliases", {})
     if not isinstance(aliases, dict) or any(not isinstance(value, str) for value in aliases.values()):
         raise ValueError("Status aliases must map source values to explicit codes")
-    limits = []
+    limits = list(extraction_limits)
     window = text_window if text_only else pagination_window(payload, mapping, entry.get("call", {}), len(events))
-    complete = window == (0, len(events), len(events))
+    complete = window == (0, len(events), len(events)) and not extraction_limits
     if not complete:
         limits.append("history-completeness-not-proven")
-    if text_only and "text_parser" not in mapping:
+    if text_only and not {'text_parser', 'text_extraction'}.intersection(mapping):
         limits.append("history-text-requires-dated-source")
     normalized = []
     for event in events:
@@ -197,7 +209,7 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> t
                 "source-sha256:" + digest_object(event), at,
                 fields.get(mapping["assignment_field"]), fields.get(mapping["status_field"]),
             ))
-    if "history-event-timestamps-not-returned" in limits:
+    if {"history-event-timestamps-not-returned", "history-text-extraction-unresolved"}.intersection(limits):
         normalized = []
     normalized.sort(key=lambda event: event.at)
     snapshot_mapping = entry["snapshot"]["mapping"] if snapshot is not None else mapping
@@ -338,7 +350,7 @@ def review_history(args) -> int:
             sources.append(snapshot_evidence)
             observed = timestamp(datetime.fromisoformat(entry["snapshot"]["call"]["captured_at"]))
         history, limits = decode_history(payload, entry, observed, snapshot)
-        if (member_keys is None or entry["key"] in member_keys) and {"history-text-requires-dated-source", "history-event-timestamps-not-returned"}.intersection(limits):
+        if (member_keys is None or entry["key"] in member_keys) and {"history-text-requires-dated-source", "history-event-timestamps-not-returned", "history-text-extraction-unresolved"}.intersection(limits):
             undated_history.append(f"{entry['key']}/{entry['role']}")
         history = replace(history, task_key=f"{entry['key']}/{entry['role']}")
         histories[identity] = (targets[0]["feature"], history)
