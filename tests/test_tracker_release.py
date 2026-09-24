@@ -119,6 +119,9 @@ class ReleasePartitionTests(unittest.TestCase):
         owners = release_owners(self.project, result)
         self.assertEqual(owners['blockers'], [])
         self.assertEqual(owners['items'][0]['basis'], 'analyst-required')
+        self.assertIn('[BE] New', owners['ownership_table'])
+        self.assertIn('JIRA-1', owners['ownership_table'])
+        self.assertIn('нужно решение аналитика', owners['ownership_table'])
         result['issues'][0]['jira_key'] = 'JIRA-99'
         self.assertEqual(release_owners(self.project, result)['selected_features'], ['other'])
         with self.assertRaises(ValueError):
@@ -127,6 +130,13 @@ class ReleasePartitionTests(unittest.TestCase):
         self.assertEqual(release_owners(self.project, result)['blockers'][0]['reason'], 'ownership-index-unreadable')
 
     def test_confirmed_scope_and_unprefixed_role_are_separate_from_raw_cards(self):
+        result = {'scope': self.scope, 'issues': [{'jira_key': 'JIRA-1', 'sbertrek_key': 'ST-9',
+            'summary': 'BE Save | selected simulation\nwith parameters', 'task_role': 'BE',
+            'epic': {'key': 'EPIC-1', 'name': 'Simulation'}}]}
+        ownership = release_owners(self.project, result)
+        self.assertIn('ST-9 | JIRA-1 | BE Save \\| selected simulation with parameters', ownership['ownership_table'])
+        self.assertIn('EPIC-1 Simulation', ownership['ownership_table'])
+        self.assertTrue(ownership['items'][0]['question_required'])
         (self.project / 'features/new-feature').mkdir(parents=True)
         answer = self.project / 'answer.txt'
         answer.write_text('All tasks belong to new-feature; TASK-1 is BE.')
@@ -451,6 +461,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(preview['next_action']['type'], 'collect-history')
         self.assertEqual(preview['next_action']['keys'], ['ST-1', 'ST-2'])
         self.assertEqual(len(preview['execution']['proposed_registrations']), 2)
+        self.assertTrue(all(row['summary'] == 'BE Work' for row in preview['execution']['proposed_registrations']))
         self.assertEqual(len(preview['skipped']), 1)
         self.assertTrue(preview['execution']['ownership_ready'])
         manifest = {'schema_version': 1, 'provider': 'sbertrek', 'analyst_confirmed': True,

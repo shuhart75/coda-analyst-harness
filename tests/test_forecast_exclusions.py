@@ -282,6 +282,9 @@ class ForecastExclusionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(expanded.read_text(), export)
         registry.write_text(registry.read_text().replace("| FE | 5 |", "| FE | |"), encoding="utf-8")
+        self.run_generator()
+        self.assertIn("[TASK_LOCAL_FE] ends 2026/09/07", (self.gantt / "actual-progress-confluence.puml").read_text())
+        registry.write_text(registry.read_text().replace("| FE | |", "| FE | 0 |"), encoding="utf-8")
         self.assert_blocked_without_writes("уточни оценку у аналитика")
 
     def test_removing_decision_reinstates_missing_source_gate(self) -> None:
@@ -530,6 +533,9 @@ class ForecastExclusionTests(unittest.TestCase):
         self.run_generator()
         self.assertEqual(self.snapshot(), after)
         registry.write_text(registry.read_text().replace("| FE | 5 |", "| FE | |"), encoding="utf-8")
+        self.run_generator()
+        self.assertIn(self.forecast.read_text(), (self.gantt / "actual-progress-confluence.puml").read_text())
+        registry.write_text(registry.read_text().replace("| FE | |", "| FE | 0 |"), encoding="utf-8")
         self.assert_blocked_without_writes("уточни оценку у аналитика")
 
     def test_preservation_rejects_collision_with_generated_task(self) -> None:

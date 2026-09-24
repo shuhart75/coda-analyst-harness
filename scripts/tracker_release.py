@@ -94,12 +94,28 @@ def release_owners(project: Path, result: dict) -> dict:
             blockers.append({"reason": "confirmed-owner-conflicts-with-registry", "key": key,
                              "confirmed_feature": confirmed, "registry_features": sorted(exact)})
         proposals.append({"key": key, "summary": issue.get("summary"),
+                          "jira_key": issue.get("jira_key"), "sbertrek_key": issue.get("sbertrek_key"),
+                          "epic": issue.get("epic"),
                           "features": sorted(candidates),
                           "role": issue.get("task_role"),
                           "basis": "analyst-confirmed" if confirmed else "registry" if exact else "associated-epic" if candidates else "analyst-required",
                           "registration_required": not bool(exact) or conflict,
                           "question_required": len(candidates) != 1 or conflict or not (exact or confirmed)})
-    return {"items": proposals, "selected_features": sorted({feature for item in proposals for feature in item["features"]}),
+    def cell(value):
+        return str(value or "-").replace("|", "\\|").replace("\n", " ")
+
+    basis_labels = {"analyst-confirmed": "подтверждено аналитиком", "registry": "связь в реестре",
+                    "associated-epic": "привязанный эпик", "analyst-required": "нужно решение аналитика"}
+    table = ["| SberTrek | Jira | Название стори / задачи | Роль | Эпик | Фича | Основание |",
+             "|---|---|---|---|---|---|---|"]
+    for proposal in proposals:
+        epic = proposal.get("epic") or {}
+        table.append("| " + " | ".join(cell(value) for value in (
+            proposal["sbertrek_key"], proposal["jira_key"], proposal["summary"], proposal["role"],
+            " ".join(str(epic.get(field) or "") for field in ("key", "name")).strip(),
+            ", ".join(proposal["features"]), basis_labels[proposal["basis"]])) + " |")
+    return {"items": proposals, "ownership_table": "\n".join(table),
+            "selected_features": sorted({feature for item in proposals for feature in item["features"]}),
             "blockers": blockers,
             "ownership_ready": not blockers and all(not item["question_required"] for item in proposals)}
 

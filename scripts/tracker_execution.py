@@ -148,6 +148,7 @@ def preview_execution(
             reference = {
                 "feature": owner, "registry": f"features/{owner}/execution/tasks.md",
                 "table": None, "row": None, "task_id": f"{identity}/{role}",
+                "summary": issue.get("summary"),
                 "role": role, "kind": "real", "jira_key": issue.get("jira_key"),
                 "sbertrek_key": issue.get("sbertrek_key"), "invalid_key": False,
                 "saved_facts": {}, "uncommitted": False, "registration_required": True,
@@ -212,6 +213,7 @@ def preview_execution(
             reasons.append("excluded-counterpart-needs-disposition")
         entry = {
             "tracker_key": identity, "jira_key": jira_key, "sbertrek_key": sbertrek_key,
+            "summary": issue.get("summary"),
             "owners": owners, "targets": matched, "work_item_ids": [item["work_item_id"] for item in roles],
             "internal_id_collisions": local_collisions, "blockers": sorted(set(reasons)),
             "proposed_action": "delete-current-execution" if issue.get("reason") == "confirmed-source-deletion" else "update",

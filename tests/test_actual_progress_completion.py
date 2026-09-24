@@ -1,4 +1,5 @@
 from datetime import date
+from dataclasses import replace
 import unittest
 
 import test_actual_progress_sources as sources
@@ -64,6 +65,54 @@ class ActualProgressCompletionTests(unittest.TestCase):
         self.assertIn("[TASK_ITEM_100_FE] on {F1} starts 2026/08/10", content)
         self.assertIn("[TASK_ITEM_100_FE] ends 2026/08/12", content)
         self.assertNotIn("[TASK_ITEM_100_FE] happens at", content)
+
+    def test_completed_development_without_estimate_renders_facts_without_inventing_weight(self):
+        for start, finish in (("2026-08-10", "2026-08-12"), ("", "")):
+            with self.subTest(start=start, finish=finish):
+                self.bounded_tasks(start, finish)
+                self.registry.write_text(self.registry.read_text().replace("| FE | 5 |", "| FE | - |"))
+                original = self.registry.read_bytes()
+                tasks = OVERLAY.load_tasks(self.feature)
+                completed = tasks['ITEM-100/FE']
+                self.assertIsNone(completed.estimate)
+                self.assertEqual(OVERLAY.task_progress(['ITEM-100/FE'], tasks), 100)
+                tasks['OTHER'] = replace(completed, task_id='OTHER', estimate=2, progress=50)
+                self.assertIsNone(OVERLAY.task_progress(['ITEM-100/FE', 'OTHER'], tasks))
+                with self.assertRaisesRegex(ValueError, 'прогноз длительности требует оценки'):
+                    OVERLAY.task_duration(completed)
+                self.quarter()
+                content = self.target.read_text()
+                if start:
+                    self.assertIn('[TASK_ITEM_100_FE] on {F1} starts 2026/08/10', content)
+                    self.assertIn('[TASK_ITEM_100_FE] ends 2026/08/12', content)
+                    self.assertIn('оценка неизвестна', content)
+                else:
+                    self.assertIn('[TASK_ITEM_100_FE] happens at 2026/08/27', content)
+                self.assertEqual(self.registry.read_bytes(), original)
+
+    def test_missing_estimate_does_not_permit_forecast_or_invalid_numbers(self):
+        self.bounded_tasks('2026-08-10', '2026-08-12')
+        original = self.registry.read_text()
+        for estimate in ('0', '-1', 'nan', 'wrong'):
+            with self.subTest(estimate=estimate):
+                self.registry.write_text(original.replace('| FE | 5 |', f'| FE | {estimate} |'))
+                with self.assertRaisesRegex(ValueError, 'положительная числовая оценка'):
+                    OVERLAY.load_tasks(self.feature)
+        self.write_tasks()
+        self.registry.write_text(self.registry.read_text().replace('| FE | 5 |', '| FE | - |'))
+        before = self.snapshot()
+        self.quarter(success=False)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_missing_date_markers_do_not_become_actual_interval(self):
+        self.bounded_tasks('-', '-')
+        self.registry.write_text(self.registry.read_text().replace('| FE | 5 |', '| FE | - |'))
+        tasks = OVERLAY.load_tasks(self.feature)
+        self.assertEqual(tasks['ITEM-100/FE'].actual_start, '')
+        self.assertEqual(tasks['ITEM-100/FE'].actual_finish, '')
+        self.quarter()
+        self.assertIn('[TASK_ITEM_100_FE] happens at 2026/08/27', self.target.read_text())
+        self.assertNotIn('[TASK_ITEM_100_FE] ends', self.target.read_text())
 
     def test_partial_actual_dates_do_not_invent_an_interval(self):
         for start, finish in (("2026-08-10", ""), ("", "2026-08-12")):

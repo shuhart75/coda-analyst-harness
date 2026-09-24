@@ -43,6 +43,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                 identity = f"{item.get(provider + '_key')}/{target['role']}"
                 calculation = review["tasks"].get(identity)
                 rows.append({"feature": feature, "task_id": target["task_id"], "role": target["role"],
+                             "summary": item.get("summary"),
                              "registry": target["registry"], "current": target["saved_facts"],
                              "registration_required": target.get("registration_required", False),
                              "role_estimates": item.get("role_estimates", {}),
@@ -88,7 +89,10 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
             notes += "; вне релиза: только разделение оценки, без актуализации факта"
         notes += "; прежнее основание: " + cell(current.get("Details") or current.get("Notes"))
         estimates = " | ".join(cell(row.get("role_estimates", {}).get(role, {}).get("value")) for role in ("FE", "BE", "QA"))
-        lines.append(f"| {cell(row['feature'])} / {cell(row['task_id'])} | {previous} | {proposed} | {bounds}; {notes} | {estimates} |")
+        title = f"{cell(row['feature'])} / {cell(row['task_id'])}"
+        if row.get('summary'):
+            title += ": " + cell(row['summary'])
+        lines.append(f"| {title} | {previous} | {proposed} | {bounds}; {notes} | {estimates} |")
     name = "Jira" if provider == "jira" else "SberTrek"
     choices = [f"Принять сроки {name} для всех задач", f"Принять сроки и статусы {name} для всех задач",
                "Оставить текущие сроки и статусы для всех задач", "Свой вариант"]
