@@ -221,7 +221,13 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
     by_key = {issue.get(field): issue for issue in issues}
     if any(not row.get(field) or row[field] not in by_key for row in development):
         return {"ready": False, "reason": "collect-all-feature-cards-before-partition", "path": path.relative_to(project).as_posix()}
-    active = [row for row in development if by_key[row[field]].get("development", {}).get("state") != "excluded"]
+    def is_active(row: dict) -> bool:
+        if scope.get("kind") == "release" and row[field] not in (release_members or set()):
+            status = str(row.get("saved_facts", {}).get("Status", "")).strip().lower()
+            return status not in {"cancelled", "canceled", "superseded"}
+        return by_key[row[field]].get("development", {}).get("state") != "excluded"
+
+    active = [row for row in development if is_active(row)]
     if len({row[field] for row in active}) != len(active):
         raise ValueError("One development task must have one role and one registry row")
     members = {row["task_id"] for row in active}

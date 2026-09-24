@@ -80,9 +80,50 @@ class ReleasePartitionTests(unittest.TestCase):
 
     def test_cancelled_tasks_do_not_receive_proportional_estimate(self):
         self.issues[-1]['development']['state'] = 'excluded'
+        self.rows[2]['saved_facts'] = {'Status': 'cancelled'}
         groups = self.calculate()['groups']
         self.assertEqual([Decimal(group['estimate']) for group in groups], [Decimal(5), Decimal(5)])
         self.assertNotIn('TASK-3', [member for group in groups for member in group['members']])
+
+    def test_cancelled_supplement_preserves_active_protected_member(self):
+        self.issues[2]['development']['state'] = 'excluded'
+        self.rows[2]['saved_facts'] = {'Status': 'unknown'}
+        original = copy.deepcopy(self.rows)
+        result = self.calculate()
+        self.assertEqual(result['groups'][1]['members'], ['TASK-2', 'TASK-3'])
+        self.assertEqual(self.rows, original)
+        self.assertEqual(sum(Decimal(group['estimate']) for group in result['groups']), Decimal(10))
+
+    def test_excluded_protected_registry_status_overrides_active_snapshot(self):
+        for status in ('cancelled', 'canceled', 'superseded'):
+            with self.subTest(status=status):
+                self.rows[2]['saved_facts'] = {'Status': status}
+                self.assertEqual(self.calculate()['groups'][1]['members'], ['TASK-2'])
+
+    def test_release_member_cancellation_uses_tracker(self):
+        self.issues[2]['development']['state'] = 'excluded'
+        result = self.calculate({'JIRA-1', 'JIRA-3'})
+        self.assertEqual(result['groups'][0]['members'], ['TASK-1'])
+        self.assertEqual(result['groups'][1]['members'], ['TASK-2'])
+
+    def test_saved_incomplete_partition_requires_review_without_rewriting(self):
+        self.rows[2]['saved_facts'] = {'Status': 'cancelled'}
+        first = self.calculate()
+        path = self.project / first['path']
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(first['document']))
+        original = path.read_bytes()
+        self.rows.append({**self.rows[-1], 'task_id': first['groups'][1]['task_id']})
+        self.rows[2]['saved_facts']['Status'] = 'unknown'
+        self.issues[2]['development']['state'] = 'excluded'
+        result = self.calculate()
+        self.assertFalse(result['ready'])
+        self.assertEqual(result['reason'], 'qa-membership-changed-review-partition')
+        self.assertEqual(result['added'], ['TASK-3'])
+        self.assertEqual(result['removed'], [])
+        self.assertEqual(path.read_bytes(), original)
+        self.scope['kind'] = 'tasks'
+        self.assertTrue(self.calculate()['ready'])
 
     def test_role_prefix_is_independent_of_developer_specialty(self):
         self.assertEqual(role_from_summary('[FE][DevOps] Work'), 'FE')
@@ -652,6 +693,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIsNone(groups[0]['qa']['finished_at'])
 
     def test_sbertrek_remainder_without_releases_preserves_run_and_qa_partition(self):
+        self.check_sbertrek_remainder('created')
+
+    def test_cancelled_sbertrek_supplement_preserves_protected_qa_coverage(self):
+        self.check_sbertrek_remainder('cancelled')
+
+    def check_sbertrek_remainder(self, status):
         from test_trackerctl import DirectTrackerWorkflowTests
         registry = self.project / 'features/owner/execution/tasks.md'
         registry.parent.mkdir(parents=True)
@@ -669,10 +716,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
         result_path = self.state / 'tracker-runs' / run['run_id'] / 'reconciled.json'
         original_result = result_path.read_bytes()
         from tracker_workflow import compact_issue, merged_value
-        remainder = DirectTrackerWorkflowTests.sber_issue(self, 'ST-2')
+        original_registry = registry.read_bytes()
+        remainder = DirectTrackerWorkflowTests.sber_issue(self, 'ST-2', status=status)
         self.assertIsNone(merged_value('releases', compact_issue(remainder, 'sbertrek'), None)[0])
         source = self.write(self.state / 'remainder.json', {
-            'issues': [DirectTrackerWorkflowTests.sber_issue(self, 'ST-2')]})
+            'issues': [remainder]})
         original_source = source.read_bytes()
         from tracker_workflow import tql_units
         manifest = self.write(self.state / 'manifest.json', {
@@ -690,6 +738,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIsNone(groups[0]['qa']['finished_at'])
         self.assertEqual(result_path.read_bytes(), original_result)
         self.assertEqual(source.read_bytes(), original_source)
+        self.assertEqual(registry.read_bytes(), original_registry)
         repeated = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
                                 '--project-root', str(self.project), '--manifest', str(manifest))
         self.assertEqual(repeated['review_file'], review['review_file'])
