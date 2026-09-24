@@ -800,6 +800,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
         applied = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],
                                 '--project-root', str(self.project))
         self.assertEqual(applied['status'], 'qa-application-verified')
+        clean_registry = path.read_text()
+        path.write_text(clean_registry.replace(f"| {groups[1]['task_id']} | - |",
+                                               f"| {groups[1]['task_id']} | JIRA-999 |"))
+        copied_identity = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],
+                                        '--project-root', str(self.project), expected=2)
+        self.assertTrue(any(error.get('reason') == 'New QA group must not copy tracker identities'
+                            for error in copied_identity['errors']))
+        path.write_text(clean_registry)
         registered_manifest = self.write(self.state / 'registered-manifest.json', {
             **value, 'expected_head': approved['head'],
             'reviewed_registries': {path.relative_to(self.project).as_posix():

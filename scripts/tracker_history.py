@@ -112,6 +112,7 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> t
     if "request_key" in mapping and pointer(entry["call"]["arguments"], mapping["request_key"]) != key:
         raise ValueError("History request belongs to another task")
     text_only = "text" in mapping
+    text_window = None
     if text_only:
         if "events" in mapping:
             raise ValueError("Choose history events or text, not both")
@@ -119,6 +120,12 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> t
         if not isinstance(text, str) or not text.strip():
             raise ValueError("History text must be a nonempty verbatim response")
         events = []
+        if "text_parser" in mapping:
+            from tracker_history_text import decode_text_records
+            events, text_window = decode_text_records(text, mapping)
+            mapping = {**mapping, "at": "/at", "field": "/field", "from": "/before", "to": "/after"}
+            if "changes" in mapping:
+                raise ValueError('Text history records must not override changes')
     else:
         required = {"events", "field", "assignment_field", "status_field"}
         missing = sorted(required - mapping.keys())
@@ -133,11 +140,11 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> t
     if not isinstance(aliases, dict) or any(not isinstance(value, str) for value in aliases.values()):
         raise ValueError("Status aliases must map source values to explicit codes")
     limits = []
-    window = None if text_only else pagination_window(payload, mapping, entry.get("call", {}), len(events))
+    window = text_window if text_only else pagination_window(payload, mapping, entry.get("call", {}), len(events))
     complete = window == (0, len(events), len(events))
     if not complete:
         limits.append("history-completeness-not-proven")
-    if text_only:
+    if text_only and "text_parser" not in mapping:
         limits.append("history-text-requires-dated-source")
     normalized = []
     for event in events:
@@ -157,7 +164,10 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> t
                 path = mapping.get(prefix + "_" + side, mapping.get(side))
                 if path is None:
                     raise ValueError(f"History mapping requires {prefix}_{side} or {side}")
-                values.append(optional(change, path))
+                if text_only and 'text_parser' in mapping and change['before' if side == 'from' else 'after'] is not None:
+                    values.append(pointer(change, path))
+                else:
+                    values.append(optional(change, path))
             before, after = values
             if field == mapping["status_field"]:
                 if before is None or after is None:
@@ -305,12 +315,8 @@ def review_history(args) -> int:
     if provider == "jira" and not load_run(args.run_id)["config"]["jira_enabled"]:
         raise ValueError("Jira is disabled for this run")
     known_roles = load_run(args.run_id)["config"].get("participants", {}).get(provider, {})
-    for identity, role in participants.items():
-        known = known_roles.get(identity)
-        if isinstance(known, dict):
-            known = known.get("role")
-        if known and known != role:
-            raise ValueError(f"Participant role contradicts the configured role: {identity}")
+    from tracker_history_text import validate_participants
+    validate_participants(participants, known_roles)
     for entry in manifest["responses"]:
         if entry["provider"] != provider:
             raise ValueError("Do not mix participant/status namespaces in one review")

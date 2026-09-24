@@ -67,6 +67,8 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                            if name in columns}
             rows.append({"feature": feature, "task_id": target["task_id"], "role": "QA",
                          "registry": target["registry"], "current": current,
+                         "local_registration_required": bool(group and target['task_id'] not in {
+                             existing_target['task_id'] for existing_target in proposal['existing_targets']}),
                          "application_mode": "partition-only" if partition_only else "update",
                          "history": group["qa"] if group else review["qa"],
                          "members": group["members"] if group else None,

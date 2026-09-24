@@ -244,6 +244,29 @@ class AdaptiveHistoryTests(unittest.TestCase):
                              'mapping': {name: JIRA_MAPPING[name] for name in ('key', 'assignee', 'status')}}
         return manifest
 
+    def test_declared_text_parser_flows_through_review_without_rewriting_sources(self):
+        from test_tracker_history_text import history_text, text_mapping
+
+        run_id = self.reconciled()
+        manifest = self.text_manifest()
+        entry = manifest['responses'][0]
+        raw_path = self.state / 'dated-history.txt'
+        raw_path.write_text(history_text())
+        entry.update(response_file=str(raw_path), format='text', mapping=text_mapping(),
+                     sha256=hashlib.sha256(raw_path.read_bytes()).hexdigest())
+        entry['call']['captured_at'] = '2026-08-10T12:00:00+03:00'
+        path = self.write(self.state / 'dated-manifest.json', manifest)
+        before = self.snapshot()
+        args = ('history-review', '--run-id', run_id, '--project-root', str(self.project), '--manifest', str(path))
+        review = self.run_tool(self.state, *args)
+        self.assertEqual(review['pending_history_dates'], [])
+        calculation = review['features'][0]['tasks']['JIRA-1/BE']['development']
+        self.assertIsNone(calculation['started_at'])
+        self.assertEqual(calculation['finished_at'], '2026-08-02T12:00:00+00:00')
+        self.assertEqual(self.run_tool(self.state, *args)['review_file'], review['review_file'])
+        self.assertEqual(raw_path.read_text(), history_text())
+        self.assertEqual(self.snapshot(), before)
+
     def test_text_response_is_preserved_and_dated_capability_check_is_pending(self):
         run_id = self.reconciled()
         before = self.snapshot()

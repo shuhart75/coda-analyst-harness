@@ -61,6 +61,7 @@ def confirmed_qa_updates(comparison: dict, confirmations: list[dict]) -> list[di
                 raise ValueError('Unsupported QA status')
         target = targets[0]
         expected = {**target['current'], **fields}
+        local_registration = target.get('local_registration_required', False)
         start, finish, bound = (expected.get(name) for name in ('Actual Start', 'Actual Finish', 'Completed By'))
         if start not in (None, '', '-', '—') and finish not in (None, '', '-', '—') and date.fromisoformat(start) > date.fromisoformat(finish):
             raise ValueError('QA finish precedes start')
@@ -71,6 +72,7 @@ def confirmed_qa_updates(comparison: dict, confirmations: list[dict]) -> list[di
                         'expected_registry_fields': {name: expected.get(name, '') for name in
                                                      ('Actual Start', 'Actual Finish', 'Completed By', 'Status', 'Progress %', 'Estimate', 'Estimate (дн)')},
                         'previous': target['current'],
+                        'local_registration_required': local_registration,
                         'confirmation': confirmation, 'verification_required': True,
                         'expected_rendering': 'actual-interval' if start not in (None, '', '-', '—') and finish not in (None, '', '-', '—') else 'no-exact-interval'})
     return updates
@@ -134,6 +136,10 @@ def check_qa_application(args) -> int:
         if len(matches) != 1:
             errors.append({'task_id': update['task_id'], 'reason': 'QA row missing or ambiguous'})
             continue
+        if update.get('local_registration_required') and any(
+            matches[0].get(field, '').strip() not in {'', '-', '—'} for field in ('Jira', 'SberTrek')
+        ):
+            errors.append({'task_id': update['task_id'], 'reason': 'New QA group must not copy tracker identities'})
         for field, value in update['expected_registry_fields'].items():
             if matches[0].get(field, '') != value:
                 errors.append({'task_id': update['task_id'], 'field': field,

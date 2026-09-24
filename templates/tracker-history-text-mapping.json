@@ -1,0 +1,17 @@
+{
+  "request_key": "/key",
+  "text": "",
+  "assignment_field": "assigned_to",
+  "status_field": "workflow_status",
+  "assignment_from": "/before/externalId",
+  "assignment_to": "/after/externalId",
+  "status_from": "/before/code",
+  "status_to": "/after/code",
+  "text_parser": {
+    "schema_version": 1,
+    "record_start_pattern": "(?m)^- ",
+    "header_pattern": "History \\((?P<count>[0-9]+) entries, page (?P<page>[0-9]+), has_next: (?P<has_next>True|False)\\)",
+    "record_pattern": "- \\*\\*[^\\n]*?\\*\\*(?: \\[(?P<at>[^\\]\\n]+)\\])? (?:CREATE|UPDATE|DELETE)(?: [^\\n]*?\\(`(?P<field>[^`]+)`\\) (?:`(?P<before>[^\\n]*)` )?→ `(?P<after>[^\\n]*)`)?",
+    "value_format": "python-literal"
+  }
+}
