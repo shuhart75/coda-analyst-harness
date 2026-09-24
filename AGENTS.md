@@ -253,6 +253,7 @@ Context summaries, checkpoints and research files are internal harness operation
 ## Analyst code inspection
 
 - Use `core/code-inspection.md` when the analyst asks to inspect code or when current implementation facts are needed for planning or requirements.
+- Start every product-code question with `workspace.py project-root`, then `code-inspect.py route PROJECT_ROOT` (scripts under HARNESS_ROOT). Use its registered absolute root and choose one contour before begin/locate/verify. Never infer code absence from a harness search or guess a clone path. Zero matches mean only no match for this query in this contour at this commit. Answer in Russian with the inspected commit and file references. An ad hoc code question does not start feature work.
 - Resolve role `code` through `.workspace-state/code-repos.json`; never require the user to provide a path in each prompt.
 - Treat role `code` as strictly read-only during inspection. Record its branch, commit, configuration and worktree state before inspection and verify that they are unchanged afterward. Do not fetch, pull, switch, build, format, generate, install, edit, commit or push there; protected pull is a separate workspace operation completed before inspection.
 - Inspect one contour at a time. Read that contour's local instructions, locate exact identifiers, then open only matched modules and nearby tests, contracts or migrations.

@@ -67,7 +67,9 @@ Code inspection is a targeted research action, not a repository audit.
 6. Inspect the second contour in a separate pass only when a concrete dependency is found.
 7. Stop when the question has sufficient evidence; do not broaden the search without a new question.
 
-The public user does not need to provide paths. `code-inspect.py locate` searches only files tracked by the inspected Git commit and returns a capped list of repository-relative matches and the exact inspected commit. It does not require a separate content-search utility.
+The public user does not need to provide paths. First run `python3 HARNESS_ROOT/scripts/workspace.py project-root`, then `python3 HARNESS_ROOT/scripts/code-inspect.py route PROJECT_ROOT --contour frontend --query IDENTIFIER` (choose the relevant contour). Use the returned absolute root and next action; never guess a clone path or search the harness as product code. Without a contour, route returns the registered choices. Missing configuration or a blocked repository requires reporting that exact limitation, not searching unrelated clones. Ad hoc code questions do not require starting feature work.
+
+Continue with begin, local instructions, locate, targeted reads and verify. `code-inspect.py locate` searches only files tracked by the inspected Git commit and returns a capped list of repository-relative matches, absolute roots and the exact inspected commit. It does not require a separate content-search utility. No matches establish only absence of this query in this contour at this commit, not absence of product code. Refine the query or inspect the other contour in a separate pass when justified. Answer in Russian with commit and file references; never invent a product answer from identifiers alone.
 
 ## Automatic triggers
 

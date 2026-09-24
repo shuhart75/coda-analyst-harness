@@ -255,18 +255,47 @@ def doctor_command(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def require_inspectable(snapshot: dict) -> None:
+    if not snapshot["head"]:
+        raise ValueError("В кодовом репозитории нет коммита для исследования")
+    if not snapshot["origin_matches_registry"]:
+        raise ValueError("origin кодового репозитория не совпадает с реестром")
+    if not snapshot["branch_matches"]:
+        raise ValueError(f"Ожидалась ветка {snapshot['expected_branch']}, найдена {snapshot['branch']}")
+    if snapshot["worktree_state"] != "clean":
+        raise ValueError("Рабочее дерево роли code изменено; для исследования нужен чистый клон; поиск заблокирован до вмешательства владельца кода")
+
+
+def route_command(args: argparse.Namespace) -> int:
+    project = Path(args.project).resolve()
+    registry = load_registry(project)
+    entry = repository_entry(registry, args.repository)
+    repository = resolve_repository(project, entry)
+    snapshot = git_snapshot(repository, entry, args.contour)
+    try:
+        require_inspectable(snapshot)
+    except ValueError as exc:
+        print_json({**snapshot, "status": "blocked", "reason": str(exc)})
+        return 1
+    argv = [sys.executable, str(Path(__file__).resolve()), "begin", str(project),
+            "--repository", args.repository]
+    if args.contour:
+        argv.extend(["--contour", args.contour])
+    if args.query:
+        argv.extend(["--query", args.query])
+    print_json({**snapshot, "status": "ready", "next_action":
+                {"type": "begin", "argv": argv} if args.contour else
+                {"type": "choose-contour", "contours": list(entry.get("contours", {}))}})
+    return 0
+
+
 def begin_command(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
     registry = load_registry(project)
     entry = repository_entry(registry, args.repository)
     repository = resolve_repository(project, entry)
     snapshot = git_snapshot(repository, entry, args.contour)
-    if not snapshot["origin_matches_registry"]:
-        raise ValueError("origin кодового репозитория не совпадает с реестром")
-    if not snapshot["branch_matches"]:
-        raise ValueError(f"Ожидалась ветка {snapshot['expected_branch']}, найдена {snapshot['branch']}")
-    if snapshot["worktree_state"] != "clean":
-        raise ValueError("Рабочее дерево роли code изменено; для исследования нужен чистый клон")
+    require_inspectable(snapshot)
     state_dir = inspection_state_dir(project)
     state_dir.mkdir(parents=True, exist_ok=True)
     name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{entry['id']}-{args.contour or 'root'}-{uuid.uuid4().hex[:8]}.json"
@@ -320,36 +349,46 @@ def locate_command(args: argparse.Namespace) -> int:
     entry = repository_entry(registry, args.repository)
     repository = resolve_repository(project, entry)
     snapshot = git_snapshot(repository, entry, args.contour)
-    if snapshot["worktree_state"] != "clean":
-        raise ValueError("Рабочее дерево роли code изменено; поиск заблокирован до вмешательства владельца кода")
+    require_inspectable(snapshot)
     search_root = Path(snapshot["contour_root"])
     command = [
         "git",
         "-C",
         str(repository),
         "grep",
+        "-z",
         "-l",
         "-I",
         "--full-name",
         "-E" if args.regex else "-F",
         "-e",
         args.query,
+        snapshot["head"],
         "--",
-        search_root.relative_to(repository).as_posix(),
+        ":(literal)" + search_root.relative_to(repository).as_posix(),
     ]
-    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    result = subprocess.run(command, text=True, capture_output=True, check=False,
+                            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     if result.returncode not in {0, 1}:
         raise ValueError(result.stderr.strip() or "Ошибка поиска по коду")
     matches = []
-    for line in result.stdout.splitlines():
+    for match in result.stdout.split("\0"):
+        if not match:
+            continue
+        line = match.removeprefix(snapshot["head"] + ":")
         path = (repository / line).resolve()
         try:
             matches.append(path.relative_to(repository).as_posix())
         except ValueError:
             continue
     matches = sorted(dict.fromkeys(matches))
+    if git_snapshot(repository, entry, args.contour) != snapshot:
+        raise ValueError("Репозиторий изменился во время поиска; результат не подтверждён")
     print_json({
         "repository": entry["id"],
+        "root": str(repository),
+        "contour_root": str(search_root),
+        "status": "matches-found" if matches else "no-matches-in-selected-contour",
         "head": snapshot["head"],
         "contour": args.contour,
         "query": args.query,
@@ -380,6 +419,13 @@ def parser() -> argparse.ArgumentParser:
     status.add_argument("--repository", default="code")
     status.add_argument("--contour", choices=("backend", "frontend"))
     status.set_defaults(handler=status_command)
+
+    route = commands.add_parser("route")
+    route.add_argument("project")
+    route.add_argument("--repository", default="code")
+    route.add_argument("--contour", choices=("backend", "frontend"))
+    route.add_argument("--query")
+    route.set_defaults(handler=route_command)
 
     begin = commands.add_parser("begin")
     begin.add_argument("project")
