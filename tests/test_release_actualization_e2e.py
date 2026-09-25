@@ -188,7 +188,7 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
                              'call': {**call, 'tool': 'synthetic-snapshot-reader'},
                              'mapping': {'key': '/key', 'assignee': '/assignee', 'status': '/status'}}}
 
-    def collect(self):
+    def collect(self, *, decision_text=None):
         self.run_tool(self.state, 'config-status')
         run = self.run_tool(self.state, 'begin', '--adaptive', '--scope-kind', 'release',
                             '--scope-provider', 'sbertrek', '--scope-id', self.expected['release'],
@@ -204,7 +204,7 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         self.collab('set-execution-scope', '--feature', 'registry', '--quarter', '2026-Q3',
                     '--run-id', self.run_id, '--reason', 'Synthetic release decision', '--analyst-confirmed')
         self.decision = self.inputs / 'decision.txt'
-        self.decision.write_text('Synthetic approval: LAB-112 is BE in registry. Keep nonmembers unchanged. '
+        self.decision.write_text(decision_text or 'Synthetic approval: LAB-112 is BE in registry. Keep nonmembers unchanged. '
                                  'Approve twelve release members and three remainder members; QA shares 7.2 and 1.8. '
                                  'Accept development dates from expected.json; unknown start and estimate stay unknown.', encoding='utf-8')
         supplement = self.write(self.inputs / 'supplement.json', {'issues': [

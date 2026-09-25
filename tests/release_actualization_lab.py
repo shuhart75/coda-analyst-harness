@@ -20,7 +20,39 @@ def dump(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 
-def create(destination):
+class RawHistoryScenario(ReleaseActualizationEndToEndTests):
+    def history_entry(self, task_id):
+        key, role = task_id.split('/')
+        variant = int(key.split('-')[1]) % 3
+        formats = (
+            ('- **actor=qa** [{at}] {operation} Исполнитель (`assigned_to`) {values}',
+             '`dev`', '`qa`', ' → '),
+            ('{at} | actor: qa | {operation} assignee | {values}',
+             'login=dev', 'login=qa', ' => '),
+            ('Автор qa; время {at}; {operation}; поле assignee; {values}',
+             'исполнитель dev', 'исполнитель qa', ' затем '),
+        )
+        template, developer, tester, arrow = formats[variant]
+        lines = ['2026-08-01T12:00:00+00:00 CREATE; actor=dev; создана карточка, исполнитель не указан']
+        if key != 'LAB-112':
+            lines.append(template.format(at='2026-08-02T12:00:00+00:00', operation='ADD', values=developer))
+        lines.append(template.format(at='2026-08-03T12:00:00+00:00', operation='CHANGE',
+                                     values=developer + arrow + tester))
+        text = f'Records: {len(lines)}; offset: 0; more: False\n' + '\n'.join(lines)
+        source = self.inputs / f'{key}-history.txt'
+        source.write_text(text, encoding='utf-8')
+        snapshot = self.write(self.inputs / f'{key}-snapshot.json',
+                              {'key': key, 'assignee': 'qa', 'status': 'created'})
+        call = {**self.call('sbertrek'), 'arguments': {'key': key}}
+        return {'provider': 'sbertrek', 'key': key, 'role': role,
+                'response_file': str(source), 'format': 'text', 'sha256': digest(source), 'call': call,
+                'mapping': {'request_key': '/key', 'text': ''},
+                'snapshot': {'response_file': str(snapshot), 'sha256': digest(snapshot),
+                             'call': {**call, 'tool': 'synthetic-snapshot-reader'},
+                             'mapping': {'key': '/key', 'assignee': '/assignee', 'status': '/status'}}}
+
+
+def create(destination, *, raw_history=False):
     if destination.is_symlink() or destination.exists():
         raise ValueError('Destination must not exist; choose a new local directory')
     parent = destination.parent.resolve(strict=True)
@@ -29,12 +61,19 @@ def create(destination):
         raise ValueError('Create the lab outside existing Git repositories')
     destination = parent / destination.name
     destination.mkdir()
-    fixture = ReleaseActualizationEndToEndTests()
+    fixture = RawHistoryScenario() if raw_history else ReleaseActualizationEndToEndTests()
     try:
         fixture.prepare_lab(destination)
-        fixture.collect()
+        fixture.collect(decision_text=(
+            'Synthetic approval: LAB-112 is BE in registry. dev is a BE/FE developer; qa is a tester. '
+            'Keep nonmembers unchanged. Approve twelve release members and three remainder members; '
+            'QA shares 7.2 and 1.8. Accept development dates supported by assignment history. '
+            'Card creation with actor alone is not a development start. Unknown start and estimate stay unknown. '
+            'QA-REGISTRY is in-progress with unknown progress and finish; start is the first handoff to QA. '
+            'QA-REST facts stay unchanged.' if raw_history else None))
         fixture.review('initial')
-        dump(fixture.inputs / 'expected.json', fixture.expected)
+        if not raw_history:
+            dump(fixture.inputs / 'expected.json', fixture.expected)
         immutable = {}
         for directory in (fixture.inputs, fixture.state / 'tracker-runs'):
             for path in directory.rglob('*'):
@@ -62,7 +101,7 @@ def create(destination):
         environment = {key: value for key, value in fixture.environment.items()
                        if key.startswith(('GIT_', 'ANALYST_HARNESS_', 'CODA_ANALYST_'))
                        or key in {'HOME', 'XDG_CONFIG_HOME', 'PYTHONPATH', 'PYTHONDONTWRITEBYTECODE', 'HARNESS_TODAY'}}
-        metadata = dict(schema_version=1, root=str(destination), harness=str(ROOT),
+        metadata = dict(schema_version=1, raw_history=raw_history, root=str(destination), harness=str(ROOT),
                         workspace=str(fixture.workspace), project=str(fixture.project),
                         remote=str(fixture.remote), state=str(fixture.state), run_id=fixture.run_id,
                         head=fixture.initial_head, main=fixture.initial_main,
@@ -105,6 +144,22 @@ actual-only и save-preview. Новые манифесты сохраняй от
 Никаких save, commit, push, merge. При реальном блокере остановись с диагнозом.
 В конце укажи абсолютный путь финального review и краткий отчёт: вопросы,
 ошибки команд, вмешательства аналитика, что проверено. Не заявляй об ускорении без замера.
+'''
+        if raw_history:
+            prompt = prompt.replace(
+                '- Полный принятый набор полей: inputs/expected.json, development и qa_fields.',
+                '- Даты разработки вычисли из реальных событий назначений. Применение этих дат согласовано.\n'
+                '- QA-REGISTRY: in-progress, прогресс unknown, окончание неизвестно; начало из первой передачи на QA.\n'
+                '- dev — разработчик BE/FE, qa — тестировщик. Роль карточки задаёт манифест, не актор события.')
+            prompt += '''
+Это второй прогон: входы содержат только сырую историю, без text_extraction/text_parser.
+Прочитай core/tracker-history-extraction.md и самостоятельно опиши события
+с привязкой к исходным фрагментам в новом манифесте того же run.
+Не спрашивай аналитика о regex, экранировании и позициях символов.
+Не читай lab.json, expected.json из обвязки, реализацию стенда и его тесты:
+они принадлежат независимой проверке и содержат ответы. Это не контроль доступа.
+Не подставляй даты вручную вместо событий в review. Не меняй оригиналы истории.
+MCP может оставаться подключённым, но вызывать его в этом испытании запрещено.
 '''
         (destination / 'AGENT-TASK.md').write_text(prompt, encoding='utf-8')
         return metadata
@@ -174,6 +229,8 @@ def verify(destination, review):
         raise ValueError('Unexpected tracker run')
     review = review.resolve(strict=True)
     review.relative_to(runs / metadata['run_id'] / 'history')
+    if metadata.get('raw_history'):
+        verify_history(json.loads(review.read_text(encoding='utf-8')), metadata)
     before = ReleaseActualizationEndToEndTests().snapshot(project)
     for tool, arguments in (
         ('trackerctl.py', ['qa-application-check', '--project-root', str(project), '--review-file', str(review)]),
@@ -188,15 +245,29 @@ def verify(destination, review):
             'conversation_quality': 'requires transcript review', 'generation_replayed': False}
 
 
+def verify_history(review, metadata):
+    if review.get('pending_history') or review.get('pending_history_dates'):
+        raise ValueError('History extraction is incomplete')
+    features = {feature['feature']: feature for feature in review['features']}
+    tasks = features['registry']['tasks']
+    for task in metadata['groups']['groups'][0]['members']:
+        development = tasks.get(task, {}).get('development', {})
+        expected_start = None if task == 'LAB-112/BE' else '2026-08-02T12:00:00+00:00'
+        if (development.get('state') != 'completed'
+                or development.get('started_at') != expected_start
+                or development.get('finished_at') != '2026-08-03T12:00:00+00:00'):
+            raise ValueError(f'History-derived lifecycle mismatch: {task}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('create', 'run', 'verify'))
+    parser.add_argument('action', choices=('create', 'create-raw', 'run', 'verify'))
     parser.add_argument('destination', type=Path)
     parser.add_argument('arguments', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     try:
-        if args.action == 'create':
-            result = create(args.destination)
+        if args.action in {'create', 'create-raw'}:
+            result = create(args.destination, raw_history=args.action == 'create-raw')
             print(json.dumps({key: result[key] for key in ('root', 'workspace', 'project', 'run_id')}, indent=2))
             print('Agent task:', Path(result['root']) / 'AGENT-TASK.md')
         elif args.action == 'verify':
