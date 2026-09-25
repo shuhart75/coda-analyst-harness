@@ -46,7 +46,10 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='release-actualization-test-')
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name).resolve()
+        self.prepare_lab(Path(temporary.name))
+
+    def prepare_lab(self, root):
+        self.root = root.resolve()
         self.expected = json.loads(FIXTURE.read_text(encoding='utf-8'))
         guard = self.root / 'offline'
         guard.mkdir()
