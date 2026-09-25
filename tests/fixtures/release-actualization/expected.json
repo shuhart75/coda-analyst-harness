@@ -1,0 +1,38 @@
+{
+  "today": "2026-09-25",
+  "release": "REL-1",
+  "members": [
+    "LAB-101/BE", "LAB-102/BE", "LAB-103/BE", "LAB-104/BE",
+    "LAB-105/BE", "LAB-106/BE", "LAB-107/BE", "LAB-108/BE",
+    "LAB-109/FE", "LAB-110/FE", "LAB-111/FE", "LAB-112/BE"
+  ],
+  "remainder": ["LAB-201/BE", "LAB-202/FE", "LAB-203/FE"],
+  "missing_coverage": ["LAB-202/FE", "LAB-203/FE"],
+  "groups": {
+    "schema_version": 1,
+    "provider": "sbertrek",
+    "total_estimate": "9",
+    "groups": [
+      {
+        "task_id": "QA-REGISTRY", "release": "REL-1", "estimate": "7.2",
+        "members": [
+          "LAB-101/BE", "LAB-102/BE", "LAB-103/BE", "LAB-104/BE",
+          "LAB-105/BE", "LAB-106/BE", "LAB-107/BE", "LAB-108/BE",
+          "LAB-109/FE", "LAB-110/FE", "LAB-111/FE", "LAB-112/BE"
+        ]
+      },
+      {
+        "task_id": "QA-REST", "release": null, "estimate": "1.8",
+        "members": ["LAB-201/BE", "LAB-202/FE", "LAB-203/FE"]
+      }
+    ]
+  },
+  "development": {
+    "regular": {"Actual Start": "2026-08-02", "Actual Finish": "2026-08-03", "Status": "completed", "Progress %": "100"},
+    "finish_only": {"Actual Start": "-", "Actual Finish": "2026-08-03", "Status": "completed", "Progress %": "100", "Estimate (дн)": "-"}
+  },
+  "qa_fields": {
+    "QA-REGISTRY": {"Actual Start": "2026-08-03", "Actual Finish": "-", "Status": "in-progress", "Progress %": "unknown", "Estimate (дн)": "7.2"},
+    "QA-REST": {"Estimate (дн)": "1.8"}
+  }
+}
