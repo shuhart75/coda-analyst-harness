@@ -1,0 +1,97 @@
+[
+  {
+    "id": "A",
+    "text": "История полная.\n2026-08-01T09:00:00Z CREATE. Автор: tester. Исполнитель не указан.\n2026-08-02T10:00:00Z ADD assigned_to: developer.\n2026-08-03T11:00:00Z CHANGE assigned_to: developer -> tester.\n",
+    "facts": {
+      "dev_state": "completed",
+      "dev_started_at": "2026-08-02T10:00:00Z",
+      "dev_finished_at": "2026-08-03T11:00:00Z",
+      "dev_started_by": null,
+      "dev_completed_by": null,
+      "qa_state": "in-progress",
+      "qa_started_at": "2026-08-03T11:00:00Z",
+      "qa_finished_at": null,
+      "cancelled_at": null
+    },
+    "support": {
+      "dev_started_at": "ADD assigned_to: developer.",
+      "dev_finished_at": "CHANGE assigned_to: developer -> tester.",
+      "qa_started_at": "CHANGE assigned_to: developer -> tester."
+    }
+  },
+  {
+    "id": "B",
+    "text": "История полная; исходного назначения разработчику нет.\n- **actor=developer** [2026-08-01T09:00:00+00:00] CREATE карточки, без поля исполнителя.\n- **actor=tester** [2026-08-04T12:00:00+00:00] UPDATE Исполнитель (`assigned_to`): `developer` → `tester`.\n",
+    "facts": {
+      "dev_state": "completed",
+      "dev_started_at": null,
+      "dev_finished_at": "2026-08-04T12:00:00Z",
+      "dev_started_by": "2026-08-04T12:00:00Z",
+      "dev_completed_by": null,
+      "qa_state": "in-progress",
+      "qa_started_at": "2026-08-04T12:00:00Z",
+      "qa_finished_at": null,
+      "cancelled_at": null
+    },
+    "support": {
+      "dev_started_by": "UPDATE Исполнитель (`assigned_to`): `developer` → `tester`.",
+      "dev_finished_at": "UPDATE Исполнитель (`assigned_to`): `developer` → `tester`.",
+      "qa_started_at": "UPDATE Исполнитель (`assigned_to`): `developer` → `tester`."
+    }
+  },
+  {
+    "id": "C",
+    "text": "История событий недоступна. Это только снимок.\nСнимок получен 2026-08-05T15:00:00+03:00.\nИсполнитель: developer. Текущий код статуса: development.\ncreated: 2026-08-01T09:00:00Z; updated: 2026-08-05T08:00:00Z.\n",
+    "facts": {
+      "dev_state": "in-progress",
+      "dev_started_at": null,
+      "dev_finished_at": null,
+      "dev_started_by": "2026-08-05T12:00:00Z",
+      "dev_completed_by": null,
+      "qa_state": "unknown",
+      "qa_started_at": null,
+      "qa_finished_at": null,
+      "cancelled_at": null
+    },
+    "support": {
+      "dev_started_by": "Снимок получен 2026-08-05T15:00:00+03:00."
+    }
+  },
+  {
+    "id": "D",
+    "text": "Доступен только снимок от 2026-08-06T12:00:00Z.\nstatus = cancelled; assigned_to = developer.\nupdated = 2026-08-06T11:50:00Z.\nИстории перехода в cancelled нет. Сведения о QA отсутствуют.\n",
+    "facts": {
+      "dev_state": "cancelled",
+      "dev_started_at": null,
+      "dev_finished_at": null,
+      "dev_started_by": null,
+      "dev_completed_by": null,
+      "qa_state": "unknown",
+      "qa_started_at": null,
+      "qa_finished_at": null,
+      "cancelled_at": null
+    },
+    "support": {}
+  },
+  {
+    "id": "E",
+    "text": "Все события, без пропусков:\n2026-08-02T10:00:00Z | назначение исполнителя | пусто => developer\n2026-08-03T11:00:00Z | смена исполнителя | developer => tester\n2026-08-04T09:00:00Z | смена исполнителя | tester => developer\n2026-08-05T09:00:00Z | смена исполнителя | developer => tester\n2026-08-06T14:00:00Z | смена статуса | qa => done\n",
+    "facts": {
+      "dev_state": "completed",
+      "dev_started_at": "2026-08-02T10:00:00Z",
+      "dev_finished_at": "2026-08-03T11:00:00Z",
+      "dev_started_by": null,
+      "dev_completed_by": null,
+      "qa_state": "completed",
+      "qa_started_at": "2026-08-03T11:00:00Z",
+      "qa_finished_at": "2026-08-06T14:00:00Z",
+      "cancelled_at": null
+    },
+    "support": {
+      "dev_started_at": "2026-08-02T10:00:00Z | назначение исполнителя | пусто => developer",
+      "dev_finished_at": "2026-08-03T11:00:00Z | смена исполнителя | developer => tester",
+      "qa_started_at": "2026-08-03T11:00:00Z | смена исполнителя | developer => tester",
+      "qa_finished_at": "2026-08-06T14:00:00Z | смена статуса | qa => done"
+    }
+  }
+]
