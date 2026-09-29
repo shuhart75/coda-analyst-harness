@@ -479,6 +479,7 @@ def bootstrap_command(args: argparse.Namespace) -> int:
         },
         "project_root": str(analytics),
         "local_entrypoint": str(entrypoint) if entrypoint else None,
+        "local_gigacode_entrypoint": str(analytics / "GIGACODE.md") if entrypoint else None,
         "commit_message_hooks": [str(path) for path in commit_message_hooks],
         "code_registry": str(code_registry),
         "migration": {

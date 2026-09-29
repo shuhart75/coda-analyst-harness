@@ -11,11 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class HarnessIntegrityTests(unittest.TestCase):
     HARNESS_TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".sh", ".py", ".txt", ".puml", ".template", ""}
-    HARNESS_OWNED_PREFIXES = ("scripts/", "core/", "modes/", "templates/", "adapters/", "skills/", "examples/", "prompts/")
+    HARNESS_OWNED_PREFIXES = (".gigacode/commands/", ".gigacode/skills/", "scripts/", "core/", "modes/", "templates/", "adapters/", "skills/", "examples/", "prompts/")
 
     def harness_text_corpus(self) -> dict[str, str]:
         corpus: dict[str, str] = {}
-        candidates = [ROOT / "AGENTS.md", ROOT / "README.md"]
+        candidates = [ROOT / "GIGACODE.md", ROOT / "AGENTS.md", ROOT / "README.md"]
         for directory in (*self.HARNESS_OWNED_PREFIXES, "tests", ".github"):
             for parent, directories, filenames in os.walk(ROOT / directory):
                 directories[:] = [name for name in directories if not name.startswith(".") and name not in {"__pycache__", "node_modules"}]

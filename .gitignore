@@ -2,10 +2,11 @@ __pycache__/
 *.pyc
 .DS_Store
 .codex/
-.gigacode/
+/.gigacode/*
+!/.gigacode/commands/
+!/.gigacode/skills/
 .gigaide/
 .idea/
-GIGACODE.md
 *.iml
 *.orig
 /.workspace-state/

@@ -1,5 +1,14 @@
 # Naming
 
+## GigaCode files
+
+- Native entry point: `GIGACODE.md` in HARNESS_ROOT; `AGENTS.md` is the compatibility entry point.
+- Slash commands: `.gigacode/commands/<action>.md`, YAML `description` and `argument-hint`.
+- Analyst skills: directories with the `coda-` prefix and a `SKILL.md`, for example `.gigacode/skills/coda-requirements/SKILL.md`; YAML `name` and `description`.
+- Command arguments are request text, never executable shell fragments.
+- Tracked native definitions belong to HARNESS_ROOT. Analytics receives only an ignored managed projection.
+- Settings, permissions, MCP configuration and memories remain local; no native files are installed into code or source.
+
 ## Slugs
 
 Use English slugs for paths.

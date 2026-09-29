@@ -180,6 +180,10 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertIn("Сообщение коммита отклонено", blocked_commit.stderr)
             entrypoint = documents / "AGENTS.md"
             self.assertTrue(entrypoint.is_file())
+            self.assertTrue((documents / "GIGACODE.md").is_file())
+            self.assertTrue((documents / ".gigacode/commands/tracker.md").is_file())
+            self.assertTrue((documents / ".gigacode/skills/coda-tracker/SKILL.md").is_file())
+            self.assertFalse((workspace / "coda/.gigacode").exists())
             entrypoint_text = entrypoint.read_text(encoding="utf-8")
             self.assertIn("analyst-harness-local-entrypoint:v1", entrypoint_text)
             self.assertIn("submit только отправляет ветку", entrypoint_text)

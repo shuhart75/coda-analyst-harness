@@ -2,6 +2,11 @@
 
 This repository defines a reusable workflow harness.
 
+## GigaCode entry point
+
+- This variant targets GigaCode. Read `GIGACODE.md` first for native command and skill routing; the operation contracts below remain mandatory. The generic `analyst-harness` stays LLM-agnostic.
+- Tracked `GIGACODE.md` and `.gigacode/commands/` and `.gigacode/skills/` belong only to HARNESS_ROOT. Their generated projections in PROJECT_ROOT are ignored local files. Settings, MCP permissions and user memories are local and must be preserved.
+
 ## Communication language
 
 - Communicate with the analyst in Russian, including progress updates, questions, status reports and final answers. Use English only for exact code, paths, identifiers, fixed product names and necessary special terms, or when the analyst explicitly requests another language.

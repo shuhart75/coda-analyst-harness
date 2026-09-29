@@ -1,6 +1,7 @@
 # Skills Policy
 
-This harness is CLI-neutral, so "skills" may come from Codex, Claude, Qwen, or project-local prompting conventions.
+This AS KODA variant uses native GigaCode skills under `.gigacode/skills/`.
+The independent generic `analyst-harness` retains its CLI-neutral contracts.
 
 ## Principle
 
@@ -19,7 +20,17 @@ Use a skill only when it adds repeatable domain value or enforces a stable workf
 - `research-analyst` — bounded role-based research over requirements, prototypes, source materials or code.
 - `qa-analyst` — requirement-level checks, negative scenarios and coverage matrices.
 
-The harness ships CLI-neutral skill contracts under `skills/`. Native agent platforms may wrap these contracts, but their mode, inputs, write scope, and validation rules remain canonical.
+GigaCode discovers the native analyst skills by their `name` and `description`
+frontmatter. Load the selected SKILL.md before its procedure, and read its DOCS
+references only for the requested operation. Slash commands live under
+`.gigacode/commands/`; Russian phrases retain the command catalog semantics.
+Bootstrap projects these files into the analytics workspace as ignored local
+files while preserving settings and user memory.
+
+The older `skills/` contracts remain reference material. In particular,
+`implementation-loop` and `qa-loop` describe the developer-owned process;
+they are not installed as analyst skills and cannot authorize code or returns
+writes. Native routing and the operation contracts define the analyst scope.
 
 ## Skill input discipline
 

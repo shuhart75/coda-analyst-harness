@@ -1,6 +1,9 @@
 # LLM Contract
 
-This contract is CLI-neutral. It applies to Codex CLI, Claude Code, Qwen CLI, VSCodium agents, and other LLM assistants working in a project scaffolded with this harness.
+This is the operation contract for the GigaCode variant of the AS KODA harness.
+Read `GIGACODE.md` for native command and skill routing. `AGENTS.md` remains
+a compatibility entry point. The independent generic `analyst-harness` remains
+LLM-agnostic; do not copy this variant's platform layer into it.
 
 ## Analyst communication
 
@@ -13,7 +16,7 @@ Communicate with the analyst in Russian. This includes intermediate updates, que
 
 Before changing artifacts, read:
 
-1. `AGENTS.md`
+1. `GIGACODE.md`, then `AGENTS.md`
 2. `core/llm-contract.md`
 3. `core/agent-delegation.md`
 4. `core/skills-policy.md`
@@ -42,7 +45,7 @@ Additional contracts are read when the action needs them:
 
 If the user points to a folder with current-system docs/screenshots/change requests, inspect that folder first and keep source references in the produced artifacts.
 
-`HARNESS_ROOT` is the `coda-analyst-harness` repository. Resolve `PROJECT_ROOT` only through `python3 HARNESS_ROOT/scripts/workspace.py --root HARNESS_ROOT project-root`. Unless a path explicitly starts with a harness directory such as `core/`, `modes/`, `scripts/`, `skills/`, `templates/` or `.workspace-state/`, resolve project paths such as `baseline/`, `context/`, `planning/`, `features/` and `releases/` under `PROJECT_ROOT`, regardless of the directory from which the LLM was launched.
+`HARNESS_ROOT` is the `coda-analyst-harness` repository. Resolve `PROJECT_ROOT` only through `python3 HARNESS_ROOT/scripts/workspace.py --root HARNESS_ROOT project-root`. Unless a path explicitly starts with a harness directory such as `.gigacode/`, `core/`, `modes/`, `scripts/`, `skills/`, `templates/` or `.workspace-state/`, resolve project paths such as `baseline/`, `context/`, `planning/`, `features/` and `releases/` under `PROJECT_ROOT`, regardless of the directory from which the LLM was launched.
 
 Repositories assigned roles `code` and `source` are optional after the first successful bootstrap. Their absence is a supported reduced-workspace state: do not recreate them without an explicit analyst request, do not attempt code inspection when `code` is absent, and do not claim reverse-patch verification when `source` is absent. Role `analytics` is mandatory.
 
@@ -398,10 +401,10 @@ Partial rollback:
 
 ## Skills rules
 
-- Skills are optional reusable behaviors, not a substitute for the project contract.
+- Native analyst skills under `.gigacode/skills/` route GigaCode to the relevant operation contracts; they are not a substitute for those contracts.
 - Use a skill only if it clearly matches the current mode and improves repeatability.
 - A skill must not bypass mode boundaries or mutate canonical baseline files outside release-finalization.
-- When a platform has no native skills, express the same reusable behavior through `templates/` and the active mode file instead.
+- Compatibility clients follow `AGENTS.md`, `templates/` and the active mode; the generic harness retains its separate platform-neutral skill policy.
 
 ## Tool discipline
 
