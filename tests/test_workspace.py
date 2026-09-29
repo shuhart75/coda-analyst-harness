@@ -47,7 +47,7 @@ class CodaWorkspaceTests(unittest.TestCase):
         self.assertFalse((workspace / "reverse-diffs/reverse-diff-latest.patch").exists())
         request = exchange["source_import"]
         self.assertFalse(request["merge_request_created"])
-        self.assertEqual(request["request_branch"], f"codex/source-import/{request['source_commit']}")
+        self.assertEqual(request["request_branch"], f"source/source-import/{request['source_commit']}")
         self.assertEqual(request["merge_method"], "merge-commit")
         checkout = Path(request["checkout"])
         self.assertTrue(checkout.is_relative_to(workspace / ".workspace-state/source-imports"))
@@ -252,7 +252,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(sync_payload["analytics_exchange"]["source_import"]["status"], "prepared-not-pushed")
             self.assertFalse((documents / "context/source-only.txt").exists())
             self.assertEqual(run("git", "ls-remote", str(documents_remote),
-                                 "refs/heads/codex/source-import/*").stdout, "")
+                                 "refs/heads/source/source-import/*", "refs/heads/codex/source-import/*").stdout, "")
             self.accept_source_import(workspace, sync_payload)
             result = run(sys.executable, str(ROOT / "scripts/workspace.py"), "--root",
                          str(workspace), "sync", "--no-push", env=environment)

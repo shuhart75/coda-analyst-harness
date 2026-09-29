@@ -24,6 +24,8 @@ from workspace_entrypoint import (
 
 
 SOURCE_REMOTE = "analyst-source-local"
+SOURCE_IMPORT_PREFIX = "source/source-import/"
+SOURCE_IMPORT_PREFIXES = (SOURCE_IMPORT_PREFIX, "codex/source-import/")
 BRANCH = "main"
 FORBIDDEN_CONTENT_PATHS = (".workflow", ".vscode", "AGENTS.md")
 ALLOWED_CONTENT_ROOTS = frozenset({
@@ -774,7 +776,8 @@ def source_import_report(repository: Path, base: str, candidate: str) -> dict:
 
 
 def source_import_heads(documents: Path) -> dict[str, str]:
-    result = git(documents, "ls-remote", "--heads", "origin", "refs/heads/codex/source-import/*")
+    result = git(documents, "ls-remote", "--heads", "origin",
+                 *(f"refs/heads/{prefix}*" for prefix in SOURCE_IMPORT_PREFIXES))
     if result.returncode:
         raise ValueError("Не удалось проверить ветки импорта; повтори синхронизацию")
     return {reference.removeprefix("refs/heads/"): commit
@@ -792,14 +795,14 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     if state is not None and (
         not isinstance(state.get("source_commit"), str)
         or not re.fullmatch(r"[0-9a-f]{40,64}", state["source_commit"])
-        or state.get("request_branch") != f"codex/source-import/{state['source_commit']}"
+        or state.get("request_branch") not in tuple(prefix + state['source_commit'] for prefix in SOURCE_IMPORT_PREFIXES)
     ):
         raise ValueError("Повреждено состояние импорта")
     accepted_receipt = None
     heads = source_import_heads(documents)
     pending = {}
     for branch, commit in heads.items():
-        if not re.fullmatch(r"codex/source-import/[0-9a-f]{40,64}", branch):
+        if not re.fullmatch(r"(?:source|codex)/source-import/[0-9a-f]{40,64}", branch):
             raise ValueError("Некорректное имя ветки импорта")
         fetched = git(documents, "fetch", "--quiet", "origin", f"refs/heads/{branch}")
         if fetched.returncode or git(documents, "rev-parse", "FETCH_HEAD").stdout.strip() != commit:
@@ -829,7 +832,7 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
         return {"status": "already-contained", "incoming": source_commit, "after": target_commit,
                 "acceptance_receipt": str(accepted_receipt) if accepted_receipt else None}
     if state is None:
-        branch = next(iter(pending), f"codex/source-import/{source_commit}")
+        branch = next(iter(pending), SOURCE_IMPORT_PREFIX + source_commit)
         incoming = branch.rsplit("/", 1)[1]
         base = git(documents, "merge-base", target_commit, pending[branch]).stdout.strip() if branch in pending else target_commit
         if not base:
@@ -838,7 +841,7 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
                  "source_commit": incoming, "target_branch": BRANCH, "base_commit": base}
     branch = state["request_branch"]
     incoming = state["source_commit"]
-    if branch != f"codex/source-import/{incoming}" or not re.fullmatch(r"[0-9a-f]{40,64}", incoming):
+    if branch not in tuple(prefix + incoming for prefix in SOURCE_IMPORT_PREFIXES) or not re.fullmatch(r"[0-9a-f]{40,64}", incoming):
         raise ValueError("Повреждено состояние импорта")
     checkout = root / ".workspace-state/source-imports" / incoming / "repository"
     state["checkout"] = str(checkout)
