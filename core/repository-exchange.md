@@ -22,7 +22,7 @@ The command `repository-exchange.py sync` performs one guarded transaction:
 2. Require a valid `source` bare mirror and fetch `source/main` directly into it.
 3. Detect an already active analytics merge and stop without changing it. Otherwise require a clean `analytics/main` worktree. The only exception is a verified filesystem-normalized alias of a non-NFC tracked path that is removed by the incoming source commit and whose bytes equal the indexed blob.
 4. Fetch `analytics/origin/main` and update local main only by fast-forward from that accepted history. Local-ahead and diverged histories both stop with `analytics-unaccepted-history` and a protective snapshot in state `prepared`. Even conflict-free divergence requires a separate feature branch and human PR/MR acceptance; sync never integrates or publishes those local commits into main. If collaboration is configured, the next action is `collaboration-recover-main`; otherwise it is `collaboration-migration`. Start with `collaboration.py status`, inspect the local history, and follow `core/collaboration.md` with analyst-confirmed ownership and commit. `--no-push` never bypasses this guard.
-5. Read incoming source history into Git objects without merging it into the ordinary documents checkout. If the incoming commit is already contained in accepted main and no import is pending, continue to reverse-patch verification.
+5. Read incoming source history into Git objects without merging it into the ordinary documents checkout. If the incoming commit is already contained in accepted main and no import is pending, continue to reverse-patch verification. A proven reverse-patch return can also continue under the narrow exception below.
 6. Otherwise prepare `source/source-import/<full-source-commit>` from accepted remote documents main in an isolated clone. Keep that clone at `.workspace-state/source-imports/<source-commit>/repository` and its pending state at `.workspace-state/source-import.json` for retry and conflict resolution. Existing `codex/source-import/<full-source-commit>` branches and saved states remain valid and are resumed without renaming; detect pending requests under both prefixes before creating a new branch.
 7. Merge source only in that isolated review branch, preserving shared history with a merge commit. Reject non-NFC paths, local tool settings, files outside registered analytical roots, direct files under `features/`, unapproved deletions relative to source, embedded harness content and whitespace errors. Paths under `context/source-materials/` remain opaque evidence. Legacy harness removal is reviewed in the import branch.
 8. Save the candidate commit and review report before sending the branch. The report lists changed and deleted files, removed `REQ-*` headings and scenarios, and changes to protected requirements, baseline, planning and release artifacts. Content-policy verification does not approve those changes; human review decides whether useful content may be removed or replaced.
@@ -34,11 +34,42 @@ The command `repository-exchange.py sync` performs one guarded transaction:
 
 The code update performed by `workspace.py sync` remains the separate guarded pull. `--no-push` prepares and retains the same review candidate locally; it never applies incoming source changes to documents/main.
 
+## Verified reverse-patch return
+
+Sync recognizes a returned source commit only from an immutable timestamped schema-2
+reverse-patch pair in `reverse-diffs/`. It rechecks repository roles and branches,
+verification flags, source and analytics commit trees, the patch SHA-256 and exact
+binary diff. The returned source must have the patch's source base as its single
+direct parent, as produced by the reverse-patch receiver, and have
+exactly the archived analytics tree; the archived analytics commit must be an
+ancestor of accepted current documents main. `latest` metadata and a receipt alone
+cannot authorize this exception. Missing or corrupted evidence leaves normal review
+required. Equality does not assert how or by whom the source commit was created.
+A later commit reverting to an older archived tree is not a return of that patch.
+
+The result `source_merge.status=roundtrip-verified` records the proof in
+`.workspace-state/source-imports/<source-commit>/roundtrip.json`. It neither commits
+nor merges into documents/main. An already pending empty import under either branch
+prefix can be retired when its first parent is accepted in current main, its tree
+equals that parent's tree, and it contains both the returned source and the archived
+analytics commit. The active state is cleared only after the receipt is written;
+remote branches, isolated clones and historical pairs are preserved. Repeated sync
+revalidates the evidence and ignores that proven empty candidate. A deferred request
+is not automatically revived; a modified candidate still requires review.
+
+If analytics advanced, the returned tree remains the proven base and a new reverse
+patch covers the later accepted changes. If source advanced, genuine changes still
+require a review branch. Inside that isolated clone only, ordinary merge commits join
+the archived analytics anchor with its identical returned source, then join this
+history into the candidate before merging new source changes. Both intermediate
+content checks must pass. This preserves a correct merge base for later reversions
+and deletions without changing accepted main or silently dropping new source work.
+
 ## Pending imports and conflicts
 
 Retry uses the saved clone, candidate and branch. A failed push retains `prepared-not-pushed`; repeat sync to check the remote outcome and send the same candidate. Existing remote import branches are discovered and reused, including after loss of local state. Multiple unfinished imports or incompatible local and remote branch histories block automatic progress. Never overwrite or force-push an open request.
 
-New source commits do not silently replace an open import: `source_has_newer_commit` exposes the difference, and the current request remains bound to its original source commit. New documents/main commits may fast-forward the ordinary checkout while review is pending; they do not authorize accepting the import. Acceptance must retain the import commit as an ancestor. **Source imports require merge-commit acceptance, not squash or rebase.** Tree equality alone does not prove acceptance or preserve shared source history.
+New source commits do not silently replace an open import: `source_has_newer_commit` exposes the difference, and the current request remains bound to its original source commit. New documents/main commits may fast-forward the ordinary checkout while review is pending; they do not authorize accepting the import. Acceptance must retain the import commit as an ancestor. **Source imports require merge-commit acceptance, not squash or rebase.** Tree equality alone does not prove acceptance or preserve shared source history. The verified-return exception above requires archived evidence, not just equality.
 
 A source conflict returns `source-analytics-merge-conflict`, `import_checkout` and a protective snapshot. The conflict remains active only in the isolated checkout; ordinary documents/main retains its accepted content. `inspect-source-analytics-conflict` reports the exact pending base/source pair and saved file versions. Request one path-level analyst decision at a time, resolve only the selected paths in `import_checkout`, create a semantic merge commit there, then repeat sync and complete human PR/MR review. Never resolve the import by editing main.
 
@@ -93,7 +124,7 @@ Preparing or sending a source review branch is pending work, not completed synch
 
 ## Reverse patch
 
-`repository-exchange.py reverse-diff` does not merge, apply or push repositories. It requires the current source commit to be contained in accepted documents history; pending or deferred imports cannot be reverse-patch inputs. It compares the bare source commit with the clean and policy-compliant `documents` commit and writes to the Git-ignored local `reverse-diffs/` directory:
+`repository-exchange.py reverse-diff` does not merge, apply or push repositories. It requires the current source commit to be contained in accepted documents history or independently verified as a reverse-patch return; pending or deferred imports cannot be reverse-patch inputs. It compares the bare source commit with the clean and policy-compliant `documents` commit and writes to the Git-ignored local `reverse-diffs/` directory:
 
 - `reverse-diffs/reverse-diff-<artifact-id>.patch`;
 - `reverse-diffs/reverse-diff-<artifact-id>.json`;
@@ -104,7 +135,7 @@ The timestamped patch and JSON are an immutable pair. Later runs replace only th
 
 The patch is intended for the maintainers of `changeswork-copy`. Normal analyst work does not apply, commit or push it. Before any transport files are written, generation runs `git diff --check` between the exact source and analytics commits and rejects trailing whitespace and other patch-format errors. Metadata schema 2 sets `verified=true` only when whitespace validation (`diff_check_verified`), exact-tree reproduction (`tree_verified`) and repository-content policy (`content_policy_verified`) pass. Fields `included_analytics_commits` and `included_features` preserve provenance even though applying a patch creates one integration commit in the receiving repository. This does not mean that draft requirements are approved. When both trees are identical, stale `reverse-diff-latest.patch` is removed and the metadata records that no patch is required.
 
-Transfer the immutable timestamped JSON and patch together through an approved external channel; do not commit them to this harness. On the machine where `changeswork-copy` is writable, the receiving analyst harness verifies the pair again, requires the exact source commit and tree after a protected fast-forward-only pull, creates one integration commit whose tree equals `analytics_tree`, pushes it and writes a local application receipt. The next full sync fetches that new source commit and routes it through review when its history is not yet contained in documents/main, even if the trees match. Only a result with `source_analytics_state=identical`, `repositories_identical=true` and `all_repositories_synchronized=true` confirms the complete round trip. If analytics advanced meanwhile, a new reverse patch is expected after acceptance.
+Transfer the immutable timestamped JSON and patch together through an approved external channel; do not commit them to this harness. On the machine where `changeswork-copy` is writable, the receiving analyst harness verifies the pair again, requires the exact source commit and tree after a protected fast-forward-only pull, creates one integration commit whose tree equals `analytics_tree`, pushes it and writes a local application receipt. The next full sync checks the verified-return exception before requesting a new import review. Only a result with `source_analytics_state=identical`, `repositories_identical=true` and `all_repositories_synchronized=true` confirms the complete round trip. If analytics advanced meanwhile, a new reverse patch is expected from the verified returned source to accepted current analytics.
 
 Every deletion of a path inherited from `source` is blocked by default. After the analyst explicitly confirms one exact deletion, register it with `repository-exchange.py approve-deletion --path <path>`. The local approval is bound to the current source blob and becomes invalid if that source file changes. Never run this command merely to make synchronization pass.
 

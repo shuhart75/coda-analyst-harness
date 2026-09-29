@@ -91,6 +91,10 @@ never integrate incoming source directly into documents/main, even without Git
 conflicts. Show the import's changed/deleted paths and removed requirements and
 scenarios. Pending import is not synchronization and blocks reverse-patch generation.
 Repeat sync to reuse the pending request and verify acceptance before resuming.
+For a proven return of an archived reverse patch, `roundtrip-verified` is the
+documented exception in `core/repository-exchange.md`: no empty PR/MR is required.
+Let sync verify and retire the empty pending import; never delete its state manually
+or infer patch correctness merely from a new source commit or an empty diff.
 
 If the command references impacted requirements, prototypes, or rollback of a known decision, consult:
 - `features/*/domain-impact.md`;

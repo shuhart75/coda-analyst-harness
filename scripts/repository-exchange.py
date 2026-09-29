@@ -784,6 +784,99 @@ def source_import_heads(documents: Path) -> dict[str, str]:
             for commit, reference in (line.split() for line in result.stdout.splitlines())}
 
 
+def verified_roundtrips(root: Path, documents: Path, incoming: str, target: str) -> dict[str, dict]:
+    history = git(documents, "log", "--format=%H %T", incoming)
+    if history.returncode:
+        raise ValueError("Не удалось проверить историю возврата обратной заплаты")
+    commits_by_tree: dict[str, list[str]] = {}
+    for line in history.stdout.splitlines():
+        commit, tree = line.split()
+        commits_by_tree.setdefault(tree, []).append(commit)
+    roles = workspace_roles(root)
+    proofs = {}
+    for path in sorted((root / "reverse-diffs").glob("reverse-diff-*.json")):
+        if path.name == "reverse-diff-latest.json":
+            continue
+        try:
+            metadata_bytes = path.read_bytes()
+            metadata = json.loads(metadata_bytes)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        if (metadata.get("schema_version") != 2
+                or path.stem != f"reverse-diff-{metadata.get('artifact_id')}"
+                or any(metadata.get(field) is not True for field in
+                       ("verified", "tree_verified", "diff_check_verified", "content_policy_verified"))
+                or metadata.get("source_repository") != roles.get("source", {}).get("repository")
+                or metadata.get("analytics_repository") != roles.get("analytics", {}).get("repository")
+                or metadata.get("source_branch") != BRANCH or metadata.get("analytics_branch") != BRANCH):
+            continue
+        base, anchor = metadata.get("source_commit"), metadata.get("analytics_commit")
+        tree = metadata.get("analytics_tree")
+        if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40,64}", value)
+                   for value in (base, anchor, tree, metadata.get("source_tree"))):
+            continue
+        if tree not in commits_by_tree or tree == metadata["source_tree"]:
+            continue
+        if (git(documents, "rev-parse", f"{base}^{{tree}}").stdout.strip() != metadata["source_tree"]
+                or git(documents, "rev-parse", f"{anchor}^{{tree}}").stdout.strip() != tree
+                or git(documents, "merge-base", "--is-ancestor", anchor, target).returncode):
+            continue
+        patch_path = path.with_suffix(".patch")
+        try:
+            patch_bytes = patch_path.read_bytes()
+        except OSError:
+            continue
+        digest = hashlib.sha256(patch_bytes).hexdigest()
+        difference = git(documents, "diff", "--binary", "--full-index", "--no-renames", base, anchor, "--", ".")
+        if digest != metadata.get("patch_sha256") or difference.returncode or difference.stdout.encode("utf-8") != patch_bytes:
+            continue
+        for returned in commits_by_tree[tree]:
+            parents = git(documents, "show", "-s", "--format=%P", returned)
+            if parents.returncode or parents.stdout.strip() != base:
+                continue
+            proofs[returned] = {
+                "source_commit": returned, "analytics_commit": anchor, "tree": tree,
+                "metadata": str(path), "metadata_sha256": hashlib.sha256(metadata_bytes).hexdigest(),
+                "patch_sha256": digest,
+            }
+    return proofs
+
+
+def roundtrip_candidate(documents: Path, candidate: str, target: str, proof: dict) -> bool:
+    parent = git(documents, "rev-parse", f"{candidate}^1")
+    if parent.returncode:
+        return False
+    base = parent.stdout.strip()
+    return (
+        git(documents, "rev-parse", f"{candidate}^{{tree}}").stdout.strip()
+        == git(documents, "rev-parse", f"{base}^{{tree}}").stdout.strip()
+        and git(documents, "merge-base", "--is-ancestor", base, target).returncode == 0
+        and git(documents, "merge-base", "--is-ancestor", proof["source_commit"], candidate).returncode == 0
+        and git(documents, "merge-base", "--is-ancestor", proof["analytics_commit"], candidate).returncode == 0
+    )
+
+
+def connect_roundtrip_history(checkout: Path, branch: str, proof: dict) -> None:
+    before = git(checkout, "rev-parse", "HEAD^{tree}").stdout.strip()
+    message = "Связать историю подтверждённого возврата обратной заплаты"
+    require_valid_commit_message(message)
+    merge_args = ("-c", "user.name=Coda Analyst Harness", "-c", "user.email=coda-analyst-harness@local.invalid",
+                  "merge", "--no-ff", "-m", message)
+    switched = git(checkout, "switch", "--detach", proof["analytics_commit"])
+    if switched.returncode:
+        raise ValueError("Не удалось подготовить историю подтверждённого возврата")
+    merged = git(checkout, *merge_args, proof["source_commit"])
+    if merged.returncode or git(checkout, "rev-parse", "HEAD^{tree}").stdout.strip() != proof["tree"]:
+        raise ValueError("Не удалось связать историю возврата; проверь изолированный импорт")
+    bridge = git(checkout, "rev-parse", "HEAD").stdout.strip()
+    if git(checkout, "switch", branch).returncode or git(checkout, *merge_args, bridge).returncode:
+        raise ValueError("Не удалось включить историю возврата в изолированный импорт")
+    if git(checkout, "rev-parse", "HEAD^{tree}").stdout.strip() != before:
+        raise ValueError("Связывание истории возврата изменило содержимое импорта")
+
+
 def prepare_source_import(root: Path, source: Path, documents: Path, analytics_id: str, no_push: bool) -> dict:
     source_commit = git(source, "rev-parse", BRANCH).stdout.strip()
     target_commit = git(documents, "rev-parse", "HEAD").stdout.strip()
@@ -809,6 +902,27 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
             raise ValueError("Ветка импорта изменилась во время чтения; повтори синхронизацию")
         if git(documents, "merge-base", "--is-ancestor", commit, target_commit).returncode != 0:
             pending[branch] = commit
+    proofs = verified_roundtrips(root, documents, source_commit, target_commit)
+    if not state or state.get("status") != "deferred":
+        candidates = dict(pending)
+        if state and state.get("request_commit"):
+            candidates.setdefault(state["request_branch"], state["request_commit"])
+        for branch, candidate in candidates.items():
+            proof = proofs.get(branch.rsplit("/", 1)[1])
+            if (not proof or not roundtrip_candidate(documents, candidate, target_commit, proof)
+                    or (state and state["request_branch"] == branch
+                        and state.get("request_commit") not in (None, candidate))):
+                continue
+            accepted_receipt = root / ".workspace-state/source-imports" / proof["source_commit"] / "roundtrip.json"
+            if not accepted_receipt.exists():
+                atomic_write(accepted_receipt, (json.dumps({
+                    "status": "roundtrip-verified", "proof": proof, "target_commit": target_commit,
+                    "request_branch": branch, "request_commit": candidate, "confirmed_at": utc_now(),
+                }, ensure_ascii=False, indent=2) + "\n").encode())
+            pending.pop(branch, None)
+            if state and state["request_branch"] == branch:
+                state_path.unlink()
+                state = None
     if state and state.get("request_commit") and git(documents, "merge-base", "--is-ancestor", state["request_commit"], target_commit).returncode == 0:
         accepted_receipt = root / ".workspace-state/source-imports" / state["source_commit"] / "merged.json"
         if not accepted_receipt.is_file():
@@ -831,6 +945,15 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     if state is None and not pending and git(documents, "merge-base", "--is-ancestor", source_commit, target_commit).returncode == 0:
         return {"status": "already-contained", "incoming": source_commit, "after": target_commit,
                 "acceptance_receipt": str(accepted_receipt) if accepted_receipt else None}
+    if state is None and not pending and source_commit in proofs:
+        receipt = root / ".workspace-state/source-imports" / source_commit / "roundtrip.json"
+        if not receipt.exists():
+            atomic_write(receipt, (json.dumps({
+                "status": "roundtrip-verified", "proof": proofs[source_commit],
+                "target_commit": target_commit, "confirmed_at": utc_now(),
+            }, ensure_ascii=False, indent=2) + "\n").encode())
+        return {"status": "roundtrip-verified", "incoming": source_commit, "after": target_commit,
+                "acceptance_receipt": str(receipt), "proof": proofs[source_commit]}
     if state is None:
         branch = next(iter(pending), SOURCE_IMPORT_PREFIX + source_commit)
         incoming = branch.rsplit("/", 1)[1]
@@ -889,6 +1012,10 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     if git(checkout, "merge-base", "--is-ancestor", incoming, "HEAD").returncode != 0:
         if branch in pending or state.get("request_commit"):
             raise ValueError("Ветка импорта потеряла исходную историю; автоматическое повторное слияние source запрещено")
+        for returned in git(checkout, "rev-list", incoming).stdout.splitlines():
+            if returned in proofs and git(checkout, "merge-base", "--is-ancestor", returned, "HEAD").returncode:
+                connect_roundtrip_history(checkout, branch, proofs[returned])
+                break
         snapshot = create_analytics_snapshot(
             root, documents, analytics_id, "source-analytics-merge", incoming,
             f"{SOURCE_REMOTE}/{BRANCH}", local_commit=state["base_commit"],
@@ -1435,7 +1562,8 @@ def verified_reverse_patch(
     configure_source_remote(analytics, source)
     source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
     documents_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
-    if git(analytics, "merge-base", "--is-ancestor", source_commit, documents_commit).returncode != 0:
+    if (git(analytics, "merge-base", "--is-ancestor", source_commit, documents_commit).returncode != 0
+            and source_commit not in verified_roundtrips(root, analytics, source_commit, documents_commit)):
         raise ValueError("source-import-pending: входящий source ещё не принят в documents/main; обратная заплата запрещена")
     pending_path = root / ".workspace-state/source-import.json"
     if pending_path.is_file():
@@ -1697,7 +1825,7 @@ def sync_command(args: argparse.Namespace) -> int:
                 "status": "unavailable", "reason": "source-import-pending", "verified": False,
             }, ensure_ascii=False).encode())
         source_merge = prepare_source_import(root, source, documents, analytics_id, args.no_push)
-        if source_merge["status"] != "already-contained":
+        if source_merge["status"] not in ("already-contained", "roundtrip-verified"):
             print(json.dumps({
                 "status": source_merge["status"], "source_analytics_state": "source-import-pending",
                 "source_import": source_merge, "analytics_pushed": False,
