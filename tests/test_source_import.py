@@ -82,7 +82,7 @@ class SourceImportTests(unittest.TestCase):
         self.change_source("Incoming\n")
         first = self.sync("--no-push")["analytics_exchange"]["source_import"]
         self.assertEqual(first["status"], "prepared-not-pushed")
-        self.assertEqual(self.git(self.remote, "for-each-ref", "--format=%(refname)", "refs/heads/codex/source-import/"), "")
+        self.assertEqual(self.git(self.remote, "for-each-ref", "--format=%(refname)", "refs/heads/source/source-import/", "refs/heads/codex/source-import/"), "")
         hook = self.remote / "hooks/pre-receive"
         hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         hook.chmod(0o755)
@@ -105,6 +105,42 @@ class SourceImportTests(unittest.TestCase):
         self.accept(first["request_branch"])
         following = self.sync()["analytics_exchange"]["source_import"]
         self.assertNotEqual(following["request_branch"], first["request_branch"])
+
+    def test_legacy_state_and_remote_branch_resume_without_renaming(self) -> None:
+        self.change_source("Legacy incoming\n")
+        first = self.sync("--no-push")["analytics_exchange"]["source_import"]
+        self.assertEqual(first["request_branch"], f"source/source-import/{first['source_commit']}")
+        legacy = f"codex/source-import/{first['source_commit']}"
+        self.git(Path(first["checkout"]), "branch", "-m", legacy)
+        state_path = self.workspace / ".workspace-state/source-import.json"
+        state = json.loads(state_path.read_text())
+        state["request_branch"] = legacy
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        resumed = self.sync()["analytics_exchange"]["source_import"]
+        self.assertEqual(resumed["request_branch"], legacy)
+        self.assertEqual(resumed["request_commit"], first["request_commit"])
+        state_path.unlink()
+        recovered = self.sync()["analytics_exchange"]["source_import"]
+        self.assertEqual(recovered["request_branch"], legacy)
+        self.assertEqual(recovered["request_commit"], first["request_commit"])
+        self.assertEqual(self.git(self.remote, "for-each-ref", "--format=%(refname)", "refs/heads/source/source-import/"), "")
+        self.accept(legacy)
+        self.assertTrue(self.sync()["all_repositories_synchronized"])
+        self.change_source("Next incoming\n")
+        following = self.sync()["analytics_exchange"]["source_import"]
+        self.assertEqual(following["request_branch"], f"source/source-import/{following['source_commit']}")
+
+    def test_pending_imports_under_both_prefixes_block_selection(self) -> None:
+        self.change_source("Incoming\n")
+        first = self.sync()["analytics_exchange"]["source_import"]
+        legacy = f"codex/source-import/{first['source_commit']}"
+        self.git(Path(first["checkout"]), "push", "origin", f"HEAD:refs/heads/{legacy}")
+        before = self.git(self.remote, "rev-parse", "main")
+        result = fixture.run("python3", str(fixture.ROOT / "scripts/workspace.py"), "--root",
+                             str(self.workspace), "sync", env=self.environment)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("несколько незавершённых импортов", result.stdout + result.stderr)
+        self.assertEqual(self.git(self.remote, "rev-parse", "main"), before)
 
     def test_cold_state_reuses_remote_request_after_target_advances(self) -> None:
         self.change_source("Incoming\n")
@@ -182,7 +218,7 @@ class SourceImportTests(unittest.TestCase):
         self.assertNotEqual(fixture.run(*command, env=self.environment).returncode, 0)
         self.assertEqual(fixture.run(*command, "--analyst-confirmed", env=self.environment).returncode, 0)
         self.assertEqual(self.sync()["analytics_exchange"]["source_import"]["status"], "deferred")
-        self.assertEqual(self.git(self.remote, "for-each-ref", "--format=%(refname)", "refs/heads/codex/source-import/"), "")
+        self.assertEqual(self.git(self.remote, "for-each-ref", "--format=%(refname)", "refs/heads/source/source-import/", "refs/heads/codex/source-import/"), "")
         self.change_source("Revised incoming\n")
         next_request = self.sync()["analytics_exchange"]["source_import"]
         self.assertNotEqual(next_request["request_branch"], first["request_branch"])
