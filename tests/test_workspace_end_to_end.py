@@ -94,6 +94,9 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
             harness = root / "coda-analyst-harness"
             cloned_harness = run("git", "clone", "--no-local", str(ROOT), str(harness))
             self.assertEqual(cloned_harness.returncode, 0, cloned_harness.stdout + cloned_harness.stderr)
+            # PR runners can clone a detached checkout; exercise that state locally too.
+            detached = run("git", "switch", "--detach", cwd=harness)
+            self.assertEqual(detached.returncode, 0, detached.stdout + detached.stderr)
             working_diff = run("git", "diff", "--binary", "HEAD", cwd=ROOT).stdout
             if working_diff:
                 applied = subprocess.run(
@@ -163,7 +166,7 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
             self.assertEqual(run("git", "check-ignore", "reverse-diffs", cwd=harness).returncode, 0)
             archived_patch_bytes = archived_patch.read_bytes()
             archived_metadata_bytes = archived_metadata.read_bytes()
-            harness_pull = run("git", "pull", "--ff-only", cwd=harness)
+            harness_pull = run("git", "pull", "--ff-only", "origin", "HEAD", cwd=harness)
             self.assertEqual(harness_pull.returncode, 0, harness_pull.stdout + harness_pull.stderr)
             self.assertEqual(archived_patch.read_bytes(), archived_patch_bytes)
             self.assertEqual(archived_metadata.read_bytes(), archived_metadata_bytes)
