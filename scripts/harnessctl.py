@@ -133,6 +133,7 @@ def session_brief_command(args: argparse.Namespace) -> int:
     active = active_mode_path().read_text(encoding="utf-8", errors="ignore")
     mode = next((line.split(":", 1)[1].strip() for line in active.splitlines() if line.startswith("mode:")), "unknown")
     harness_paths = [
+        harness_root() / "GIGACODE.md",
         harness_root() / "AGENTS.md",
         harness_root() / "core/llm-contract.md",
         harness_root() / "core/code-inspection.md",

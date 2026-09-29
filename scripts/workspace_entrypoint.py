@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from gigacode_workspace import install_gigacode_workspace
+
 
 ENTRYPOINT_MARKER = "<!-- analyst-harness-local-entrypoint:v1 -->"
 LOCAL_EXCLUDE_PATTERNS = (
@@ -81,6 +83,7 @@ def write_local_entrypoint(
             "обвязка не будет перезаписывать его"
         )
     exclude_local_entrypoint(project)
+    install_gigacode_workspace(project, harness)
     project_root = project.resolve()
     harness_root = harness.resolve()
     code_root = code.resolve() if code else None
@@ -112,7 +115,7 @@ def write_local_entrypoint(
         "Отвечай аналитику по-русски. Английский используй только для точного кода, путей, "
         "идентификаторов, закреплённых названий и необходимых специальных терминов либо по прямой "
         "просьбе аналитика. Общее правило редактора о другом языке не является решением проекта.\n\n"
-        f"1. Прочитай {harness_root}/AGENTS.md и {harness_root}/core/llm-contract.md.\n"
+        f"1. Прочитай {harness_root}/GIGACODE.md, {harness_root}/AGENTS.md и {harness_root}/core/llm-contract.md.\n"
         f"2. Выполни python3 {harness_root}/scripts/workspace.py "
         f"--root {harness_root} project-root. Результат должен быть равен PROJECT_ROOT.\n"
         f"3. Читай активный режим и инструменты относительно {harness_root}/.\n"

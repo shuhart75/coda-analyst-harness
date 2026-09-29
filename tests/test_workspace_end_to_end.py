@@ -102,9 +102,9 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
                 self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
             untracked = run("git", "ls-files", "-z", "--others", "--exclude-standard", cwd=ROOT)
             self.assertEqual(untracked.returncode, 0, untracked.stdout + untracked.stderr)
-            harness_directories = {"adapters", "core", "examples", "modes", "prompts", "scripts", "skills", "templates", "tests"}
+            harness_directories = {".gigacode", "adapters", "core", "examples", "modes", "prompts", "scripts", "skills", "templates", "tests"}
             for relative in untracked.stdout.split("\0"):
-                if not relative or relative.split("/", 1)[0] not in harness_directories:
+                if not relative or (relative != "GIGACODE.md" and relative.split("/", 1)[0] not in harness_directories):
                     continue
                 source = ROOT / relative
                 target = harness / relative
@@ -178,6 +178,10 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
                 self.assertFalse((analytics / forbidden).exists())
             entrypoint = analytics / "AGENTS.md"
             entrypoint_text = entrypoint.read_text(encoding="utf-8")
+            gigacode_text = (analytics / "GIGACODE.md").read_text(encoding="utf-8")
+            self.assertIn(f"HARNESS_ROOT = {harness}", gigacode_text)
+            self.assertTrue((analytics / ".gigacode/commands/delivery.md").is_file())
+            self.assertTrue((analytics / ".gigacode/skills/coda-delivery/SKILL.md").is_file())
             self.assertIn("analyst-harness-local-entrypoint:v1", entrypoint_text)
             self.assertIn(f"HARNESS_ROOT = {harness}", entrypoint_text)
             self.assertIn(f"PROJECT_ROOT = {analytics}", entrypoint_text)

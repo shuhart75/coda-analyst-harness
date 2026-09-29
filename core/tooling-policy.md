@@ -45,15 +45,23 @@ Before broad workflow work, run `harnessctl doctor`. Before approving a plan, ru
 - Use `scripts/validate-context.py` after adding or materially changing context, research, handoff, implementation-plan or test-plan conventions.
 - Use `scripts/validate-language.py` after changing requirements. Treat avoidable anglicisms as a completion blocker, not as optional editorial cleanup.
 
-## CLI-neutrality
+## GigaCode integration
 
-Do not assume a specific terminal agent supports:
+Native entry points are `GIGACODE.md`, `.gigacode/commands/` and
+`.gigacode/skills/`. They select existing guarded operations. Do not install
+permissions, MCP credentials or tool hooks from a source report; local settings
+remain owned by the user. `scripts/gigacode_workspace.py` installs only the
+managed local projection during bootstrap, preserving unrelated files.
+
+## Optional platform capabilities
+
+Do not assume the local platform has configured:
 - subagents;
-- skills;
 - memory;
 - local plugins.
 
-When such capabilities exist, use them as optional accelerators, not as the only workflow path.
+Use subagents, memory and plugins only when available and permitted by the
+operation contract. Native commands and skills never bypass deterministic gates.
 
 ## Consistency records
 
