@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import (feature_root as layout_feature_root, exchange_binding,
+                            validate_exchange_binding, require_audit_binding, require_manifest_binding)
+
 import argparse
 import hashlib
 import json
@@ -230,7 +233,7 @@ def run_requirement_guards(project: Path, feature: str) -> None:
 
 
 def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> str:
-    state_path = project / "features" / feature / "requirements-state.json"
+    state_path = layout_feature_root(project, feature) / "requirements-state.json"
     if not state_path.is_file():
         raise ValueError(
             "Публикация запрещена: сначала начни подготовку, проведи аудит требований "
@@ -246,6 +249,7 @@ def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> 
         or not isinstance(offer, dict)
     ):
         raise ValueError("Публикация запрещена: состояние требований не содержит актуального аудита")
+    require_audit_binding(project, feature, audit)
     current_hash = sha256(requirements)
     stages.require_audit_stage(state, requirements.read_text(encoding="utf-8"))
     levels = audit.get("levels")
@@ -446,12 +450,24 @@ def revision_processing_status(feature_root: Path, entry: dict[str, Any]) -> dic
 def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
     errors: list[str] = []
     schema_version = manifest.get("schema_version")
-    if schema_version not in {1, 2, 3} or manifest.get("exchange_kind") != "feature-requirements":
+    if schema_version not in {1, 2, 3, 4} or manifest.get("exchange_kind") != "feature-requirements":
         errors.append("неподдерживаемая схема manifest.json")
         schema_version = CURRENT_MANIFEST_SCHEMA
     feature = manifest.get("feature")
     if not isinstance(feature, str) or not FEATURE_RE.fullmatch(feature) or feature != root.name:
         errors.append("feature в manifest.json не совпадает с каталогом функциональности")
+    binding = manifest.get("delivery_binding")
+    ceiling = manifest.get("legacy_revision_ceiling", 0)
+    if schema_version == 4:
+        try:
+            validate_exchange_binding(binding, feature)
+        except ValueError as exc:
+            errors.append(str(exc))
+        if type(ceiling) is not int or ceiling < 0:
+            errors.append("Invalid legacy revision ceiling")
+            ceiling = 0
+    elif binding is not None:
+        errors.append("Delivery binding requires schema 4")
     owner = manifest.get("owner")
     if not isinstance(owner, dict) or not isinstance(owner.get("analyst_id"), str) or not owner["analyst_id"]:
         errors.append("в manifest.json отсутствует владелец-аналитик")
@@ -479,6 +495,8 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
         errors.append("номера редакций должны быть положительными целыми числами")
     elif len(revision_numbers) != len(set(revision_numbers)):
         errors.append("номера редакций должны быть уникальными")
+    if schema_version == 4 and (not isinstance(active, int) or active <= ceiling):
+        errors.append("Active delivery revision must be newer than legacy history")
     if matches[0].get("state") == "superseded":
         errors.append("активная редакция не может быть вытеснена новой")
     for item in revisions:
@@ -487,6 +505,14 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
             continue
         if item.get("state") not in ALLOWED_REVISION_STATES:
             errors.append(f"редакция {item.get('revision')} имеет неизвестное состояние")
+        if schema_version == 4:
+            if item.get("delivery_binding") is not None:
+                if item["delivery_binding"] != binding:
+                    errors.append("Revision belongs to another delivery")
+            elif item["revision"] > ceiling:
+                errors.append("New revision has no delivery binding")
+        elif item.get("delivery_binding") is not None:
+            errors.append("Delivery revision requires schema 4")
         valid_stage = True
         try:
             stages.validate_revision(item)
@@ -537,6 +563,12 @@ def require_plain_exchange(exchange: Path) -> None:
         raise ValueError("requirements-exchange не должен содержать символические ссылки")
 
 
+def require_exchange_delivery_binding(project: Path, feature: str) -> dict | None:
+    binding = exchange_binding(project, feature)
+    stages.require_closed_sibling_stages(project, feature)
+    return binding
+
+
 def prepare_in_exchange(
     exchange: Path,
     project: Path,
@@ -545,10 +577,11 @@ def prepare_in_exchange(
     requirements_text: str,
     analyst: str,
 ) -> dict[str, Any]:
-    approved_hash = require_confirmed_audit(project, feature, project / "features" / feature / "requirements.md")
+    binding = require_exchange_delivery_binding(project, feature)
+    approved_hash = require_confirmed_audit(project, feature, layout_feature_root(project, feature) / "requirements.md")
     if hashlib.sha256(requirements_bytes).hexdigest() != approved_hash:
         raise ValueError("Передаваемый документ не совпадает с подтверждённым аудитом")
-    state = load_json(project / "features" / feature / "requirements-state.json")
+    state = load_json(layout_feature_root(project, feature) / "requirements-state.json")
     stage = stages.require_audit_stage(state, requirements_text)
     records = stages.registry(state)["revisions"]
     require_plain_exchange(exchange)
@@ -567,6 +600,7 @@ def prepare_in_exchange(
         "developer_sdd": developer_sdd_contract(CURRENT_MANIFEST_SCHEMA),
         "sdd_contract": "../AGENTS.md",
     }
+    require_manifest_binding(project, feature, manifest)
     if manifest.get("feature") != feature:
         raise ValueError("Существующий manifest.json относится к другой функциональности")
     revisions = manifest.get("revisions")
@@ -604,6 +638,10 @@ def prepare_in_exchange(
             "traceability": traceability_contract(CURRENT_MANIFEST_SCHEMA),
             "developer_sdd": developer_sdd_contract(CURRENT_MANIFEST_SCHEMA),
         })
+    if binding is not None:
+        if manifest.get("schema_version") != 4:
+            manifest["legacy_revision_ceiling"] = max((entry["revision"] for entry in revisions), default=0)
+        manifest.update(schema_version=4, delivery_binding=binding)
     known_entries = [stages.record_entry(record) for record in records]
     effective = {item["revision"]: item for item in known_entries}
     all_entries = [*(effective.get(item["revision"], item) for item in revisions), *known_entries]
@@ -640,10 +678,12 @@ def prepare_in_exchange(
         "sha256": current_hash,
         "source": {
             "repository_role": "analytics",
-            "feature_path": f"features/{feature}/requirements.md",
+            "feature_path": (layout_feature_root(project, feature) / "requirements.md").relative_to(project).as_posix(),
             "commit": git_value(project, "rev-parse", "HEAD"),
         },
     })
+    if binding is not None:
+        revisions[-1]["delivery_binding"] = binding
     save_json(manifest_path, manifest)
     validation = validate_manifest(manifest, feature_exchange)
     if validation:
@@ -769,10 +809,11 @@ def publish_to_code(
     analyst: str,
     target_branch: str | None = None,
 ) -> dict[str, Any]:
-    approved_hash = require_confirmed_audit(project, feature, project / "features" / feature / "requirements.md")
+    binding = require_exchange_delivery_binding(project, feature)
+    approved_hash = require_confirmed_audit(project, feature, layout_feature_root(project, feature) / "requirements.md")
     if hashlib.sha256(requirements_bytes).hexdigest() != approved_hash:
         raise ValueError("Передаваемый документ не совпадает с подтверждённым аудитом")
-    state = load_json(project / "features" / feature / "requirements-state.json")
+    state = load_json(layout_feature_root(project, feature) / "requirements-state.json")
     stage = stages.require_audit_stage(state, requirements_text)
     before = code_snapshot(code_root)
     if before is None:
@@ -808,9 +849,10 @@ def publish_to_code(
         manifest_path = exchange / feature / "manifest.json"
 
         def response(prepared: dict[str, Any], merged: bool, request_commit: str, push_output: str = "") -> dict[str, Any]:
-            current = load_json(project / "features" / feature / "requirements-state.json")
+            current = load_json(layout_feature_root(project, feature) / "requirements-state.json")
             stages.require_audit_stage(current, requirements_text)
             prepared_manifest = load_json(prepared["manifest_path"])
+            require_manifest_binding(project, feature, prepared_manifest)
             stages.require_manifest_history(current, prepared_manifest)
             prepared_entry = next(item for item in prepared_manifest["revisions"] if item["revision"] == prepared["revision"])
             stages.require_entry_stage(prepared_entry, stage)
@@ -825,7 +867,7 @@ def publish_to_code(
             cached = cache_manifest(feature, prepared["revision"], prepared["manifest_path"], publication)
             link = re.search(r"https?://[^\s]+(?:merge_requests/new|/compare/)[^\s]*", push_output)
             result = {
-                **prepared, "status": "already-current" if merged else "awaiting-merge",
+                **prepared, "delivery_binding": binding, "status": "already-current" if merged else "awaiting-merge",
                 "stage_id": stage["stage_id"], "stage_revision": prepared_entry["stage_revision"],
                 "destination_role": "code", "manifest": str(cached),
                 "repository_url": before["remote"], "repository_branch": target if merged else branch,
@@ -852,6 +894,7 @@ def publish_to_code(
         accepted_revisions = {}
         if manifest_path.is_file():
             manifest = load_json(manifest_path)
+            require_manifest_binding(project, feature, manifest)
             errors = validate_manifest(manifest, manifest_path.parent)
             if errors:
                 raise ValueError("; ".join(errors))
@@ -873,6 +916,7 @@ def publish_to_code(
             candidate = git(clone, "show", f"{commit}:{EXCHANGE_DIR}/{feature}/manifest.json")
             try:
                 proposed = json.loads(candidate.stdout)
+                require_manifest_binding(project, feature, proposed)
                 entry = next(item for item in proposed["revisions"] if item["revision"] == proposed["active_revision"])
                 accepted = accepted_revisions.get(entry["revision"])
                 if accepted and stages.revision_identity(accepted) == stages.revision_identity(entry) and accepted["requirements_path"] == entry["requirements_path"]:
@@ -924,7 +968,7 @@ def publish_to_code(
         if committed.returncode != 0:
             raise ValueError(f"Не удалось создать коммит передачи: {committed.stderr.strip()}")
         request_commit = git_value(clone, "rev-parse", "HEAD")
-        if require_confirmed_audit(project, feature, project / "features" / feature / "requirements.md") != current_hash:
+        if require_confirmed_audit(project, feature, layout_feature_root(project, feature) / "requirements.md") != current_hash:
             raise ValueError("Требования изменились перед отправкой; повтори аудит")
         pushed = git(clone, "push", "origin", f"HEAD:{branch_ref}")
         if pushed.returncode != 0:
@@ -939,7 +983,8 @@ def publish_to_code(
 def prepare_command(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
     validate_feature(args.feature)
-    feature_root = project / "features" / args.feature
+    require_exchange_delivery_binding(project, args.feature)
+    feature_root = layout_feature_root(project, args.feature)
     requirements = feature_root / "requirements.md"
     if not requirements.is_file():
         raise ValueError(f"Требования не найдены: {requirements}")
@@ -983,6 +1028,7 @@ def prepare_command(args: argparse.Namespace) -> int:
     )
     result = {
         **prepared,
+        "delivery_binding": exchange_binding(project, args.feature),
         "destination_role": "analytics",
         "publication_confirmed": True,
         "exchange_root": str(exchange),
@@ -1002,11 +1048,12 @@ def prepare_command(args: argparse.Namespace) -> int:
 
 
 def record_prepared(project: Path, feature: str, result: dict[str, Any]) -> None:
-    feature_root = project / "features" / feature
+    feature_root = layout_feature_root(project, feature)
     state_path = feature_root / "requirements-state.json"
     require_confirmed_audit(project, feature, feature_root / "requirements.md")
     state = load_json(state_path)
     manifest = load_json(Path(result["manifest"]))
+    require_manifest_binding(project, feature, manifest)
     stages.require_manifest_history(state, manifest)
     entry = next(item for item in manifest["revisions"] if item["revision"] == result["revision"])
     if entry["sha256"] != sha256(feature_root / "requirements.md"):
@@ -1065,10 +1112,16 @@ def scan_command(args: argparse.Namespace) -> int:
             feature = manifest_path.parent.name
             manifest = load_json(manifest_path)
             errors = validate_manifest(manifest, manifest_path.parent)
+            if manifest.get("schema_version") == 4:
+                try:
+                    require_manifest_binding(project, feature, manifest)
+                except ValueError as exc:
+                    errors.append(str(exc))
             if errors:
                 items.append({
                     "source_role": role,
                     "feature": feature,
+                    "delivery_binding": manifest.get("delivery_binding"),
                     "status": "invalid",
                     "errors": errors
                 })
@@ -1083,6 +1136,7 @@ def scan_command(args: argparse.Namespace) -> int:
                 items.append({
                     "source_role": role,
                     "feature": feature,
+                    "delivery_binding": manifest.get("delivery_binding"),
                     "owner": owner,
                     "revision": revision,
                     "status": "invalid-return-lifecycle",
@@ -1092,7 +1146,7 @@ def scan_command(args: argparse.Namespace) -> int:
                 })
                 continue
             returns = manifest_path.parent / revision_entry["returns_path"]
-            processed = processed_ids(project / "features" / feature)
+            processed = processed_ids(layout_feature_root(project, feature))
             new_returns = []
             for path in sorted(returns.rglob("*")) if returns.is_dir() else []:
                 if not path.is_file():
@@ -1110,6 +1164,7 @@ def scan_command(args: argparse.Namespace) -> int:
             items.append({
                 "source_role": role,
                 "feature": feature,
+                    "delivery_binding": manifest.get("delivery_binding"),
                 "owner": owner,
                 "revision": revision,
                 "status": "new-results" if new_returns else "no-new-results",
@@ -1129,6 +1184,7 @@ def scan_command(args: argparse.Namespace) -> int:
 def publication_root(project: Path, feature: str, record: dict[str, Any]) -> Path:
     manifest_path = Path(record["manifest_path"]).resolve()
     manifest = load_json(manifest_path)
+    require_manifest_binding(project, feature, manifest)
     if not record.get("publication_confirmed"):
         raise ValueError("Место передачи ещё не подтверждено")
     if record["destination_role"] == "analytics":
@@ -1275,7 +1331,7 @@ def validate_result_review(project: Path, feature: str, return_id: str, review: 
 def record_processed_command(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
     validate_feature(args.feature)
-    feature_root = project / "features" / args.feature
+    feature_root = layout_feature_root(project, args.feature)
     if not feature_root.is_dir():
         raise ValueError(f"Функциональность не найдена: {feature_root}")
     analyst = current_analyst(args.analyst, project)

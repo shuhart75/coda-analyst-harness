@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root, quarter_root, artifact_glob, project_path
+
 import argparse
 import hashlib
 import json
@@ -95,7 +97,7 @@ def doctor_command(args: argparse.Namespace) -> int:
         run_tool(project, "validate-trace.py", ["--strict"] if args.strict else []),
     ]
     handoff_tool = harness_root() / "scripts/handoffctl.py"
-    for manifest in sorted(project.glob("features/*/handoffs/*/handoff.json")):
+    for manifest in sorted(artifact_glob(project, "features/*/handoffs/*/handoff.json")):
         codes.append(
             subprocess.run(
                 [sys.executable, str(handoff_tool), "validate", str(manifest.parent)],
@@ -159,7 +161,7 @@ def session_brief_command(args: argparse.Namespace) -> int:
                 f"features/{args.feature}/slices/{args.slice}/requirements/backend.md",
             ]
         )
-    existing = [path for path in paths if (project / path).exists()]
+    existing = [path for path in paths if project_path(project, path).exists()]
     output = run_state_path() / "session-brief.md"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
@@ -220,16 +222,16 @@ def run_init_command(args: argparse.Namespace) -> int:
     if args.feature:
         input_paths.extend(
             [
-                project / "features" / args.feature / "requirements.md",
-                project / "features" / args.feature / "feature.md",
+                layout_feature_root(project, args.feature) / "requirements.md",
+                layout_feature_root(project, args.feature) / "feature.md",
             ]
         )
     if args.feature and args.slice:
         input_paths.extend(
             [
-                project / "features" / args.feature / "slices" / args.slice / "slice.md",
-                project / "features" / args.feature / "slices" / args.slice / "requirements/frontend.md",
-                project / "features" / args.feature / "slices" / args.slice / "requirements/backend.md",
+                layout_feature_root(project, args.feature) / "slices" / args.slice / "slice.md",
+                layout_feature_root(project, args.feature) / "slices" / args.slice / "requirements/frontend.md",
+                layout_feature_root(project, args.feature) / "slices" / args.slice / "requirements/backend.md",
             ]
         )
     payload = {
@@ -335,7 +337,7 @@ def run_verify_command(args: argparse.Namespace) -> int:
     results: list[dict[str, object]] = []
     failed = False
     for rel, expected in payload.get("input_hashes", {}).items():
-        source = project_root / rel
+        source = project_path(project_root, rel)
         actual = sha256(source) if source.is_file() else "missing"
         if actual != expected:
             results.append({"name": f"input freshness: {rel}", "returncode": 3, "output": "source artifact changed after run initialization"})
@@ -378,7 +380,7 @@ def run_verify_command(args: argparse.Namespace) -> int:
 
 def plan_approve_command(args: argparse.Namespace) -> int:
     project = Path(args.project).resolve()
-    quarter_dir = project / "planning" / args.quarter
+    quarter_dir = quarter_root(project, args.quarter)
     state = quarter_dir / "plan-state.md"
     if not state.exists():
         raise SystemExit(f"Missing plan state: {state}")
@@ -402,7 +404,7 @@ def plan_approve_command(args: argparse.Namespace) -> int:
     feature_slugs = [line.strip() for line in order_file.read_text(encoding="utf-8").splitlines() if line.strip() and not line.lstrip().startswith("#")] if order_file.exists() else []
     actualization_baseline: dict[str, list[list[str]]] = {}
     for feature_slug in feature_slugs:
-        actualization = project / "features" / feature_slug / "planning/actualization.md"
+        actualization = layout_feature_root(project, feature_slug) / "planning/actualization.md"
         if not actualization.exists():
             continue
         rows = actualization_baseline_rows(actualization)

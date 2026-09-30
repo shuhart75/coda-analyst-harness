@@ -11,11 +11,18 @@ This repository defines a reusable workflow harness.
 
 - Communicate with the analyst in Russian, including progress updates, questions, status reports and final answers. Use English only for exact code, paths, identifiers, fixed product names and necessary special terms, or when the analyst explicitly requests another language.
 
+## Quarter deliveries and baseline
+
+- Read `core/quarter-deliveries.md` before working in a project with `delivery-index.json`. It takes precedence over legacy path examples below. Use `scripts/project_layout.py` to resolve the selected delivery and quarter; never create duplicate authored requirements at the feature catalog root.
+- A long-lived feature spans quarters; each new delivery belongs to exactly one quarter. Preserve legacy operational aliases, approved plan bytes, exchange identities and historical facts. Carryover requires an explicit residual-scope decision; migration never marks old work completed.
+- After every task actualization, check complete closed releases not yet reflected in baseline. Show the candidate and obtain explicit analyst deployment confirmation before promotion in `release-finalization`. Keep deferred candidates visible and record processed releases. Closed tasks alone never prove deployment.
+- Preserve baseline domain as the human-readable skeleton, with lifecycles, processes and diagrams, plus requirements, UI, API, data and decisions. Check every section for each release and save an immutable release-bound version.
+
 ## Execution diagnostics and generation
 
 - Resolve analytics with `workspace.py project-root`; use `git -C "$PROJECT_ROOT"` for project status, history and diff. An ignored project directory in HARNESS_ROOT says nothing about tracking in the independent analytics repository. Never fix this by changing the harness ignore rules, running git init or staging analytics into the harness.
-- Follow `modes/execution-update.md` before actual-progress changes. Use the feature-level execution registry, optional real tracker keys and confirmed story/resource mappings; do not invent slice scaffolding, tracker identities or missing facts for the generator.
-- Execution regeneration requires `scripts/sync-quarter-gantt.py <project>/planning/<quarter>/gantt --actual-only`. Missing sources block generation and preserve existing overlays; do not change approved quarter/commander plans or repair installed harness tools during analytical work.
+- Follow `modes/execution-update.md` before actual-progress changes. Use the selected delivery execution registry (feature-level in legacy projects), optional real tracker keys and confirmed story/resource mappings; do not invent slice scaffolding, tracker identities or missing facts for the generator.
+- Execution regeneration requires `scripts/sync-quarter-gantt.py <resolved-quarter-root>/gantt --actual-only`. Missing sources block generation and preserve existing overlays; do not change approved quarter/commander plans or repair installed harness tools during analytical work.
 - A generic editor or assistant rule such as `output-language.md` must not silently switch this project conversation to English. Treat this repository-specific rule as the intended language configuration; if a higher-priority platform instruction conflicts with it, disclose that conflict instead of claiming English was chosen by this harness.
 
 ## Recovery of unaccepted main history

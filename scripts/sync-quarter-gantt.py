@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root
+
 from datetime import date
 from pathlib import Path
 import argparse
@@ -86,7 +88,7 @@ def feature_title(gantt_dir: Path, path: Path, contents: dict[Path, str]) -> str
     slug = feature_slug(path)
 
     root = project_root(gantt_dir)
-    feature_md = root / "features" / slug / "feature.md"
+    feature_md = layout_feature_root(root, slug) / "feature.md"
     if feature_md.exists():
         feature_text = feature_md.read_text(encoding="utf-8")
         title_match = FEATURE_TITLE_RE.search(feature_text)

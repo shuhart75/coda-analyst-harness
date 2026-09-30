@@ -1,5 +1,12 @@
 # Workflow Model
 
+
+Для проекта с `delivery-index.json` применяй `core/quarter-deliveries.md`:
+legacy-пути `features/<feature>/...` означают корень выбранной поставки,
+`planning/<quarter>/...` — корень квартала; разрешай их через
+`scripts/project_layout.py`. Корневой каталог фич хранит идентичность и backlog,
+а не вторые нормативные документы. Примеры ниже сохраняются для legacy-проектов.
+
 ## Layers
 
 1. Baseline
@@ -15,7 +22,8 @@
 - `baseline`
 - `quarter`
 - `feature`
-- `business delivery stage` (a sequential registry entity, not a new document directory)
+- `quarter delivery` (working scope within one quarter)
+- `business delivery stage` (sequential scope and revision registry; see `core/delivery-stages.md`)
 - `exchange revision`
 - `release`
 
@@ -38,7 +46,7 @@
 
 - `baseline/current` is the canonical description of the deployed system
 - `baseline/versions` stores previous deployed baselines
-- `features/*` are working deltas against `baseline/current`
+- delivery roots resolved by `delivery-index.json` contain working deltas against a recorded baseline version; legacy projects use `features/*`
 - `releases/*` are immutable release packages used to promote a new baseline
 
 ## Sequential delivery model
@@ -70,7 +78,9 @@ not rewritten automatically. Release and baseline writes retain their existing m
 - `commander plan` uses planning stories with extra buffer
 - `actual progress` overlays commander baseline planning stories with current execution items
 
-All three views should keep the same feature lanes where possible.
+All three views should keep the same feature/delivery lanes where possible.
+In migrated projects the planning and execution owner is the delivery, not the
+whole long-lived feature; never aggregate its different quarters automatically.
 
 ## Actual-progress semantics
 

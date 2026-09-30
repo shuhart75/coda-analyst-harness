@@ -7,7 +7,7 @@ from typing import Any
 
 
 STAGE_FIELDS = ("stage_id", "number", "title", "goal")
-REVISION_FIELDS = ("revision", "sha256", "stage_id", "stage_revision", "stage", "stage_sha256")
+REVISION_FIELDS = ("revision", "sha256", "stage_id", "stage_revision", "stage", "stage_sha256", "delivery_binding")
 SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 
 
@@ -186,3 +186,27 @@ def stage_action(state: dict[str, Any]) -> str:
     if not value["stages"]:
         return "legacy-stage-migration-required" if state.get("last_published") else "register-delivery-stage"
     return "start-next-delivery-stage" if value["stages"][-1]["state"] == "closed" else "continue-delivery-stage"
+
+
+def require_closed_sibling_stages(project, key):
+    """Quarter migration never silently closes the previous business scope."""
+    from project_layout import layout, feature_root, exchange_binding
+    index = layout(project)
+    if index is None:
+        return
+    binding = exchange_binding(project, key)
+    for sibling, delivery in index['deliveries'].items():
+        if sibling == key or delivery['feature_id'] != binding['feature_id']:
+            continue
+        path = feature_root(project, sibling) / 'requirements-state.json'
+        if not path.is_file():
+            continue
+        state = json.loads(path.read_text())
+        value = registry(state)
+        if any(stage['state'] == 'open' for stage in value['stages']):
+            raise ValueError(f'Previous delivery has an open business stage: {sibling}; explicit closure required')
+        if state.get('last_published') and not value['stages']:
+            raise ValueError(f'legacy-stage-migration-required: {sibling}')
+        if value['stages']:
+            from requirementsctl import validate_stage_closure
+            validate_stage_closure(project, sibling, state, value['stages'][-1])

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root, quarter_root
+
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
@@ -47,7 +49,7 @@ def unique_keys(pairs: list[tuple[str, object]]) -> dict:
 
 def load_forecast_scope(project_root: Path, quarter_id: str) -> ForecastScope:
     project_root = project_root.resolve()
-    gantt_dir = project_root / "planning" / quarter_id / "gantt"
+    gantt_dir = quarter_root(project_root, quarter_id) / "gantt"
     config_path = gantt_dir / "actual-progress-features.json"
     if not config_path.exists():
         return ForecastScope({}, {}, {}, {}, {})
@@ -104,7 +106,7 @@ def load_forecast_scope(project_root: Path, quarter_id: str) -> ForecastScope:
             raise ValueError(f"{config_path}: {slug}: source должен быть относительным путём внутри проекта")
         if not resolved_source.is_file() or not resolved_source.read_text(encoding="utf-8").strip():
             raise ValueError(f"{config_path}: {slug}: источник решения не найден или пуст: {source}")
-        feature_dir = project_root / "features" / feature_map.get(slug, slug)
+        feature_dir = layout_feature_root(project_root, feature_map.get(slug, slug))
         if not feature_dir.is_dir():
             raise ValueError(f"{feature_dir}: функциональность не найдена; проверь actual-progress-features.json")
         evidence = []

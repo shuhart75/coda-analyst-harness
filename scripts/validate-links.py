@@ -17,6 +17,15 @@ for md in root.rglob("*.md"):
             continue
         clean = match.split("#", 1)[0]
         target = (md.parent / clean).resolve() if not Path(clean).is_absolute() else Path(clean)
+        # Immutable snapshots retain links relative to their former current root.
+        # Resolve only references leaving the snapshot; missing internal files fail.
+        relative = md.relative_to(root).parts
+        if not target.exists() and relative[:2] == ("baseline", "versions"):
+            depth = 4 if len(relative) > 2 and relative[2] == "documentation" else 3
+            snapshot = root.joinpath(*relative[:depth]).resolve()
+            if not Path(clean).is_absolute() and not target.is_relative_to(snapshot):
+                original = root / "baseline" / "current" / Path(*relative[depth:])
+                target = (original.parent / clean).resolve()
         if not target.exists():
             missing.append((md, match))
 if missing:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root, artifact_glob, feature_roots, delivery_key
+
 import copy
 from decimal import Decimal, ROUND_DOWN
 import hashlib
@@ -33,7 +35,7 @@ def apply_scope_decisions(project: Path, result: dict, decisions: dict | None) -
         if key not in known or key in seen:
             raise ValueError("Scope decision must name one unique collected task")
         seen.add(key)
-        if not valid_slug(feature) or not inside_project(project, project / "features" / feature).is_dir():
+        if not valid_slug(feature) or not inside_project(project, layout_feature_root(project, feature)).is_dir():
             raise ValueError("Confirm an existing analytical feature; a missing Gantt lane is not a missing feature")
         issue = known[key]
         role = decision.get("role", issue.get("task_role"))
@@ -62,7 +64,7 @@ def release_owners(project: Path, result: dict) -> dict:
     column = "Jira" if provider == "jira" else "SberTrek"
     owners, epics, blockers = {}, {}, []
     for path in registry_paths(project):
-        feature = path.relative_to(project).parts[1]
+        feature = delivery_key(project, path)
         try:
             tables, _ = read_registry(path, identity_only=True)
         except ValueError as error:
@@ -74,13 +76,13 @@ def release_owners(project: Path, result: dict) -> dict:
                 key = row.get(key_column, "").split("/")[0].strip()
                 if key and key not in {"-", "—"}:
                     owners.setdefault((key_column, key), set()).add(feature)
-    for path in sorted((project / "features").glob("*/execution/tracker-scope.json")):
+    for path in sorted(artifact_glob(project, "features/*/execution/tracker-scope.json")):
         inside_project(project, path)
         config = json.loads(path.read_text(encoding="utf-8"))
         if config.get("schema_version") != 1:
             raise ValueError(f"Unknown epic association schema: {path}")
         for key in config.get("epics", {}).get(provider, []):
-            epics.setdefault(key, set()).add(path.relative_to(project).parts[1])
+            epics.setdefault(key, set()).add(delivery_key(project, path))
     proposals = []
     for issue in result["issues"]:
         key = issue.get(provider + "_key")
@@ -142,7 +144,7 @@ def release_preview_command(args) -> int:
               "writes_performed": False, "next_action": {"type": "resolve-release-ownership"},
               "release_membership_evidence": result.get("release_membership_evidence"),
               "registration": {
-                  "existing_features": sorted(path.name for path in (project / "features").glob("*") if path.is_dir()),
+                  "existing_features": sorted(delivery_key(project, path) for path in feature_roots(project)),
                   "gantt_presence_required": False, "before_write": "application-preflight",
                   "before_history_write_required": False,
                   "registry": "features/<confirmed-feature>/execution/tasks.md",
@@ -209,7 +211,7 @@ def supplement_result(run_id: str, project: Path, result: dict, responses: list[
 
 def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict], scope: dict,
               release_members: set[str] | None = None) -> dict | None:
-    path = inside_project(project, project / "features" / feature / "execution/qa-groups.json")
+    path = inside_project(project, layout_feature_root(project, feature) / "execution/qa-groups.json")
     saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
     if not saved and scope.get("kind") != "release":
         return None

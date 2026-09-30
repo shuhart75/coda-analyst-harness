@@ -70,7 +70,7 @@ DEFAULT_ROLES = {
     "source": "changeswork-copy",
 }
 ROLE_CONFIG_NAME = "repository-roles.json"
-PROJECT_PATHS = ("baseline", "context", "features", "planning", "releases")
+PROJECT_PATHS = ("baseline", "context", "features", "planning", "quarters", "backlog", "releases", "delivery-index.json", "migration-layout.json")
 CODE_PUSH_DISABLED = "DISABLED_BY_CODA_ANALYST_HARNESS"
 WORKSPACE_STATE_NAME = "workspace.json"
 

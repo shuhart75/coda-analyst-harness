@@ -5,6 +5,19 @@ Read `GIGACODE.md` for native command and skill routing. `AGENTS.md` remains
 a compatibility entry point. The independent generic `analyst-harness` remains
 LLM-agnostic; do not copy this variant's platform layer into it.
 
+## Quarter delivery layout
+
+For projects containing `delivery-index.json`, read `core/quarter-deliveries.md`
+before resolving artifacts. Its layout and delivery ownership rules take priority
+over legacy `features/<feature>` and `planning/<quarter>` examples in this contract.
+Resolve paths with `scripts/project_layout.py`; preserve historical identities and
+approved artifact bytes. The authored root belongs to a quarter delivery; the root
+feature catalog holds navigation, history and tentative backlog, never duplicate
+normative text. Closed releases are checked after each task actualization;
+baseline promotion still requires explicit analyst deployment confirmation and
+review of domain, requirements, UI, API, data and decisions.
+
+
 ## Analyst communication
 
 Communicate with the analyst in Russian. This includes intermediate updates, questions, choices, status summaries and final answers. Preserve English only where it is part of exact code, a path, an identifier, a fixed product name or a necessary special term. Switch the conversation language only when the analyst explicitly requests it. A generic editor language rule does not represent a project decision to use English.

@@ -9,8 +9,8 @@ fi
 PROJECT_ROOT="$1"
 QUARTER="$2"
 INSTALL_MODE="${3:-create}"
-QUARTER_DIR="$PROJECT_ROOT/planning/$QUARTER"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+QUARTER_DIR="$(python3 "$ROOT_DIR/scripts/layoutctl.py" quarter-path "$PROJECT_ROOT" --quarter "$QUARTER")"
 
 if [[ -d "$QUARTER_DIR" && -n "$(find "$QUARTER_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" && "$INSTALL_MODE" == "create" ]]; then
   echo "Quarter already exists: $QUARTER_DIR"

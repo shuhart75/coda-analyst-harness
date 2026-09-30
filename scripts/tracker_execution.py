@@ -1,4 +1,5 @@
 from __future__ import annotations
+from project_layout import feature_root as layout_feature_root, artifact_glob, logical_path, delivery_key
 
 import hashlib
 from decimal import Decimal
@@ -56,13 +57,12 @@ def repository_state(project: Path) -> dict:
     return {
         "head": git(project, "rev-parse", "HEAD").strip(),
         "tracked": set(git(project, "ls-files", "-z").split("\0")) - {""},
-        "changed": set(git(project, "diff", "--name-only", "--no-renames", "-z", "HEAD", "--", "features").split("\0")) - {""},
+        "changed": set(git(project, "diff", "--name-only", "--no-renames", "-z", "HEAD", "--", "features", "quarters", "backlog").split("\0")) - {""},
     }
 
 
 def registry_paths(project: Path) -> list[Path]:
-    features = inside_project(project, project / "features")
-    paths = set(features.glob("*/execution/tasks.md")) | set(features.glob("*/slices/*/execution/tasks.md"))
+    paths = set(artifact_glob(project, "features/*/execution/tasks.md")) | set(artifact_glob(project, "features/*/slices/*/execution/tasks.md"))
     return sorted(inside_project(project, path) for path in paths)
 
 
@@ -102,7 +102,7 @@ def preview_execution(
             raise ValueError(f"Реестр недоступен: {relative}")
         sources[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         try:
-            tables, note = read_registry(path, identity_only=path.relative_to(project).parts[1] not in selected)
+            tables, note = read_registry(path, identity_only=delivery_key(project, path) not in selected)
         except ValueError:
             blockers.append({"reason": "unreadable-registry", "registry": relative})
             continue
@@ -114,7 +114,7 @@ def preview_execution(
                 jira, jira_invalid = read_key(row.get("Jira", ""), role)
                 sbertrek, sber_invalid = read_key(row.get("SberTrek", ""), role)
                 reference = {
-                    "feature": path.relative_to(project).parts[1], "registry": relative,
+                    "feature": delivery_key(project, path), "registry": relative,
                     "table": table_number, "row": row_number,
                     "task_id": row.get("Task ID") or row.get("Jira") or "",
                     "role": role, "kind": row.get("Kind", "").casefold(),
@@ -129,7 +129,7 @@ def preview_execution(
                 if reference["invalid_key"]:
                     warnings.append({"reason": "invalid-external-key", "reference": reference})
     for relative in sorted(before["changed"]):
-        if REGISTRY.fullmatch(relative) and relative not in sources:
+        if REGISTRY.fullmatch(logical_path(project, relative)) and relative not in sources:
             blockers.append({"reason": "deleted-or-renamed-registry", "registry": relative})
     for relative, checksum in reviewed.items():
         if sources.get(relative) != checksum or not re.fullmatch(r"[0-9a-f]{64}", checksum):
@@ -146,7 +146,7 @@ def preview_execution(
                 continue
             identity = issue.get("jira_key") or issue.get("sbertrek_key")
             reference = {
-                "feature": owner, "registry": f"features/{owner}/execution/tasks.md",
+                "feature": owner, "registry": (layout_feature_root(project, owner) / "execution/tasks.md").relative_to(project).as_posix(),
                 "table": None, "row": None, "task_id": f"{identity}/{role}",
                 "summary": issue.get("summary"),
                 "role": role, "kind": "real", "jira_key": issue.get("jira_key"),

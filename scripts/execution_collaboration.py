@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root, quarter_root, logical_path
+
 from contextlib import redirect_stdout
 from importlib import import_module
 from io import StringIO
@@ -38,7 +40,7 @@ def require_tracker_root(root: Path) -> None:
 
 def check_draft_planning(analytics, scope, api) -> None:
     for quarter in scope['quarters']:
-        relative = f'planning/{quarter}/plan-state.md'
+        relative = (quarter_root(analytics, quarter) / 'plan-state.md').relative_to(analytics).as_posix()
         path = analytics / relative
         if path.resolve() != path or not path.is_file() or not re.search(
             r'^Status:\s*`?draft`?\s*$', path.read_text(), re.MULTILINE | re.IGNORECASE
@@ -80,13 +82,13 @@ def set_scope(args, api) -> int:
     for feature in features:
         if not api.SLUG_PATTERN.fullmatch(feature):
             raise ValueError('Invalid execution feature slug')
-        path = analytics / 'features' / feature
+        path = layout_feature_root(analytics, feature)
         if path.resolve() != path or not path.is_dir():
             raise ValueError(f'Execution feature is missing or linked: {feature}')
     for quarter in quarters:
         if not re.fullmatch(r'\d{4}-Q[1-4]', quarter):
             raise ValueError('Invalid execution quarter')
-        path = analytics / 'planning' / quarter / 'gantt'
+        path = quarter_root(analytics, quarter) / 'gantt'
         if path.resolve() != path or not path.is_dir():
             raise ValueError(f'Gantt directory is missing or linked: {quarter}')
     run_ids = sorted(set(args.run_id))
@@ -160,10 +162,10 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
     for path in sorted(paths):
         api.exact_path(path)
         target = analytics / path
-        kind = path_kind(path, scope)
+        kind = path_kind(logical_path(analytics, path), scope)
         if not kind or target.resolve() != target:
             raise ValueError(f'Path outside confirmed execution scope or linked: {path}')
-        if re.fullmatch(r'features/[a-z0-9-]+/planning/estimates-\d{4}-Q[1-4]\.md', path):
+        if re.fullmatch(r'features/[a-z0-9-]+/planning/estimates-\d{4}-Q[1-4]\.md', logical_path(analytics, path)):
             previous = api.git(analytics, 'rev-parse', f'HEAD:{path}')
             if previous.returncode == 0:
                 current = api.git(analytics, 'hash-object', '--no-filters', '--', path)
@@ -195,7 +197,7 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
     verified_quarters = []
     expander = import_module('expand-plantuml-includes')
     for quarter in scope['quarters']:
-        gantt = analytics / 'planning' / quarter / 'gantt'
+        gantt = quarter_root(analytics, quarter) / 'gantt'
         source, export = gantt / 'actual-progress.puml', gantt / 'actual-progress-confluence.puml'
         dependencies = []
         expanded = '\n'.join(expander.expand_file(source, [], dependencies=dependencies)).rstrip() + '\n'
@@ -204,8 +206,11 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
         if export.read_text() != expanded:
             raise ValueError(f'Confluence export differs from actual-progress: {quarter}; regenerate --actual-only')
         verified_quarters.append(quarter)
+    baseline_candidates = __import__('baseline_releases').scan(analytics)
     return {'paths': classified, 'confluence_verified': verified_quarters,
-            'qa_verified_runs': sorted(reviewed_runs), 'generation_proven': False}
+            'qa_verified_runs': sorted(reviewed_runs), 'generation_proven': False,
+            'baseline_release_candidates': baseline_candidates,
+            'baseline_review_required': bool(baseline_candidates)}
 
 
 def save_preview(args, api) -> int:

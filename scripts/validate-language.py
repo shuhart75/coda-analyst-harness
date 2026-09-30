@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root, artifact_glob
+
 import argparse
 import json
 import re
@@ -42,14 +44,14 @@ def changed_files(root: Path) -> set[Path]:
 
 def requirement_files(root: Path, feature: str | None, all_files: bool) -> list[Path]:
     if feature:
-        base = root / "features" / feature
+        base = layout_feature_root(root, feature)
         candidates = set(base.glob("requirements.md"))
         candidates.update(base.glob("slices/*/slice.md"))
         candidates.update(base.glob("slices/*/requirements/*.md"))
     else:
         candidates: set[Path] = set()
         for pattern in REQUIREMENT_PATTERNS:
-            candidates.update(root.glob(pattern))
+            candidates.update(artifact_glob(root, pattern))
     if not all_files:
         candidates.intersection_update(changed_files(root))
     return sorted(path for path in candidates if path.is_file())

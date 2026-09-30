@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root, quarter_root
+
 import argparse
 import itertools
 import math
@@ -96,7 +98,7 @@ def load_features(gantt_dir: Path) -> list[str]:
 
 
 def load_stories(project: Path, feature: str) -> list[Story]:
-    path = project / "features" / feature / "planning/estimates.md"
+    path = layout_feature_root(project, feature) / "planning/estimates.md"
     if not path.exists():
         return []
     required = {"Story ID", "Role", "Summary", "Agreed effort, дн", "Max parallelism", "Efficiency"}
@@ -337,7 +339,7 @@ def render_feature(feature: str, schedules: list[Scheduled], commander: bool) ->
 
 
 def write_actualization(project: Path, quarter: str, feature: str, schedules: list[Scheduled]) -> None:
-    path = project / "features" / feature / "planning/actualization.md"
+    path = layout_feature_root(project, feature) / "planning/actualization.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [
         f"| {item.story.story_id} | {item.story.summary} | {item.start.isoformat()} | {item.duration} | virtual | explicit |  |  | {', '.join(item.story.depends_on)} | {item.story.role} |"
@@ -362,7 +364,7 @@ def main() -> int:
     parser.add_argument("quarter")
     args = parser.parse_args()
     project = Path(args.project).resolve()
-    gantt_dir = project / "planning" / args.quarter / "gantt"
+    gantt_dir = quarter_root(project, args.quarter) / "gantt"
     plan_state = gantt_dir.parent / "plan-state.md"
     if approved(plan_state):
         print(f"Approved plan is immutable: {plan_state}")

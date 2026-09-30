@@ -10,7 +10,7 @@ PROJECT_ROOT="$1"
 FEATURE="$2"
 INSTALL_MODE="${3:-create}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FEATURE_DIR="$PROJECT_ROOT/features/$FEATURE"
+FEATURE_DIR="$(python3 "$ROOT_DIR/scripts/layoutctl.py" feature-path "$PROJECT_ROOT" --feature "$FEATURE")"
 
 if [[ -d "$FEATURE_DIR" && -n "$(find "$FEATURE_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" && "$INSTALL_MODE" == "create" ]]; then
   echo "Feature already exists: $FEATURE_DIR"
