@@ -98,6 +98,11 @@ Planning mode owns quarter and commander baselines. It does not own current exec
 - If the user asks to актуализировать текущее положение дел while planning mode is active, switch to `execution-update` before changing tasks or actual-progress.
 - Do not silently edit `quarter-plan.puml` or `commander-plan.puml` while only updating current state.
 
+Для совместного сохранения явно запрошенных draft-планов и исполнения после
+переключения в execution-update зарегистрируй ту же область с
+`collaboration.py set-execution-scope --include-planning` по
+`core/collaboration.md`. Это не утверждение плана и не разрешение менять approved.
+
 ## Preliminary impact
 
 During planning, capture obvious cross-feature or domain-wide consequences in `domain-impact.md`, but keep them marked as `proposed` until requirements work confirms them.

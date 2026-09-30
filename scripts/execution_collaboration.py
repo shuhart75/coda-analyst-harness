@@ -6,6 +6,8 @@ from io import StringIO
 import json
 from pathlib import Path
 import re
+import subprocess
+import sys
 from types import SimpleNamespace
 
 
@@ -32,6 +34,36 @@ def require_tracker_root(root: Path) -> None:
     from tracker_workflow import state_root
     if state_root().resolve() != (root / '.workspace-state').resolve():
         raise ValueError('Tracker state root differs from collaboration workspace; set ANALYST_HARNESS_STATE_ROOT explicitly')
+
+
+def check_draft_planning(analytics, scope, api) -> None:
+    for quarter in scope['quarters']:
+        relative = f'planning/{quarter}/plan-state.md'
+        path = analytics / relative
+        if path.resolve() != path or not path.is_file() or not re.search(
+            r'^Status:\s*`?draft`?\s*$', path.read_text(), re.MULTILINE | re.IGNORECASE
+        ):
+            raise ValueError(f'Planning save requires a draft quarter: {relative}')
+        previous = api.git(analytics, 'show', f'HEAD:{relative}')
+        if previous.returncode == 0 and re.search(
+            r'^Status:\s*`?approved`?\s*$', previous.stdout, re.MULTILINE | re.IGNORECASE
+        ):
+            raise ValueError(f'Approved quarter cannot be downgraded to draft: {relative}')
+    # A removed or replaced protection snapshot must not disable validation.
+    snapshots = api.git(analytics, 'ls-tree', '-r', '--name-only', 'HEAD', '--', 'planning/approved-plans')
+    if snapshots.returncode != 0:
+        raise ValueError('Cannot verify accepted planning snapshots')
+    for relative in snapshots.stdout.splitlines():
+        path = analytics / relative
+        previous = api.git(analytics, 'rev-parse', f'HEAD:{relative}')
+        current = api.git(analytics, 'hash-object', '--no-filters', '--', relative)
+        if (previous.returncode != 0 or path.resolve() != path or not path.is_file()
+                or current.returncode != 0 or current.stdout.strip() != previous.stdout.strip()):
+            raise ValueError(f'Accepted planning snapshot is immutable: {relative}')
+    validator = Path(api.__file__).with_name('validate-planning.py')
+    checked = subprocess.run([sys.executable, str(validator), str(analytics)], capture_output=True, text=True)
+    if checked.returncode != 0:
+        raise ValueError('Planning validation failed: ' + checked.stdout + checked.stderr)
 
 
 def set_scope(args, api) -> int:
@@ -65,8 +97,12 @@ def set_scope(args, api) -> int:
             completion, _ = verified_result(run_id)
             if not completion['planning_application_allowed']:
                 raise ValueError('Tracker run must allow application before scope registration')
-    work['execution_scope'] = {'features': features, 'quarters': quarters, 'run_ids': run_ids,
-                               'reason': args.reason, 'confirmed_at': api.utc_now()}
+    scope = {'features': features, 'quarters': quarters, 'run_ids': run_ids,
+             'reason': args.reason, 'confirmed_at': api.utc_now()}
+    if getattr(args, 'include_planning', False):
+        check_draft_planning(analytics, scope, api)
+        scope['include_planning'] = True
+    work['execution_scope'] = scope
     api.write_state(root, state)
     print(json.dumps({'status': 'execution-scope-registered', 'branch': work['branch'],
                       'execution_scope': work['execution_scope'], 'analytics_writes_performed': False,
@@ -84,6 +120,22 @@ def path_kind(path: str, scope: dict) -> str | None:
             r'(?:slices/[a-z0-9-]+/)?execution/(?:[a-zA-Z0-9_./-]+)\.(?:md|json)', relative
         ):
             return 'execution-source'
+        if scope.get('include_planning') is True and (
+            relative in {'planning/estimates.md', 'planning/planning-context.md', 'planning/assumptions.md',
+                         'planning/risk-register.md', 'planning/story-map.md'}
+            or re.fullmatch(r'planning/estimates-\d{4}-Q[1-4]\.md', relative)
+            or re.fullmatch(r'planning/stories/STORY-[A-Z0-9-]+-(?:AN|BE|FE|QA)\.md', relative)
+        ):
+            return 'draft-feature-planning'
+    if (scope.get('include_planning') is True and len(parts) >= 3
+            and parts[0] == 'planning' and parts[1] in scope['quarters']):
+        relative = '/'.join(parts[2:])
+        if (relative in {'plan-state.md', 'retrospective.md', 'gantt/README.md', 'gantt/order.txt',
+                         'gantt/closed-days.txt', 'gantt/quarter-plan.puml', 'gantt/commander-plan.puml'}
+                or re.fullmatch(r'quarter/[a-zA-Z0-9-]+\.md', relative)
+                or re.fullmatch(r'gantt/preamble/(?:common|quarter-plan|commander-plan)\.puml', relative)
+                or re.fullmatch(r'gantt/includes/(?:quarter-plan|commander-plan)/FEATURE-[a-z0-9-]+\.puml', relative)):
+            return 'draft-quarter-planning'
     if len(parts) >= 4 and parts[0] == 'planning' and parts[1] in scope['quarters'] and parts[2] == 'gantt':
         relative = '/'.join(parts[3:])
         if relative in {'actual-progress.puml', 'actual-progress-confluence.puml'} or re.fullmatch(
@@ -102,6 +154,8 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
     scope = work.get('execution_scope')
     if not scope:
         raise ValueError('Register the confirmed feature/quarter set with set-execution-scope first')
+    if scope.get('include_planning') is True:
+        check_draft_planning(analytics, scope, api)
     classified = []
     for path in sorted(paths):
         api.exact_path(path)
@@ -109,6 +163,12 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
         kind = path_kind(path, scope)
         if not kind or target.resolve() != target:
             raise ValueError(f'Path outside confirmed execution scope or linked: {path}')
+        if re.fullmatch(r'features/[a-z0-9-]+/planning/estimates-\d{4}-Q[1-4]\.md', path):
+            previous = api.git(analytics, 'rev-parse', f'HEAD:{path}')
+            if previous.returncode == 0:
+                current = api.git(analytics, 'hash-object', '--no-filters', '--', path)
+                if not target.is_file() or current.returncode != 0 or current.stdout.strip() != previous.stdout.strip():
+                    raise ValueError(f'Historical estimate archive is immutable: {path}')
         classified.append({'path': path, 'kind': kind})
     reviewed_runs = set()
     if scope.get('run_ids') or review_files:

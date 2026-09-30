@@ -26,6 +26,7 @@ class UncertainScheduleTests(unittest.TestCase):
                 self.assertEqual(task, before)
                 text = "\n".join(OVERLAY.render_task(task, schedule))
                 self.assertNotIn("% completed", text)
+                self.assertIn("is colored in transparent/LightCoral", text)
                 if status != "planned":
                     self.assertIn("прогноз; фактическое начало неизвестно", text)
                     self.assertNotIn("Shifted not-started", text)

@@ -121,6 +121,8 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.quarter()
         content = self.target.read_text()
         self.assertIn("прогресс неизвестен", content)
+        self.assertIn("[TASK_ITEM_100_FE] is colored in transparent/LightCoral", content)
+        self.assertIn("[STORY_STORY_COHORT] is colored in transparent/Gainsboro", content)
         self.assertNotRegex(content, r"\[TASK_ITEM_100_FE\] is \d+% completed")
         self.assertNotRegex(content, r"\[STORY_STORY_COHORT\] is \d+% completed")
         self.assertIn("[TASK_QA_COHORT] is 30% completed", content)

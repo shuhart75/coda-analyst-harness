@@ -92,6 +92,106 @@ class ExecutionCollaborationTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
 
+    def planning_scope(self):
+        self.change('planning/2026-Q3/plan-state.md', 'Status: `draft`\n')
+        return self.collaboration(self.workspace, self.environment, 'set-execution-scope',
+                                  '--feature', 'registry', '--quarter', '2026-Q3', '--include-planning',
+                                  '--reason', 'Confirmed draft planning and execution', '--analyst-confirmed')
+
+    def protect_plan(self):
+        import hashlib
+        path = 'planning/2026-Q3/gantt/quarter-plan.puml'
+        self.change(path, '@startgantt\n@endgantt\n')
+        snapshot = 'planning/approved-plans/2026-Q3.json'
+        self.change(snapshot, json.dumps({'files': {path: hashlib.sha256((self.project / path).read_bytes()).hexdigest()}}))
+        self.git(self.project, 'add', '--', path, snapshot)
+        self.git(self.project, 'commit', '-m', 'Protect planning fixtures')
+        return path, snapshot
+
+    def test_explicit_planning_scope_saves_both_artifact_sets_and_pushes_one_commit(self):
+        registered = self.planning_scope()
+        self.assertTrue(registered['execution_scope']['include_planning'])
+        self.change(self.source)
+        self.change('planning/2026-Q3/gantt/quarter-plan.puml', '@startgantt\n@endgantt\n')
+        self.change('planning/2026-Q3/quarter/estimate-basis.md', 'Draft capacity assumptions\n')
+        self.change('features/registry/planning/stories/STORY-REGISTRY-BE.md', 'Draft BE role\n')
+        self.change('features/registry/planning/estimates-2026-Q2.md', 'Preserved historical estimates\n')
+        preview = self.collaboration(self.workspace, self.environment, 'save-preview')
+        self.assertEqual({item['kind'] for item in preview['paths']},
+                         {'execution-source', 'draft-feature-planning', 'draft-quarter-planning'})
+        self.assertEqual(preview['confluence_verified'], ['2026-Q3'])
+        command = preview['save_command']
+        command[command.index('--message') + 1] = 'Save draft plans and execution together'
+        result = test_workspace.run(*command, env=self.environment)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        saved = json.loads(result.stdout)
+        self.assertEqual(self.git(self.project, 'status', '--porcelain'), '')
+        self.assertEqual(self.git(self.remote, 'rev-parse', 'refs/heads/feature/registry/ivan'), saved['commit'])
+        self.assertEqual(self.git(self.project, 'rev-parse', 'HEAD^'), self.initial_head)
+
+    def test_planning_registration_requires_draft_and_does_not_erase_existing_scope_on_failure(self):
+        self.scope()
+        previous = self.state_path.read_bytes()
+        args = ('set-execution-scope', '--feature', 'registry', '--quarter', '2026-Q3',
+                '--include-planning', '--reason', 'Confirmed planning', '--analyst-confirmed')
+        self.assertIn('requires a draft quarter', self.raw(*args).stdout)
+        self.change('planning/2026-Q3/plan-state.md', 'Status: approved\n')
+        self.assertIn('requires a draft quarter', self.raw(*args).stdout)
+        self.assertEqual(self.state_path.read_bytes(), previous)
+
+    def test_approved_head_cannot_be_downgraded_for_planning_save(self):
+        self.protect_plan()
+        self.change('planning/2026-Q3/plan-state.md', 'Status: approved\n')
+        self.git(self.project, 'add', '--', 'planning/2026-Q3/plan-state.md')
+        self.git(self.project, 'commit', '-m', 'Approve planning fixtures')
+        self.change('planning/2026-Q3/plan-state.md', 'Status: draft\n')
+        result = self.raw('set-execution-scope', '--feature', 'registry', '--quarter', '2026-Q3',
+                          '--include-planning', '--reason', 'Confirmed planning', '--analyst-confirmed')
+        self.assertIn('cannot be downgraded', result.stdout)
+        self.assertEqual(self.git(self.project, 'diff', '--cached', '--name-only'), '')
+
+    def test_planning_save_rechecks_protected_content_and_snapshot_removal(self):
+        path, snapshot = self.protect_plan()
+        self.planning_scope()
+        original = (self.project / path).read_bytes()
+        self.change(path, 'Modified protected plan\n')
+        result = self.raw('save-preview')
+        self.assertIn('approved plan was modified', result.stdout)
+        (self.project / path).write_bytes(original)
+        (self.project / snapshot).unlink()
+        self.assertIn('snapshot is immutable', self.raw('save-preview').stdout)
+        self.assertEqual(self.git(self.project, 'diff', '--cached', '--name-only'), '')
+
+    def test_planning_scope_preserves_qa_export_and_ownership_gates(self):
+        self.planning_scope()
+        self.change('planning/2026-Q3/gantt/actual-progress-confluence.puml', 'Stale export\n')
+        self.assertIn('Confluence export differs', self.raw('save-preview').stdout)
+        self.expand()
+        for path in ('features/other/planning/stories/STORY-OTHER-BE.md',
+                     'planning/2026-Q2/quarter/README.md', 'features/registry/requirements.md'):
+            target = self.project / path
+            previous = target.read_bytes() if target.exists() else None
+            self.change(path)
+            self.assertIn('outside confirmed execution scope', self.raw('save-preview').stdout)
+            if previous is None:
+                target.unlink()
+            else:
+                target.write_bytes(previous)
+        state = json.loads(self.state_path.read_text())
+        state['active_work']['execution_scope']['run_ids'] = ['20260922T085505Z-12345678']
+        self.state_path.write_text(json.dumps(state))
+        self.assertIn('QA verification is mandatory', self.raw('save-preview').stdout)
+
+    def test_existing_estimate_archive_cannot_be_changed(self):
+        path = 'features/registry/planning/estimates-2026-Q2.md'
+        self.change(path, 'Historical source\n')
+        self.git(self.project, 'add', '--', path)
+        self.git(self.project, 'commit', '-m', 'Preserve historical estimate fixtures')
+        self.planning_scope()
+        self.change(path, 'Changed history\n')
+        self.assertIn('estimate archive is immutable', self.raw('save-preview').stdout)
+        self.assertEqual(self.git(self.project, 'diff', '--cached', '--name-only'), '')
+
     def test_one_commit_contains_multiple_sources_and_complete_quarter_views(self):
         self.scope('registry', 'other')
         self.change(self.source)

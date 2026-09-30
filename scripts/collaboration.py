@@ -761,6 +761,8 @@ def parser() -> argparse.ArgumentParser:
     scope.add_argument('--feature', action='append', required=True)
     scope.add_argument('--quarter', action='append', required=True)
     scope.add_argument('--run-id', action='append', default=[])
+    scope.add_argument('--include-planning', action='store_true',
+                       help='Explicitly include scoped draft planning artifacts in the same execution save')
     scope.add_argument('--reason', required=True)
     scope.add_argument('--analyst-confirmed', action='store_true', required=True)
     scope.set_defaults(handler=lambda args: set_scope(args, sys.modules[__name__]))
