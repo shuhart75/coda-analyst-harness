@@ -13,7 +13,7 @@ This repository defines a reusable workflow harness.
 
 ## Quarter deliveries and baseline
 
-- Read `core/quarter-deliveries.md` before working in a project with `delivery-index.json`. It takes precedence over legacy path examples below. Use `scripts/project_layout.py` to resolve the selected delivery and quarter; never create duplicate authored requirements at the feature catalog root.
+- Read `core/quarter-deliveries.md` before working in a project with `delivery-index.json`. It takes precedence over legacy path examples below. Use `scripts/project_layout.py` to resolve the selected delivery and quarter; keep human-readable feature passports under core/feature-passports.md; never substitute the summary for a delivery contract.
 - A long-lived feature spans quarters; each new delivery belongs to exactly one quarter. Preserve legacy operational aliases, approved plan bytes, exchange identities and historical facts. Carryover requires an explicit residual-scope decision; migration never marks old work completed.
 - After every task actualization, check complete closed releases not yet reflected in baseline. Show the candidate and obtain explicit analyst deployment confirmation before promotion in `release-finalization`. Keep deferred candidates visible and record processed releases. Closed tasks alone never prove deployment.
 - Preserve baseline domain as the human-readable skeleton, with lifecycles, processes and diagrams, plus requirements, UI, API, data and decisions. Check every section for each release and save an immutable release-bound version.

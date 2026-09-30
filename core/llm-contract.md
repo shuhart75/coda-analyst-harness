@@ -12,8 +12,9 @@ before resolving artifacts. Its layout and delivery ownership rules take priorit
 over legacy `features/<feature>` and `planning/<quarter>` examples in this contract.
 Resolve paths with `scripts/project_layout.py`; preserve historical identities and
 approved artifact bytes. The authored root belongs to a quarter delivery; the root
-feature catalog holds navigation, history and tentative backlog, never duplicate
-normative text. Closed releases are checked after each task actualization;
+feature catalog holds human-readable passports, consolidated requirements, history
+and tentative backlog under `core/feature-passports.md`. A passport never replaces
+the delivery contract or duplicates its independently editable normative text. Closed releases are checked after each task actualization;
 baseline promotion still requires explicit analyst deployment confirmation and
 review of domain, requirements, UI, API, data and decisions.
 

@@ -164,6 +164,43 @@ class ProjectLayoutTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             layout.project_path(self.project, "features/kib-mvp/../../../../escape")
 
+    def test_navigation_preserves_authored_passport_and_delivery_contracts(self):
+        proposal = self.plan()
+        layoutctl.apply(self.project, proposal, True)
+        passport = self.project / 'features/kib'
+        documents = {'README.md': '# КИБ\n\nИстория и подтверждённое состояние.\n',
+                     'requirements.md': '# Сводные требования\n\nДействующее и будущее поведение.\n',
+                     'backlog.md': '# Отложенный объём\n'}
+        for name, content in documents.items():
+            (passport / name).write_text(content)
+        contracts = {p: p.read_bytes() for p in layout.artifact_glob(self.project, 'features/*/requirements.md')}
+        layoutctl.write_navigation(self.project, proposal['deliveries'])
+        layoutctl.write_navigation(self.project, proposal['deliveries'])
+        for name, content in documents.items():
+            self.assertEqual((passport / name).read_text(), content)
+        self.assertIn('2026-Q4', (passport / 'deliveries.md').read_text())
+        self.assertEqual(contracts, {p: p.read_bytes() for p in layout.artifact_glob(self.project, 'features/*/requirements.md')})
+        self.assertNotIn(passport / 'requirements.md', contracts)
+
+    def test_execution_scope_allows_only_owning_passport_status(self):
+        from execution_collaboration import passport_path_kind
+        layoutctl.apply(self.project, self.plan(), True)
+        scope = {'features': ['kib-next'], 'quarters': ['2026-Q4']}
+        self.assertEqual(passport_path_kind(self.project, 'features/kib/README.md', scope), 'feature-passport-status')
+        for path in ['features/other/README.md', 'features/kib/requirements.md', 'features/kib/backlog.md']:
+            self.assertIsNone(passport_path_kind(self.project, path, scope))
+        self.assertIsNone(passport_path_kind(self.project, 'features/kib/README.md',
+                                            {'features': ['kib-next'], 'quarters': ['2026-Q3']}))
+
+    def test_passport_language_checks_prose_but_not_link_destinations(self):
+        from importlib import import_module
+        validator = import_module('validate-language')
+        layoutctl.apply(self.project, self.plan(), True)
+        path = self.project / 'features/kib/requirements.md'
+        path.write_text('[Проверка](../../baseline-review.md)\n[review](../../baseline-review.md)\n')
+        self.assertIn(path, validator.requirement_files(self.project, None, True))
+        self.assertEqual(validator.prose_lines(path), [(1, 'Проверка'), (2, 'review')])
+
 
 if __name__ == "__main__":
     unittest.main()

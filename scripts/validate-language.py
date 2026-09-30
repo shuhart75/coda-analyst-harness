@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from project_layout import feature_root as layout_feature_root, artifact_glob
+from project_layout import feature_root as layout_feature_root, artifact_glob, layout
 
 import argparse
 import json
@@ -52,6 +52,8 @@ def requirement_files(root: Path, feature: str | None, all_files: bool) -> list[
         candidates: set[Path] = set()
         for pattern in REQUIREMENT_PATTERNS:
             candidates.update(artifact_glob(root, pattern))
+        if layout(root):
+            candidates.update(root.glob('features/*/requirements.md'))
     if not all_files:
         candidates.intersection_update(changed_files(root))
     return sorted(path for path in candidates if path.is_file())
@@ -62,6 +64,8 @@ def prose_lines(path: Path) -> list[tuple[int, str]]:
     text = FENCE_RE.sub(lambda match: "\n" * match.group(0).count("\n"), text)
     result: list[tuple[int, str]] = []
     for number, line in enumerate(text.splitlines(), start=1):
+        # Link destinations are exact paths/URLs; their labels remain prose.
+        line = re.sub(r'\[([^\]]*)\]\([^)]+\)', r'\1', line)
         line = INLINE_CODE_RE.sub("", line)
         line = URL_RE.sub("", line)
         line = MACHINE_ID_RE.sub("", line)

@@ -3,8 +3,8 @@
 Для проекта с `delivery-index.json` применяй `core/quarter-deliveries.md`:
 legacy-пути `features/<feature>/...` означают корень выбранной поставки,
 `planning/<quarter>/...` — корень квартала; разрешай их через
-`scripts/project_layout.py`. Корневой каталог фич хранит идентичность и backlog,
-а не вторые нормативные документы. Примеры ниже сохраняются для legacy-проектов.
+`scripts/project_layout.py`. Корневой каталог фич содержит человекочитаемые паспорта и сводные требования
+по core/feature-passports.md. Передаваемый контракт остаётся в выбранной поставке. Примеры ниже сохраняются для legacy-проектов.
 
 ## Goal
 
@@ -149,3 +149,10 @@ For `новая фича`, `занимаемся планированием`, `�
 - update the run checkpoint before and after long planning passes.
 
 Do not ask the user to request these context operations explicitly. Ask only when scope, quarter boundary, estimate basis or current-vs-new classification requires a human decision.
+
+## Паспорт долгоживущей фичи
+
+Следуй `core/feature-passports.md`. После изменения поставки или подтверждённых
+фактов обновляй паспорт соответствующей фичи с датой, содержанием и основанием.
+При актуализации исполнения меняй только сводку состояния README и ссылки поставок;
+требования паспорта и контракт поставки требуют своего режима работы.
