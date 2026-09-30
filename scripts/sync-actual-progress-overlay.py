@@ -1119,6 +1119,17 @@ def story_type(story: StoryMap, tasks: dict[str, Task]) -> str:
     return "GEN"
 
 
+def progress_style(alias: str, color: str, progress: float | None) -> list[str]:
+    # PlantUML fills the entire bar when completion is omitted. Unknown must
+    # remain unknown in the data and look hollow, not like completed work.
+    if progress is None:
+        return [f"[{alias}] is colored in transparent/{color}"]
+    return [
+        f"[{alias}] is colored in {color}",
+        f"[{alias}] is {round(max(0, min(progress, 100)))}% completed",
+    ]
+
+
 def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
     if task.status.lower() in EXCLUDED_STATUSES:
         return [f"' Excluded task: {task.task_id}; status={task.status}; {plantuml_label(task.summary)}"]
@@ -1156,10 +1167,8 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
     lines = [
         f"[{label}] as [{alias}]{assignee_part} starts {fmt_date(scheduled.start)}",
         f"[{alias}] ends {fmt_date(scheduled.finish)}" if scheduled.finish else f"[{alias}] lasts {task_duration(task)} days",
-        f"[{alias}] is colored in {role_color(role_for_task(task))}",
+        *progress_style(alias, role_color(role_for_task(task)), task.progress),
     ]
-    if task.progress is not None:
-        lines.append(f"[{alias}] is {round(max(0, min(task.progress, 100)))}% completed")
     if needs_forecast_schedule(task) and not is_not_started(task):
         lines.append(f"' Forecast only; full estimate, not confirmed remaining work: {task.task_id}; status={task.status}")
     elif scheduled.shifted:
@@ -1279,9 +1288,7 @@ def render_story(
         lines.append(f"[{alias}] ends {fmt_date(finish)}")
     else:
         lines.append(f"[{alias}] lasts {max(story.baseline_duration, 1)} days")
-    lines.append(f"[{alias}] is colored in {color}")
-    if progress is not None:
-        lines.append(f"[{alias}] is {progress}% completed")
+    lines.extend(progress_style(alias, color, progress))
     return lines, finish
 
 
@@ -1305,8 +1312,7 @@ def render_role_baseline(baseline: RoleBaseline, feature_slug: str, tasks: dict[
         f"' Decision source: {baseline.decision_source}; tasks={', '.join(task_ids)}",
         f"[{label}] as [{alias}] starts {fmt_date(start)}",
         f"[{alias}] ends {fmt_date(finish)}",
-        f"[{alias}] is colored in Gainsboro",
-        *([f"[{alias}] is {progress}% completed"] if progress is not None else []),
+        *progress_style(alias, "Gainsboro", progress),
         "",
     ]
 

@@ -53,6 +53,16 @@ class RolePlanBaselinesTests(unittest.TestCase):
         decision["sha256"][calendar.relative_to(self.root).as_posix()] = hashlib.sha256(calendar.read_bytes()).hexdigest() if calendar.exists() else None
         self.save_config()
 
+    def test_unknown_role_baseline_is_hollow_without_invented_completion(self):
+        self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |"))
+        before = self.registry.read_bytes()
+        self.quarter()
+        content = self.target.read_text()
+        self.assertIn("[PLAN_COHORTS_FE] is colored in transparent/Gainsboro", content)
+        self.assertNotRegex(content, r"\[PLAN_COHORTS_FE\] is \d+% completed")
+        self.assertIn("[PLAN_COHORTS_QA] is 30% completed", content)
+        self.assertEqual(self.registry.read_bytes(), before)
+
     def test_role_bars_replace_legacy_rendering_but_not_mapping(self):
         original = self.snapshot()
         self.quarter()
