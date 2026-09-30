@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from project_layout import feature_root as layout_feature_root, quarter_root, logical_path
+from project_layout import feature_root as layout_feature_root, quarter_root, logical_path, layout
 
 from contextlib import redirect_stdout
 from importlib import import_module
@@ -151,6 +151,17 @@ def path_kind(path: str, scope: dict) -> str | None:
     return None
 
 
+def passport_path_kind(analytics: Path, path: str, scope: dict) -> str | None:
+    index = layout(analytics)
+    if index is None:
+        return None
+    owners = {d['feature_id'] for key, d in index['deliveries'].items()
+              if key in scope['features'] and d.get('quarter') in scope['quarters']}
+    if any(path in {f'features/{owner}/README.md', f'features/{owner}/deliveries.md'} for owner in owners):
+        return 'feature-passport-status'
+    return None
+
+
 def check_save(root, analytics, work, paths, review_files, api) -> dict:
     require_execution_work(root, analytics, work, api)
     scope = work.get('execution_scope')
@@ -162,7 +173,7 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
     for path in sorted(paths):
         api.exact_path(path)
         target = analytics / path
-        kind = path_kind(logical_path(analytics, path), scope)
+        kind = passport_path_kind(analytics, path, scope) or path_kind(logical_path(analytics, path), scope)
         if not kind or target.resolve() != target:
             raise ValueError(f'Path outside confirmed execution scope or linked: {path}')
         if re.fullmatch(r'features/[a-z0-9-]+/planning/estimates-\d{4}-Q[1-4]\.md', logical_path(analytics, path)):

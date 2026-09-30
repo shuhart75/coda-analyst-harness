@@ -152,11 +152,27 @@ def write_navigation(project, deliveries):
     for feature, entries in sorted(by_feature.items()):
         directory = project / "features" / feature
         directory.mkdir(parents=True, exist_ok=True)
-        lines = [f"# {feature}", "", "Постоянная идентичность фичи. Рабочие документы находятся в поставках кварталов.", ""]
+        readme = directory / "README.md"
+        if not readme.exists():
+            readme.write_text(f"# {feature}\n\nПаспорт требует содержательного заполнения по core/feature-passports.md.\n"
+                              "Назначение, доступность пользователям, текущая работа и даты событий пока не подтверждены.\n\n"
+                              "[Поставки фичи](deliveries.md)\n")
+        for name, text in {
+            'requirements.md': f'# {feature}: сводные требования\n\n'
+                               '## Действующее поведение\n\nПодтверждённые сведения пока не внесены.\n\n'
+                               '## Согласованные изменения\n\nСостав и источники требуют заполнения аналитиком.\n\n'
+                               '[Поставки](deliveries.md)\n',
+            'backlog.md': f'# {feature}: отложенный объём\n\n'
+                          'Остаток вне поставок пока не сверён. Отсутствие записей не означает отсутствие дальнейшей работы.\n',
+        }.items():
+            target = directory / name
+            if not target.exists():
+                target.write_text(text)
+        lines = [f"# Поставки {feature}", "", "Производный список. Наличие поставки не подтверждает её внедрение.", ""]
         for key, d in entries:
             target = project / d["path"]
             lines.append(f"- [{d.get('quarter') or 'Backlog'} · {d['delivery_id']}]({os.path.relpath(target, directory)}/): {d.get('basis', '')}")
-        (directory / "README.md").write_text("\n".join(lines) + "\n")
+        (directory / "deliveries.md").write_text("\n".join(lines) + "\n")
     for q, entries in sorted(by_quarter.items(), key=lambda i: i[0] or ""):
         directory = project / (f"quarters/{q}" if q else "backlog")
         directory.mkdir(parents=True, exist_ok=True)
@@ -171,8 +187,10 @@ def write_navigation(project, deliveries):
             readme = feature_dir / "README.md"
             if not readme.exists():
                 readme.write_text(f"# {title}\n\nПостоянная фича: `{d['feature_id']}`.\n\n")
-            with readme.open("a") as stream:
-                stream.write(f"- [Поставка {d['delivery_id']}](deliveries/{d['delivery_id']}/)\n")
+            link = f"- [Поставка {d['delivery_id']}](deliveries/{d['delivery_id']}/)\n"
+            if link not in readme.read_text():
+                with readme.open("a") as stream:
+                    stream.write(link)
         if q:
             lines += ["", "## Планирование", "", "- [Квартальный план](quarter/)", "- [Гант](gantt/)"]
         target = directory / "README.md"
