@@ -1,5 +1,11 @@
 # Mode: planning
 
+Для проекта с `delivery-index.json` применяй `core/quarter-deliveries.md`:
+legacy-пути `features/<feature>/...` означают корень выбранной поставки,
+`planning/<quarter>/...` — корень квартала; разрешай их через
+`scripts/project_layout.py`. Корневой каталог фич хранит идентичность и backlog,
+а не вторые нормативные документы. Примеры ниже сохраняются для legacy-проектов.
+
 ## Goal
 
 Shape prioritized quarter features, role workstreams, HLE, capacity schedule, and immutable planning baselines.

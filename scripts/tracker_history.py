@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from project_layout import delivery_key
+
 from datetime import datetime, timezone
 from dataclasses import replace
 import json
@@ -367,7 +369,7 @@ def review_history(args) -> int:
         expected.update(f"{row[provider + '_key']}/{row['role']}"
                         for row in preview["proposed_registrations"] if row["feature"] == feature)
         for path in registry_paths(project):
-            if path.relative_to(project).parts[1] != feature:
+            if delivery_key(project, path) != feature:
                 continue
             tables, _ = read_registry(path)
             for row in (row for table in tables for row in table):

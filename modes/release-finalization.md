@@ -1,8 +1,30 @@
 # Mode: release-finalization
 
+Для проекта с `delivery-index.json` применяй `core/quarter-deliveries.md`:
+legacy-пути `features/<feature>/...` означают корень выбранной поставки,
+`planning/<quarter>/...` — корень квартала; разрешай их через
+`scripts/project_layout.py`. Корневой каталог фич хранит идентичность и backlog,
+а не вторые нормативные документы. Примеры ниже сохраняются для legacy-проектов.
+
 ## Goal
 
 Собрать итоговые требования по релизу, зафиксировать фактическую доменную модель после внедрения и промоутить результат в новый baseline.
+
+## Триггер и полнота baseline
+
+После каждой актуализации задач рассматриваются полные закрытые релизы, ещё не
+отражённые в baseline, по `core/quarter-deliveries.md`. Закрытие всех задач
+запускает предложение аналитику, но не доказывает внедрение. Подтверждение
+аналитика связывается с точной версией, средой и составом. Подготовленный кандидат,
+проверка всех разделов и отметка обработки хранятся через `baseline_releases.py`.
+
+Проверяй влияние каждого релиза на `domain`, `requirements`, `ui`, `api`, `data`
+и `decisions`. Неизменившиеся разделы сохраняют содержание; версия baseline
+обновляется для каждого подтверждённого релиза. Домен остаётся связным
+человекочитаемым объяснением сущностей, отношений, правил, ЖЦ и процессов,
+с диаграммами внутри соответствующих разделов. История решений не удаляется:
+заменённые решения связаны с заменяющими. Обновление документации не является
+новым бизнес-утверждением отклонений, уже попавших в ПРОМ.
 
 ## Main artifacts
 
@@ -24,7 +46,7 @@
 - release package contents
 - final requirements after delivery
 - baseline promotion notes and version metadata
-- canonical domain model, API, UI and data-model baseline files
+- canonical requirements, human-readable domain model, lifecycles, processes, diagrams, API, UI, data-model and decision baseline files
 - baseline snapshots under `baseline/versions/`
 - feature deployment status notes tied to promotion
 

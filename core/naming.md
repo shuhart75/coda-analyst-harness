@@ -1,5 +1,11 @@
 # Naming
 
+Для проекта с `delivery-index.json` применяй `core/quarter-deliveries.md`:
+legacy-пути `features/<feature>/...` означают корень выбранной поставки,
+`planning/<quarter>/...` — корень квартала; разрешай их через
+`scripts/project_layout.py`. Корневой каталог фич хранит идентичность и backlog,
+а не вторые нормативные документы. Примеры ниже сохраняются для legacy-проектов.
+
 ## GigaCode files
 
 - Native entry point: `GIGACODE.md` in HARNESS_ROOT; `AGENTS.md` is the compatibility entry point.
@@ -23,8 +29,8 @@ Human-readable Russian names live inside markdown files.
 ## Delivery stage identifiers
 
 Follow `core/delivery-stages.md`. Use a plain `Этап поставки: stage-1` line in
-`Границы`, replacing `stage-1` with the current `stage_id`. Do not create a
-stage-specific authored requirements file or directory. `stage_revision` counts
+`Границы`, replacing `stage-1` with the current `stage_id`. Do not create additional stage text copies within a delivery. In migrated
+projects the authored root is the registered quarter delivery directory. `stage_revision` counts
 revisions inside one stage; `revisions/NNN` stays global within the feature.
 For example, `001` and `002` may be revisions 1 and 2 of `stage-1`, and `003`
 revision 1 of `stage-2` after explicit closure and a new analyst decision.

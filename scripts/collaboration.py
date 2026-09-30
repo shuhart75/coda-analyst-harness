@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root
+
 import argparse
 import fcntl
 import json
@@ -236,7 +238,7 @@ def next_feature_branch(repository: Path, feature: str, analyst: str) -> str:
 
 
 def require_feature(repository: Path, feature: str) -> None:
-    if not (repository / "features" / feature).is_dir():
+    if not (layout_feature_root(repository, feature)).is_dir():
         raise ValueError(f"Функциональность не найдена в analytics: features/{feature}")
 
 

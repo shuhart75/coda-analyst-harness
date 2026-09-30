@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root
+
 import json
 import re
 import sys
@@ -50,7 +52,7 @@ def main() -> int:
     args = [arg for arg in args if arg != "--strict"]
     root = Path(args[0]).resolve() if args else Path.cwd()
     feature = args[args.index("--feature") + 1] if "--feature" in args else None
-    base = root / "features" / feature if feature else root
+    base = layout_feature_root(root, feature) if feature else root
     definitions: dict[str, list[str]] = {}
     references: dict[str, list[str]] = {}
     errors: list[str] = []

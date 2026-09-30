@@ -1,5 +1,12 @@
 # Entity Model
 
+
+Для проекта с `delivery-index.json` применяй `core/quarter-deliveries.md`:
+legacy-пути `features/<feature>/...` означают корень выбранной поставки,
+`planning/<quarter>/...` — корень квартала; разрешай их через
+`scripts/project_layout.py`. Корневой каталог фич хранит идентичность и backlog,
+а не вторые нормативные документы. Примеры ниже сохраняются для legacy-проектов.
+
 ## Baseline snapshot
 
 Canonical deployed-system description.
@@ -14,7 +21,10 @@ Contains:
 
 ## Feature
 
-Main knowledge container for a business change.
+Long-lived identity of a product capability. In migrated projects its root
+contains navigation, history and tentative backlog; working artifacts belong to
+the selected quarter delivery. The list below describes that delivery (or the
+legacy feature root).
 
 Contains:
 - planning artifacts
@@ -65,7 +75,7 @@ plan. Actual tasks and their confirmed story links remain valid without a PLAN b
 показывается подписанной отметкой границы, не занимает ресурс и не получает
 интервал из плановых дат. Граница не определяет начало PLAN; известный фактический
 старт сохраняет обычное правило привязки. Задача учитывается в прогрессе PLAN.
-QA относится к фиче и учитывается только в роли QA, даже если источник оценки
+QA относится к поставке (legacy: фиче) и учитывается только в роли QA, даже если источник оценки
 находится в FE-карточке; несколько QA-задач не объединяются и не дублируются.
 AN также относится к фиче: назначение разработческой карточки на аналитика
 не создаёт отдельную AN-работу. Источник ролевой оценки сопоставляется с
@@ -140,7 +150,8 @@ Analyst-side actual execution tracking artifact with fields such as:
 - related/replaced planning stories
 - optional description
 
-The canonical registry is `features/<feature>/execution/tasks.md`; existing slice registries remain readable without creating new slices. A real local task may have no tracker key. Individual task cards and progress summaries supplement the registry, not replace it. Preserve unknown facts and ask the analyst rather than inventing estimates, story membership or person-to-resource mappings.
+The canonical registry is `<resolved-delivery-root>/execution/tasks.md`
+(legacy: `features/<feature>/execution/tasks.md`); existing slice registries remain readable without creating new slices. A real local task may have no tracker key. Individual task cards and progress summaries supplement the registry, not replace it. Preserve unknown facts and ask the analyst rather than inventing estimates, story membership or person-to-resource mappings.
 
 Not-started implementation tasks have `Progress % = 0` and no actual dates. In generated actual-progress gantt views, not-started tasks are rendered no earlier than the current date marker, frontend tasks are delayed until backend/API work in the same feature has had a 3-open-day lead, and resources are capacity-scheduled from `PROJECT_ROOT/planning/team.md` at no more than 100% per open workday.
 

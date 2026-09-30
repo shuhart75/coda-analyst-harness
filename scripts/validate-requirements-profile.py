@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root, artifact_glob
+
 import argparse
 import re
 from pathlib import Path
@@ -71,9 +73,9 @@ def requirement_bodies(text: str) -> list[tuple[str, str]]:
 
 def candidates(root: Path, feature: str | None) -> list[Path]:
     if feature:
-        path = root / "features" / feature / "requirements.md"
+        path = layout_feature_root(root, feature) / "requirements.md"
         return [path] if path.is_file() else []
-    return sorted(root.glob("features/*/requirements.md"))
+    return sorted(artifact_glob(root, "features/*/requirements.md"))
 
 
 def metadata_value(text: str, prefix: str) -> str:

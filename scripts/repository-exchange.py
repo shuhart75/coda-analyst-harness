@@ -39,6 +39,10 @@ ALLOWED_CONTENT_ROOTS = frozenset({
     "context",
     "features",
     "planning",
+    "quarters",
+    "backlog",
+    "delivery-index.json",
+    "migration-layout.json",
     "releases",
 })
 FORBIDDEN_LOCAL_COMPONENTS = frozenset({
@@ -769,7 +773,7 @@ def source_import_report(repository: Path, base: str, candidate: str) -> dict:
             "status": status, "path": path,
             "removed_requirements": sorted(set(re.findall(requirements_pattern, before, re.MULTILINE)) - set(re.findall(requirements_pattern, after, re.MULTILINE))),
             "removed_scenarios": sorted(set(re.findall(scenario_pattern, before, re.MULTILINE)) - set(re.findall(scenario_pattern, after, re.MULTILINE))),
-            "protected_artifact": path.startswith(("baseline/", "planning/", "releases/")) or path.endswith("/requirements.md"),
+            "protected_artifact": path.startswith(("baseline/", "planning/", "quarters/", "releases/")) or path in {"delivery-index.json", "migration-layout.json"} or path.endswith("/requirements.md"),
         })
     return {"base_commit": base, "candidate_commit": candidate, "changed_paths": changes,
             "deleted_paths": [item["path"] for item in changes if item["status"] == "D"]}
@@ -1659,9 +1663,14 @@ def verified_reverse_patch(
             raise ValueError(f"Не удалось прочитать коммит {commit}: {subject.stderr.strip()}")
         included_analytics_commits.append({"commit": commit, "subject": subject.stdout.strip()})
     included_features = sorted({
-        parts[1]
+        parts[1] if parts[0] == "features" else parts[3]
         for path in changed_paths
-        if len(parts := PurePosixPath(path).parts) >= 2 and parts[0] == "features"
+        if len(parts := PurePosixPath(path).parts) >= 2 and (
+            parts[0] == "features" or (
+                len(parts) >= 4 and parts[0] == "quarters"
+                and re.fullmatch(r"\d{4}-Q[1-4]", parts[1]) and parts[2] == "features"
+            )
+        )
     })
     approved_deletions = deleted_source_paths(analytics, source_commit, documents_commit)
     metadata = {

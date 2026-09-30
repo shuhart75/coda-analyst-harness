@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root, quarter_root
+
 from pathlib import Path
 import json
 import re
@@ -27,7 +29,7 @@ def select_features(project: Path, quarter: str | None, feature: str | None) -> 
     if quarter:
         if not re.fullmatch(r"[0-9]{4}-Q[1-4]", quarter):
             raise ValueError("Квартал должен иметь вид YYYY-QN")
-        gantt = inside_project(project, project / "planning" / quarter / "gantt")
+        gantt = inside_project(project, quarter_root(project, quarter) / "gantt")
         if not gantt.is_dir():
             raise ValueError(f"Гант квартала не найден: {gantt}")
         scope = load_forecast_scope(project, quarter)
@@ -87,7 +89,7 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
     if quarter and any(not entry.get("order_confirmed") for entry in selected.values()):
         limitations.append("feature-order-and-roster-need-confirmation")
     for name, entry in selected.items():
-        directory = inside_project(project, project / "features" / name)
+        directory = inside_project(project, layout_feature_root(project, name))
         if not directory.is_dir():
             raise ValueError(f"Фича не найдена: {directory}")
         association = inside_project(project, directory / "execution/tracker-scope.json")

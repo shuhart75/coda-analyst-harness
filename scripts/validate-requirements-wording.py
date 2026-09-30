@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root, artifact_glob
+
 import argparse
 import re
 from dataclasses import dataclass
@@ -72,9 +74,9 @@ def without_fenced_code(text: str) -> str:
 
 def requirement_files(root: Path, feature: str | None) -> list[Path]:
     if feature:
-        path = root / "features" / feature / "requirements.md"
+        path = layout_feature_root(root, feature) / "requirements.md"
         return [path] if path.is_file() else []
-    return sorted(root.glob("features/*/requirements.md"))
+    return sorted(artifact_glob(root, "features/*/requirements.md"))
 
 
 def current_requirement(line_number: int, headings: list[tuple[int, str]]) -> str | None:

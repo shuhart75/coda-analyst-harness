@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from project_layout import quarter_root, project_path
+
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -27,7 +29,7 @@ def local_path(root: Path, value: object) -> Path:
     if not isinstance(value, str) or not value or any(ord(char) < 32 for char in value):
         raise ValueError("PLAN: нужен относительный путь внутри проекта")
     relative = Path(value)
-    path = root / relative
+    path = project_path(root, str(relative))
     if relative.is_absolute() or ".." in relative.parts or path.resolve() != path:
         raise ValueError(f"PLAN: недопустимый путь: {value}")
     return path
@@ -74,7 +76,7 @@ def read_bar(text: str, role: str, alias: str, path: str, view: str,
 
 
 def load_role_baselines(root: Path, quarter: str, decisions: dict, expand) -> dict[str, list[RoleBaseline]]:
-    gantt = root / "planning" / quarter / "gantt"
+    gantt = quarter_root(root, quarter) / "gantt"
     result = {}
     claimed = set()
     for slug, decision in decisions.items():
@@ -105,7 +107,7 @@ def load_role_baselines(root: Path, quarter: str, decisions: dict, expand) -> di
         calendar = gantt / "closed-days.txt"
         expected_paths = {path.relative_to(root).as_posix() for path in dependencies + [calendar]}
         hashes = decision["sha256"]
-        if not isinstance(hashes, dict) or set(hashes) != expected_paths:
+        if not isinstance(hashes, dict) or {project_path(root, item).relative_to(root).as_posix() for item in hashes} != expected_paths:
             raise ValueError(f"PLAN: {slug}: sha256 должен покрывать диаграмму, все includes и closed-days.txt")
         for relative, checksum in hashes.items():
             path = local_path(root, relative)

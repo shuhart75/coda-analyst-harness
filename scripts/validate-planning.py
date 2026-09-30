@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import artifact_glob, project_path
+
 import re
 import json
 import hashlib
@@ -132,12 +134,12 @@ def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     errors: list[str] = []
     warnings: list[str] = []
-    for path in sorted(root.glob("features/*/planning/estimates.md")):
+    for path in sorted(artifact_glob(root, "features/*/planning/estimates.md")):
         validate_estimates(path, root, errors, warnings)
-    for path in sorted(root.glob("features/*/slices/*/execution/task-candidates.md")):
+    for path in sorted(artifact_glob(root, "features/*/slices/*/execution/task-candidates.md")):
         validate_task_candidates(path, root, errors, warnings)
     approved_snapshots = approved_plans_path(root)
-    for state in sorted(root.glob("planning/*/plan-state.md")):
+    for state in sorted(artifact_glob(root, "planning/*/plan-state.md")):
         text = state.read_text(encoding="utf-8", errors="ignore")
         if re.search(r"^Status:\s*`?approved`?\s*$", text, re.MULTILINE | re.IGNORECASE):
             quarter = state.parent.name
@@ -150,7 +152,7 @@ def main() -> int:
             errors.append(f"{snapshot_path.relative_to(root)}: invalid approval snapshot: {exc}")
             continue
         for rel, expected in snapshot.get("files", {}).items():
-            target = root / rel
+            target = project_path(root, rel)
             if not target.exists():
                 errors.append(f"approved plan file missing: {rel}")
                 continue
@@ -158,7 +160,7 @@ def main() -> int:
             if actual != expected:
                 errors.append(f"approved plan was modified: {rel}")
         for rel, expected_rows in snapshot.get("actualization_baseline", {}).items():
-            target = root / rel
+            target = project_path(root, rel)
             actual_rows = actualization_baseline_rows(target) if target.exists() else []
             if actual_rows != expected_rows:
                 errors.append(f"approved actualization baseline was modified: {rel}")

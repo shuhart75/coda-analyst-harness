@@ -501,7 +501,7 @@ class RequirementsExchangeTests(unittest.TestCase):
             )
             self.prepare(project)
             refreshed = agents.read_text(encoding="utf-8")
-            self.assertIn("Версия договора: `3`", refreshed)
+            self.assertIn("Версия договора: `4`", refreshed)
             self.assertIn("бизнес-контрактом, а не готовым локальным `spec.md`", refreshed)
             self.assertIn("Не объединяй клиентскую и серверную работу", refreshed)
             self.assertIn("returns/receipt.json", refreshed)

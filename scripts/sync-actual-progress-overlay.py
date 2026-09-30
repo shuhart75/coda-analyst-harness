@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import feature_root as layout_feature_root, quarter_root, feature_roots, logical_path, delivery_key
+
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -207,7 +209,7 @@ def parse_number(value: str, default: float = 0.0) -> float:
 
 
 def load_closed_days(project_root: Path, quarter_id: str) -> set[date]:
-    path = project_root / "planning" / quarter_id / "gantt/closed-days.txt"
+    path = quarter_root(project_root, quarter_id) / "gantt/closed-days.txt"
     if not path.exists():
         return set()
     result: set[date] = set()
@@ -1389,7 +1391,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
     project_root = project_root.resolve()
     if not re.fullmatch(r"\d{4}-Q[1-4]", quarter_id):
         raise ValueError("Неверный идентификатор квартала")
-    target_dir = project_root / "planning" / quarter_id / "gantt/includes/actual-progress"
+    target_dir = quarter_root(project_root, quarter_id) / "gantt/includes/actual-progress"
     scope = load_forecast_scope(project_root, quarter_id)
     feature_map = scope.features
     layout = load_layout(target_dir.parent.parent)
@@ -1397,7 +1399,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         feature_slugs = layout.execution_features
     if feature_slugs is None:
         feature_slugs = sorted({
-            path.name for path in (project_root / "features").iterdir()
+            delivery_key(project_root, path) for path in feature_roots(project_root)
             if path.is_dir() and (
                 (path / "planning/actualization.md").exists() or (path / "execution").exists()
                 or list(path.glob("slices/*/execution/tasks.md"))
@@ -1417,7 +1419,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
     scoped_tasks: dict[str, Task] = {}
     aliases: set[str] = set()
     for feature_slug in feature_slugs:
-        feature_dir = project_root / "features" / feature_map.get(feature_slug, feature_slug)
+        feature_dir = layout_feature_root(project_root, feature_map.get(feature_slug, feature_slug))
         if not feature_dir.exists():
             raise ValueError(f"{feature_dir}: функциональность не найдена; проверь actual-progress-features.json")
         stories = load_story_map(feature_dir)
@@ -1427,7 +1429,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         relative_map = actualization_path.relative_to(project_root).as_posix()
         for snapshot_path in approved_plans_path(project_root).glob("*.json"):
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            expected = snapshot.get("actualization_baseline", {}).get(relative_map)
+            expected = snapshot.get("actualization_baseline", {}).get(logical_path(project_root, relative_map))
             if expected is not None and baseline_rows(actualization_path) != expected:
                 raise ValueError(f"{actualization_path}: approved actualization baseline was modified")
         tasks = load_tasks(feature_dir)
@@ -1477,7 +1479,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
 
     outputs: dict[Path, str] = {}
     for feature_slug in feature_slugs:
-        feature_dir = project_root / "features" / feature_map.get(feature_slug, feature_slug)
+        feature_dir = layout_feature_root(project_root, feature_map.get(feature_slug, feature_slug))
         target = target_dir / f"FEATURE-{feature_slug}.puml"
         tasks = feature_tasks.get(feature_slug, {})
         schedules = {

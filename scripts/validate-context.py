@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from project_layout import feature_roots
 from pathlib import Path
 import sys
 
@@ -50,7 +51,7 @@ for item in required_research_templates:
 
 features_dir = ROOT / "features"
 if strict_features and features_dir.exists():
-    for feature_dir in sorted(p for p in features_dir.iterdir() if p.is_dir()):
+    for feature_dir in feature_roots(ROOT):
         req = feature_dir / "requirements.md"
         slices = feature_dir / "slices"
         context_summary = feature_dir / "context-summary.md"

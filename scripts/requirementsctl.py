@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from project_layout import (feature_root as layout_feature_root, exchange_binding,
+                            require_audit_binding, require_manifest_binding)
+
 import argparse
 import hashlib
 import importlib.util
@@ -59,7 +62,7 @@ def save_json(path: Path, value: dict[str, Any]) -> None:
 
 def feature_paths(project_value: str, feature: str) -> tuple[Path, Path, Path]:
     project = Path(project_value).expanduser().resolve()
-    feature_root = project / "features" / feature
+    feature_root = layout_feature_root(project, feature)
     if not feature_root.is_dir():
         raise ValueError(f"Функциональность не найдена: {feature_root}")
     return project, feature_root, feature_root / STATE_NAME
@@ -374,7 +377,7 @@ def begin_preparation_command(args: argparse.Namespace) -> int:
 
 
 def record_audit_command(args: argparse.Namespace) -> int:
-    _, feature_root, state_path = feature_paths(args.project, args.feature)
+    project, feature_root, state_path = feature_paths(args.project, args.feature)
     payload = load_or_create(feature_root, state_path, args.feature)
     if payload["revision_offer"]["state"] != "audit-required":
         raise ValueError("Аудит не был начат явной командой передачи требований")
@@ -407,6 +410,9 @@ def record_audit_command(args: argparse.Namespace) -> int:
         "stage": stage,
         "stage_sha256": stages.checksum(stage),
     }
+    binding = exchange_binding(project, args.feature)
+    if binding is not None:
+        payload["delivery_audit"]["delivery_binding"] = binding
     if blocked:
         payload["revision_offer"].update({
             "state": "audit-required",
@@ -426,7 +432,7 @@ def record_audit_command(args: argparse.Namespace) -> int:
 
 
 def confirm_audit_command(args: argparse.Namespace) -> int:
-    _, feature_root, state_path = feature_paths(args.project, args.feature)
+    project, feature_root, state_path = feature_paths(args.project, args.feature)
     payload = load_or_create(feature_root, state_path, args.feature)
     audit = payload["delivery_audit"]
     if payload["revision_offer"]["state"] != "awaiting-audit-confirmation":
@@ -437,6 +443,8 @@ def confirm_audit_command(args: argparse.Namespace) -> int:
     if audit["requirements_sha256"] != current_hash:
         raise ValueError("Требования изменились после аудита; выполните аудит заново")
     stages.require_audit_stage(payload, (feature_root / "requirements.md").read_text(encoding="utf-8"))
+    require_audit_binding(project, args.feature, audit)
+    stages.require_closed_sibling_stages(project, args.feature)
     audit.update({"state": "confirmed", "confirmed_at": now()})
     payload["requirements_sha256"] = current_hash
     payload["revision_offer"].update({
@@ -450,12 +458,14 @@ def confirm_audit_command(args: argparse.Namespace) -> int:
 
 
 def mark_published_command(args: argparse.Namespace) -> int:
-    _, feature_root, state_path = feature_paths(args.project, args.feature)
+    project, feature_root, state_path = feature_paths(args.project, args.feature)
     payload = load_or_create(feature_root, state_path, args.feature)
     current_hash = requirements_hash(feature_root)
     stage = stages.active_stage(payload, (feature_root / "requirements.md").read_text(encoding="utf-8"))
     manifest_path = Path(args.manifest).expanduser().resolve()
     manifest = load_json(manifest_path)
+    require_manifest_binding(project, args.feature, manifest)
+    require_audit_binding(project, args.feature, payload["delivery_audit"])
     publication = manifest.get("publication")
     if isinstance(publication, dict) and publication.get("state") != "merged":
         raise ValueError("Передача ожидает принятия PR/MR; повтори prepare после слияния")
@@ -555,6 +565,7 @@ def require_no_legacy_history(project: Path, feature: str, payload: dict[str, An
 
 def start_stage_command(args: argparse.Namespace) -> int:
     project, feature_root, state_path = feature_paths(args.project, args.feature)
+    stages.require_closed_sibling_stages(project, args.feature)
     payload = load_or_create(feature_root, state_path, args.feature)
     value = stages.registry(payload)
     if value["stages"] and value["stages"][-1]["state"] != "closed":
@@ -669,7 +680,7 @@ def validate_stage_closure(project: Path, feature: str, payload: dict[str, Any],
     record = next((item for item in records if item["entry"]["revision"] == closure["revision"]), None)
     if record is None or stages.record_entry(record)["stage_id"] != stage["stage_id"] or record["entry"]["sha256"] != closure["requirements_sha256"]:
         raise ValueError("Закрытие не совпадает с переданным этапом")
-    review = current_review(project / "features" / feature, feature, closure["return_id"])
+    review = current_review(layout_feature_root(project, feature), feature, closure["return_id"])
     if stages.checksum(review) != closure["review_sha256"]:
         raise ValueError("После закрытия изменилось подробное решение; требуется повторное решение аналитика")
     exchange_module().validate_result_review(project, feature, closure["return_id"], review, publication=record)
