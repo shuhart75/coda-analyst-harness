@@ -29,14 +29,18 @@ class LayoutSaveTests(unittest.TestCase):
         p = self.root / 'features/demo/requirements.md'
         p.parent.mkdir(parents=True)
         p.write_text('Original business requirements\n')
-        self.git('add', '--', 'features/demo/requirements.md')
+        self.handoff_source = 'features/demo/handoffs/initial-delivery/AGENTS.md'
+        handoff = self.root / self.handoff_source
+        handoff.parent.mkdir(parents=True)
+        handoff.write_text('Immutable historical receiver contract\n')
+        self.git('add', '--', 'features/demo/requirements.md', self.handoff_source)
         self.git('commit', '-qm', 'Initial content')
         self.head = self.git('rev-parse', 'HEAD')
         self.git('switch', '-qc', 'codex/layout')
         proposal = layoutctl.plan(self.root, {'demo': {'quarter': '2026-Q4'}})
         layoutctl.apply(self.root, proposal, True)
         install_commit_message_hook(self.root, ROOT / 'scripts/commit_message_policy.py')
-        self.paths = {'features/demo/requirements.md': None}
+        self.paths = {'features/demo/requirements.md': None, self.handoff_source: None}
         for p in self.root.rglob('*'):
             if p.is_file() and '.git' not in p.parts:
                 self.paths[p.relative_to(self.root).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
@@ -62,6 +66,24 @@ class LayoutSaveTests(unittest.TestCase):
             self.save()
         self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.head)
+
+    def test_changed_historical_receiver_instructions_refused(self):
+        target = next(p for p in self.paths if p.startswith('quarters/') and p.endswith('/AGENTS.md'))
+        (self.root / target).write_text('Changed receiver contract\n')
+        self.paths[target] = hashlib.sha256((self.root / target).read_bytes()).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'Local settings'):
+            self.save()
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
+
+    def test_new_receiver_instructions_are_not_historical(self):
+        target = 'quarters/2026-Q4/features/demo/deliveries/demo/handoffs/new/AGENTS.md'
+        p = self.root / target
+        p.parent.mkdir(parents=True)
+        p.write_text('New instructions\n')
+        self.paths[target] = hashlib.sha256(p.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'Local settings'):
+            self.save()
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
 
     def test_foreign_staged_content_preserved_and_save_refused(self):
         (self.root / 'unrelated.txt').write_text('Keep staged\n')
@@ -110,8 +132,9 @@ class LayoutSaveTests(unittest.TestCase):
         journal = json.loads(path.read_text());journal['moves'] = []
         path.write_text(json.dumps(journal))
         self.paths['migration-layout.json'] = hashlib.sha256(path.read_bytes()).hexdigest()
-        with self.assertRaisesRegex(ValueError, 'complete tracked'):
+        with self.assertRaisesRegex(ValueError, 'complete tracked|Local settings'):
             self.save()
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
 
     def test_failed_push_retains_commit_and_reports_retry(self):
         result = self.save(push=True)

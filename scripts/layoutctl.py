@@ -220,11 +220,20 @@ def save(project, expected_head, paths, message, push=False):
         raise ValueError("Exact reviewed paths including journal and delivery index are required")
     allowed = {"README.md", "LICENSE", "assets", "baseline", "context", "features", "planning", "quarters", "backlog", "releases", REGISTRY, "migration-layout.json", "migration-report.md", "baseline-review.md"}
     forbidden = {".git", ".workflow", ".workspace-state", ".codex", ".gigacode", ".gigaide", ".idea", ".vscode", "__pycache__", "AGENTS.md", "GIGACODE.md"}
+    # Historical receiver instructions are immutable handoff inputs, not local settings.
+    archived_instructions = set()
+    for move in journal.get("moves", []):
+        source, target = move["source"], move["target"]
+        if source in tracked and re.fullmatch(r"features/[^/]+/handoffs/[^/]+/AGENTS\.md", source):
+            original = subprocess.check_output(["git", "-C", str(project), "show", f"{expected_head}:{source}"])
+            checksum = hashlib.sha256(original).hexdigest()
+            if move["sha256"] == checksum and paths.get(source, "missing") is None and paths.get(target) == checksum:
+                archived_instructions.update((source, target))
     for name, checksum in paths.items():
         if not isinstance(name, str) or not name or Path(name).as_posix() != name:
             raise ValueError("Canonical relative file paths are required")
         parts = Path(name).parts
-        if parts[0] not in allowed or any(p in forbidden or p.endswith((".orig", ".iml")) for p in parts):
+        if parts[0] not in allowed or any((p in forbidden and not (p == "AGENTS.md" and name in archived_instructions)) or p.endswith((".orig", ".iml")) for p in parts):
             raise ValueError(f"Local settings or non-analytical path cannot be saved: {name}")
         target = safe_path(project, name)
         if checksum is None:
