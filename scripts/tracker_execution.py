@@ -1,5 +1,5 @@
 from __future__ import annotations
-from project_layout import feature_root as layout_feature_root, artifact_glob, logical_path, delivery_key
+from project_layout import feature_root as layout_feature_root, artifact_glob, logical_path, delivery_key, layout as project_layout, delivery_selection
 
 import hashlib
 from decimal import Decimal
@@ -79,6 +79,7 @@ def read_key(value: str, role: str) -> tuple[str | None, bool]:
 def preview_execution(
     project: Path, quarter: str | None, feature: str | None, result: dict,
     reviewed: dict[str, str] | None = None, expected_head: str | None = None,
+    deliveries: list[str] | None = None,
 ) -> dict:
     project = project.expanduser().resolve()
     if Path(git(project, "rev-parse", "--show-toplevel").strip()).resolve() != project:
@@ -88,11 +89,14 @@ def preview_execution(
     if reviewed and before["head"] != expected_head:
         raise ValueError("HEAD изменился после проверки реестров")
     def selection():
-        if result.get("scope", {}).get("kind") == "release" and not quarter and not feature:
+        if result.get("scope", {}).get("kind") == "release" and not quarter and not feature and deliveries is None:
             from tracker_release import release_owners
             return dict.fromkeys(release_owners(project, result)["selected_features"])
-        return select_features(project, quarter, feature)
+        return select_features(project, quarter, feature, deliveries)
     selected = selection()
+    candidates = selected.copy()
+    index_path = project / 'delivery-index.json'
+    index_sha = hashlib.sha256(index_path.read_bytes()).hexdigest() if index_path.exists() else None
     overlay = import_module("sync-actual-progress-overlay")
     paths = registry_paths(project)
     sources, rows, warnings, blockers = {}, [], [], []
@@ -155,6 +159,11 @@ def preview_execution(
             }
             proposed_rows.append(reference)
         rows.extend(proposed_rows)
+
+    if index_sha and deliveries is None and not feature and result.get('scope', {}).get('kind') != 'release':
+        owners = {row['feature'] for row in rows for issue in [*result['issues'], *result['excluded']]
+                  if any(issue.get(field) and row.get(field) == issue[field] for field in ('jira_key', 'sbertrek_key'))}
+        selected = {key: value for key, value in selected.items() if key in owners}
 
     items = []
     for issue in [*result["issues"], *result["excluded"]]:
@@ -302,7 +311,10 @@ def preview_execution(
          "next_action": "verify-absence-or-access", "deletion_allowed": False}
         for key in scope.get("ids", []) if scope.get("kind") == "tasks" and key not in returned
     ]
-    if selection() != selected:
+    if index_sha and application_scope is None:
+        application_scope = {'kind': 'deliveries-only', 'delivery_keys': list(selected),
+                             'protected_rows': [row for row in rows if row['feature'] not in selected]}
+    if selection() != candidates or (index_sha and hashlib.sha256(index_path.read_bytes()).hexdigest() != index_sha):
         raise ValueError("Область изменилась во время проверки; повтори execution-preview")
     if repository_state(project) != before or registry_paths(project) != paths or any(
         not (project / relative).is_file()
@@ -314,6 +326,8 @@ def preview_execution(
         "status": "tracker-execution-preview",
         "project_root": str(project), "head": before["head"], "quarter": quarter,
         "selected_features": list(selected), "items": items,
+        "selected_deliveries": list(delivery_selection(project, list(selected)).values()) if index_sha and selected else [],
+        "delivery_index_sha256": index_sha,
         "application_scope": application_scope,
         "feature_qa_proposals": qa_proposals, "missing_task_candidates": missing_candidates,
         "registry_sha256": sources, "reviewed_registry_sha256": reviewed,

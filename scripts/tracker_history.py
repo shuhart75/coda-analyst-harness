@@ -411,13 +411,14 @@ def review_history(args) -> int:
         from tracker_release_evidence import review_membership
         result = review_membership(args.run_id, result, manifest.get("release_membership"))
     preview = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
-                                manifest.get("reviewed_registries", {}), manifest.get("expected_head"))
+                                manifest.get("reviewed_registries", {}), manifest.get("expected_head"),
+                                manifest.get('deliveries'))
     if not preview["ownership_ready"]:
         raise ValueError("Resolve execution-preview ownership blockers before history review")
     histories, evidence, limitations, undated_history = {}, [], [], []
     incomplete_fields = []
     application_scope = preview.get("application_scope")
-    member_keys = set(application_scope["member_keys"]) if application_scope else None
+    member_keys = set(application_scope["member_keys"]) if application_scope and application_scope['kind'] == 'release-members-only' else None
     reference_history = {f"{item.get(manifest['provider'] + '_key')}/{target['role']}"
                          for item in preview['items'] if item.get('proposed_action') == 'reference-only'
                          for target in item['targets'] if target['role'] in {'BE', 'FE'}}
@@ -520,7 +521,7 @@ def review_history(args) -> int:
             else:
                 review["qa_groups"] = []
                 for group in partition["groups"]:
-                    if application_scope and group["release"] != application_scope["release"]:
+                    if member_keys is not None and group["release"] != application_scope["release"]:
                         review["qa_groups"].append({**group, "qa": None, "limitations": [],
                                                     "application_mode": "partition-only"})
                         continue
@@ -575,6 +576,8 @@ def review_history(args) -> int:
               "comparison": comparison,
               "project_root": str(project), "qa_application": qa_application,
               "application_scope": application_scope,
+              "selected_deliveries": preview['selected_deliveries'],
+              "delivery_index_sha256": preview['delivery_index_sha256'],
               "date_proposals_allowed": not pending_history,
               "fact_priority": ["analyst-confirmation", "assignment-and-status-history", "current-state-only"],
               "history_processed": bool(histories), "adapter": "source-mapped-history-v2",

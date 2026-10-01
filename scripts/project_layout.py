@@ -56,6 +56,32 @@ def quarter_root(project: Path, quarter: str) -> Path:
     return project / ("quarters" if layout(project) else "planning") / quarter
 
 
+def delivery_selection(project: Path, keys: list[str] | None = None, quarter: str | None = None) -> dict[str, dict]:
+    index = layout(project)
+    if index is None:
+        raise ValueError('Explicit deliveries require delivery-index.json')
+    if keys is not None and (not isinstance(keys, list) or not keys
+                             or any(not isinstance(key, str) for key in keys) or len(set(keys)) != len(keys)):
+        raise ValueError('Select a nonempty list of distinct delivery keys')
+    selected = keys if keys is not None else [key for key, entry in index['deliveries'].items()
+                                              if entry.get('quarter') == quarter]
+    result = {}
+    for key in selected:
+        binding = exchange_binding(project, key)
+        if quarter and binding['quarter'] != quarter:
+            raise ValueError(f"Delivery {key} belongs to {binding['quarter']}, not {quarter}")
+        result[key] = binding
+    return result
+
+
+def delivery_title(project: Path, key: str, title: str) -> str:
+    if layout(project) is None:
+        return title
+    binding = exchange_binding(project, key)
+    suffix = f" — поставка {binding['delivery_id']} ({binding['quarter']})"
+    return title if title.endswith(suffix) else title + suffix
+
+
 def feature_roots(project: Path) -> list[Path]:
     index = layout(project)
     if index is None:

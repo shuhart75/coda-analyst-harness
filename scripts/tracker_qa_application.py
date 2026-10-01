@@ -96,6 +96,9 @@ def check_qa_application(args) -> int:
     if result.get('scope', {}).get('kind') == 'release' and not review.get('application_scope'):
         raise ValueError('Repeat history-review to verify release-only application scope')
     project = Path(args.project_root).resolve()
+    if review.get('delivery_index_sha256'):
+        if hashlib.sha256((project / 'delivery-index.json').read_bytes()).hexdigest() != review['delivery_index_sha256']:
+            raise ValueError('Delivery index changed; repeat history-review before application')
     if str(project) != review.get('project_root') or git(project, 'rev-parse', 'HEAD').strip() != review['head']:
         raise ValueError('Project or HEAD differs from the reviewed application')
     updates = review.get('qa_application', [])

@@ -1565,7 +1565,7 @@ def scope_preview_command(args: argparse.Namespace) -> int:
         raise ValueError("Jira отключена в tracker-config.json")
     from tracker_scope import preview_scope
 
-    payload = preview_scope(Path(args.project_root), args.provider, args.quarter, args.feature)
+    payload = preview_scope(Path(args.project_root), args.provider, args.quarter, args.feature, args.delivery)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
@@ -1864,7 +1864,7 @@ def execution_preview_command(args: argparse.Namespace) -> int:
     if not reviewed and (args.analyst_confirmed or args.expected_head):
         raise ValueError("Подтверждение требует точных --reviewed-registry")
     payload = preview_execution(
-        Path(args.project_root), args.quarter, args.feature, result, reviewed, args.expected_head,
+        Path(args.project_root), args.quarter, args.feature, result, reviewed, args.expected_head, args.delivery,
     )
     payload["run_id"] = args.run_id
     payload["reconciled_sha256"] = completion["reconciled_sha256"]
@@ -1894,12 +1894,14 @@ def parser() -> argparse.ArgumentParser:
     preview.add_argument("--provider", choices=PROVIDERS, required=True)
     preview.add_argument("--quarter")
     preview.add_argument("--feature")
+    preview.add_argument('--delivery', action='append', help='Exact delivery key; repeat for several deliveries')
     preview.set_defaults(handler=scope_preview_command)
     execution = commands.add_parser("execution-preview")
     execution.add_argument("--run-id", required=True)
     execution.add_argument("--project-root", required=True)
     execution.add_argument("--quarter")
     execution.add_argument("--feature")
+    execution.add_argument('--delivery', action='append', help='Exact delivery key; repeat for several deliveries')
     execution.add_argument("--reviewed-registry", nargs=2, action="append", default=[], metavar=("PATH", "SHA256"))
     execution.add_argument("--expected-head")
     execution.add_argument("--analyst-confirmed", action="store_true")
@@ -1927,7 +1929,7 @@ def parser() -> argparse.ArgumentParser:
     from tracker_safety import application_preflight_command, identity_lookup_command
     preflight = commands.add_parser("application-preflight")
     preflight.add_argument("--project-root", required=True)
-    preflight.add_argument("--feature", required=True)
+    preflight.add_argument("--feature", "--delivery", dest='feature', required=True)
     preflight.set_defaults(handler=application_preflight_command)
     identity = commands.add_parser("identity-lookup")
     identity.add_argument("--source-provider", choices=PROVIDERS, required=True)

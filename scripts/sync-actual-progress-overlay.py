@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from project_layout import feature_root as layout_feature_root, quarter_root, feature_roots, logical_path, delivery_key
+from project_layout import feature_root as layout_feature_root, quarter_root, feature_roots, logical_path, delivery_key, layout as project_layout, delivery_selection, delivery_title
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -1398,9 +1398,10 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
     if layout and feature_slugs is None:
         feature_slugs = layout.execution_features
     if feature_slugs is None:
+        quarter_deliveries = delivery_selection(project_root, quarter=quarter_id) if project_layout(project_root) else None
         feature_slugs = sorted({
             delivery_key(project_root, path) for path in feature_roots(project_root)
-            if path.is_dir() and (
+            if (quarter_deliveries is None or delivery_key(project_root, path) in quarter_deliveries) and path.is_dir() and (
                 (path / "planning/actualization.md").exists() or (path / "execution").exists()
                 or list(path.glob("slices/*/execution/tasks.md"))
             )
@@ -1413,6 +1414,8 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
     if len(set(sources)) != len(sources):
         raise ValueError("Одна функциональность назначена нескольким файлам Ганта")
     feature_slugs = [slug for slug in feature_slugs if slug not in scope.exclusions and slug not in scope.preserved]
+    if project_layout(project_root) and feature_slugs:
+        delivery_selection(project_root, [feature_map.get(slug, slug) for slug in feature_slugs], quarter_id)
     closed_days = load_closed_days(project_root, quarter_id)
     team_resources = load_team_resources(project_root)
     feature_tasks: dict[str, dict[str, Task]] = {}
@@ -1490,8 +1493,10 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         if any(task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES and not completion_bound_only(task) and not completion_finish_only(task)
                and task_id not in schedules for task_id, task in tasks.items()):
             raise ValueError(f"{feature_dir}: не для каждой задачи определена дата начала; Гант сохранён")
+        title = delivery_title(project_root, feature_map.get(feature_slug, feature_slug),
+                               layout.titles[feature_slug] if layout else feature_slug)
         content = render_feature(feature_dir, feature_slug, closed_days, tasks, schedules, scope.role_baselines.get(feature_slug),
-                                 layout.titles[feature_slug] if layout else None)
+                                 title if project_layout(project_root) or layout else None)
         if content is None:
             raise ValueError(f"{feature_dir}: источники изменились во время генерации")
         outputs[target] = content
