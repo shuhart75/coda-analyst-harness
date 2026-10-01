@@ -199,6 +199,8 @@ continuing; never downgrade state to bypass stage gates.
 
 ## Gantt rules
 
+- Whenever creating or changing any Gantt diagram (including quarter-plan, commander-plan and actual-progress), generate or refresh its sibling `<name>-confluence.puml` as a standalone expansion without `!include`. Verify exact parity with the source expansion and save both in the same reviewed change. This also applies when only includes or preambles change; never regenerate approved plans or other views to obtain an export. Confluence exports themselves do not require another export. See `core/tooling-policy.md`.
+
 - `quarter-plan` and `commander-plan` are built from planning stories.
 - Planning story estimates must be stored in `features/<feature>/planning/estimates.md` with explicit `AN / FE / BE / QA` role splits and an agreed total.
 - A feature is the quarter-level outcome. Planning stories are role workstreams, with at most one story per `AN`, `BE`, `FE`, and `QA`.

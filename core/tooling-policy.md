@@ -23,9 +23,31 @@ CI keeps the complete suite mandatory. Do not repeat the full suite after every
 small edit; never drop data-loss, recovery or ownership-boundary checks to save time.
 
 After structural or canonical changes, run available validators.
-After gantt-related changes, regenerate the gantt. For actual-progress, the regeneration must also refresh the standalone Confluence export without includes.
+After gantt-related changes, regenerate the affected Gantt within its mode boundary and refresh its standalone Confluence export without includes. This is mandatory for every Gantt view, including quarter-plan, commander-plan and actual-progress; follow the export contract below.
 After release promotion, validate both structure and links again.
 Before broad workflow work, run `harnessctl doctor`. Before approving a plan, run workflow, planning, link, context, and trace checks.
+
+## Обязательная Confluence-версия любого Ганта
+
+При создании или изменении любой диаграммы Ганта, включая `quarter-plan`,
+`commander-plan`, `actual-progress` и другие именованные представления,
+обязательно создавай или обновляй соседний файл `<имя>-confluence.puml`.
+Это самостоятельный PlantUML-документ без `!include`, полученный раскрытием
+исходной диаграммы; он сохраняет тот же состав, даты, ресурсы и оформление.
+Изменение подключаемого include или preamble также требует обновления экспортов
+всех диаграмм, которые его используют. Производный файл `*-confluence.puml`
+не требует ещё одной Confluence-версии.
+
+Используй `scripts/expand-plantuml-includes.py <input.puml> <output.puml>`
+после завершения генерации исходника. Если штатный генератор уже создал экспорт,
+проверь его точное совпадение с раскрытым исходником. Вручную экспорт не редактируй.
+Отсутствие экспорта, оставшийся `!include` или несовпадение содержимого блокирует
+завершение и сохранение изменения. Исходник, изменённые подключения и все затронутые
+экспорты входят в один проверенный набор и один коммит при разрешённом сохранении.
+
+Генерация экспорта не расширяет границы режима: не запускай полный генератор ради
+экспорта, если это перепишет утверждённые планы или фактическое исполнение другого
+режима. Раскрой только нужные исходные диаграммы; утверждённые планы не меняй.
 
 ## Editing discipline
 
@@ -41,7 +63,7 @@ Before broad workflow work, run `harnessctl doctor`. Before approving a plan, ru
 - After requirement edits, use targeted text search or an equivalent local find-in-files sweep for superseded terms such as old endpoints, field names, role names, status values and UX labels.
 - Keep the sweep proportional: start with the current feature and explicitly affected artifacts; expand to neighboring features or baseline only when the change is cross-feature or domain-wide.
 - If the project provides `scripts/find-stale-terms.py`, use it as the fast default helper for local tail cleanup; otherwise use the platform's normal text search.
-- If the user asks for a PlantUML file "without includes" or Confluence-ready code, expand `!include` directives with `scripts/expand-plantuml-includes.py` when available instead of editing generated gantt sources by hand.
+- Confluence export is mandatory for every created or changed Gantt without a separate analyst request; use `scripts/expand-plantuml-includes.py` and the export contract above instead of editing generated exports by hand.
 - Use `scripts/validate-context.py` after adding or materially changing context, research, handoff, implementation-plan or test-plan conventions.
 - Use `scripts/validate-language.py` after changing requirements. Treat avoidable anglicisms as a completion blocker, not as optional editorial cleanup.
 
