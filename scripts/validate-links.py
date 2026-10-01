@@ -26,6 +26,10 @@ for md in root.rglob("*.md"):
             if not Path(clean).is_absolute() and not target.is_relative_to(snapshot):
                 original = root / "baseline" / "current" / Path(*relative[depth:])
                 target = (original.parent / clean).resolve()
+                # This report moved out of the exchange-forbidden project root.
+                # Only immutable snapshots may retain its historical root path.
+                if not target.exists() and target == (root / "baseline-review.md").resolve():
+                    target = root / "releases/baseline-reconciliation/baseline-review.md"
         if not target.exists():
             missing.append((md, match))
 if missing:

@@ -110,6 +110,17 @@ class LayoutSaveTests(unittest.TestCase):
                 self.save(paths={**self.paths, name: hashlib.sha256(b'{}').hexdigest()})
         self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
 
+    def test_reports_require_registered_release_directory(self):
+        for name in ('baseline-review.md', 'migration-report.md'):
+            (self.root / name).write_text('# Report\n')
+            with self.assertRaisesRegex(ValueError, 'non-analytical path'):
+                self.save(paths={**self.paths, name: hashlib.sha256(b'# Report\n').hexdigest()})
+        report = self.root / 'releases/layout-migration/migration-report.md'
+        report.parent.mkdir(parents=True)
+        report.write_text('# Report\n')
+        self.assertEqual(self.save(paths={**self.paths, report.relative_to(self.root).as_posix():
+                                         hashlib.sha256(report.read_bytes()).hexdigest()})['status'], 'committed')
+
     def test_missing_managed_hook_and_invalid_message_refused(self):
         hook = self.root / '.git/hooks/commit-msg'
         hook.write_text('#!/bin/sh\nexit 0\n')
