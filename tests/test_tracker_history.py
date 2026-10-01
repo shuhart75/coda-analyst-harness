@@ -153,6 +153,107 @@ class AdaptiveHistoryTests(unittest.TestCase):
             combine_history_parts([(history, limits, {'status'}),
                                    (replace(history, current_status='todo'), limits, {'assignment'})])
 
+    def test_actual_mcp_filter_attributes_does_not_prove_complete_history(self):
+        raw = {'key': 'JIRA-1', 'status': {'name': 'todo'}, 'assignee': {'key': None},
+               'changelogs': [], 'start': 0, 'total': 0}
+        entry = self.manifest()['responses'][0]
+        entry['provider'] = 'sbertrek'
+        entry['mapping'] = {**JIRA_MAPPING, 'assignment_field': 'assigned_to',
+                            'start': '/start', 'total': '/total'}
+        for name in ('filter_attributes', 'filterAttributes', 'filter-attributes'):
+            with self.subTest(name=name):
+                entry['call']['arguments'] = {'key': 'JIRA-1', name: ['status']}
+                history, limits = decode_history(raw, entry, datetime.fromisoformat(entry['call']['captured_at']))
+                self.assertFalse(history.complete)
+                self.assertIn('history-field-coverage-not-proven', limits)
+                result = calculate_task(history, {}, StatusRules(not_started=frozenset({'todo'})))
+                self.assertEqual(result['development']['state'], 'unknown')
+        entry['mapping']['request_fields'] = '/filter_attributes'
+        for selected, expected in ((['status'], {'status'}), (['assigned_to'], {'assignment'}),
+                                   (['developer'], set()), (['assigned_to', 'status'], {'assignment', 'status'})):
+            entry['call']['arguments'] = {'filter_attributes': selected}
+            self.assertEqual(history_field_coverage(entry), expected)
+        entry['call']['arguments']['filter_author'] = 'someone'
+        self.assertEqual(history_field_coverage(entry), set())
+        entry['mapping']['request_fields'] = '/filter/fields'
+        entry['call']['arguments'] = {'filter': {'fields': ['assigned_to', 'status'], 'author': 'someone'}}
+        self.assertEqual(history_field_coverage(entry), set())
+        del entry['call']['arguments']['filter']['author']
+        self.assertEqual(history_field_coverage(entry), {'assignment', 'status'})
+
+    def test_snapshot_selects_same_assignment_relation_as_history(self):
+        from test_tracker_history_text import text_mapping
+
+        source = ("History (1 entries, page 0, has_next: False)\n\n"
+                  "- **external_id='actor'** [2026-08-01T12:00:00+00:00] CREATE Исполнитель (`assigned_to`) "
+                  "→ `{'login': 'dev'}`\n")
+        mapping = text_mapping()
+        mapping.update(assignment_from='/before/login', assignment_to='/after/login')
+        entry = {'provider': 'sbertrek', 'key': 'TASK-1', 'role': 'FE', 'mapping': mapping,
+                 'call': {'arguments': {'key': 'TASK-1'}},
+                 'snapshot': {'mapping': {'key': '/0/key', 'status': '/0/status', 'assignee': '/0/assignee'}}}
+        snapshot = [{'key': 'TASK-1', 'status': 'created', 'assignee': None,
+                     'attributes': [{'code': 'developer', 'value': {'externalId': 'other'}},
+                                    {'code': 'assigned_to', 'value': {'externalId': 'dev'}}]}]
+        original = copy.deepcopy(snapshot)
+        observed = datetime.fromisoformat('2026-08-10T12:00:00+00:00')
+        for path in ('/0/assignee', '/0/attributes/0/value/externalId'):
+            entry['snapshot']['mapping']['assignee'] = path
+            with self.assertRaisesRegex(ValueError, 'does not select the history assignment field'):
+                decode_history(source, entry, observed, snapshot)
+        entry['snapshot']['mapping']['assignee'] = '/0/attributes/1/value/externalId'
+        history, limits = decode_history(source, entry, observed, snapshot)
+        self.assertEqual(limits, [])
+        result = calculate_task(history, {'dev': 'BE'}, StatusRules(not_started=frozenset({'created'})))
+        self.assertEqual(result['development']['started_at'], '2026-08-01T12:00:00+00:00')
+        self.assertEqual(result['development']['state'], 'in-progress')
+        self.assertEqual(snapshot, original)
+        entry['snapshot']['mapping'] = {name: '/output' + value
+                                        for name, value in entry['snapshot']['mapping'].items()}
+        wrapped, _ = decode_history(source, entry, observed, {'output': json.dumps(snapshot)})
+        self.assertEqual(wrapped, history)
+        entry['snapshot']['mapping'] = {name: value.removeprefix('/output')
+                                        for name, value in entry['snapshot']['mapping'].items()}
+        snapshot[0]['attributes'][1]['value'] = None
+        entry['snapshot']['mapping']['assignee'] = '/0/attributes/1/value'
+        history, _ = decode_history(source, entry, observed, snapshot)
+        self.assertIsNone(history.current_assignee)
+
+    def test_modified_receipts_cannot_override_review_and_new_capture_recovers_same_run(self):
+        run_id = self.reconciled()
+        manifest = self.text_manifest()
+        entry = manifest['responses'][0]
+        path = self.write(self.state / 'original-manifest.json', manifest)
+        args = ('history-review', '--run-id', run_id, '--project-root', str(self.project), '--manifest')
+        review = self.run_tool(self.state, *args, str(path))
+        review_path = Path(review['review_file'])
+        saved_review = review_path.read_bytes()
+        root = review_path.parent.parent
+        raw = Path(entry['response_file'])
+        raw.write_bytes(raw.read_bytes() + b'\n')
+        old_sha = entry['sha256']
+        entry['sha256'] = hashlib.sha256(raw.read_bytes()).hexdigest()
+        for receipt in (root / 'history-sources').glob('*.json'):
+            document = json.loads(receipt.read_text())
+            if document['sha256'] == old_sha:
+                document['sha256'] = entry['sha256']
+                self.write(receipt, document)
+        new_manifest = self.write(self.state / 'retry-manifest.json', manifest)
+        failure = self.run_tool(self.state, *args, str(new_manifest), expected=2)
+        self.assertIn('do not edit source receipts', failure['error'])
+        replacement = self.state / 'new-capture.json'
+        replacement.write_bytes(raw.read_bytes())
+        entry['response_file'] = str(replacement)
+        self.write(new_manifest, manifest)
+        failure = self.run_tool(self.state, *args, str(new_manifest), expected=2)
+        self.assertIn('actual new call', failure['error'])
+        entry['call']['captured_at'] = '2026-08-10T12:01:00+03:00'
+        self.write(new_manifest, manifest)
+        recovered = self.run_tool(self.state, *args, str(new_manifest))
+        self.assertEqual(recovered['status'], review['status'])
+        self.assertEqual(Path(recovered['review_file']).parent, review_path.parent)
+        self.assertEqual(review_path.read_bytes(), saved_review)
+
     def test_flexible_tool_selection_keeps_scope_and_resumes_same_run(self):
         run = self.begin()
         self.assertEqual(run['next_action']['type'], 'collect-tracker-data')

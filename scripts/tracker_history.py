@@ -100,22 +100,62 @@ JIRA_MAPPING = {
 def history_field_coverage(entry: dict) -> set[str]:
     mapping = entry.get('mapping', JIRA_MAPPING if entry['provider'] == 'jira' else {})
     arguments = entry.get('call', {}).get('arguments', {})
+    selected_path = mapping.get('request_fields')
+    coverage = {'assignment', 'status'}
     if 'request_fields' in mapping:
         selected = pointer(arguments, mapping['request_fields'])
         selected = [selected] if isinstance(selected, str) else selected
         if not isinstance(selected, list) or any(not isinstance(item, str) for item in selected):
             raise ValueError('request_fields must select actual field names from call arguments')
-        return {kind for kind in ('assignment', 'status') if mapping.get(kind + '_field') in selected}
+        coverage = {kind for kind in ('assignment', 'status') if mapping.get(kind + '_field') in selected}
 
-    def restricted(value):
+    def restricted(value, path=''):
+        if path == selected_path:
+            return False
         if isinstance(value, dict):
-            return any((key.casefold().replace('_', '') in
-                        {'filter', 'filters', 'field', 'fields', 'fieldname', 'fieldnames'}
-                        and item not in (None, '', [], {})) or restricted(item)
-                       for key, item in value.items())
-        return isinstance(value, list) and any(restricted(item) for item in value)
+            for key, item in value.items():
+                child_path = path + '/' + key.replace('~', '~0').replace('/', '~1')
+                if child_path == selected_path:
+                    continue
+                normalized = ''.join(character for character in key.casefold() if character.isalnum())
+                selector = any(word in normalized for word in ('filter', 'field', 'attribute'))
+                if selector and item not in (None, '', [], {}):
+                    if selected_path is None or not selected_path.startswith(child_path + '/'):
+                        return True
+                    if isinstance(item, dict) and len(item) != 1:
+                        return True
+                if restricted(item, child_path):
+                    return True
+        return isinstance(value, list) and any(restricted(item, path + '/' + str(index))
+                                              for index, item in enumerate(value))
 
-    return set() if restricted(arguments) else {'assignment', 'status'}
+    return set() if restricted(arguments) else coverage
+
+
+def validate_snapshot_assignment(payload, snapshot_mapping: dict, history_mapping: dict, provider: str) -> None:
+    if provider != 'sbertrek':
+        return
+    key_path = snapshot_mapping.get('key', '')
+    card_path = key_path.rsplit('/', 1)[0]
+    card = pointer(payload, card_path)
+    if isinstance(card, str):
+        card = json.loads(card)
+    attributes = card.get('attributes') if isinstance(card, dict) else None
+    if not isinstance(attributes, list):
+        return
+    relation = history_mapping.get('assignment_field')
+    candidates = [(index, attribute) for index, attribute in enumerate(attributes)
+                  if isinstance(attribute, dict) and attribute.get('code') == relation]
+    if not relation:
+        raise ValueError('Snapshot assignment relation is required: set assignment_field from the selected history field')
+    if len(candidates) > 1:
+        raise ValueError('Snapshot contains ambiguous assignment attributes')
+    if not candidates:
+        raise ValueError('Selected assignment field is absent from snapshot attributes; collect a complete snapshot')
+    value_path = card_path + '/attributes/' + str(candidates[0][0]) + '/value'
+    assignee_path = snapshot_mapping.get('assignee', '')
+    if assignee_path != value_path and not assignee_path.startswith(value_path + '/'):
+        raise ValueError('Snapshot assignee mapping does not select the history assignment field: use ' + value_path)
 
 
 def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, check_fields=True) -> tuple[TaskHistory, list[str]]:
@@ -247,6 +287,7 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, c
     if "status" not in snapshot_mapping:
         raise ValueError("A current snapshot status is required; use a separate snapshot response when needed")
     status = pointer(snapshot_payload, snapshot_mapping["status"])
+    validate_snapshot_assignment(snapshot_payload, snapshot_mapping, entry.get('mapping', {}), entry['provider'])
     try:
         assignee = pointer(snapshot_payload, snapshot_mapping["assignee"])
     except (KeyError, ValueError):
@@ -319,6 +360,20 @@ def pin_history_response(run_id: str, path: Path, raw: bytes, provenance: dict |
     from tracker_workflow import run_root, digest_bytes, digest_object, load_json, save_json
 
     root = run_root(run_id) / "history-sources"
+    recovery = ('Previously reviewed raw history changed; do not edit source receipts or old reviews. '
+                'Capture a new verbatim response at a new path with its actual new call, '
+                'then submit a new manifest in the same run; preserve earlier evidence and decisions')
+    for review_path in sorted((run_root(run_id) / 'history').glob('*.json')):
+        review = load_json(review_path)
+        if digest_object(review) != review_path.stem:
+            raise ValueError('Previously saved history review checksum changed: ' + str(review_path))
+        for evidence in review.get('evidence', []):
+            for source in evidence.get('sources', []):
+                same_path = source.get('path') == str(path.resolve())
+                same_call = (provenance is not None and source.get('call') == provenance.get('call')
+                             and evidence.get('key') == provenance.get('key'))
+                if (same_path or same_call) and source.get('sha256') != digest_bytes(raw):
+                    raise ValueError(recovery)
     receipts = [(root / (digest_object(str(path.resolve())) + ".json"),
                  {"path": str(path.resolve()), "sha256": digest_bytes(raw)})]
     if provenance is not None:
@@ -326,7 +381,7 @@ def pin_history_response(run_id: str, path: Path, raw: bytes, provenance: dict |
                          {"provenance": provenance, "sha256": digest_bytes(raw)}))
     for receipt, expected in receipts:
         if receipt.exists() and load_json(receipt) != expected:
-            raise ValueError("Previously reviewed raw history changed; keep the original response and record analyst decisions separately")
+            raise ValueError(recovery)
     for receipt, expected in receipts:
         if not receipt.exists():
             save_json(receipt, expected)
