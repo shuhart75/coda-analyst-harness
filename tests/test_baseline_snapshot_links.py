@@ -32,6 +32,13 @@ class SnapshotLinksTest(unittest.TestCase):
         })
         self.assertEqual(result.returncode, 1)
 
+    def test_relocated_review_resolves_only_in_immutable_snapshot(self):
+        files = {'releases/baseline-reconciliation/baseline-review.md': '# Evidence',
+                 'baseline/versions/before-hash/VERSION.md': '[Evidence](../../baseline-review.md)'}
+        self.assertEqual(self.check_tree(files).returncode, 0)
+        files['features/demo/README.md'] = '[Stale](../../baseline-review.md)'
+        self.assertEqual(self.check_tree(files).returncode, 1)
+
     def test_broken_current_and_missing_external_links_still_fail(self):
         for name, link in [
             ('baseline/current/README.md', 'missing.md'),

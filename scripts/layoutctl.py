@@ -236,7 +236,7 @@ def save(project, expected_head, paths, message, push=False):
         raise ValueError("Migration already saved; use ordinary branch push to retry publication")
     if not isinstance(paths, dict) or not paths or not {"migration-layout.json", REGISTRY}.issubset(paths):
         raise ValueError("Exact reviewed paths including journal and delivery index are required")
-    allowed = {"README.md", "LICENSE", "assets", "baseline", "context", "features", "planning", "quarters", "backlog", "releases", REGISTRY, "migration-layout.json", "migration-report.md", "baseline-review.md"}
+    allowed = {"README.md", "LICENSE", "assets", "baseline", "context", "features", "planning", "quarters", "backlog", "releases", REGISTRY, "migration-layout.json"}
     forbidden = {".git", ".workflow", ".workspace-state", ".codex", ".gigacode", ".gigaide", ".idea", ".vscode", "__pycache__", "AGENTS.md", "GIGACODE.md"}
     # Historical receiver instructions are immutable handoff inputs, not local settings.
     archived_instructions = set()
