@@ -379,6 +379,71 @@ class SourceImportTests(unittest.TestCase):
         next_request = self.sync()["analytics_exchange"]["source_import"]
         self.assertNotEqual(next_request["request_branch"], first["request_branch"])
 
+    def test_whitespace_block_reports_exact_candidate_without_mutating_main(self) -> None:
+        before = self.git(self.documents, "rev-parse", "HEAD")
+        self.change_source("Incoming with trailing spaces  \n")
+        command = ("python3", str(fixture.ROOT / "scripts/repository-exchange.py"), "--root", str(self.workspace), "sync")
+        result = fixture.run(*command, env=self.environment)
+        self.assertNotEqual(result.returncode, 0)
+        report = json.loads(result.stdout.removeprefix('ERROR: ').strip())
+        self.assertEqual(report['reason'], 'source-import-whitespace-errors')
+        self.assertIn('context/shared.txt:1: trailing whitespace.', report['detail'])
+        checkout = Path(report['import_checkout'])
+        self.assertEqual(report['candidate_commit'], self.git(checkout, 'rev-parse', 'HEAD'))
+        self.assertEqual(report['source_commit'], self.git(self.source, 'rev-parse', 'HEAD'))
+        state_path = self.workspace / '.workspace-state/source-import.json'
+        saved_state = state_path.read_bytes()
+        self.assertEqual(self.git(self.documents, 'rev-parse', 'HEAD'), before)
+        self.assertEqual(self.git(self.remote, 'rev-parse', 'main'), before)
+        self.assertEqual(self.git(self.remote, 'for-each-ref', '--format=%(refname)', 'refs/heads/source/source-import/'), '')
+        retry = fixture.run(*command, env=self.environment)
+        self.assertNotEqual(retry.returncode, 0)
+        self.assertEqual(json.loads(retry.stdout.removeprefix('ERROR: ').strip())['candidate_commit'], report['candidate_commit'])
+        self.assertEqual(state_path.read_bytes(), saved_state)
+
+    def prepare_contract_move(self, extra: str = "") -> tuple[str, str, str]:
+        old = 'features/demo/requirements.md'
+        target = 'quarters/2026-Q4/features/demo/deliveries/initial/requirements.md'
+        original = '# Historical contract\n\nExisting Markdown break  \n'
+        path = self.source / old
+        path.parent.mkdir(parents=True)
+        path.write_text(original)
+        self.git(self.source, 'add', '--', old)
+        self.git(self.source, 'commit', '-m', 'Record historical contract')
+        self.git(self.source, 'push', 'origin', 'main')
+        self.git(self.documents, 'fetch', str(self.source), 'main')
+        self.git(self.documents, 'merge', '--ff-only', 'FETCH_HEAD')
+        self.git(self.documents, 'push', 'origin', 'main')
+        accepted = self.git(self.documents, 'rev-parse', 'HEAD')
+        moved = self.source / target
+        moved.parent.mkdir(parents=True)
+        moved.write_text(original + extra)
+        path.write_text('# Human-readable passport\n')
+        self.git(self.source, 'add', '--', old, target)
+        self.git(self.source, 'commit', '-m', 'Move contract and add passport')
+        self.git(self.source, 'push', 'origin', 'main')
+        return target, original, accepted
+
+    def test_exact_moved_contract_with_inherited_whitespace_and_new_passport(self) -> None:
+        target, original, accepted = self.prepare_contract_move()
+        request = self.sync()['analytics_exchange']['source_import']
+        self.assertEqual(request['status'], 'awaiting-merge')
+        self.assertEqual((Path(request['checkout']) / target).read_bytes(), original.encode())
+        self.assertEqual(self.git(self.documents, 'rev-parse', 'HEAD'), accepted)
+        self.assertEqual(self.git(self.remote, 'rev-parse', 'main'), accepted)
+        self.assertFalse((self.documents / target).exists())
+
+
+    def test_changed_moved_contract_does_not_inherit_whitespace_exemption(self) -> None:
+        target, _, accepted = self.prepare_contract_move('New malformed line  \n')
+        result = fixture.run('python3', str(fixture.ROOT / 'scripts/repository-exchange.py'), '--root', str(self.workspace), 'sync', env=self.environment)
+        self.assertNotEqual(result.returncode, 0)
+        report = json.loads(result.stdout.removeprefix('ERROR: ').strip())
+        self.assertEqual(report['reason'], 'source-import-whitespace-errors')
+        self.assertIn(target + ':', report['detail'])
+        self.assertEqual(self.git(self.documents, 'rev-parse', 'HEAD'), accepted)
+        self.assertEqual(self.git(self.remote, 'rev-parse', 'main'), accepted)
+
 
 if __name__ == "__main__":
     unittest.main()

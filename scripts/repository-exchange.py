@@ -1045,8 +1045,21 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     require_nfc_paths(checkout, candidate, analytics_id)
     require_content_only(checkout, analytics_id)
     require_analytics_content_policy(root, source, checkout, incoming, candidate)
-    if git(checkout, "diff", "--check", state["base_commit"], candidate).returncode:
-        raise ValueError("Импорт содержит ошибки пробельного оформления")
+    # Passports replace old paths while contracts move byte-for-byte. Treat only
+    # exact copies as inherited content; changed/new lines still undergo --check.
+    whitespace_arguments = ("diff", "--check", "--find-copies=100%", "--find-copies-harder", state["base_commit"], candidate)
+    whitespace_check = git(checkout, *whitespace_arguments)
+    if whitespace_check.returncode:
+        raise ValueError(json.dumps({
+            "status": "blocked", "reason": "source-import-whitespace-errors",
+            "message": "Импорт содержит ошибки пробельного оформления",
+            "source_commit": incoming, "base_commit": state["base_commit"],
+            "candidate_commit": candidate, "import_checkout": str(checkout),
+            "request_branch": branch,
+            "detail": whitespace_check.stdout.strip() or whitespace_check.stderr.strip(),
+            "inspection_command": ["git", "-C", str(checkout), *whitespace_arguments],
+            "allowed_next_action": "inspect-reported-whitespace-errors",
+        }, ensure_ascii=False))
     report = source_import_report(checkout, state["base_commit"], candidate)
     state.update({"request_commit": candidate, "status": "prepared", "review": report})
     atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())

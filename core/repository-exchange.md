@@ -163,3 +163,14 @@ If `source` is absent, a new reverse patch cannot be built or verified. `reverse
 - no tracked local IDE/LLM settings or test artifacts outside the analytical structure;
 - no source-file deletion in a reverse patch without an explicit path-level analyst approval;
 - no claim of equality without exact tree verification.
+
+## Whitespace diagnostics during source import
+
+Source import checks changed lines with `git diff --check`. Exact copies
+(`--find-copies=100% --find-copies-harder`) preserve historical bytes, including
+existing Markdown line breaks, when old contract paths are replaced by passports.
+A changed copy is checked as new content; new whitespace defects remain blockers.
+The blocked result reports `source-import-whitespace-errors`, the exact base and
+candidate commits, isolated checkout, complete Git diagnostic and a read-only
+inspection command. The candidate remains local and neither documents/main nor
+the remote target branch changes on failure. Retry preserves the same import.
