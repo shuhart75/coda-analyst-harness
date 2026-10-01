@@ -20,6 +20,8 @@ This repository defines a reusable workflow harness.
 
 ## Execution diagnostics and generation
 
+- Whenever creating or changing any Gantt diagram (including quarter-plan, commander-plan and actual-progress), generate or refresh its sibling `<name>-confluence.puml` as a standalone expansion without `!include`. Verify exact parity with the source expansion and save both in the same reviewed change. This also applies when only includes or preambles change; never regenerate approved plans or other views to obtain an export. Confluence exports themselves do not require another export. See `core/tooling-policy.md`.
+
 - Resolve analytics with `workspace.py project-root`; use `git -C "$PROJECT_ROOT"` for project status, history and diff. An ignored project directory in HARNESS_ROOT says nothing about tracking in the independent analytics repository. Never fix this by changing the harness ignore rules, running git init or staging analytics into the harness.
 - Follow `modes/execution-update.md` before actual-progress changes. Use the selected delivery execution registry (feature-level in legacy projects), optional real tracker keys and confirmed story/resource mappings; do not invent slice scaffolding, tracker identities or missing facts for the generator.
 - Execution regeneration requires `scripts/sync-quarter-gantt.py <resolved-quarter-root>/gantt --actual-only`. Missing sources block generation and preserve existing overlays; do not change approved quarter/commander plans or repair installed harness tools during analytical work.

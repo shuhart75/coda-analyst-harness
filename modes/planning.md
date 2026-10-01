@@ -82,6 +82,8 @@ The planning mode starts with feature intake when the user brings a candidate ne
 
 ## Gantt planning rules
 
+- При создании или изменении любого планового Ганта обязательно генерируй соседнюю Confluence-версию `<имя>-confluence.puml` без `!include` по `core/tooling-policy.md`, в том числе после изменения includes или preambles. Проверь точное соответствие раскрытому исходнику; экспорт входит в тот же проверенный набор сохранения. Это правило действует и при использовании отдельных функций генератора.
+
 - Feature sections are the primary visual grouping in quarter, commander and actual-progress gantt views.
 - When planning future not-started work for a feature, put backend/API work before frontend work.
 - If exact dates are not known, plan frontend no earlier than 3 open days after backend/API work starts.
