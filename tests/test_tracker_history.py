@@ -12,7 +12,7 @@ import test_trackerctl
 import test_tracker_execution
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from tracker_history import JIRA_MAPPING, decode_history, pagination_window, pointer, validate_call
+from tracker_history import JIRA_MAPPING, combine_history_parts, decode_history, history_field_coverage, pagination_window, pointer, validate_call
 from tracker_lifecycle import StatusRules, calculate_task
 from tracker_execution import feature_qa_estimate
 from tracker_workflow import response_json
@@ -76,6 +76,82 @@ class AdaptiveHistoryTests(unittest.TestCase):
                 'responses': [{'provider': 'jira', 'key': 'JIRA-1', 'role': 'BE',
                                'response_file': str(response), 'sha256': hashlib.sha256(response.read_bytes()).hexdigest(),
                                'call': self.call('jira'), 'status_aliases': {'Done': 'done'}}]}
+
+    def test_filtered_history_requires_assignment_and_status_coverage(self):
+        run_id = self.reconciled()
+        manifest = self.manifest()
+        entry = manifest['responses'][0]
+        entry['mapping'] = {**JIRA_MAPPING, 'start': '/start', 'total': '/total',
+                            'request_fields': '/filter/field'}
+        raw = self.raw_history()
+        raw.update(start=0, total=1, changelogs=raw['changelogs'][2:])
+        response = self.write(self.state / 'status-only.json', raw)
+        entry.update(response_file=str(response), sha256=hashlib.sha256(response.read_bytes()).hexdigest())
+        entry['call']['arguments']['filter'] = {'field': 'status'}
+        manifest_path = self.write(self.state / 'coverage-manifest.json', manifest)
+        result = self.run_tool(self.state, 'history-review', '--run-id', run_id,
+                               '--project-root', str(self.project), '--manifest', str(manifest_path))
+        self.assertEqual(result['status'], 'history-collection-incomplete')
+        self.assertIn('JIRA-1/BE', result['pending_history'])
+        assignments = self.raw_history()
+        assignments.update(start=0, total=2, changelogs=assignments['changelogs'][:2])
+        response = self.write(self.state / 'assignments-only.json', assignments)
+        part = copy.deepcopy(entry)
+        part.update(response_file=str(response), sha256=hashlib.sha256(response.read_bytes()).hexdigest())
+        part['call']['arguments']['filter'] = {'field': 'assignee'}
+        entry['history_parts'] = [part]
+        manifest_path = self.write(self.state / 'coverage-complete.json', manifest)
+        result = self.run_tool(self.state, 'history-review', '--run-id', run_id,
+                               '--project-root', str(self.project), '--manifest', str(manifest_path))
+        self.assertEqual(result['status'], 'history-review-ready')
+        self.assertEqual(result['pending_history'], [])
+        self.assertEqual(len(result['evidence'][0]['sources']), 2)
+        self.assertEqual(result['features'][0]['qa']['started_at'], '2026-08-02T12:00:00+03:00')
+        response.write_text('{}')
+        self.run_tool(self.state, 'history-review', '--run-id', run_id,
+                      '--project-root', str(self.project), '--manifest', str(manifest_path), expected=2)
+
+    def test_empty_status_filter_never_proves_not_started(self):
+        raw = {'key': 'JIRA-1', 'status': {'name': 'todo'}, 'assignee': {'key': None},
+               'changelogs': [], 'start': 0, 'total': 0}
+        entry = self.manifest()['responses'][0]
+        entry['mapping'] = {**JIRA_MAPPING, 'start': '/start', 'total': '/total'}
+        entry['call']['arguments']['filter'] = {'field': 'status'}
+        observed = datetime.fromisoformat(entry['call']['captured_at'])
+        for mapped in (False, True):
+            with self.subTest(mapped=mapped):
+                if mapped:
+                    entry['mapping']['request_fields'] = '/filter/field'
+                history, limits = decode_history(raw, entry, observed)
+                self.assertFalse(history.complete)
+                self.assertIn('history-field-coverage-not-proven', limits)
+                result = calculate_task(history, {'dev': 'BE'}, StatusRules(not_started=frozenset({'todo'})))
+                self.assertEqual(result['development']['state'], 'unknown')
+
+    def test_field_selection_uses_real_arguments_without_equating_developer_and_assignee(self):
+        entry = self.manifest()['responses'][0]
+        entry['mapping'] = {**JIRA_MAPPING, 'request_fields': '/options/kinds'}
+        for selected, expected in ((['status'], {'status'}), (['developer'], set()),
+                                   (['assignee', 'status'], {'assignment', 'status'})):
+            with self.subTest(selected=selected):
+                entry['call']['arguments']['options'] = {'kinds': selected}
+                self.assertEqual(history_field_coverage(entry), expected)
+        entry['mapping']['request_fields'] = '/missing'
+        with self.assertRaises((ValueError, KeyError)):
+            history_field_coverage(entry)
+
+    def test_field_union_does_not_repair_missing_pages_or_conflicting_snapshots(self):
+        entry = self.manifest()['responses'][0]
+        observed = datetime.fromisoformat(entry['call']['captured_at'])
+        history, limits = decode_history(self.raw_history(), entry, observed, check_fields=False)
+        combined, _ = combine_history_parts([(history, limits, {'status'}),
+                                              (history, limits, {'assignment'})])
+        self.assertFalse(combined.complete)
+        self.assertEqual(combined.events, history.events)
+        from dataclasses import replace
+        with self.assertRaisesRegex(ValueError, 'same task'):
+            combine_history_parts([(history, limits, {'status'}),
+                                   (replace(history, current_status='todo'), limits, {'assignment'})])
 
     def test_flexible_tool_selection_keeps_scope_and_resumes_same_run(self):
         run = self.begin()

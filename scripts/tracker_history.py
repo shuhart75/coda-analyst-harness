@@ -97,7 +97,28 @@ JIRA_MAPPING = {
 }
 
 
-def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> tuple[TaskHistory, list[str]]:
+def history_field_coverage(entry: dict) -> set[str]:
+    mapping = entry.get('mapping', JIRA_MAPPING if entry['provider'] == 'jira' else {})
+    arguments = entry.get('call', {}).get('arguments', {})
+    if 'request_fields' in mapping:
+        selected = pointer(arguments, mapping['request_fields'])
+        selected = [selected] if isinstance(selected, str) else selected
+        if not isinstance(selected, list) or any(not isinstance(item, str) for item in selected):
+            raise ValueError('request_fields must select actual field names from call arguments')
+        return {kind for kind in ('assignment', 'status') if mapping.get(kind + '_field') in selected}
+
+    def restricted(value):
+        if isinstance(value, dict):
+            return any((key.casefold().replace('_', '') in
+                        {'filter', 'filters', 'field', 'fields', 'fieldname', 'fieldnames'}
+                        and item not in (None, '', [], {})) or restricted(item)
+                       for key, item in value.items())
+        return isinstance(value, list) and any(restricted(item) for item in value)
+
+    return set() if restricted(arguments) else {'assignment', 'status'}
+
+
+def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, check_fields=True) -> tuple[TaskHistory, list[str]]:
     from tracker_workflow import digest_object
 
     mapping = entry.get("mapping", JIRA_MAPPING if entry["provider"] == "jira" else None)
@@ -156,6 +177,9 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> t
     limits = list(extraction_limits)
     window = text_window if text_only else pagination_window(payload, mapping, entry.get("call", {}), len(events))
     complete = window == (0, len(events), len(events)) and not extraction_limits
+    if check_fields and history_field_coverage(entry) != {'assignment', 'status'}:
+        complete = False
+        limits.append('history-field-coverage-not-proven')
     if not complete:
         limits.append("history-completeness-not-proven")
     if text_only and not {'text_parser', 'text_extraction'}.intersection(mapping):
@@ -238,6 +262,29 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None) -> t
     return history, limits
 
 
+def combine_history_parts(parts: list[tuple[TaskHistory, list[str], set[str]]]) -> tuple[TaskHistory, list[str]]:
+    first = parts[0][0]
+    coverage, events, limits = set(), {}, []
+    for history, part_limits, fields in parts:
+        if (history.task_key, history.development_role, history.observed_at, history.current_assignee,
+                history.current_status) != (first.task_key, first.development_role, first.observed_at,
+                                           first.current_assignee, first.current_status):
+            raise ValueError('History parts must describe the same task and captured snapshot')
+        coverage.update(fields)
+        limits.extend(part_limits)
+        for event in history.events:
+            if event.event_id in events and events[event.event_id] != event:
+                raise ValueError('Conflicting duplicate history event across parts')
+            events[event.event_id] = event
+    complete = all(history.complete for history, _, _ in parts)
+    if coverage != {'assignment', 'status'}:
+        limits.append('history-field-coverage-not-proven')
+        complete = False
+    if {'history-event-timestamps-not-returned', 'history-text-extraction-unresolved'}.intersection(limits):
+        events = {}
+    return replace(first, events=tuple(sorted(events.values(), key=lambda event: event.at)), complete=complete), sorted(set(limits))
+
+
 def read_history_source(run_id: str, source: dict, provider: str, key: str, kind: str):
     from tracker_workflow import response_file, response_json, digest_bytes
 
@@ -313,6 +360,7 @@ def review_history(args) -> int:
     if not preview["ownership_ready"]:
         raise ValueError("Resolve execution-preview ownership blockers before history review")
     histories, evidence, limitations, undated_history = {}, [], [], []
+    incomplete_fields = []
     application_scope = preview.get("application_scope")
     member_keys = set(application_scope["member_keys"]) if application_scope else None
     reference_history = {f"{item.get(manifest['provider'] + '_key')}/{target['role']}"
@@ -351,7 +399,26 @@ def review_history(args) -> int:
                 raise ValueError("Snapshot response cannot be null")
             sources.append(snapshot_evidence)
             observed = timestamp(datetime.fromisoformat(entry["snapshot"]["call"]["captured_at"]))
-        history, limits = decode_history(payload, entry, observed, snapshot)
+        supplements = entry.get('history_parts', [])
+        if not isinstance(supplements, list):
+            raise ValueError('history_parts must be an array of verbatim history responses')
+        part_history, part_limits = decode_history(payload, entry, observed, snapshot, check_fields=False)
+        parts = [(part_history, part_limits, history_field_coverage(entry))]
+        for supplement in supplements:
+            if any(supplement.get(field) != entry[field] for field in ('provider', 'key', 'role')):
+                raise ValueError('History parts must use the same provider, key and role')
+            if 'history_parts' in supplement or 'snapshot' in supplement:
+                raise ValueError('History parts share the parent snapshot and cannot nest')
+            part_payload, part_evidence = read_history_source(args.run_id, supplement, provider, entry['key'], 'history')
+            sources.append(part_evidence)
+            part_entry = {**supplement, 'status_aliases': entry.get('status_aliases', {})}
+            if snapshot is not None:
+                part_entry['snapshot'] = entry['snapshot']
+            part_history, part_limits = decode_history(part_payload, part_entry, observed, snapshot, check_fields=False)
+            parts.append((part_history, part_limits, history_field_coverage(part_entry)))
+        history, limits = combine_history_parts(parts)
+        if (member_keys is None or entry['key'] in member_keys) and 'history-field-coverage-not-proven' in limits:
+            incomplete_fields.append(f"{entry['key']}/{entry['role']}")
         if (member_keys is None or entry["key"] in member_keys) and {"history-text-requires-dated-source", "history-event-timestamps-not-returned", "history-text-extraction-unresolved"}.intersection(limits):
             undated_history.append(f"{entry['key']}/{entry['role']}")
         history = replace(history, task_key=f"{entry['key']}/{entry['role']}")
@@ -422,7 +489,7 @@ def review_history(args) -> int:
     ):
         raise ValueError("Unavailable history dates require a capability-check reason for each undated work item")
     pending_dates = sorted(set(undated_history) - set(date_sources_unavailable))
-    pending_history = sorted((set(missing_history) - set(unavailable)) | set(pending_dates))
+    pending_history = sorted((set(missing_history) - set(unavailable)) | set(pending_dates) | set(incomplete_fields))
     from tracker_comparison import build_comparison
     comparison = build_comparison(preview, reviews, provider) if not pending_history else None
     from tracker_qa_application import confirmed_qa_updates
