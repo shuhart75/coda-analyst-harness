@@ -46,6 +46,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                              "summary": item.get("summary"),
                              "registry": target["registry"], "current": target["saved_facts"],
                              "registration_required": target.get("registration_required", False),
+                             "proposed_action": item.get('proposed_action', 'update'),
                              "role_estimates": item.get("role_estimates", {}),
                              "history": calculation["development"] if calculation else None,
                              "limitations": calculation["limitations"] if calculation else ["history-not-collected"]})

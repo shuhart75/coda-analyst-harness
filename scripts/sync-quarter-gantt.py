@@ -235,8 +235,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Генерация Ганта с проверкой источников до записи")
     parser.add_argument("gantt_dir")
     parser.add_argument("--actual-only", action="store_true", help="Не изменять quarter-plan и commander-plan")
+    parser.add_argument('--review-file', action='append', default=[], help='Saved application review; repeat for each tracker run')
     args = parser.parse_args()
     gantt_dir = Path(args.gantt_dir).resolve()
+    from tracker_development_application import check_generation
+    check_generation(project_root(gantt_dir), gantt_dir.parent.name, args.review_file)
     quarter_start = parse_quarter_start(gantt_dir)
     closed_days = read_closed_days(gantt_dir)
     order = feature_order(gantt_dir)

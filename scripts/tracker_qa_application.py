@@ -101,6 +101,8 @@ def check_qa_application(args) -> int:
             raise ValueError('Delivery index changed; repeat history-review before application')
     if str(project) != review.get('project_root') or git(project, 'rev-parse', 'HEAD').strip() != review['head']:
         raise ValueError('Project or HEAD differs from the reviewed application')
+    if review.get('status') != 'history-review-ready' or review.get('pending_history'):
+        raise ValueError('Complete history review before application verification')
     updates = review.get('qa_application', [])
     if not updates:
         raise ValueError('No explicit QA confirmations in this review')
@@ -159,7 +161,14 @@ def check_qa_application(args) -> int:
                         equal = False
                     if not equal:
                         errors.append({'task_id': update['task_id'], 'reason': 'QA partition estimate differs'})
+    from tracker_development_application import check_development
+    errors.extend(check_development(project, review))
+    for entry in review.get('evidence', []):
+        for source in entry.get('sources', []):
+            if hashlib.sha256(Path(source['path']).read_bytes()).hexdigest() != source['sha256']:
+                raise ValueError('History evidence changed after review; preserve the old review and use the recovery protocol')
     print(json.dumps({'status': 'qa-application-mismatch' if errors else 'qa-application-verified',
+                      'development_verified': not errors,
                       'errors': errors, 'writes_performed': False,
                       'gantt_verified': False, 'next_action': 'fix-registry' if errors else 'generate-actual-only-and-check-gantt'}, ensure_ascii=False, indent=2))
     return 2 if errors else 0

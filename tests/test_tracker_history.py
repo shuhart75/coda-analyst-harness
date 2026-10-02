@@ -749,6 +749,8 @@ class AdaptiveHistoryTests(unittest.TestCase):
                         'kind': 'exact-interval', 'fields': {'Actual Start': '2026-08-02', 'Actual Finish': '2026-08-03'},
                         'source': {'file': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(), 'quote': quote}}
         manifest['qa_confirmations'] = [confirmation]
+        manifest['development_decision'] = {'kind': 'keep-current', 'analyst_confirmed': True,
+                                             'source': confirmation['source']}
         path = self.write(self.state / 'manifest.json', manifest)
         review = self.run_tool(self.state, 'history-review', '--run-id', run_id,
                                '--project-root', str(self.project), '--manifest', str(path))

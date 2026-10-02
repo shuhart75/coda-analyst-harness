@@ -554,8 +554,12 @@ def review_history(args) -> int:
     if qa_blockers and manifest.get('qa_confirmations'):
         raise ValueError('Resolve QA partition blockers before approving QA application')
     qa_application = confirmed_qa_updates(comparison, manifest.get('qa_confirmations', [])) if comparison else []
+    from tracker_development_application import development_updates
+    if pending_history and manifest.get('development_decision'):
+        raise ValueError('Complete history review before recording the development application decision')
+    development_application = development_updates(comparison, manifest.get('development_decision')) if comparison else []
     rechecked = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
-                                  manifest.get("reviewed_registries", {}), manifest.get("expected_head"))
+                                  manifest.get("reviewed_registries", {}), manifest.get("expected_head"), manifest.get('deliveries'))
     if rechecked != preview:
         raise ValueError("Execution sources changed during review")
     output = {"schema_version": 1, "run_id": args.run_id,
@@ -575,6 +579,8 @@ def review_history(args) -> int:
               "pending_history_dates": pending_dates, "unavailable_history_dates": date_sources_unavailable,
               "comparison": comparison,
               "project_root": str(project), "qa_application": qa_application,
+              "development_decision": manifest.get('development_decision'),
+              "development_application": development_application,
               "application_scope": application_scope,
               "selected_deliveries": preview['selected_deliveries'],
               "delivery_index_sha256": preview['delivery_index_sha256'],

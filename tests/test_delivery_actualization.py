@@ -103,9 +103,13 @@ class DeliveryActualizationTests(unittest.TestCase):
                          'analyst_confirmed': True, 'source': self.evidence(self.decision)}
                         for key, task in (('registry', 'QA-REGISTRY'), ('registry', 'QA-REST'), ('other', 'QA-OTHER'))]}
         path = self.write(self.inputs / 'deliveries.json', manifest)
+        manifest['development_decision'] = {'kind': 'accept-dates-and-statuses',
+            'analyst_confirmed': True, 'source': self.evidence(self.decision)}
+        self.write(path, manifest)
         review = self.run_tool(self.state, 'history-review', '--run-id', self.run_id,
                                '--project-root', str(self.project), '--manifest', str(path))
         self.assertEqual(review['qa_application_blockers'], [])
+        self.generation_review = review['review_file']
         self.assertEqual(review['pending_history'], [])
         self.assertEqual(review['application_scope']['kind'], 'deliveries-only')
         self.assertEqual({row['feature'] for row in review['comparison']['rows']}, {'registry', 'other'})
