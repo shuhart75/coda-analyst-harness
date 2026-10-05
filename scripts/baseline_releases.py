@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 SECTIONS = ("domain", "requirements", "ui", "api", "data", "decisions")
+DOMAIN_ASPECTS = ("entities", "relations", "rules", "lifecycles", "processes", "diagrams")
 
 
 def digest(value):
@@ -111,9 +112,10 @@ def observe(project, observation):
 
 
 def scan(project):
-    """Read-only list of unprocessed closed releases, including deferred candidates."""
+    """Closed releases awaiting baseline or the release-bound exchange cleanup."""
     return [{"release_id": key, **value} for key, value in _load(project)["releases"].items()
-            if value["status"] != "promoted" and _eligible(value["observation"])]
+            if _eligible(value["observation"]) and (value["status"] != "promoted"
+               or value.get("exchange_cleanup", {}).get("state", "completed") != "completed")]
 
 
 def defer(project, release_id, reason):
@@ -148,10 +150,33 @@ def review_hashes(candidate):
     return {section: tree_hash(Path(candidate) / section) for section in SECTIONS}
 
 
+def _validate_domain_review(review, base_domain_hash):
+    domain = review.get("domain_review")
+    if not isinstance(domain, dict) or set(domain) != set(DOMAIN_ASPECTS):
+        raise ValueError("domain_review должен содержать проверку всех аспектов доменной модели")
+    for aspect, item in domain.items():
+        if (not isinstance(item, dict) or set(item) != {"status", "evidence"}
+                or item.get("status") not in ("updated", "unchanged") or not _text(item.get("evidence"))):
+            raise ValueError(f"domain_review.{aspect}: нужны status updated/unchanged и непустое evidence")
+    if (all(item["status"] == "unchanged" for item in domain.values())
+            and review.get("sections", {}).get("domain") != base_domain_hash):
+        raise ValueError("Изменённая доменная модель не может иметь все аспекты unchanged")
+
+
+def _validate_prepared_review(preparation):
+    review = preparation.get("review", {})
+    if (not preparation.get("review_hash") or digest(review) != preparation["review_hash"]
+            or review.get("base_hash") != preparation["base_hash"]
+            or not preparation.get("base_domain_hash")):
+        raise ValueError("Проверка baseline изменилась или устарела; требуется новая подготовка")
+    _validate_domain_review(review, preparation["base_domain_hash"])
+
+
 def prepare(project, release_id, candidate, review):
     """Bind an explicitly reviewed complete candidate to observed scope and old baseline.
 
-    review: {scope_hash, sections: {name: tree hash}, consistency_evidence: str}.
+    review: {scope_hash, base_hash, sections: {name: tree hash},
+             domain_review: {aspect: {status, evidence}}, consistency_evidence: str}.
     Candidate must be a release-owned directory, never baseline/current.
     """
     project = _guard(project)
@@ -166,8 +191,15 @@ def prepare(project, release_id, candidate, review):
         raise ValueError("Нет необработанного релиза с подтверждённо закрытым полным составом")
     if review.get("scope_hash") != entry["scope_hash"] or review.get("sections") != review_hashes(candidate) or not _text(review.get("consistency_evidence")):
         raise ValueError("Требуется актуальная проверка состава, всех разделов и согласованности")
+    current = project / "baseline" / "current"
+    base_hash = tree_hash(current)
+    if review.get("base_hash") != base_hash:
+        raise ValueError("Проверка должна ссылаться на текущий base_hash baseline")
+    base_domain_hash = tree_hash(current / "domain")
+    _validate_domain_review(review, base_domain_hash)
     preparation = {"candidate": candidate.relative_to(project).as_posix(), "candidate_hash": tree_hash(candidate),
-                   "base_hash": tree_hash(project / "baseline" / "current"), "review": review}
+                   "base_hash": base_hash, "base_domain_hash": base_domain_hash,
+                   "review": copy.deepcopy(review), "review_hash": digest(review)}
     entry.update(status="prepared", preparation=preparation)
     _save(project, state)
     return entry
@@ -184,17 +216,23 @@ def promote(project, release_id, scope_hash, deployment, analyst_confirmed=False
     if not isinstance(deployment, dict) or not all(_text(deployment.get(key)) for key in ("version", "environment", "evidence")):
         raise ValueError("Нужны версия, среда и доказательство внедрения")
     if entry["status"] == "promoted":
+        preparation = entry["preparation"]
+        if ("review_hash" in preparation or "base_domain_hash" in preparation
+                or "domain_review" in preparation.get("review", {})):
+            _validate_prepared_review(preparation)
         if deployment != entry["deployment"] or tree_hash(project / entry["snapshot"]) != entry["preparation"]["candidate_hash"]:
             raise ValueError("Повторная команда не совпадает с неизменяемой записью")
         return entry
     if entry["status"] != "prepared" or not _eligible(entry["observation"]):
         raise ValueError("Baseline не подготовлен")
     preparation = entry["preparation"]
+    _validate_prepared_review(preparation)
     candidate = project / preparation["candidate"]
     if tree_hash(candidate) != preparation["candidate_hash"] or review_hashes(candidate) != preparation["review"]["sections"]:
         raise ValueError("Кандидат изменился после проверки")
     snapshot = _install_snapshot(project, preparation, release_id)
     entry.update(status="promoted", deployment=deployment, snapshot=snapshot.relative_to(project).as_posix())
+    entry["exchange_cleanup"] = {"state": "pending-review", "deliveries": {}}
     _save(project, state)
     return entry
 

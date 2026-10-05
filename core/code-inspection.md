@@ -40,7 +40,7 @@ After the first successful bootstrap the analyst may remove the local repository
 
 ## Read-only contract
 
-During analyst planning and requirements research, role `code` is strictly read-only. The only path exception is `requirements-exchange/**`, and it is usable only by the explicit protected transfer operation from `requirements-exchange.py` when the root catalog was created in advance by developers. A conversational user request does not extend it.
+During analyst planning and requirements research, role `code` is strictly read-only. The only path exception is `requirements-exchange/**`, and it is usable only by the explicit protected transfer operation from `requirements-exchange.py` or release-bound `baselinectl.py cleanup-exchange` after baseline and archive acceptance in analytics/main (core/quarter-deliveries.md) when the root catalog was created in advance by developers. A conversational user request does not extend it.
 
 Before inspection:
 

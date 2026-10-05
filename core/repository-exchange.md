@@ -8,7 +8,7 @@ This policy governs the one-way integration path from role `source` to role `ana
 |---|---|---|---|
 | `analytics` (`documents` by default) | read and write | pull and push | Normal analyst work, requirements, planning and factual progress |
 | `source` (`changeswork-copy` by default) | no working tree; hidden bare mirror | fetch only | Upstream analytical source received from GitHub |
-| `code` (`coda` by default) | ordinary clone is read-only except registered protected pull | protected pull and isolated requirements review-branch publication only | Implementation evidence and reviewed requirements delivery |
+| `code` (`coda` by default) | ordinary clone is read-only except registered protected pull | protected pull, isolated requirements publication and release-bound archived-packet cleanup through review branches only | Implementation evidence and reviewed requirements delivery |
 
 The repositories are independent under the `coda-analyst-harness` root. Roles `analytics` and `code` use normal clones. Role `source` is stored only at `.workspace-state/repositories/<repository-id>.git` as a bare mirror, is excluded from the editor workspace, and has no files that an LLM can edit. They are not submodules and must not be copied into one another. Default roles are used without questions; reassignment is allowed only by an explicit analyst command.
 

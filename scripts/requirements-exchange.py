@@ -170,11 +170,23 @@ def install_root_contract(exchange: Path) -> None:
     managed_headings = {
         "README.md": "# Обмен требованиями и результатами разработки",
         "AGENTS.md": "# Договор SDD для обмена требованиями",
+        "SDD-WORKFLOW.md": "# Работа разработческой SDD с поставкой",
+        "tasks.template.md": "# Задачи разработки",
+        "task-result.template.md": "# Результат задачи",
+        "summary.template.md": "# Итог реализации редакции этапа",
+        "GIGACODE.md": "# GigaCode: разработка по переданным требованиям",
+        "delivery-sdd.command.md": "---\ndescription: Разработческая SDD по точной поставке требований",
     }
     managed_files = (
         ("README.template.md", "README.md"),
         ("AGENTS.template.md", "AGENTS.md"),
         ("receipt.template.json", "receipt.template.json"),
+        ("SDD-WORKFLOW.template.md", "SDD-WORKFLOW.md"),
+        ("tasks.template.md", "tasks.template.md"),
+        ("task-result.template.md", "task-result.template.md"),
+        ("summary.template.md", "summary.template.md"),
+        ("GIGACODE.template.md", "GIGACODE.md"),
+        ("delivery-sdd.command.template.md", "delivery-sdd.command.md"),
     )
     for source_name, target_name in managed_files:
         source = templates / source_name
@@ -477,7 +489,10 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
         errors.append("manifest.json содержит неподдерживаемый договор трассировки")
     if schema_version >= 2 and manifest.get("developer_sdd") != developer_sdd_contract(schema_version):
         errors.append("manifest.json не содержит договор преобразования в локальную SDD")
-    if manifest.get("sdd_contract") != "../AGENTS.md" or not (root.parent / "AGENTS.md").is_file():
+    contract = root.parent / "AGENTS.md"
+    if root.parent.name == "exchange-archive":
+        contract = root.parent.parent / "exchange-contracts" / root.name / "AGENTS.md"
+    if manifest.get("sdd_contract") != "../AGENTS.md" or not contract.is_file():
         errors.append("manifest.json не связан с корневым договором SDD")
     active = manifest.get("active_revision")
     revisions = manifest.get("revisions")
@@ -564,6 +579,9 @@ def require_plain_exchange(exchange: Path) -> None:
 
 
 def require_exchange_delivery_binding(project: Path, feature: str) -> dict | None:
+    from release_exchange import find_archive
+    if find_archive(project, feature):
+        raise ValueError("Передача архивирована по релизу; новый объём требует новой поставки")
     binding = exchange_binding(project, feature)
     stages.require_closed_sibling_stages(project, feature)
     return binding
@@ -1105,6 +1123,10 @@ def scan_command(args: argparse.Namespace) -> int:
         raise ValueError(
             "Не удалось определить текущего аналитика; укажи --analyst либо настрой автора Git"
         )
+    if getattr(args, "archived", False):
+        from release_exchange import scan_archives
+        print(json.dumps(scan_archives(project, analyst, args.all), ensure_ascii=False, indent=2))
+        return 0
     code_root = resolve_code_root(project, args.code_root)
     items: list[dict[str, Any]] = []
     for role, exchange in exchange_roots(project, code_root):
@@ -1146,7 +1168,21 @@ def scan_command(args: argparse.Namespace) -> int:
                 })
                 continue
             returns = manifest_path.parent / revision_entry["returns_path"]
-            processed = processed_ids(layout_feature_root(project, feature))
+            try:
+                analytical_root = layout_feature_root(project, feature)
+            except ValueError as exc:
+                items.append({
+                    "source_role": role,
+                    "feature": feature,
+                    "delivery_binding": manifest.get("delivery_binding"),
+                    "owner": owner,
+                    "revision": revision,
+                    "status": "unmapped",
+                    "errors": [str(exc)],
+                    "new_returns": [],
+                })
+                continue
+            processed = processed_ids(analytical_root)
             new_returns = []
             for path in sorted(returns.rglob("*")) if returns.is_dir() else []:
                 if not path.is_file():
@@ -1182,6 +1218,12 @@ def scan_command(args: argparse.Namespace) -> int:
 
 
 def publication_root(project: Path, feature: str, record: dict[str, Any]) -> Path:
+    from release_exchange import archived_root
+    archived = archived_root(project, feature)
+    if archived is not None:
+        if not record.get("publication_confirmed"):
+            raise ValueError("Место передачи ещё не подтверждено")
+        return archived
     manifest_path = Path(record["manifest_path"]).resolve()
     manifest = load_json(manifest_path)
     require_manifest_binding(project, feature, manifest)
@@ -1218,6 +1260,10 @@ def validate_result_review(project: Path, feature: str, return_id: str, review: 
     requirement_ids: set[str] = set()
     found = False
     roots = [exchange / feature for _, exchange in exchange_roots(project, resolve_code_root(project, None))]
+    from release_exchange import archived_root
+    archived = archived_root(project, feature)
+    if archived is not None:
+        roots.append(archived)
     if publication is not None:
         authoritative = publication_root(project, feature, publication)
         for root in set([*roots, authoritative]):
@@ -1247,6 +1293,7 @@ def validate_result_review(project: Path, feature: str, return_id: str, review: 
         errors = validate_manifest(manifest, root)
         if errors:
             raise ValueError("; ".join(errors))
+        require_manifest_binding(project, feature, manifest)
         entry = next((item for item in manifest["revisions"] if item["revision"] == revision), None)
         if entry is None or entry["sha256"] != review.get("requirements_sha256"):
             raise ValueError("Решение не совпадает с контрольной суммой переданных требований")
@@ -1428,6 +1475,7 @@ def parser() -> argparse.ArgumentParser:
     scan.add_argument("--analyst")
     scan.add_argument("--code-root")
     scan.add_argument("--all", action="store_true")
+    scan.add_argument("--archived", action="store_true")
     scan.set_defaults(handler=scan_command)
     record = commands.add_parser("record-processed")
     record.add_argument("project")

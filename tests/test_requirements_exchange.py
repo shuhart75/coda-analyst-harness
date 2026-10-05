@@ -199,6 +199,16 @@ class RequirementsExchangeTests(unittest.TestCase):
             )
             self.assertEqual(manifest["revisions"][0]["returns_contract_version"], 1)
             self.assertTrue((exchange / "receipt.template.json").is_file())
+            for template, installed in (
+                ("SDD-WORKFLOW.template.md", "SDD-WORKFLOW.md"),
+                ("tasks.template.md", "tasks.template.md"),
+                ("task-result.template.md", "task-result.template.md"),
+                ("summary.template.md", "summary.template.md"),
+                ("GIGACODE.template.md", "GIGACODE.md"),
+                ("delivery-sdd.command.template.md", "delivery-sdd.command.md"),
+            ):
+                self.assertEqual((exchange / installed).read_bytes(),
+                                 (ROOT / "templates/exchange" / template).read_bytes())
             self.assertFalse((exchange / "demo/revisions/001/returns").exists())
             self.assertFalse((project / "features/demo/slices").exists())
 
@@ -312,6 +322,12 @@ class RequirementsExchangeTests(unittest.TestCase):
             self.git(inspect, "switch", result["request_branch"])
             self.assertTrue((inspect / "requirements-exchange/demo/revisions/001/requirements.md").is_file())
             self.assertTrue((inspect / "requirements-exchange/receipt.template.json").is_file())
+            self.assertTrue((inspect / "requirements-exchange/SDD-WORKFLOW.md").is_file())
+            self.assertTrue((inspect / "requirements-exchange/summary.template.md").is_file())
+            self.assertTrue((inspect / "requirements-exchange/GIGACODE.md").is_file())
+            self.assertTrue((inspect / "requirements-exchange/delivery-sdd.command.md").is_file())
+            self.assertFalse((inspect / "GIGACODE.md").exists())
+            self.assertFalse((inspect / ".gigacode").exists())
 
     def test_rejected_code_push_falls_back_without_dirtying_code(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
