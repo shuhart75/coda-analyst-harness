@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -157,6 +158,84 @@ class DeliveryExchangeTests(unittest.TestCase):
         result = fixtures.run(sys.executable, str(fixtures.SCRIPT), 'prepare', str(self.project), 'demo-q4', '--analyst', 'ivan')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(manifest_path.read_bytes(), before)
+
+    def test_review_rejects_foreign_delivery_binding_without_recording(self):
+        self.migrate()
+        prepared = self.prepare_q4()
+        receipt = self.write_receipt(prepared)
+        value = json.loads(receipt.read_text())
+        value['feature'] = 'demo-q4'
+        receipt.write_text(json.dumps(value))
+        historical_returns = Path(self.q3_prepared['requirements']).parent / 'returns'
+        for name in ('tasks.md', 'summary.md'):
+            (receipt.parent / name).write_bytes((historical_returns / name).read_bytes())
+        scan = self.command('scan', str(self.project), '--analyst', 'ivan')
+        delivery = next(item for item in scan['items'] if item['feature'] == 'demo-q4')
+        returned = next(item for item in delivery['new_returns']
+                        if item['relative_path'].endswith('/summary.md'))
+        historical = json.loads((self.q3 / 'development-results-state.json').read_text())
+        review = next(item['review'] for item in historical['processed'] if item['decision'] == 'reviewed')
+        review['return_id'] = returned['return_id']
+        manifest_path = Path(prepared['manifest'])
+        original_manifest = manifest_path.read_text()
+        review['requirements_sha256'] = json.loads(original_manifest)['revisions'][0]['sha256']
+        review_path = self.parent / 'q4-review.json'
+        review_path.write_text(json.dumps(review))
+        arguments = (sys.executable, str(fixtures.SCRIPT), 'record-processed', str(self.project),
+                     'demo-q4', '--return-id', returned['return_id'], '--decision', 'reviewed',
+                     '--review-file', str(review_path), '--analyst', 'ivan')
+        original_state = (self.q4 / 'requirements-state.json').read_bytes()
+        for field, wrong_value in (('feature_id', 'another-feature'),
+                                   ('delivery_id', 'another-delivery'), ('quarter', '2027-Q1')):
+            with self.subTest(field=field):
+                manifest = json.loads(original_manifest)
+                manifest['delivery_binding'][field] = wrong_value
+                manifest['revisions'][0]['delivery_binding'][field] = wrong_value
+                manifest_path.write_text(json.dumps(manifest))
+                result = fixtures.run(*arguments)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('different feature or delivery', result.stdout + result.stderr)
+                self.assertFalse((self.q4 / 'development-results-state.json').exists())
+                self.assertEqual((self.q4 / 'requirements-state.json').read_bytes(), original_state)
+        manifest_path.write_text(original_manifest)
+        accepted = fixtures.run(*arguments)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        recorded = json.loads((self.q4 / 'development-results-state.json').read_text())
+        self.assertEqual(recorded['processed'][0]['return_id'], returned['return_id'])
+
+    def test_scan_reports_unmapped_legacy_stream_and_keeps_delivery_returns(self):
+        self.migrate()
+        prepared = self.prepare_q4()
+        receipt = self.write_receipt(prepared)
+        value = json.loads(receipt.read_text())
+        value['feature'] = 'demo-q4'
+        receipt.write_text(json.dumps(value))
+        source = Path(self.q3_prepared['manifest']).parent
+        foreign = source.with_name('another-project-feature')
+        shutil.copytree(source, foreign)
+        manifest_path = foreign / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        self.assertEqual(manifest['schema_version'], 3)
+        manifest['feature'] = foreign.name
+        manifest_path.write_text(json.dumps(manifest))
+        foreign_receipt = foreign / 'revisions/001/returns/receipt.json'
+        value = json.loads(foreign_receipt.read_text())
+        value['feature'] = foreign.name
+        foreign_receipt.write_text(json.dumps(value))
+        index_path = self.project / 'delivery-index.json'
+        original_index = index_path.read_bytes()
+        scan = self.command('scan', str(self.project), '--analyst', 'ivan')
+        items = {item['feature']: item for item in scan['items']}
+        self.assertEqual(items[foreign.name]['status'], 'unmapped')
+        self.assertIn('Select a delivery', items[foreign.name]['errors'][0])
+        self.assertEqual(items[foreign.name]['new_returns'], [])
+        self.assertEqual(items['demo-q4']['status'], 'new-results')
+        self.assertEqual(len(items['demo-q4']['new_returns']), 1)
+        self.assertTrue(items['demo-q4']['new_returns'][0]['return_id'].startswith('demo-q4:001:'))
+        self.assertEqual(scan['new_result_count'], sum(len(item.get('new_returns', []))
+                                                     for item in scan['items']))
+        self.assertIn('demo', items)
+        self.assertEqual(index_path.read_bytes(), original_index)
 
     def test_schema_three_legacy_manifest_stays_unchanged_without_layout(self):
         fixtures.register_stage(self.project, 'demo-q4')

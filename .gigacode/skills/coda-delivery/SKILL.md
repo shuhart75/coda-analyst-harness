@@ -5,6 +5,12 @@ description: Бизнес-этапы поставки АС КОДА, аудит 
 
 # Поставка и возвраты
 
+**RULE:** Это skill аналитической стороны. Разработческий вход поставляется
+в `requirements-exchange/GIGACODE.md` и `SDD-WORKFLOW.md`; он использует
+локальные skills SDD разработчиков. Не запускай реализацию через этот skill.
+Шаблон `delivery-sdd.command.md` подключает разработчик в своём репозитории;
+prepare не меняет его корневой `GIGACODE.md` и `.gigacode/`.
+
 **DOCS:** Прочитай `GIGACODE.md`, `core/delivery-stages.md`,
 `core/developer-handoff.md`, `core/requirements-audit.md` и `modes/requirements.md`.
 

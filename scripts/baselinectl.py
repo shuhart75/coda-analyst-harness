@@ -33,6 +33,12 @@ def main():
     promote.add_argument("--scope-hash", required=True)
     promote.add_argument("--deployment", required=True, type=Path)
     promote.add_argument("--analyst-confirmed", action="store_true")
+    exchange_review = commands.add_parser("review-exchange")
+    exchange_review.add_argument("--release", required=True)
+    exchange_review.add_argument("--review", required=True, type=Path)
+    cleanup = commands.add_parser("cleanup-exchange")
+    cleanup.add_argument("--release", required=True)
+    cleanup.add_argument("--delivery", required=True)
     reconciliation = commands.add_parser("prepare-reconciliation")
     reconciliation.add_argument("--documentation-version", required=True)
     reconciliation.add_argument("--candidate", required=True, type=Path)
@@ -55,6 +61,12 @@ def main():
             result = baseline.defer(args.project, args.release, args.reason)
         elif args.command == "prepare":
             result = baseline.prepare(args.project, args.release, args.candidate, json.loads(args.review.read_text()))
+        elif args.command == "review-exchange":
+            import release_exchange
+            result = release_exchange.review_exchange(args.project, args.release, json.loads(args.review.read_text()))
+        elif args.command == "cleanup-exchange":
+            import release_exchange
+            result = release_exchange.cleanup(args.project, args.release, args.delivery)
         elif args.command == "prepare-reconciliation":
             result = baseline.prepare_reconciliation(args.project, args.documentation_version, args.candidate,
                                                        json.loads(args.review.read_text()))

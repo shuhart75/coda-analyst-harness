@@ -32,9 +32,15 @@ class BaselineReleaseTests(unittest.TestCase):
 
     def prepare(self):
         entry = baseline.observe(self.project, self.observation)
-        return baseline.prepare(self.project, "release-one", self.candidate, {
+        return baseline.prepare(self.project, "release-one", self.candidate, self.release_review(entry))
+
+    def release_review(self, entry):
+        return {
             "scope_hash": entry["scope_hash"], "sections": baseline.review_hashes(self.candidate),
-            "consistency_evidence": "Domain impact, backlog, decisions and auxiliary results reviewed"})
+            "base_hash": baseline.tree_hash(self.current),
+            "domain_review": {aspect: {"status": "updated", "evidence": f"Reviewed {aspect} against release results"}
+                              for aspect in baseline.DOMAIN_ASPECTS},
+            "consistency_evidence": "Domain impact, backlog, decisions and auxiliary results reviewed"}
 
     def promote(self, entry, **kwargs):
         return baseline.promote(self.project, "release-one", entry["scope_hash"], self.deployment, **kwargs)
@@ -89,7 +95,7 @@ class BaselineReleaseTests(unittest.TestCase):
         entry = self.prepare()
         result = self.promote(entry, analyst_confirmed=True)
         self.assertEqual(result, self.promote(entry, analyst_confirmed=True))
-        self.assertEqual(baseline.scan(self.project), [])
+        self.assertEqual(baseline.scan(self.project)[0]["exchange_cleanup"]["state"], "pending-review")
         snapshot = self.project / result["snapshot"]
         self.assertEqual(baseline.tree_hash(self.current), baseline.tree_hash(snapshot))
         prior = self.project / "baseline" / "versions" / ("before-" + entry["preparation"]["base_hash"])
@@ -118,6 +124,107 @@ class BaselineReleaseTests(unittest.TestCase):
         (self.current / "domain" / "README.md").write_text("another release")
         with self.assertRaises(ValueError):
             self.promote(entry, analyst_confirmed=True)
+
+    def test_domain_review_is_required_before_preparation(self):
+        entry = baseline.observe(self.project, self.observation)
+        review = self.release_review(entry)
+        del review["domain_review"]
+        before = baseline._path(self.project).read_bytes()
+        with self.assertRaisesRegex(ValueError, "domain_review"):
+            baseline.prepare(self.project, "release-one", self.candidate, review)
+        self.assertEqual(baseline._path(self.project).read_bytes(), before)
+
+    def test_every_domain_aspect_requires_explicit_status_and_evidence(self):
+        entry = baseline.observe(self.project, self.observation)
+        for aspect in baseline.DOMAIN_ASPECTS:
+            for invalid in (None, {"status": "unknown", "evidence": "Reviewed"},
+                            {"status": "unchanged", "evidence": " "}):
+                with self.subTest(aspect=aspect, invalid=invalid):
+                    review = self.release_review(entry)
+                    if invalid is None:
+                        del review["domain_review"][aspect]
+                    else:
+                        review["domain_review"][aspect] = invalid
+                    with self.assertRaisesRegex(ValueError, "domain_review"):
+                        baseline.prepare(self.project, "release-one", self.candidate, review)
+
+    def test_unchanged_domain_review_requires_identical_domain_tree(self):
+        entry = baseline.observe(self.project, self.observation)
+        review = self.release_review(entry)
+        for item in review["domain_review"].values():
+            item["status"] = "unchanged"
+        with self.assertRaisesRegex(ValueError, "unchanged"):
+            baseline.prepare(self.project, "release-one", self.candidate, review)
+        (self.candidate / "domain/README.md").write_bytes((self.current / "domain/README.md").read_bytes())
+        review["sections"] = baseline.review_hashes(self.candidate)
+        prepared = baseline.prepare(self.project, "release-one", self.candidate, review)
+        self.assertEqual(prepared["preparation"]["review_hash"], baseline.digest(review))
+        self.assertEqual(self.promote(prepared, analyst_confirmed=True)["status"], "promoted")
+        self.assertEqual((self.current / "domain/README.md").read_text(), "before")
+
+    def test_changed_domain_review_allows_explicitly_updated_aspect(self):
+        entry = baseline.observe(self.project, self.observation)
+        review = self.release_review(entry)
+        for aspect, item in review["domain_review"].items():
+            item["status"] = "updated" if aspect == "rules" else "unchanged"
+        prepared = baseline.prepare(self.project, "release-one", self.candidate, review)
+        self.assertEqual(self.promote(prepared, analyst_confirmed=True)["status"], "promoted")
+        self.assertEqual((self.current / "domain/README.md").read_text(), "after")
+
+    def test_review_binds_base_and_domain_before_preparation(self):
+        entry = baseline.observe(self.project, self.observation)
+        review = self.release_review(entry)
+        review["base_hash"] = "stale"
+        with self.assertRaisesRegex(ValueError, "base_hash"):
+            baseline.prepare(self.project, "release-one", self.candidate, review)
+        review["base_hash"] = baseline.tree_hash(self.current)
+        (self.candidate / "domain/README.md").write_text("changed after domain review")
+        with self.assertRaisesRegex(ValueError, "актуальная проверка"):
+            baseline.prepare(self.project, "release-one", self.candidate, review)
+
+    def test_saved_domain_review_tampering_blocks_first_and_repeat_promotion(self):
+        for already_promoted in (False, True):
+            with self.subTest(already_promoted=already_promoted):
+                entry = self.prepare()
+                if already_promoted:
+                    self.promote(entry, analyst_confirmed=True)
+                path = baseline._path(self.project)
+                original = path.read_bytes()
+                state = json.loads(original)
+                state["releases"]["release-one"]["preparation"]["review"]["domain_review"]["rules"]["evidence"] = "Substituted review"
+                path.write_text(json.dumps(state))
+                current_hash = baseline.tree_hash(self.current)
+                with self.assertRaisesRegex(ValueError, "Проверка baseline изменилась"):
+                    self.promote(entry, analyst_confirmed=True)
+                self.assertEqual(baseline.tree_hash(self.current), current_hash)
+                path.write_bytes(original)
+
+    def test_legacy_prepared_requires_review_but_promoted_repeat_remains_readable(self):
+        entry = self.prepare()
+        path = baseline._path(self.project)
+        current_hash = baseline.tree_hash(self.current)
+        original = path.read_bytes()
+        state = json.loads(original)
+        preparation = state["releases"]["release-one"]["preparation"]
+        for field in ("review_hash", "base_domain_hash"):
+            del preparation[field]
+        for field in ("domain_review", "base_hash"):
+            del preparation["review"][field]
+        path.write_text(json.dumps(state))
+        self.assertEqual(len(baseline.scan(self.project)), 1)
+        with self.assertRaisesRegex(ValueError, "новая подготовка"):
+            self.promote(entry, analyst_confirmed=True)
+        self.assertEqual(baseline.tree_hash(self.current), current_hash)
+        path.write_bytes(original)
+        self.promote(entry, analyst_confirmed=True)
+        promoted = json.loads(path.read_text())
+        preparation = promoted["releases"]["release-one"]["preparation"]
+        for field in ("review_hash", "base_domain_hash"):
+            del preparation[field]
+        for field in ("domain_review", "base_hash"):
+            del preparation["review"][field]
+        path.write_text(json.dumps(promoted))
+        self.assertEqual(self.promote(entry, analyst_confirmed=True), promoted["releases"]["release-one"])
 
     def test_review_requires_every_section(self):
         entry = baseline.observe(self.project, self.observation)

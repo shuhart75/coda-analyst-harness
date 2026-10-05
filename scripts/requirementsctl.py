@@ -565,6 +565,9 @@ def require_no_legacy_history(project: Path, feature: str, payload: dict[str, An
 
 def start_stage_command(args: argparse.Namespace) -> int:
     project, feature_root, state_path = feature_paths(args.project, args.feature)
+    from release_exchange import find_archive
+    if find_archive(project, args.feature):
+        raise ValueError("Поставка архивирована по релизу; зарегистрируй новую поставку для следующего объёма")
     stages.require_closed_sibling_stages(project, args.feature)
     payload = load_or_create(feature_root, state_path, args.feature)
     value = stages.registry(payload)
