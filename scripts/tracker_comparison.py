@@ -46,6 +46,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                              "summary": item.get("summary"),
                              "registry": target["registry"], "current": target["saved_facts"],
                              "registration_required": target.get("registration_required", False),
+                             "proposed_action": item.get('proposed_action', 'update'),
                              "role_estimates": item.get("role_estimates", {}),
                              "history": calculation["development"] if calculation else None,
                              "limitations": calculation["limitations"] if calculation else ["history-not-collected"]})
@@ -78,7 +79,9 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
     def cell(value):
         return str(value if value not in (None, "") else "-").replace("|", "\\|").replace("\n", " ")
 
-    lines = ["| Фича / задача | Текущие начало / конец / статус | По истории: начало / конец / состояние | Границы и ограничения | FE | BE | QA |",
+    bindings = {entry['delivery_key']: entry for entry in preview.get('selected_deliveries', [])}
+    scope_label = 'Фича / поставка / задача' if bindings else 'Фича / задача'
+    lines = [f"| {scope_label} | Текущие начало / конец / статус | По истории: начало / конец / состояние | Границы и ограничения | FE | BE | QA |",
              "|---|---|---|---|---:|---:|---:|"]
     for row in rows:
         current, history = row["current"], row["history"] or {}
@@ -92,6 +95,10 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
         notes += "; прежнее основание: " + cell(current.get("Details") or current.get("Notes"))
         estimates = " | ".join(cell(row.get("role_estimates", {}).get(role, {}).get("value")) for role in ("FE", "BE", "QA"))
         title = f"{cell(row['feature'])} / {cell(row['task_id'])}"
+        if row['feature'] in bindings:
+            binding = bindings[row['feature']]
+            row['delivery'] = binding
+            title = f"{cell(binding['feature_id'])} / {cell(binding['delivery_id'])} ({cell(binding['quarter'])}) / {cell(row['task_id'])}"
         if row.get('summary'):
             title += ": " + cell(row['summary'])
         lines.append(f"| {title} | {previous} | {proposed} | {bounds}; {notes} | {estimates} |")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -86,6 +87,49 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIn("TASK_QA_COHORT", outputs[self.target])
         self.assertIn("30% completed", outputs[self.target])
         self.assertEqual(OVERLAY.story_progress(OVERLAY.load_story_map(self.feature)[0], tasks), 75)
+
+    def test_same_feature_has_separate_quarter_deliveries_and_exports(self):
+        mvp = self.root / 'quarters/2026-Q3/features/kib/deliveries/mvp'
+        mvp.parent.mkdir(parents=True)
+        shutil.move(str(self.feature), mvp)
+        post = self.root / 'quarters/2026-Q4/features/kib/deliveries/post-mvp'
+        shutil.copytree(mvp, post)
+        for path in post.rglob('*.md'):
+            path.write_text(path.read_text().replace('ITEM-100', 'ITEM-200').replace('QA-COHORT', 'QA-POST')
+                            .replace('STORY-COHORT', 'STORY-POST'))
+        for path in (mvp, post):
+            (path / 'feature.md').write_text('# FEATURE-KIB — КИБ\n')
+        self.gantt = self.root / 'quarters/2026-Q3/gantt'
+        shutil.move(str(self.root / 'planning/2026-Q3/gantt'), self.gantt)
+        index = {'schema_version': 1, 'deliveries': {
+            'cohorts': {'feature_id': 'kib', 'delivery_id': 'mvp', 'quarter': '2026-Q3', 'path': mvp.relative_to(self.root).as_posix()},
+            'kib-next': {'feature_id': 'kib', 'delivery_id': 'post-mvp', 'quarter': '2026-Q4', 'path': post.relative_to(self.root).as_posix()}}}
+        (self.root / 'delivery-index.json').write_text(json.dumps(index))
+        plans = {path: path.read_bytes() for path in self.gantt.glob('*-plan.puml')}
+        self.quarter()
+        q3_export = self.gantt / 'actual-progress-confluence.puml'
+        self.assertIn('КИБ — поставка mvp (2026-Q3)', q3_export.read_text())
+        self.assertNotIn('TASK_ITEM_200', q3_export.read_text())
+        q3_before = self.snapshot()
+        self.gantt = self.root / 'quarters/2026-Q4/gantt'
+        self.gantt.mkdir(parents=True)
+        self.quarter()
+        export = self.gantt / 'actual-progress-confluence.puml'
+        self.assertIn('КИБ — поставка post-mvp (2026-Q4)', export.read_text())
+        self.assertIn('TASK_ITEM_200', export.read_text())
+        self.assertNotIn('TASK_ITEM_100', export.read_text())
+        expected = '\n'.join(EXPANDER.expand_file(self.gantt / 'actual-progress.puml', [])).rstrip() + '\n'
+        self.assertEqual(export.read_text(), expected)
+        for relative, content in q3_before.items():
+            self.assertEqual((self.root / relative).read_bytes(), content, relative)
+        for path, content in plans.items():
+            self.assertEqual(path.read_bytes(), content)
+        wrong = self.gantt / 'includes/actual-progress/FEATURE-cohorts.puml'
+        wrong.write_text("' wrong quarter source\n")
+        before = self.snapshot()
+        failure = self.quarter(success=False)
+        self.assertIn('belongs to 2026-Q3, not 2026-Q4', failure.stderr)
+        self.assertEqual(self.snapshot(), before)
 
     def test_release_qa_groups_generate_and_reject_overlapping_members(self) -> None:
         self.write_tasks([

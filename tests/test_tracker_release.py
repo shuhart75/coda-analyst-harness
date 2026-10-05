@@ -614,6 +614,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
                        'Status': 'done', 'Progress %': '100'},
             'analyst_confirmed': True, 'source': {'file': str(answer),
                 'sha256': hashlib.sha256(answer.read_bytes()).hexdigest(), 'quote': quote}}]
+        manifest['development_decision'] = {'kind': 'keep-current', 'analyst_confirmed': True,
+                                             'source': manifest['qa_confirmations'][0]['source']}
         self.write(manifest_file, manifest)
         approved = self.run_tool(self.state, *review_args)
         self.write(self.project / approved['feature_qa_proposals'][0]['partition']['path'],
@@ -864,6 +866,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
                                              'quote': evidence.read_text()}})
         value = json.loads(manifest.read_text())
         value['qa_confirmations'] = confirmations
+        value['development_decision'] = {'kind': 'keep-current', 'analyst_confirmed': True,
+                                          'source': confirmations[0]['source']}
         invalid = copy.deepcopy(value)
         invalid['qa_confirmations'][1]['fields']['Status'] = 'done'
         self.write(manifest, invalid)

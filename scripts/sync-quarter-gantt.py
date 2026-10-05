@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from project_layout import feature_root as layout_feature_root
+from project_layout import feature_root as layout_feature_root, delivery_title
 
 from datetime import date
 from pathlib import Path
@@ -88,7 +88,8 @@ def feature_title(gantt_dir: Path, path: Path, contents: dict[Path, str]) -> str
     slug = feature_slug(path)
 
     root = project_root(gantt_dir)
-    feature_md = layout_feature_root(root, slug) / "feature.md"
+    key = load_forecast_scope(root, gantt_dir.parent.name).features.get(slug, slug)
+    feature_md = layout_feature_root(root, key) / "feature.md"
     if feature_md.exists():
         feature_text = feature_md.read_text(encoding="utf-8")
         title_match = FEATURE_TITLE_RE.search(feature_text)
@@ -234,8 +235,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Генерация Ганта с проверкой источников до записи")
     parser.add_argument("gantt_dir")
     parser.add_argument("--actual-only", action="store_true", help="Не изменять quarter-plan и commander-plan")
+    parser.add_argument('--review-file', action='append', default=[], help='Saved application review; repeat for each tracker run')
     args = parser.parse_args()
     gantt_dir = Path(args.gantt_dir).resolve()
+    from tracker_development_application import check_generation
+    check_generation(project_root(gantt_dir), gantt_dir.parent.name, args.review_file)
     quarter_start = parse_quarter_start(gantt_dir)
     closed_days = read_closed_days(gantt_dir)
     order = feature_order(gantt_dir)
@@ -292,6 +296,8 @@ def main() -> int:
                 title = feature_title(gantt_dir, path, outputs)
                 if layout:
                     title = layout.titles[feature_slug(path)]
+                key = scope.features.get(feature_slug(path), feature_slug(path))
+                title = delivery_title(project_root(gantt_dir), key, title)
                 excluded_slug = feature_slug(path)
                 if slug == "actual-progress" and excluded_slug in scope.exclusions:
                     decision = scope.exclusions[excluded_slug]
@@ -328,7 +334,10 @@ def main() -> int:
     sync_confluence_export(gantt_dir, outputs)
     if layout:
         exported = outputs[gantt_dir / "actual-progress-confluence.puml"]
-        if re.findall(r"^-- (.+?) --\s*$", exported, re.MULTILINE) != [section["title"] for section in layout.sections]:
+        expected_titles = [section['title'] if gantt_dir / section['include'] in set(scope.includes.values())
+                           else delivery_title(project_root(gantt_dir), scope.features.get(section['feature'], section['feature']), section['title'])
+                           for section in layout.sections]
+        if re.findall(r"^-- (.+?) --\s*$", exported, re.MULTILINE) != expected_titles:
             raise ValueError("Итоговый состав разделов отличается от подтверждённого описания")
         if load_layout(gantt_dir) != layout:
             raise ValueError("Описание диаграммы изменилось во время генерации")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from project_layout import feature_root as layout_feature_root, quarter_root
+from project_layout import feature_root as layout_feature_root, quarter_root, layout as project_layout, delivery_selection, delivery_key
 
 from pathlib import Path
 import json
@@ -17,10 +17,24 @@ def inside_project(project: Path, path: Path) -> Path:
     return path
 
 
-def select_features(project: Path, quarter: str | None, feature: str | None) -> dict[str, dict]:
+def select_features(project: Path, quarter: str | None, feature: str | None,
+                    deliveries: list[str] | None = None) -> dict[str, dict]:
     project = project.expanduser().resolve()
     if not project.is_dir():
         raise ValueError(f"Проект не найден: {project}")
+    if deliveries is not None and feature:
+        raise ValueError('Choose deliveries or the legacy feature selector, not both')
+    if deliveries is not None or project_layout(project) is not None:
+        if not quarter and not feature and deliveries is None:
+            raise ValueError('Select deliveries or their quarter')
+        keys = deliveries
+        if feature:
+            keys = [delivery_key(project, layout_feature_root(project, feature, quarter))]
+        bindings = delivery_selection(project, keys, quarter)
+        if not bindings:
+            raise ValueError('No deliveries registered in the selected quarter')
+        return {key: {'feature': key, **binding, 'sources': ['delivery-index.json'], 'forecast_state': None}
+                for key, binding in bindings.items()}
     if not quarter and not feature:
         raise ValueError("Укажи --quarter или --feature")
     if feature and not valid_slug(feature):
@@ -75,11 +89,12 @@ def select_features(project: Path, quarter: str | None, feature: str | None) -> 
     return selected
 
 
-def preview_scope(project: Path, provider: str, quarter: str | None, feature: str | None) -> dict:
+def preview_scope(project: Path, provider: str, quarter: str | None, feature: str | None,
+                  deliveries: list[str] | None = None) -> dict:
     project = project.expanduser().resolve()
     if provider not in {"jira", "sbertrek"}:
         raise ValueError("Требуется явный провайдер jira или sbertrek")
-    selected = select_features(project, quarter, feature)
+    selected = select_features(project, quarter, feature, deliveries)
     references: dict[str, list[dict]] = {}
     omitted = []
     identity_requests = []

@@ -151,7 +151,9 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         lines = ['2026-08-01T12:00:00+00:00 CREATE by actor']
         if key != 'LAB-112':
             lines.append('2026-08-02T12:00:00+00:00 assigned_to CREATE -> dev')
-        lines.append('2026-08-03T12:00:00+00:00 assignee changed dev -> qa')
+        started_only = task_id in getattr(self, 'started_tasks', set())
+        if not started_only:
+            lines.append('2026-08-03T12:00:00+00:00 assignee changed dev -> qa')
         text = f'Records: {len(lines)}; offset: 0; more: False\n' + '\n'.join(lines)
 
         def span(value, start=0):
@@ -176,7 +178,8 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
                                            'source': span('CREATE' if creation else 'changed', start)}})
         source = self.inputs / f'{key}-history.txt'
         source.write_text(text, encoding='utf-8')
-        snapshot = self.write(self.inputs / f'{key}-snapshot.json', {'key': key, 'assignee': 'qa', 'status': 'created'})
+        snapshot = self.write(self.inputs / f'{key}-snapshot.json',
+                              {'key': key, 'assignee': 'dev' if started_only else 'qa', 'status': 'created'})
         call = {**self.call('sbertrek'), 'arguments': {'key': key}}
         return {'provider': 'sbertrek', 'key': key, 'role': role, 'response_file': str(source), 'format': 'text',
                 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(), 'call': call,
@@ -228,12 +231,16 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         value.update(expected_head=self.initial_head, reviewed_registries={
             self.registry.relative_to(self.project).as_posix(): hashlib.sha256(self.registry.read_bytes()).hexdigest()})
         if confirmed:
+            value['development_decision'] = {'kind': 'accept-dates-and-statuses',
+                'analyst_confirmed': True, 'source': self.evidence(self.decision)}
             value['qa_confirmations'] = [{'feature': 'registry', 'task_id': task_id, 'kind': 'reviewed-fields',
                 'analyst_confirmed': True, 'fields': fields, 'source': self.evidence(self.decision)}
                 for task_id, fields in self.expected['qa_fields'].items()]
         path = self.write(self.inputs / f'{name}.json', value)
-        return self.run_tool(self.state, 'history-review', '--run-id', self.run_id,
-                             '--project-root', str(self.project), '--manifest', str(path))
+        review = self.run_tool(self.state, 'history-review', '--run-id', self.run_id,
+                               '--project-root', str(self.project), '--manifest', str(path))
+        self.generation_review = review['review_file']
+        return review
 
     def qa_check(self, review, *, expected=0):
         return self.run_tool(self.state, 'qa-application-check', '--project-root', str(self.project),
@@ -241,11 +248,54 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
 
     def generate(self, *, expected=0):
         return self.command(sys.executable, str(ROOT / 'scripts/sync-quarter-gantt.py'),
-                            str(self.gantt), '--actual-only', expected=expected)
+                            str(self.gantt), '--actual-only', '--review-file', self.generation_review, expected=expected)
 
     def snapshot(self, root):
         return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob('*')
                 if path.is_file() and '.git' not in path.relative_to(root).parts}
+
+    def test_stale_development_blocks_check_generation_and_save_even_with_correct_qa(self):
+        task_id = self.expected['members'][0]
+        self.started_tasks = {task_id}
+        self.collect()
+        self.rows[task_id].update({'Status': 'planned', 'Progress %': '0'})
+        self.write(self.groups_path, self.expected['groups'])
+        for task, fields in self.expected['qa_fields'].items():
+            self.rows[task].update(fields)
+        self.write_registry(self.registry, self.rows.values())
+        review = self.review('approved-start', confirmed=True)
+        for task in self.expected['members']:
+            if task != task_id:
+                self.rows[task].update(self.expected['development']['finish_only' if task == 'LAB-112/BE' else 'regular'])
+        self.write_registry(self.registry, self.rows.values())
+        check = self.qa_check(review, expected=2)
+        self.assertEqual({error['task_id'] for error in check['errors']}, {task_id})
+        self.assertEqual({error['field'] for error in check['errors']}, {'Status', 'Progress %', 'Actual Start'})
+        before = self.snapshot(self.gantt)
+        self.assertIn('Development fact not applied', self.generate(expected=1).stderr)
+        self.assertEqual(self.snapshot(self.gantt), before)
+        missing = self.command(sys.executable, str(ROOT / 'scripts/sync-quarter-gantt.py'),
+                               str(self.gantt), '--actual-only', expected=1)
+        self.assertIn('--review-file', missing.stderr)
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        import collaboration
+        from execution_collaboration import save_preview
+        with patch.dict(os.environ, self.environment):
+            with self.assertRaisesRegex(ValueError, 'Development fact not applied'):
+                save_preview(SimpleNamespace(root=str(self.workspace), review_file=[review['review_file']]), collaboration)
+        self.rows[task_id].update({'Status': 'in-progress', 'Progress %': 'unknown', 'Actual Start': '2026-08-02'})
+        self.write_registry(self.registry, self.rows.values())
+        self.assertTrue(self.qa_check(review)['development_verified'])
+        source = Path(self.manifest['responses'][0]['response_file'])
+        original = source.read_bytes()
+        source.write_bytes(original + b'\n')
+        try:
+            self.assertIn('History evidence changed', self.qa_check(review, expected=2)['error'])
+        finally:
+            source.write_bytes(original)
+        self.generate()
+        self.assertEqual(self.collab('save-preview', '--review-file', review['review_file'])['qa_verified_runs'], [self.run_id])
 
     def test_offline_release_from_collection_to_save_preview(self):
         protected = {task: copy.deepcopy(self.rows[task]) for task in self.expected['remainder']}

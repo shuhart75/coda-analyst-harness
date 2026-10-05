@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from project_layout import feature_root as layout_feature_root, quarter_root, logical_path, layout
+from project_layout import feature_root as layout_feature_root, quarter_root, logical_path, layout, delivery_selection
 
 from contextlib import redirect_stdout
 from importlib import import_module
@@ -101,6 +101,11 @@ def set_scope(args, api) -> int:
                 raise ValueError('Tracker run must allow application before scope registration')
     scope = {'features': features, 'quarters': quarters, 'run_ids': run_ids,
              'reason': args.reason, 'confirmed_at': api.utc_now()}
+    if layout(analytics):
+        bindings = list(delivery_selection(analytics, features).values())
+        if any(binding['quarter'] not in quarters for binding in bindings):
+            raise ValueError('Execution scope must include the registered quarter of every selected delivery')
+        scope['deliveries'] = bindings
     if getattr(args, 'include_planning', False):
         check_draft_planning(analytics, scope, api)
         scope['include_planning'] = True

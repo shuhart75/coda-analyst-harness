@@ -756,11 +756,11 @@ def parser() -> argparse.ArgumentParser:
     worktree.add_argument("--analyst-confirmed", action="store_true", required=True)
     worktree.set_defaults(handler=recover_worktree_command)
     start = commands.add_parser("start")
-    start.add_argument("--feature", required=True)
+    start.add_argument("--feature", "--delivery", dest='feature', required=True)
     start.set_defaults(handler=start_command)
     from execution_collaboration import set_scope, save_preview
     scope = commands.add_parser('set-execution-scope')
-    scope.add_argument('--feature', action='append', required=True)
+    scope.add_argument('--feature', '--delivery', dest='feature', action='append', required=True)
     scope.add_argument('--quarter', action='append', required=True)
     scope.add_argument('--run-id', action='append', default=[])
     scope.add_argument('--include-planning', action='store_true',
