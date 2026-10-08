@@ -8,4 +8,6 @@ Writes: root requirements, requirement state, cross-feature impact section, boun
 
 Rules: the root requirements are the only authored requirement document; slices and contour packs are not created; new roots use the compact specification in `core/requirements-profile.md` and controlled wording from `core/requirements-wording.md`; delivery runs the three-level audit in `core/requirements-audit.md`; local stale tails block completion; only the user-owner approves requirements.
 
+OpenSpec input: follow `core/sdd-input.md`; the requirements mode may derive proposal/spec in delivery `sdd/`, without independent business scope or developer design/tasks. Select the OpenSpec profile for new handoffs; audit and record origin for SDD-only changes too.
+
 Validation: individual rules, cross-requirement interactions, delivery readiness, direct `REQ-*` traceability, links, stale-term sweep, Russian-language check, compact-profile check, PlantUML integrity, and explicit coverage of every cross-feature impact.

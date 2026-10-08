@@ -35,6 +35,7 @@ legacy-пути `features/<feature>/...` означают корень выбр�
 - `scope prototype`
 - `delivery prototype`
 - `exchange manifest`
+- `analyst proposal and delta specifications` — derived SDD input under core/sdd-input.md, one bundle per revision
 - `agreed developer task list`
 - `developer task result`
 - `developer summary`

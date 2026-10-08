@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "profile": "openspec-spec-driven-v1",
+  "requirements_sha256": "<SHA256 точных байтов requirements.md>",
+  "changes": [
+    {
+      "contour": "backend",
+      "change_id": "<exact-change-id>",
+      "target_root": "backend/openspec",
+      "repository": "<точный Git origin без секретов>",
+      "code_commit": "<полный исходный commit SHA>",
+      "context_files": {
+        "backend/openspec/config.yaml": "<SHA256 всего файла>",
+        "<путь реально использованного контекста или кода>": "<SHA256 всего файла>"
+      },
+      "base_specs": {
+        "<exact-new-capability>": null
+      },
+      "coverage": [
+        {
+          "req_id": "REQ-EXAMPLE-001",
+          "capability": "<exact-new-capability>",
+          "requirement": "<точное имя requirement>",
+          "scenarios": [
+            "<точное имя Scenario>"
+          ]
+        }
+      ]
+    }
+  ]
+}

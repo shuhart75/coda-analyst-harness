@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,8 @@ from typing import Any
 from commit_message_policy import require_valid_commit_message
 from workspace import install_commit_message_hook
 import delivery_stages as stages
+import sdd_audit
+import sdd_bundle
 
 
 EXCHANGE_DIR = "requirements-exchange"
@@ -181,6 +184,7 @@ def install_root_contract(exchange: Path) -> None:
         ("README.template.md", "README.md"),
         ("AGENTS.template.md", "AGENTS.md"),
         ("receipt.template.json", "receipt.template.json"),
+        ("receipt-sdd.template.json", "receipt-sdd.template.json"),
         ("SDD-WORKFLOW.template.md", "SDD-WORKFLOW.md"),
         ("tasks.template.md", "tasks.template.md"),
         ("task-result.template.md", "task-result.template.md"),
@@ -194,13 +198,22 @@ def install_root_contract(exchange: Path) -> None:
         if not target.exists():
             target.write_bytes(source.read_bytes())
             continue
-        if target_name == "receipt.template.json":
+        if target_name in {"receipt.template.json", "receipt-sdd.template.json"}:
             if target.read_bytes() != source.read_bytes():
                 target.write_bytes(source.read_bytes())
             continue
         current = target.read_text(encoding="utf-8", errors="ignore")
         if current.startswith(managed_headings[target_name]) and target.read_bytes() != source.read_bytes():
             target.write_bytes(source.read_bytes())
+
+    for name in ("sdd-receive.py", "sdd_bundle.py"):
+        source = harness_root() / "scripts" / name
+        target = exchange / name
+        marker = b"analyst-sdd-receiver:v1"
+        content = source.read_bytes()
+        if target.exists() and marker not in target.read_bytes()[:300]:
+            raise ValueError("Unmanaged receiver helper would be overwritten: " + name)
+        target.write_bytes(content)
 
 
 def title_from_requirements(text: str, feature: str) -> str:
@@ -286,6 +299,7 @@ def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> 
         raise ValueError(
             "Публикация запрещена: аудит текущей редакции требований не подтверждён аналитиком"
         )
+    sdd_audit.require_unchanged(layout_feature_root(project, feature), state)
     return current_hash
 
 
@@ -342,7 +356,14 @@ def developer_sdd_contract(schema_version: int = 2) -> dict[str, str]:
     }
     if schema_version >= 3:
         contract["revision_receipt"] = "required-before-other-returns"
+    if schema_version >= 5:
+        contract.update(input_role="business-and-analyst-sdd",
+                        technical_artifacts="analyst-proposal-specs-developer-design-tasks")
     return contract
+
+
+def input_digest(requirements_hash, sdd):
+    return stages.checksum({"requirements_sha256": requirements_hash, "sdd_input": sdd}) if sdd else requirements_hash
 
 
 def valid_timestamp(value: Any) -> bool:
@@ -356,7 +377,7 @@ def valid_timestamp(value: Any) -> bool:
 
 
 def validate_receipt(
-    receipt: dict[str, Any], feature: str, revision: int, requirements_sha256: str
+    receipt: dict[str, Any], feature: str, revision: int, requirements_sha256: str, sdd=None
 ) -> list[str]:
     errors: list[str] = []
     expected = {
@@ -367,6 +388,8 @@ def validate_receipt(
         "requirements_sha256": requirements_sha256,
         "state": "accepted",
     }
+    if sdd is not None:
+        expected.update(schema_version=2, sdd_sha256=sdd["sha256"])
     for key, value in expected.items():
         if receipt.get(key) != value:
             errors.append(f"receipt.json: поле {key} не совпадает с принятой редакцией")
@@ -397,7 +420,7 @@ def revision_processing_status(feature_root: Path, entry: dict[str, Any]) -> dic
         }
 
     errors: list[str] = []
-    if contract_version != CURRENT_RETURNS_CONTRACT:
+    if contract_version not in {1, 2}:
         errors.append(f"неподдерживаемая версия договора возвратов: {contract_version}")
     allowed = {"receipt.json", "tasks.md", "summary.md"}
     unexpected = [
@@ -418,7 +441,7 @@ def revision_processing_status(feature_root: Path, entry: dict[str, Any]) -> dic
         except ValueError as exc:
             errors.append(str(exc))
         else:
-            errors.extend(validate_receipt(receipt, feature_root.name, revision, entry["sha256"]))
+            errors.extend(validate_receipt(receipt, feature_root.name, revision, entry["sha256"], entry.get("sdd_input")))
 
     tasks_present = (returns / "tasks.md").is_file()
     task_results = sorted((returns / "tasks").glob("*.md")) if (returns / "tasks").is_dir() else []
@@ -462,7 +485,7 @@ def revision_processing_status(feature_root: Path, entry: dict[str, Any]) -> dic
 def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
     errors: list[str] = []
     schema_version = manifest.get("schema_version")
-    if schema_version not in {1, 2, 3, 4} or manifest.get("exchange_kind") != "feature-requirements":
+    if schema_version not in {1, 2, 3, 4, 5} or manifest.get("exchange_kind") != "feature-requirements":
         errors.append("неподдерживаемая схема manifest.json")
         schema_version = CURRENT_MANIFEST_SCHEMA
     feature = manifest.get("feature")
@@ -470,7 +493,7 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
         errors.append("feature в manifest.json не совпадает с каталогом функциональности")
     binding = manifest.get("delivery_binding")
     ceiling = manifest.get("legacy_revision_ceiling", 0)
-    if schema_version == 4:
+    if schema_version == 4 or (schema_version == 5 and binding is not None):
         try:
             validate_exchange_binding(binding, feature)
         except ValueError as exc:
@@ -510,17 +533,20 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
         errors.append("номера редакций должны быть положительными целыми числами")
     elif len(revision_numbers) != len(set(revision_numbers)):
         errors.append("номера редакций должны быть уникальными")
-    if schema_version == 4 and (not isinstance(active, int) or active <= ceiling):
+    if binding is not None and schema_version in {4, 5} and (not isinstance(active, int) or active <= ceiling):
         errors.append("Active delivery revision must be newer than legacy history")
     if matches[0].get("state") == "superseded":
         errors.append("активная редакция не может быть вытеснена новой")
+    sdd_floor = manifest.get("sdd_revision_floor")
+    if schema_version == 5 and (type(sdd_floor) is not int or not 1 <= sdd_floor <= active):
+        errors.append("Schema 5 requires a valid SDD revision floor")
     for item in revisions:
         if not isinstance(item, dict) or not isinstance(item.get("revision"), int):
             errors.append("некорректная запись редакции")
             continue
         if item.get("state") not in ALLOWED_REVISION_STATES:
             errors.append(f"редакция {item.get('revision')} имеет неизвестное состояние")
-        if schema_version == 4:
+        if schema_version == 4 or (schema_version == 5 and binding is not None):
             if item.get("delivery_binding") is not None:
                 if item["delivery_binding"] != binding:
                     errors.append("Revision belongs to another delivery")
@@ -535,7 +561,7 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
             errors.append(str(exc))
             valid_stage = False
         contract_version = item.get("returns_contract_version", None if item.get("stage_id") else 0)
-        if schema_version >= 3 and contract_version not in {0, 1}:
+        if schema_version >= 3 and contract_version not in {0, 1, 2}:
             errors.append(
                 f"редакция {item.get('revision')} не содержит поддерживаемую версию договора возвратов"
             )
@@ -557,6 +583,19 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
                 stages.validate_scope(item["stage"], path.read_text(encoding="utf-8"))
             except ValueError as exc:
                 errors.append(str(exc))
+        sdd = item.get("sdd_input")
+        if schema_version == 5 and type(sdd_floor) is int and item["revision"] >= sdd_floor and sdd is None:
+            errors.append("New revision requires an SDD input")
+        if sdd is not None:
+            if schema_version != 5 or contract_version != 2:
+                errors.append("SDD input requires manifest schema 5 and returns contract 2")
+            else:
+                try:
+                    sdd_bundle.verify_descriptor(path.parent / "sdd", path.read_text(encoding="utf-8"), sdd)
+                except (ValueError, OSError, TypeError, KeyError) as exc:
+                    errors.append(str(exc))
+        elif (path.parent / "sdd").exists():
+            errors.append("Unregistered SDD files in revision")
     stage_revisions: dict[str, list[int]] = {}
     stage_snapshots: dict[str, dict[str, Any]] = {}
     for item in revisions:
@@ -601,6 +640,7 @@ def prepare_in_exchange(
         raise ValueError("Передаваемый документ не совпадает с подтверждённым аудитом")
     state = load_json(layout_feature_root(project, feature) / "requirements-state.json")
     stage = stages.require_audit_stage(state, requirements_text)
+    sdd = sdd_audit.require_unchanged(layout_feature_root(project, feature), state)
     records = stages.registry(state)["revisions"]
     require_plain_exchange(exchange)
     feature_exchange = exchange / feature
@@ -635,7 +675,7 @@ def prepare_in_exchange(
         (item for item in revisions if isinstance(item, dict) and item.get("revision") == active),
         None,
     )
-    if active_entry and active_entry.get("stage_id") and active_entry.get("sha256") == current_hash:
+    if active_entry and active_entry.get("stage_id") and active_entry.get("sha256") == current_hash and active_entry.get("sdd_input") == sdd:
         stages.require_entry_stage(active_entry, stage)
         return {
             "status": "already-current",
@@ -657,25 +697,38 @@ def prepare_in_exchange(
             "developer_sdd": developer_sdd_contract(CURRENT_MANIFEST_SCHEMA),
         })
     if binding is not None:
-        if manifest.get("schema_version") != 4:
+        if manifest.get("schema_version") not in {4, 5}:
             manifest["legacy_revision_ceiling"] = max((entry["revision"] for entry in revisions), default=0)
-        manifest.update(schema_version=4, delivery_binding=binding)
+        manifest.update(schema_version=5 if manifest.get("schema_version") == 5 else 4, delivery_binding=binding)
     known_entries = [stages.record_entry(record) for record in records]
     effective = {item["revision"]: item for item in known_entries}
     all_entries = [*(effective.get(item["revision"], item) for item in revisions), *known_entries]
     latest = max(all_entries, key=lambda item: item["revision"], default=None)
     legacy_numbers = {record["entry"]["revision"] for record in records if "legacy_overlay" in record}
-    reuse = latest if latest and latest["revision"] not in legacy_numbers and latest["sha256"] == current_hash and latest.get("stage") == stage else None
+    reuse = latest if latest and latest["revision"] not in legacy_numbers and latest["sha256"] == current_hash and latest.get("stage") == stage and latest.get("sdd_input") == sdd else None
     revision = reuse["revision"] if reuse else max((item["revision"] for item in all_entries), default=0) + 1
     stage_revision = reuse["stage_revision"] if reuse else max(
         (item["stage_revision"] for item in all_entries if item.get("stage_id") == stage["stage_id"]), default=0,
     ) + 1
+    if sdd is not None:
+        manifest.setdefault("sdd_revision_floor", revision)
+        manifest.update(schema_version=5, requested_returns=requested_returns_contract(5),
+                        traceability=traceability_contract(5), developer_sdd=developer_sdd_contract(5))
+    elif manifest.get("schema_version") == 5:
+        raise ValueError("Cannot downgrade SDD exchange to a requirements-only input")
     revision_root = feature_exchange / "revisions" / f"{revision:03d}"
     if revision_root.exists():
         raise ValueError(f"Каталог редакции уже существует: {revision_root}")
     revision_root.mkdir(parents=True)
     target_requirements = revision_root / "requirements.md"
-    target_requirements.write_bytes(requirements_bytes)
+    try:
+        target_requirements.write_bytes(requirements_bytes)
+        if sdd is not None:
+            sdd_bundle.copy_snapshot(layout_feature_root(project, feature) / "sdd",
+                                     revision_root / "sdd", sdd, requirements_text)
+    except Exception:
+        shutil.rmtree(revision_root)
+        raise
     for item in revisions:
         if isinstance(item, dict) and item.get("stage_id") == stage["stage_id"] and item.get("state") in {"sent", "in-progress", "paused"}:
             item["state"] = "superseded"
@@ -700,6 +753,8 @@ def prepare_in_exchange(
             "commit": git_value(project, "rev-parse", "HEAD"),
         },
     })
+    if sdd is not None:
+        revisions[-1].update(sdd_input=sdd, returns_contract_version=2)
     if binding is not None:
         revisions[-1]["delivery_binding"] = binding
     save_json(manifest_path, manifest)
@@ -729,6 +784,7 @@ def code_snapshot(code_root: Path) -> dict[str, str] | None:
         ("git", "-C", str(code_root), "status", "--porcelain=v1", "-z", "--untracked-files=all"),
         capture_output=True,
         check=False,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
     )
     local_config = subprocess.run(
         ("git", "-C", str(code_root), "config", "--local", "--list", "--null"),
@@ -833,6 +889,7 @@ def publish_to_code(
         raise ValueError("Передаваемый документ не совпадает с подтверждённым аудитом")
     state = load_json(layout_feature_root(project, feature) / "requirements-state.json")
     stage = stages.require_audit_stage(state, requirements_text)
+    sdd = sdd_audit.require_unchanged(layout_feature_root(project, feature), state)
     before = code_snapshot(code_root)
     if before is None:
         raise CodeDestinationUnavailable("роль code не является доступным клоном Git с веткой и origin")
@@ -844,12 +901,13 @@ def publish_to_code(
         pending = load_json(Path(record["manifest_path"])).get("publication", {})
         if (
             record["entry"]["sha256"] != current_hash
+            or record["entry"].get("sdd_input") != sdd
             or pending.get("repository_url") != before["remote"]
             or pending.get("target_branch") != target
         ):
             raise ValueError("Есть другая незавершённая передача; сначала заверши её в подтверждённом месте")
     target_key = hashlib.sha256(target.encode()).hexdigest()[:12]
-    branch = f"requirements/{feature}/{target_key}-{current_hash}"
+    branch = f"requirements/{feature}/{target_key}-{input_digest(current_hash, sdd)}"
     branch_ref = f"refs/heads/{branch}"
     with tempfile.TemporaryDirectory(prefix="requirements-exchange-") as temporary:
         clone = Path(temporary) / "code"
@@ -863,6 +921,8 @@ def publish_to_code(
         require_plain_exchange(exchange)
         if not exchange.is_dir():
             raise CodeDestinationUnavailable("в целевой ветке роли code отсутствует корневой requirements-exchange")
+        if sdd is not None:
+            sdd_bundle.verify_sources(layout_feature_root(project, feature) / "sdd", sdd, clone)
         target_commit = git_value(clone, "rev-parse", "HEAD")
         manifest_path = exchange / feature / "manifest.json"
 
@@ -873,6 +933,10 @@ def publish_to_code(
             require_manifest_binding(project, feature, prepared_manifest)
             stages.require_manifest_history(current, prepared_manifest)
             prepared_entry = next(item for item in prepared_manifest["revisions"] if item["revision"] == prepared["revision"])
+            if prepared_entry.get("sdd_input") != sdd:
+                raise ValueError("Published SDD input differs from the confirmed audit")
+            if sdd_audit.require_unchanged(layout_feature_root(project, feature), current) != sdd:
+                raise ValueError("SDD input changed during publication")
             stages.require_entry_stage(prepared_entry, stage)
             if code_snapshot(code_root) != before:
                 raise ValueError("Обычный клон code изменился во время передачи; требуется проверка владельцем")
@@ -919,7 +983,7 @@ def publish_to_code(
             stages.require_manifest_history(state, manifest)
             accepted_revisions = {entry["revision"]: entry for entry in manifest["revisions"]}
             active = next(entry for entry in manifest["revisions"] if entry["revision"] == manifest["active_revision"])
-            if active.get("stage_id") and active["sha256"] == current_hash:
+            if active.get("stage_id") and active["sha256"] == current_hash and active.get("sdd_input") == sdd:
                 stages.require_entry_stage(active, stage)
                 return response({"revision": active["revision"], "feature": feature, "manifest_path": manifest_path}, True, target_commit)
 
@@ -965,7 +1029,7 @@ def publish_to_code(
             if errors:
                 raise ValueError("; ".join(errors))
             active = next(entry for entry in manifest["revisions"] if entry["revision"] == manifest["active_revision"])
-            if active["sha256"] != current_hash:
+            if active["sha256"] != current_hash or active.get("sdd_input") != sdd:
                 raise ValueError("Содержимое ветки передачи не совпадает с подтверждённым входом")
             stages.require_manifest_history(state, manifest)
             stages.require_entry_stage(active, stage)
@@ -1022,6 +1086,7 @@ def prepare_command(args: argparse.Namespace) -> int:
         raise ValueError("Не задан идентификатор аналитика: используй --analyst или CODA_ANALYST_ID")
     code_root = resolve_code_root(project, args.code_root)
     state = load_json(feature_root / "requirements-state.json")
+    sdd_audit.snapshot(feature_root, state, code_root, verify_source=True)
     pending = [item for item in stages.registry(state)["revisions"] if not item["publication_confirmed"]]
     reason = "Репозиторий роли code отсутствует или не настроен"
     if code_root is not None:
@@ -1074,7 +1139,7 @@ def record_prepared(project: Path, feature: str, result: dict[str, Any]) -> None
     require_manifest_binding(project, feature, manifest)
     stages.require_manifest_history(state, manifest)
     entry = next(item for item in manifest["revisions"] if item["revision"] == result["revision"])
-    if entry["sha256"] != sha256(feature_root / "requirements.md"):
+    if entry["sha256"] != sha256(feature_root / "requirements.md") or entry.get("sdd_input") != state["delivery_audit"].get("sdd_input"):
         raise ValueError("Подготовленная редакция не совпадает с текущими требованиями")
     stage = stages.require_audit_stage(state, (feature_root / "requirements.md").read_text(encoding="utf-8"))
     stages.require_entry_stage(entry, stage)
@@ -1134,7 +1199,7 @@ def scan_command(args: argparse.Namespace) -> int:
             feature = manifest_path.parent.name
             manifest = load_json(manifest_path)
             errors = validate_manifest(manifest, manifest_path.parent)
-            if manifest.get("schema_version") == 4:
+            if manifest.get("schema_version") in {4, 5}:
                 try:
                     require_manifest_binding(project, feature, manifest)
                 except ValueError as exc:

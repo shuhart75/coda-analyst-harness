@@ -46,6 +46,7 @@ deployed behavior. Legacy inputs and returns are not renamed or rebound automati
 - feature requirements: `requirements.md`
 - delivery stage registry: `requirements-state.json` at the feature root, without copies of requirement text
 - exchange manifest: `manifest.json`
+- derived analyst SDD: selected delivery `sdd/package.json` and `sdd/<contour>/<change-id>/` under core/sdd-input.md
 - returned task list: `returns/tasks.md`
 - execution registry: `tasks.md`
 - detailed task note: `<JIRA>.md`

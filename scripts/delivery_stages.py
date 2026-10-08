@@ -7,7 +7,7 @@ from typing import Any
 
 
 STAGE_FIELDS = ("stage_id", "number", "title", "goal")
-REVISION_FIELDS = ("revision", "sha256", "stage_id", "stage_revision", "stage", "stage_sha256", "delivery_binding")
+REVISION_FIELDS = ("revision", "sha256", "stage_id", "stage_revision", "stage", "stage_sha256", "delivery_binding", "sdd_input")
 SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
 
 
