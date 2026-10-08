@@ -33,6 +33,7 @@ ALLOWED_REVISION_STATES = {"sent", "in-progress", "paused", "superseded", "compl
 FEATURE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 CURRENT_MANIFEST_SCHEMA = 3
 CURRENT_RETURNS_CONTRACT = 1
+MAX_REQUEST_BRANCH_LENGTH = 48
 
 
 class CodeDestinationUnavailable(ValueError):
@@ -366,6 +367,40 @@ def input_digest(requirements_hash, sdd):
     return stages.checksum({"requirements_sha256": requirements_hash, "sdd_input": sdd}) if sdd else requirements_hash
 
 
+def request_identity(feature: str, target: str, requirements_hash: str, sdd) -> dict[str, str]:
+    return {"feature": feature, "target_branch": target,
+            "input_sha256": input_digest(requirements_hash, sdd)}
+
+
+def request_branch_name(feature: str, target: str, requirements_hash: str, sdd=None) -> str:
+    """A bounded alias; full identity stays in the manifest and cache."""
+    validate_feature(feature)
+    key = feature[:14].rstrip("-")
+    target_key = hashlib.sha256(target.encode()).hexdigest()[:6]
+    request_key = stages.checksum(request_identity(feature, target, requirements_hash, sdd))[:12]
+    branch = f"requirements/{key}/{target_key}-{request_key}"
+    if len(branch.encode("utf-8")) > MAX_REQUEST_BRANCH_LENGTH:
+        raise ValueError("Имя новой ветки передачи превышает допустимую длину")
+    return branch
+
+
+def validate_publication_request(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    request = manifest.get("publication_request")
+    if request is None:
+        return None
+    if not isinstance(request, dict) or request.get("schema_version") != 1:
+        raise ValueError("Некорректная идентичность запроса передачи")
+    target = request.get("target_branch")
+    if not isinstance(target, str) or not target or target.startswith("requirements/"):
+        raise ValueError("Некорректная целевая ветка запроса передачи")
+    entry = next(item for item in manifest["revisions"] if item["revision"] == manifest["active_revision"])
+    identity = request_identity(manifest["feature"], target, entry["sha256"], entry.get("sdd_input"))
+    expected_branch = request_branch_name(manifest["feature"], target, entry["sha256"], entry.get("sdd_input"))
+    if any(request.get(key) != value for key, value in identity.items()) or request.get("identity_sha256") != stages.checksum(identity) or request.get("request_branch") != expected_branch:
+        raise ValueError("Идентичность запроса передачи не совпадает с пакетом")
+    return request
+
+
 def valid_timestamp(value: Any) -> bool:
     if not isinstance(value, str) or not value.strip():
         return False
@@ -609,6 +644,10 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
     for values in stage_revisions.values():
         if all(type(value) is int for value in values) and len(values) != len(set(values)):
             errors.append("stage_revision должен быть уникальным внутри этапа")
+    try:
+        validate_publication_request(manifest)
+    except (ValueError, TypeError, KeyError, StopIteration) as exc:
+        errors.append("publication_request: " + str(exc))
     return errors
 
 
@@ -686,6 +725,7 @@ def prepare_in_exchange(
             "stage_id": stage["stage_id"],
             "stage_revision": active_entry["stage_revision"],
         }
+    manifest.pop("publication_request", None)
     if manifest.get("schema_version") in {1, 2}:
         for item in revisions:
             if isinstance(item, dict) and item.get("stage_id"):
@@ -907,8 +947,11 @@ def publish_to_code(
         ):
             raise ValueError("Есть другая незавершённая передача; сначала заверши её в подтверждённом месте")
     target_key = hashlib.sha256(target.encode()).hexdigest()[:12]
-    branch = f"requirements/{feature}/{target_key}-{input_digest(current_hash, sdd)}"
+    identity = request_identity(feature, target, current_hash, sdd)
+    branch = request_branch_name(feature, target, current_hash, sdd)
+    legacy_branch = f"requirements/{feature}/{target_key}-{input_digest(current_hash, sdd)}"
     branch_ref = f"refs/heads/{branch}"
+    compatible_refs = {branch_ref, f"refs/heads/{legacy_branch}"}
     with tempfile.TemporaryDirectory(prefix="requirements-exchange-") as temporary:
         clone = Path(temporary) / "code"
         cloned = subprocess.run(
@@ -960,6 +1003,7 @@ def publish_to_code(
                 "request_commit": request_commit, "merge_request_created": False,
                 "merge_request_create_url": link.group(0) if link else None,
                 "local_code_worktree_unchanged": True,
+                "publication_strategy": "review-branch", "target_branch_push_allowed": False,
                 "selection_reason": "Проверена целевая ветка" if merged else "Редакция предложена через отдельную ветку",
                 "next_action": "mark-published" if merged else "create-or-review-merge-request",
                 "message": (
@@ -987,8 +1031,10 @@ def publish_to_code(
                 stages.require_entry_stage(active, stage)
                 return response({"revision": active["revision"], "feature": feature, "manifest_path": manifest_path}, True, target_commit)
 
-        heads = remote_heads(before["remote"], f"refs/heads/requirements/{feature}/{target_key}-*")
+        heads = remote_heads(before["remote"], f"refs/heads/{branch.rsplit('-', 1)[0]}-*")
+        heads.update(remote_heads(before["remote"], f"refs/heads/requirements/{feature}/{target_key}-*"))
         pending_commit = None
+        pending_ref = None
         for reference, commit in heads.items():
             fetched = git(clone, "fetch", "--quiet", "origin", reference)
             if fetched.returncode != 0 or git_value(clone, "rev-parse", "FETCH_HEAD") != commit:
@@ -996,10 +1042,16 @@ def publish_to_code(
             if git(clone, "merge-base", "--is-ancestor", commit, target_commit).returncode == 0:
                 continue
             candidate = git(clone, "show", f"{commit}:{EXCHANGE_DIR}/{feature}/manifest.json")
+            if candidate.returncode and reference not in compatible_refs and not reference.startswith(f"refs/heads/requirements/{feature}/{target_key}-"):
+                # Different delivery keys may share the readable shortened prefix.
+                continue
             try:
                 proposed = json.loads(candidate.stdout)
+                if not isinstance(proposed, dict) or proposed.get("feature") != feature:
+                    raise ValueError("Ветка передачи относится к другой поставке")
                 require_manifest_binding(project, feature, proposed)
                 entry = next(item for item in proposed["revisions"] if item["revision"] == proposed["active_revision"])
+                request = validate_publication_request(proposed)
                 accepted = accepted_revisions.get(entry["revision"])
                 if accepted and stages.revision_identity(accepted) == stages.revision_identity(entry) and accepted["requirements_path"] == entry["requirements_path"]:
                     content = subprocess.run(
@@ -1008,12 +1060,23 @@ def publish_to_code(
                     )
                     if content.returncode == 0 and hashlib.sha256(content.stdout).hexdigest() == accepted["sha256"]:
                         continue
+                if request is not None:
+                    if request["request_branch"] != reference.removeprefix("refs/heads/"):
+                        raise ValueError("Идентичность запроса передачи не совпадает с пакетом")
+                    if request["target_branch"] != target:
+                        continue
+                elif not reference.startswith(f"refs/heads/requirements/{feature}/{target_key}-"):
+                    raise ValueError("Короткая ветка не содержит полной идентичности запроса")
             except (ValueError, TypeError, KeyError, StopIteration):
                 raise ValueError("Ветка передачи содержит некорректный манифест") from None
-            if reference != branch_ref:
+            if reference not in compatible_refs:
                 raise ValueError("Есть другая незавершённая передача этой функциональности; сначала прими или закрой её PR/MR и удали отклонённую ветку")
+            if pending_ref is not None and pending_ref != reference:
+                raise ValueError("Найдены несколько незавершённых веток одного входа; требуется разбор PR/MR")
             pending_commit = commit
+            pending_ref = reference
         if pending_commit:
+            branch = pending_ref.removeprefix("refs/heads/")
             base = git_value(clone, "merge-base", target_commit, pending_commit)
             if not base:
                 raise ValueError("Ветка передачи не имеет общей истории с целевой веткой")
@@ -1039,6 +1102,10 @@ def publish_to_code(
         if switched.returncode != 0:
             raise ValueError("Не удалось создать изолированную ветку передачи")
         prepared = prepare_in_exchange(exchange, project, feature, requirements_bytes, requirements_text, analyst)
+        manifest = load_json(prepared["manifest_path"])
+        manifest["publication_request"] = {"schema_version": 1, **identity,
+                                           "identity_sha256": stages.checksum(identity), "request_branch": branch}
+        save_json(prepared["manifest_path"], manifest)
         assert_exchange_only(clone)
         message = "Предложить редакцию требований для разработки"
         require_valid_commit_message(message)
@@ -1052,6 +1119,8 @@ def publish_to_code(
         request_commit = git_value(clone, "rev-parse", "HEAD")
         if require_confirmed_audit(project, feature, layout_feature_root(project, feature) / "requirements.md") != current_hash:
             raise ValueError("Требования изменились перед отправкой; повтори аудит")
+        if not branch.startswith("requirements/") or branch == target or len(branch.encode("utf-8")) > MAX_REQUEST_BRANCH_LENGTH:
+            raise ValueError("Отправка допустима только в короткую отдельную review-ветку")
         pushed = git(clone, "push", "origin", f"HEAD:{branch_ref}")
         if pushed.returncode != 0:
             observed = remote_heads(before["remote"], branch_ref)

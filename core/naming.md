@@ -37,6 +37,29 @@ revision 1 of `stage-2` after explicit closure and a new analyst decision.
 Keep existing `return_id` and `REQ-*` identities; omission does not repeal earlier
 deployed behavior. Legacy inputs and returns are not renamed or rebound automatically.
 
+## Requirements publication branches
+
+Новые ветки передачи создаёт только `requirements-exchange.py prepare`:
+`requirements/<key14>/<target6>-<request12>`, не более 48 байт ASCII.
+`key14` — первые 14 символов полного ключа без завершающего дефиса;
+`target6` — первые 6 символов SHA-256 целевой ветки; `request12` — первые
+12 символов контрольной суммы объекта с полным ключом, целевой веткой и
+полной контрольной суммой подтверждённого входа. Для SDD вход включает
+`requirements.md` и дескриптор всего SDD-пакета.
+
+Имя — только короткий псевдоним. `manifest.json/publication_request` хранит
+`schema_version: 1`, полный `feature`, `target_branch`, `input_sha256`,
+`identity_sha256` и `request_branch`. Ключи каталогов обмена, номера
+редакций и полные контрольные суммы не сокращаются. Перед повторным
+использованием ветки проверяется полный вход; совпадение коротких имён
+не разрешает заменить чужой пакет или выполнить force push.
+
+Повторная подготовка неизменного входа использует ту же ветку. Уже
+существующие ветки прежнего длинного формата проверяются и продолжаются
+без переименования и дублирования; исторические манифесты без
+`publication_request` остаются допустимыми. Целевая ветка никогда
+не используется для отправки: принятие выполняет человек через PR/MR.
+
 ## File conventions
 
 - feature root: `feature.md`
