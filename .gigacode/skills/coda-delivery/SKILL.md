@@ -12,16 +12,27 @@ description: Бизнес-этапы поставки АС КОДА, аудит 
 prepare не меняет его корневой `GIGACODE.md` и `.gigacode/`.
 
 **DOCS:** Прочитай `GIGACODE.md`, `core/delivery-stages.md`,
-`core/developer-handoff.md`, `core/requirements-audit.md` и `modes/requirements.md`.
+`core/developer-handoff.md`, `core/sdd-input.md`, `core/requirements-audit.md` и
+`modes/requirements.md`.
 
 **RULE:** Определи операцию по запросу: регистрация/закрытие этапа, передача,
 проверка прежней публикации, чтение или обработка возврата. Не выполняй
 остальные операции автоматически. Входы и разрешённые записи задаёт её договор.
 
+**RULE:** Новая подготовка явно выбирает `begin-preparation --input-profile
+openspec-spec-driven-v1`. В рабочей ветке требований до принятия в main подготовь
+`<delivery-root>/sdd/package.json`, proposal и delta specs затронутых backend/frontend
+по `core/sdd-input.md`. Requirements остаётся единственным авторским бизнес-контрактом.
+Исходный code commit, config/context, main specs и покрытие REQ/сценариев проверяются
+через зарегистрированное чтение; отсутствие источников блокирует готовность.
+Не генерируй design/tasks и не вызывай opsx-propose/opsx-ff. Аналитик не запускает
+sdd-receive.py --apply и не пишет в рабочие OpenSpec roots кода.
+
 **RULE:** Перед передачей нужны актуальная принятая main, завершённая сессия
 и `require-main-for-delivery`. Выполни три уровня аудита, проверки и record-audit,
 покажи отчёт и получи отдельное явное подтверждение аудита и отправки.
-Только после этого confirm-audit и prepare неизменного документа.
+Только после этого confirm-audit и prepare неизменного requirements и всего SDD-пакета.
+Аудит связывает все байты и источники; изменение любого входа требует повтора.
 При awaiting-merge сообщи ожидание человеческого PR/MR; mark-published
 для code допустим только при publication_confirmed=true.
 
@@ -29,8 +40,9 @@ prepare не меняет его корневой `GIGACODE.md` и `.gigacode/`.
 решения по каждому REQ и остатку. Различай реализацию, проверку, приёмку,
 внедрение и закрытие этапа. Прежние входы и returns неизменяемы.
 
-**PROHIBITED:** Не создавай техническую декомпозицию за разработчиков,
-не включай остаток в следующий этап автоматически. ZIP только по явному
+**PROHIBITED:** Не создавай design/tasks и техническую декомпозицию за разработчиков;
+proposal/delta specs аналитика являются согласованным входом SDD.
+Не включай остаток в следующий этап автоматически. ZIP только по явному
 запросу и только в ~/Downloads. Сообщи фактическое место и номер редакции.
 
 **DOCS:** Для квартальной структуры прочитай `core/quarter-deliveries.md`.

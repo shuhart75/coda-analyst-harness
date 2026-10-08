@@ -58,7 +58,7 @@ A failed check does not advance the run. Repeated failure reaches the configured
 - Delivery scope is approved by the analyst with product-owner authority. Developer SDD proposes technical decomposition and reports all remaining scope; it never silently reduces the business contract.
 - Per-requirement result decisions follow `core/developer-handoff.md`. Accepted deviations and a next-cycle delta may coexist. Reporting completion never authorizes automatic baseline promotion.
 
-- Ordinary requirement authoring changes only `features/<feature>/requirements.md` as the requirements artifact. The state file and bounded code-research evidence are control and auxiliary records, not a decomposition of the requirements.
+- The authored business contract remains the resolved delivery `requirements.md`. OpenSpec preparation also derives `sdd/` proposal/spec under `core/sdd-input.md`; it never creates independent business scope or developer design/tasks. State and bounded code-research evidence remain auxiliary records.
 - Slices, contour packs and preliminary task candidates are never created by the requirements process. An exchange revision is created only after the analyst explicitly requests or accepts transfer.
 - Every root change records `analyst` or `developer-result` origin in `requirements-state.json`.
 - A `developer-result` change never triggers or offers a revision.
@@ -66,12 +66,12 @@ A failed check does not advance the run. Repeated failure reaches the configured
 - Authoring review is allowed in the feature branch. Explicit preparation requires accepted current `main`, finished collaboration and `require-main-for-delivery` before the three-level audit in `core/requirements-audit.md`. Ask semantic questions one at a time; any correction passes through the authoring branch and human acceptance before the full delivery audit is repeated.
 - Requirement authoring and preparation both run the controlled-wording check and the isolated-reader review from `core/requirements-wording.md`.
 - The LLM shows the completed audit report to the analyst. Publication is forbidden until the analyst explicitly confirms both that report and transfer.
-- Audit confirmation is bound to the exact `requirements.md` checksum. Any later change invalidates it and requires a new audit.
-- After confirmation, preparation copies only `requirements.md`, updates `manifest.json` and records the actual destination. No exchange revision exists while audit confirmation is pending.
+- Audit confirmation binds the exact `requirements.md` and the complete SDD descriptor when present. Any later input change invalidates it and requires a new audit.
+- After confirmation, preparation copies the audited `requirements.md` and SDD input unchanged, updates `manifest.json` and records the actual destination. No exchange revision exists while audit confirmation is pending.
 
 ## Technical Decomposition Invariants
 
-- Analysts transmit one immutable feature requirements document plus a manifest; developers define the future Jira decomposition in their own process.
+- Analysts transmit one immutable delivery contract with a manifest and, for OpenSpec, derived proposal/spec. Developers own design/tasks and future Jira decomposition.
 - Developer SDD acknowledges each new revision once with an immutable `returns/receipt.json` containing the exact revision and requirements checksum. No receipt means the revision is new; a receipt from an older revision never carries forward.
 - `returns/tasks.md` appears only after developers have agreed the decomposition. The analytical workflow has no proposal or confirmation state for it.
 - Each task has one independently implementable technical result and direct links to `REQ-*`.

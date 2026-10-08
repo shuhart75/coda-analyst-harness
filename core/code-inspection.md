@@ -96,7 +96,7 @@ When code findings affect requirements, use `features/<feature>/.research/code-e
 - relative paths, symbols and short observations without copying source code;
 - related requirement identifiers and transfer destination.
 
-Code evidence is auxiliary and commit-bound. During ordinary requirements work, transfer accepted requirement findings only into the root `requirements.md`; record deferred cross-feature propagation in the consistency backlog when necessary. Explicit developer transfer copies that root document and never creates another requirements representation. Do not update `baseline/current/` from code research outside the existing release-finalization rules.
+Code evidence is auxiliary and commit-bound. Transfer accepted business findings into the resolved delivery `requirements.md`; record deferred cross-feature propagation in the consistency backlog when necessary. OpenSpec preparation also derives proposal/spec under `core/sdd-input.md`, pinning the inspected code, context and main specs. Explicit transfer copies the audited business contract and derived SDD input unchanged. Do not update `baseline/current/` from code research outside the existing release-finalization rules.
 
 ## Two-stage reconciliation
 

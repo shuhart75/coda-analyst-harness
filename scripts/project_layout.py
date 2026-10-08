@@ -171,7 +171,7 @@ def require_audit_binding(project: Path, key: str, audit: dict) -> None:
 
 def require_manifest_binding(project: Path, key: str, manifest: dict) -> None:
     binding = exchange_binding(project, key)
-    if manifest.get('schema_version') == 4 and manifest.get('delivery_binding') != binding:
+    if manifest.get('schema_version') in {4, 5} and manifest.get('delivery_binding') != binding:
         raise ValueError('Exchange manifest belongs to a different feature or delivery')
-    if manifest.get('schema_version') != 4 and manifest.get('delivery_binding') is not None:
+    if manifest.get('schema_version') not in {4, 5} and manifest.get('delivery_binding') is not None:
         raise ValueError('Delivery binding requires exchange schema 4')

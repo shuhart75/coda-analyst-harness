@@ -4,6 +4,7 @@ from __future__ import annotations
 from project_layout import (feature_root as layout_feature_root, exchange_binding,
                             require_audit_binding, require_manifest_binding)
 
+import sdd_audit
 import argparse
 import hashlib
 import importlib.util
@@ -321,6 +322,7 @@ def record_change_command(args: argparse.Namespace) -> int:
     payload.update({
         "updated_at": now(),
         "requirements_sha256": requirements_hash(feature_root),
+        "sdd_working_sha256": sdd_audit.working_hash(feature_root),
         "last_change": {
             "origin": args.origin,
             "recorded_at": now(),
@@ -364,6 +366,11 @@ def begin_preparation_command(args: argparse.Namespace) -> int:
     _, feature_root, state_path = feature_paths(args.project, args.feature)
     payload = load_or_create(feature_root, state_path, args.feature)
     stages.active_stage(payload, (feature_root / "requirements.md").read_text(encoding="utf-8"))
+    profile = getattr(args, "input_profile", None) or payload.get("input_profile", sdd_audit.LEGACY)
+    if payload.get("input_profile") == sdd_audit.sdd_bundle.PROFILE and profile != payload["input_profile"]:
+        raise ValueError("An SDD delivery cannot downgrade to requirements-only")
+    payload["input_profile"] = profile
+    payload["sdd_working_sha256"] = sdd_audit.working_hash(feature_root)
     payload["requirements_sha256"] = requirements_hash(feature_root)
     payload["revision_offer"].update({
         "state": "audit-required",
@@ -392,6 +399,8 @@ def record_audit_command(args: argparse.Namespace) -> int:
     if not args.summary.strip():
         raise ValueError("Итог аудита не может быть пустым")
     checksum = requirements_hash(feature_root)
+    sdd = sdd_audit.snapshot(feature_root, payload,
+                             exchange_module().resolve_code_root(project, None), verify_source=True)
     stage = stages.active_stage(payload, (feature_root / "requirements.md").read_text(encoding="utf-8"))
     blocked = args.blocking_finding_count > 0
     resolved = args.finding_count - args.accepted_risk_count - args.blocking_finding_count
@@ -410,6 +419,8 @@ def record_audit_command(args: argparse.Namespace) -> int:
         "stage": stage,
         "stage_sha256": stages.checksum(stage),
     }
+    if sdd is not None:
+        payload["delivery_audit"]["sdd_input"] = sdd
     binding = exchange_binding(project, args.feature)
     if binding is not None:
         payload["delivery_audit"]["delivery_binding"] = binding
@@ -445,6 +456,7 @@ def confirm_audit_command(args: argparse.Namespace) -> int:
     stages.require_audit_stage(payload, (feature_root / "requirements.md").read_text(encoding="utf-8"))
     require_audit_binding(project, args.feature, audit)
     stages.require_closed_sibling_stages(project, args.feature)
+    sdd_audit.require_unchanged(feature_root, payload)
     audit.update({"state": "confirmed", "confirmed_at": now()})
     payload["requirements_sha256"] = current_hash
     payload["revision_offer"].update({
@@ -469,6 +481,10 @@ def mark_published_command(args: argparse.Namespace) -> int:
     publication = manifest.get("publication")
     if isinstance(publication, dict) and publication.get("state") != "merged":
         raise ValueError("Передача ожидает принятия PR/MR; повтори prepare после слияния")
+    if args.destination_role == "analytics":
+        errors = exchange_module().validate_manifest(manifest, manifest_path.parent)
+        if errors:
+            raise ValueError("; ".join(errors))
     if args.destination_role == "code":
         publication = manifest.get("publication")
         if not isinstance(publication, dict) or publication.get("state") != "merged" or not publication.get("target_commit"):
@@ -483,6 +499,9 @@ def mark_published_command(args: argparse.Namespace) -> int:
         raise ValueError("Опубликованная редакция не найдена в манифесте")
     if entries[0].get("sha256") != current_hash:
         raise ValueError("Передана не текущая редакция корневых требований")
+    current_sdd = sdd_audit.require_unchanged(feature_root, payload)
+    if entries[0].get("sdd_input") != current_sdd:
+        raise ValueError("Published SDD input differs from the confirmed audit")
     stages.require_manifest_history(payload, manifest)
     stages.require_entry_stage(entries[0], stage)
     records = stages.registry(payload)["revisions"]
@@ -522,6 +541,7 @@ def mark_published_command(args: argparse.Namespace) -> int:
         },
         "last_published": {
             "revision": args.revision,
+            "sdd_input": entries[0].get("sdd_input"),
             "requirements_sha256": current_hash,
             "published_at": now(),
             "manifest_path": str(manifest_path),
@@ -541,6 +561,8 @@ def status_command(args: argparse.Namespace) -> int:
     payload = load_or_create(feature_root, state_path, args.feature)
     current_hash = requirements_hash(feature_root, required=False)
     action = "record-requirements-change" if current_hash != payload.get("requirements_sha256") else action_for(payload)
+    if sdd_audit.working_hash(feature_root) != payload.get("sdd_working_sha256"):
+        action = "record-requirements-change"
     output(payload, action)
     return 1 if action == "record-requirements-change" else 0
 
@@ -703,6 +725,8 @@ def close_stage_command(args: argparse.Namespace) -> int:
     current_hash = requirements_hash(feature_root)
     if payload["revision_offer"]["state"] != "not-needed":
         raise ValueError("Нельзя закрыть этап: изменение объёма или подготовка новой редакции не завершены")
+    if sdd_audit.working_hash(feature_root) != payload.get("sdd_working_sha256"):
+        raise ValueError("Нельзя закрыть этап после незарегистрированного изменения SDD")
     if current_hash != published["requirements_sha256"] and (
         payload["last_change"]["origin"] != "developer-result"
         or payload.get("requirements_sha256") != current_hash
@@ -794,6 +818,7 @@ def parser() -> argparse.ArgumentParser:
     begin = commands.add_parser("begin-preparation")
     begin.add_argument("project")
     begin.add_argument("feature")
+    begin.add_argument("--input-profile", choices=[sdd_audit.LEGACY, sdd_audit.sdd_bundle.PROFILE])
     begin.set_defaults(handler=begin_preparation_command)
     audit = commands.add_parser("record-audit")
     audit.add_argument("project")
