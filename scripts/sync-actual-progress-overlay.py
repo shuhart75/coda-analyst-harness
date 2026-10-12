@@ -974,8 +974,8 @@ def task_schedules(
     closed_days: set[date],
     today: date,
     team_resources: dict[str, list[str]],
-    resource_closed_days: dict[str, set[date]] | None = None,
     feature_priorities: dict[str, int] | None = None,
+    resource_closed_days: dict[str, set[date]] | None = None,
 ) -> dict[str, ScheduledTask]:
     tasks = {task_id: task for task_id, task in tasks.items()
              if task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES
@@ -1518,8 +1518,8 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         closed_days,
         harness_today(),
         team_resources,
-        resource_closed_days,
         layout.priorities if layout else None,
+        resource_closed_days,
     )
 
     outputs: dict[Path, str] = {}
