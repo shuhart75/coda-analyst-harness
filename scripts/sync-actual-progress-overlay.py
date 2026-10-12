@@ -96,7 +96,10 @@ ROLE_ALIASES = {
     },
 }
 
-NOT_STARTED_STATUSES = {"proposed", "предложен", "planned", "todo", "open", "backlog"}
+NOT_STARTED_STATUSES = {
+    "proposed", "предложен", "planned", "todo", "open", "backlog",
+    "not-started", "not_started",
+}
 DONE_STATUSES = {"done", "closed", "complete", "completed"}
 EXCLUDED_STATUSES = {"superseded", "cancelled", "canceled"}
 FE_AFTER_BE_OPEN_DAYS = 3
@@ -316,6 +319,35 @@ def load_team_resources(project_root: Path) -> dict[str, list[str]]:
         if normalized:
             resources[role] = normalized
     return resources
+
+
+def load_resource_closed_days(project_root: Path) -> dict[str, set[date]]:
+    """Read resource-specific unavailable intervals from the project roster."""
+    path = team_path(project_root)
+    if not path.exists():
+        return {}
+    rows = first_table_with(path, "Resource")
+    result: dict[str, set[date]] = {}
+    for row in rows:
+        resource = normalize_executor(row.get("Resource", ""))
+        if not resource:
+            continue
+        closed: set[date] = set()
+        raw_intervals = clean_cell(row.get("Closed intervals", ""))
+        for item in split_list(raw_intervals):
+            if ".." in item:
+                start_raw, finish_raw = (part.strip() for part in item.split("..", 1))
+                start, finish = date.fromisoformat(start_raw), date.fromisoformat(finish_raw)
+            else:
+                start = finish = date.fromisoformat(item.strip())
+            if finish < start:
+                raise ValueError(f"{path}: {resource}: закрытый интервал заканчивается раньше начала")
+            current = start
+            while current <= finish:
+                closed.add(current)
+                current += timedelta(days=1)
+        result[resource] = closed
+    return result
 
 
 def load_story_map(feature_dir: Path) -> list[StoryMap]:
@@ -943,12 +975,15 @@ def task_schedules(
     today: date,
     team_resources: dict[str, list[str]],
     feature_priorities: dict[str, int] | None = None,
+    resource_closed_days: dict[str, set[date]] | None = None,
 ) -> dict[str, ScheduledTask]:
     tasks = {task_id: task for task_id, task in tasks.items()
              if task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES
              and not completion_bound_only(task) and not completion_finish_only(task)}
     schedules: dict[str, ScheduledTask] = {}
-    occupied: dict[str, set[date]] = {}
+    occupied: dict[str, set[date]] = {
+        resource: set(days) for resource, days in (resource_closed_days or {}).items()
+    }
 
     def task_scope(task_key: str) -> str:
         return task_key.removesuffix(tasks[task_key].task_id).rstrip("/")
@@ -1418,6 +1453,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         delivery_selection(project_root, [feature_map.get(slug, slug) for slug in feature_slugs], quarter_id)
     closed_days = load_closed_days(project_root, quarter_id)
     team_resources = load_team_resources(project_root)
+    resource_closed_days = load_resource_closed_days(project_root)
     feature_tasks: dict[str, dict[str, Task]] = {}
     scoped_tasks: dict[str, Task] = {}
     aliases: set[str] = set()
@@ -1477,8 +1513,14 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
 
     if layout and set(feature_slugs) != set(layout.execution_features):
         raise ValueError("Состав задач не совпадает с подтверждённым описанием диаграммы")
-    scoped_schedules = task_schedules(scoped_tasks, closed_days, harness_today(), team_resources,
-                                     layout.priorities if layout else None)
+    scoped_schedules = task_schedules(
+        scoped_tasks,
+        closed_days,
+        harness_today(),
+        team_resources,
+        layout.priorities if layout else None,
+        resource_closed_days,
+    )
 
     outputs: dict[Path, str] = {}
     for feature_slug in feature_slugs:
