@@ -224,6 +224,8 @@ Requirement templates live in `templates/requirements/`. Use them as the active 
 
 ## Developer handoff
 
+- Analyst-side return review must independently inspect available code under core/code-inspection.md and follow the self-service review procedure in core/developer-handoff.md. Preserve developer returns; keep our evidence, scenario assessments and analyst decisions separately. A return on another branch and later target-branch changes are normal. Ask development only for evidence unavailable locally, never for cosmetic report corrections; analyst decisions govern behavior and residual scope.
+
 - Read core/sdd-input.md for OpenSpec input preparation. The requirements mode may write derived sdd/ before accepted-main audit, in the owning feature branch. Record SDD-only changes with record-change too. Audit and confirmation bind the entire bundle; any change invalidates them. Registered code read access is required to verify the source even for analytics fallback. Receiver --apply belongs only to the developer workspace.
 
 - The analyst with product-owner authority approves the current delivery scope; developer SDD owns technical decomposition and must not silently reduce that scope.

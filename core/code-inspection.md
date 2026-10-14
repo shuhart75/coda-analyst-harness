@@ -100,6 +100,13 @@ Code evidence is auxiliary and commit-bound. Transfer accepted business findings
 
 ## Two-stage reconciliation
 
+Return review is an automatic read-only inspection trigger. Follow the analyst
+review procedure in core/developer-handoff.md: start from developer code pointers,
+verify each input scenario, distinguish the reported commit from the inspected
+version and account for later changes. A report branch is a valid evidence source;
+target-branch movement does not require a rewritten report. Resolve locally
+answerable questions before asking development, and preserve the original returns.
+
 Analyst-side inspection improves requirements against a recorded local code revision. It does not replace developer-side reconciliation.
 
 Before implementation, the receiving SDD repeats a targeted comparison against its current branch because the code may be newer, differently configured or already changed. Developer findings and actual delivery are returned through `returns/tasks.md`, per-task results and the final summary of the active exchange revision.
