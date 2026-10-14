@@ -1,5 +1,6 @@
 """Renderer-level regression; set PLANTUML_JAR to a local supported jar."""
 from datetime import date
+import importlib
 import os
 from pathlib import Path
 import subprocess
@@ -13,6 +14,30 @@ OVERLAY = uncertain.OVERLAY
 
 
 class ProgressRenderingTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('PLANTUML_JAR'), 'PLANTUML_JAR is not configured')
+    def test_generated_header_hides_table_but_keeps_task_and_milestone_labels(self):
+        generator = importlib.import_module('sync-quarter-gantt')
+        lines = generator.header_lines(Path('/project/quarters/2026-Q4/gantt'),
+                                       'Example', date(2026, 10, 1), [], [])
+        # Keep the renderer fixture independent of today's calendar date.
+        lines = [line for line in lines if 'TODAY_MARK' not in line]
+        lines += ['[Wide task] requires 10 days',
+                  '[Long name for a short task] requires 1 day',
+                  '[Release] happens at 2026/10/12', '@endgantt']
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'labels.puml'
+            source.write_text('\n'.join(lines), encoding='utf-8')
+            subprocess.run(['java', '-Djava.awt.headless=true', '-jar',
+                            os.environ['PLANTUML_JAR'], '-tsvg', str(source)],
+                           check=True, capture_output=True, timeout=60)
+            root = ET.parse(source.with_suffix('.svg')).getroot()
+        texts = [''.join(node.itertext()) for node in root.iter()
+                 if node.tag.endswith('}text')]
+        for label in ('Wide task', 'Long name for a short task', 'Release'):
+            self.assertEqual(texts.count(label), 1)
+        for heading in ('Task', 'Start', 'End', 'Duration'):
+            self.assertNotIn(heading, texts)
+
     @unittest.skipUnless(os.environ.get('PLANTUML_JAR'), 'PLANTUML_JAR is not configured')
     def test_unknown_zero_partial_and_done_have_distinct_fill_semantics(self):
         lines = ['@startgantt', 'Project starts 2026-09-07']

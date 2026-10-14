@@ -170,6 +170,10 @@ def header_lines(
 ) -> list[str]:
     lines = [
         "@startgantt",
+        "hide column task",
+        "hide column start",
+        "hide column end",
+        "hide column duration",
         f"title {title} - {gantt_dir.parent.name}",
         f"Project starts {format_project_start(start)}",
         "saturday are closed",
