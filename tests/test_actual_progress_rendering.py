@@ -14,8 +14,15 @@ OVERLAY = uncertain.OVERLAY
 
 
 class ProgressRenderingTests(unittest.TestCase):
+    def test_shared_header_avoids_renderer_specific_column_commands(self):
+        generator = importlib.import_module('sync-quarter-gantt')
+        lines = generator.header_lines(Path('/project/quarters/2026-Q4/gantt'),
+                                       'Example', date(2026, 10, 1), [], [])
+        self.assertFalse(any(line.lower().startswith(('hide column', 'show column', 'label on'))
+                             for line in lines))
+
     @unittest.skipUnless(os.environ.get('PLANTUML_JAR'), 'PLANTUML_JAR is not configured')
-    def test_generated_header_hides_table_but_keeps_task_and_milestone_labels(self):
+    def test_generated_header_keeps_task_and_milestone_labels(self):
         generator = importlib.import_module('sync-quarter-gantt')
         lines = generator.header_lines(Path('/project/quarters/2026-Q4/gantt'),
                                        'Example', date(2026, 10, 1), [], [])
@@ -35,8 +42,6 @@ class ProgressRenderingTests(unittest.TestCase):
                  if node.tag.endswith('}text')]
         for label in ('Wide task', 'Long name for a short task', 'Release'):
             self.assertEqual(texts.count(label), 1)
-        for heading in ('Task', 'Start', 'End', 'Duration'):
-            self.assertNotIn(heading, texts)
 
     @unittest.skipUnless(os.environ.get('PLANTUML_JAR'), 'PLANTUML_JAR is not configured')
     def test_unknown_zero_partial_and_done_have_distinct_fill_semantics(self):
