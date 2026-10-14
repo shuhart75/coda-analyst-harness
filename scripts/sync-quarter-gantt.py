@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from project_layout import feature_root as layout_feature_root, delivery_title
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import argparse
 import importlib.util
@@ -206,6 +206,40 @@ def header_lines(
     return lines
 
 
+AVAILABILITY_TITLE = "Отпуска и недоступность команды"
+
+
+def availability_lines(gantt_dir: Path, overlay) -> list[str]:
+    """Display personal closed days without assigning work or rescheduling tasks."""
+    start = parse_quarter_start(gantt_dir)
+    finish = date(start.year + 1, 1, 1) if start.month == 10 else date(start.year, start.month + 3, 1)
+    closed = overlay.load_resource_closed_days(project_root(gantt_dir))
+    roster = {resource for resources in overlay.load_team_resources(project_root(gantt_dir)).values()
+              for resource in resources}
+    lines: list[str] = []
+    for resource in sorted(roster):
+        if not re.fullmatch(r"[ABFQ][1-9][0-9]*", resource):
+            continue
+        days = sorted(day for day in closed.get(resource, set()) if start <= day < finish)
+        spans: list[tuple[date, date]] = []
+        for day in days:
+            if spans and day == spans[-1][1] + timedelta(days=1):
+                spans[-1] = (spans[-1][0], day)
+            else:
+                spans.append((day, day))
+        for first, last in spans:
+            alias = f"CALENDAR_OFF_{resource}_{first:%Y%m%d}"
+            lines.extend([
+                f"[Недоступность {resource}] as [{alias}] starts {first:%Y/%m/%d}",
+                f"[{alias}] ends {last:%Y/%m/%d}",
+                f"[{alias}] is colored in LightYellow/Orange",
+            ])
+    if not lines:
+        return []
+    return [f"-- {AVAILABILITY_TITLE} --",
+            "' Calendar information only; no resource assignment or work estimate.", *lines, ""]
+
+
 def load_tool(name: str):
     spec = importlib.util.spec_from_file_location(name.replace("-", "_"), Path(__file__).with_name(name + ".py"))
     module = importlib.util.module_from_spec(spec)
@@ -331,6 +365,8 @@ def main() -> int:
                     lines.append(f'!include {path.relative_to(gantt_dir).as_posix()}')
                     lines.append("")
 
+        if slug == "actual-progress":
+            lines.extend(availability_lines(gantt_dir, overlay))
         lines.append("@endgantt")
         target = gantt_dir / f"{slug}.puml"
         outputs[target] = "\n".join(lines).rstrip() + "\n"
@@ -341,6 +377,8 @@ def main() -> int:
         expected_titles = [section['title'] if gantt_dir / section['include'] in set(scope.includes.values())
                            else delivery_title(project_root(gantt_dir), scope.features.get(section['feature'], section['feature']), section['title'])
                            for section in layout.sections]
+        if availability_lines(gantt_dir, overlay):
+            expected_titles.append(AVAILABILITY_TITLE)
         if re.findall(r"^-- (.+?) --\s*$", exported, re.MULTILINE) != expected_titles:
             raise ValueError("Итоговый состав разделов отличается от подтверждённого описания")
         if load_layout(gantt_dir) != layout:
