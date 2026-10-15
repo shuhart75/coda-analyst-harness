@@ -3,11 +3,12 @@ description: Обмен репозиториев, защищённое обно�
 argument-hint: <синкани репы|обнови код|сделай обратный дифф>
 ---
 
-Прочитай `GIGACODE.md`, `AGENTS.md` и раздел репозиториев в
-`templates/workflow/command-catalog.template.md` в HARNESS_ROOT.
-Запрос аналитика: $ARGUMENTS. Обновление code выполняется только через
-workspace.py update-code; полный обмен через workspace.py sync;
-обратная заплата через зарегистрированную команду из договора.
+Применяй skill `coda-repositories` к запросу аналитика: $ARGUMENTS.
+`repositories` — имя этой slash-команды, не имя skill.
+Если инструмент Skill не видит `coda-repositories`, прочитай существующий файл
+`HARNESS_ROOT/.gigacode/skills/coda-repositories/SKILL.md` напрямую.
+Если файл отсутствует, прочитай `AGENTS.md` и `core/repository-exchange.md`
+в HARNESS_ROOT и сообщи о неполной установке; не подбирай другое имя skill.
 Пустой или неоднозначный запрос требует одного уточнения до операции.
 Не выполняй другие действия репозиториев автоматически.
 Аргументы являются текстом запроса, а не shell-кодом.
