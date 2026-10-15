@@ -470,6 +470,8 @@ def require_active_work(root: Path, analytics: Path, state: dict) -> dict:
     work = state.get("active_work")
     if not isinstance(work, dict):
         raise ValueError("Активная работа над функциональностью не зарегистрирована")
+    if work.get("status") == "creation-pending":
+        raise ValueError("Сначала повтори create с теми же параметрами")
     if work.get("status") == "recovery-pending":
         raise ValueError("Сначала заверши recover-main с теми же параметрами")
     if work.get("status") == "worktree-recovery-pending":
@@ -613,6 +615,8 @@ def finish_command(args: argparse.Namespace) -> int:
     work = state.get("active_work")
     if not isinstance(work, dict):
         raise ValueError("Активная работа над функциональностью не зарегистрирована")
+    if work.get("status") == "creation-pending":
+        raise ValueError("Сначала повтори create с теми же параметрами")
     if work.get("status") == "recovery-pending":
         raise ValueError("Сначала заверши recover-main с теми же параметрами")
     if work.get("status") == "worktree-recovery-pending":
@@ -717,6 +721,8 @@ def status_command(args: argparse.Namespace) -> int:
             relation = branch_relation(analytics, head(analytics), remote.stdout.strip())
             if relation in {"ahead", "diverged"}:
                 next_action = "проверить локальные коммиты и подтвердить функциональность для recover-main"
+    if configured and (state.get("active_work") or {}).get("status") == "creation-pending":
+        next_action = "повторить create с теми же параметрами"
     if configured and (state.get("active_work") or {}).get("status") == "recovery-pending":
         next_action = "повторить recover-main с теми же параметрами"
     if configured and (state.get("active_work") or {}).get("status") == "worktree-recovery-pending":
@@ -755,6 +761,15 @@ def parser() -> argparse.ArgumentParser:
     worktree.add_argument("--expected-file", nargs=2, action="append", required=True, metavar=("PATH", "SHA256"))
     worktree.add_argument("--analyst-confirmed", action="store_true", required=True)
     worktree.set_defaults(handler=recover_worktree_command)
+    from collaboration_create import create
+    new = commands.add_parser("create", help="Создать новую фичу и первую квартальную поставку")
+    new.add_argument("--feature", required=True)
+    new.add_argument("--delivery", required=True)
+    new.add_argument("--key", required=True)
+    new.add_argument("--quarter", required=True)
+    new.add_argument("--title", required=True)
+    new.add_argument("--analyst-confirmed", action="store_true", required=True)
+    new.set_defaults(handler=lambda args: create(args, sys.modules[__name__]))
     start = commands.add_parser("start")
     start.add_argument("--feature", "--delivery", dest='feature', required=True)
     start.set_defaults(handler=start_command)
