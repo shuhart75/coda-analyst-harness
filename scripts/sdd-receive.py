@@ -190,6 +190,8 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
         prepared.append({"target": target, "root": root, "change": change, "contents": contents, "existing": existing})
     allowed_paths = [item["target"].relative_to(code_root).as_posix() for item in prepared if item["existing"]]
     source_check = sdd_bundle.verify_sources(bundle_root, descriptor, code_root, allowed_receiver_paths=allowed_paths)
+    # Source inspection may take time; recheck the whole input before any write.
+    sdd_bundle.verify_descriptor(bundle_root, requirements_text, descriptor)
     created_targets: list[Path] = []
     created_parents: list[Path] = []
     if apply:
@@ -210,6 +212,7 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
                 plain_tree(item["target"])
                 if any((item["target"] / name).read_bytes() != data for name, data in item["contents"].items()):
                     raise ValueError("Принятые файлы изменились во время размещения")
+            sdd_bundle.verify_descriptor(bundle_root, requirements_text, descriptor)
         except Exception:
             for path in reversed(created_targets):
                 if path.is_dir() and not path.is_symlink():
@@ -229,6 +232,10 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
                      "commands": [["openspec", "status", "--change", item["change"]["change_id"], "--json"],
                                   ["openspec", "validate", item["change"]["change_id"], "--strict", "--no-interactive", "--json"]]}
                     for item in prepared],
+        "materials": ({"path": str(bundle_root.parent / "materials"),
+                       "sha256": descriptor["materials"]["sha256"],
+                       "file_count": len(descriptor["materials"]["files"])}
+                      if "materials" in descriptor else None),
         "runtime_validation": "not-performed", "receipt_created": False,
         "next_action": "receiver-validate-openspec-then-record-receipt" if apply else "review-then-receiver-apply",
     }

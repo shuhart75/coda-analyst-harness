@@ -1,7 +1,5 @@
 """Bind the analyst-owned SDD input to the existing delivery audit."""
 from pathlib import Path
-import hashlib
-import json
 
 import sdd_bundle
 
@@ -12,8 +10,7 @@ def working_hash(feature_root):
     root = Path(feature_root) / "sdd"
     if not root.exists() and not root.is_symlink():
         return None
-    files = sdd_bundle._files(root)
-    return hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return sdd_bundle.working_hash(root)
 
 
 def snapshot(feature_root, state, code_root=None, *, verify_source=False):
