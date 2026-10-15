@@ -27,20 +27,31 @@ Slash-команды принимают `$ARGUMENTS` как запрос ана�
 семантику. Если аргументов недостаточно для предметного решения, задай один
 вопрос. Пустые аргументы не разрешают угадывать функциональность или объём.
 
-| Команда | Назначение | Skill или договор |
-|---|---|---|
-| `/feature` | Начать, сохранить, обновить, submit или finish функциональность | `core/collaboration.md` |
-| `/requirements` | Создать, изменить или проверить требования | `coda-requirements` |
-| `/planning` | Плановые истории, оценки, зависимости и расписание | `coda-planning` |
-| `/prototype` | Прототип планирования или передачи | `coda-prototype` |
-| `/tracker` | Прочитать, сравнить или актуализировать выбранные задачи | `coda-tracker` |
-| `/code-inspect` | Исследовать один зарегистрированный контур | `coda-code-inspection` |
-| `/delivery` | Этапы, передача требований и результаты разработки | `coda-delivery` |
-| `/release` | Завершить выпуск и обновить baseline | `coda-release` |
-| `/repositories` | Обновить код, обменять репозитории или подготовить обратную заплату | `AGENTS.md` |
+Slash-команда и skill — разные сущности. Файл команды находится в
+`.gigacode/commands/<команда>.md`; имя для инструмента Skill указано отдельно.
+Знак `/` и имя команды не являются именем skill.
 
-**RULE:** Skills выбираются по намерению запроса и читаются перед соответствующей
-операцией. Режим из `.workspace-state/active-mode.md` является границей записи;
+| Slash-команда | Точное имя skill | Основной договор |
+|---|---|---|
+| `/feature` | нет — читать договор напрямую | `core/collaboration.md` |
+| `/requirements` | `coda-requirements` | `modes/requirements.md` |
+| `/planning` | `coda-planning` | `modes/planning.md` |
+| `/prototype` | `coda-prototype` | `core/workflow.md` |
+| `/tracker` | `coda-tracker` | `core/tracker-adaptive.md` |
+| `/code-inspect` | `coda-code-inspection` | `core/code-inspection.md` |
+| `/delivery` | `coda-delivery` | `core/delivery-stages.md` |
+| `/release` | `coda-release` | `modes/release-finalization.md` |
+| `/repositories` | `coda-repositories` | `core/repository-exchange.md` |
+
+**RULE:** Для естественного запроса выбирай skill по его назначению из доступного
+каталога. Для команд таблицы используй только указанное точное имя. Например,
+`/repositories` направляет в `coda-repositories`, а не в `repositories`.
+Если skill не зарегистрирован инструментом, прочитай существующий
+`HARNESS_ROOT/.gigacode/skills/<точное имя>/SKILL.md` напрямую. Если и файла нет,
+используй указанный основной договор и сообщи о неполной установке; не угадывай
+другие имена и пути и не повторяй неуспешный вызов. Для `/feature` skill не нужен.
+
+Режим из `.workspace-state/active-mode.md` является границей записи;
 перед изменением артефактов другого режима переключи режим по договору.
 
 **PROHIBITED:** Slash-команда или skill не разрешает запись в main, продуктовый
