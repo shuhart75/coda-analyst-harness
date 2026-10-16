@@ -435,3 +435,7 @@ Partial rollback:
 - Use PlantUML as a rendering target, not as the semantic store for mapping.
 - Keep raw evidence in `context/source-materials/`.
 - Prefer small, reviewable edits over broad rewrites.
+
+Перед отменой неподтверждённого кандидата публикации прочитай
+`core/publication-cancellation.md`. Отмена требует явного решения аналитика
+и сохраняет историю; она не подтверждает публикацию.
