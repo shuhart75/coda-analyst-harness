@@ -375,8 +375,13 @@ def inspect(root: Path, requirements_text: str) -> dict:
     return _input_descriptor(files, materials)
 
 
-def verify_descriptor(root: Path, requirements_text: str, expected: dict) -> dict:
-    actual = inspect(root, requirements_text)
+def verify_descriptor(root: Path, requirements_text: str, expected: dict, *, allow_decision=False) -> dict:
+    if expected.get("verification") == "analyst-decision-v1":
+        if not allow_decision:
+            _fail("analyst decision requires an explicit bound delivery decision")
+        actual = inspect_transport(root)
+    else:
+        actual = inspect(root, requirements_text)
     if actual != expected:
         _fail("bundle descriptor mismatch")
     return actual
@@ -524,3 +529,42 @@ def copy_snapshot(src: Path, dst: Path, expected: dict, requirements_text: str) 
         if created_materials and material_dst.is_dir() and not material_dst.is_symlink():
             shutil.rmtree(material_dst)
         raise
+
+
+DECISION_MODE = "analyst-decision-v1"
+DECISION_SKIPPED = ["main-gate", "audit", "language", "traceability", "source-pins", "materials-checksum-list"]
+
+
+def inspect_transport(root: Path) -> dict:
+    """Inventory actual bytes, without interpreting requirements, pins or checklists."""
+    root = Path(root)
+    files = _files(root)
+    materials = None
+    material_root = root.parent / "materials"
+    if material_root.exists() or material_root.is_symlink():
+        values = _files(material_root)
+        materials = {"files": values, "sha256": _hash(json.dumps(values, sort_keys=True, separators=(",", ":")).encode())}
+    for values in (files, materials["files"] if materials else {}):
+        names = [name.casefold() for name in values]
+        if len(names) != len(set(names)):
+            _fail("case collision in transport paths")
+    descriptor = _input_descriptor(files, materials)
+    descriptor["verification"] = DECISION_MODE
+    return descriptor
+
+
+def decision_basis(entry: dict) -> dict | None:
+    """A decision is bound to this exact input; never label skipped audits successful."""
+    decision = entry.get("delivery_decision")
+    if decision is None:
+        return None
+    if (not isinstance(decision, dict) or decision.get("schema_version") != 1
+            or decision.get("mode") != DECISION_MODE
+            or decision.get("analyst_confirmed") is not True
+            or any(not isinstance(decision.get(k), str) or not decision[k].strip()
+                   for k in ("analyst", "reason", "decided_at"))
+            or decision.get("checks") != {k: "not-performed" for k in DECISION_SKIPPED}
+            or decision.get("requirements_sha256") != entry.get("sha256")
+            or decision.get("sdd_sha256") != (entry.get("sdd_input") or {}).get("sha256")):
+        _fail("invalid analyst decision binding")
+    return decision

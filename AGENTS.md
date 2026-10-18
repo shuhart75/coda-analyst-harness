@@ -320,3 +320,11 @@ Context summaries, checkpoints and research files are internal harness operation
 - Run `python3 scripts/validate-language.py "$PROJECT_ROOT"` for changed requirements before completion.
 - Run `python3 scripts/validate-requirements-profile.py "$PROJECT_ROOT"` for changed root documents that use the profile marker.
 - Run `python3 scripts/validate-requirements-wording.py "$PROJECT_ROOT"` for changed compact requirements. A successful script result never replaces the isolated-reader review from `core/requirements-wording.md`.
+
+## Передача по явному решению аналитика
+
+Если аналитик явно просит передать текущий пакет без аудита и сверки с кодом,
+приоритет имеет `core/analyst-decision-delivery.md`: одна команда
+`requirements-exchange.py send-by-decision`, без предварительных main gate,
+record-change, аудитов и отмены прежнего кандидата. Разрешение повторно не
+запрашивать. Обычный маршрут остаётся для передачи без такого решения.
