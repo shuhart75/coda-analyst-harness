@@ -18,6 +18,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 from commit_message_policy import require_valid_commit_message
 from workspace import install_commit_message_hook
@@ -1151,7 +1152,7 @@ def publish_to_code(
         if switched.returncode != 0:
             raise ValueError("Не удалось создать изолированную ветку передачи")
         install_root_contract(exchange)
-        cancellation.restore_history(sys.modules[__name__], exchange, feature, state, before["remote"], target)
+        cancellation.restore_history(SimpleNamespace(**globals()), exchange, feature, state, before["remote"], target)
         prepared = prepare_in_exchange(exchange, project, feature, requirements_bytes, requirements_text, analyst)
         manifest = load_json(prepared["manifest_path"])
         manifest["publication_request"] = {"schema_version": 1, **identity,
@@ -1664,7 +1665,7 @@ def parser() -> argparse.ArgumentParser:
     direct.add_argument("--analyst")
     direct.add_argument("--code-root")
     direct.add_argument("--target-branch")
-    direct.set_defaults(handler=lambda args: analyst_delivery.command(sys.modules[__name__], args))
+    direct.set_defaults(handler=lambda args: analyst_delivery.command(SimpleNamespace(**globals()), args))
     cancel = commands.add_parser("cancel-publication")
     cancel.add_argument("project")
     cancel.add_argument("feature")
@@ -1672,7 +1673,7 @@ def parser() -> argparse.ArgumentParser:
     cancel.add_argument("--expected-commit", required=True)
     cancel.add_argument("--reason", required=True)
     cancel.add_argument("--analyst-confirmed", action="store_true")
-    cancel.set_defaults(handler=lambda args: cancellation.command(sys.modules[__name__], args))
+    cancel.set_defaults(handler=lambda args: cancellation.command(SimpleNamespace(**globals()), args))
     scan = commands.add_parser("scan")
     scan.add_argument("project")
     scan.add_argument("--analyst")
