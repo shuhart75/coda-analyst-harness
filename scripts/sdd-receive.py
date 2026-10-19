@@ -40,7 +40,7 @@ def relative_path(value: Any) -> Path:
     if not isinstance(value, str) or not value or "\\" in value:
         raise ValueError("Ожидался безопасный относительный путь")
     path = PurePosixPath(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in value.split("/")):
+    if path.is_absolute() or any(part in {"", ".", "..", ".git"} for part in value.split("/")):
         raise ValueError(f"Небезопасный относительный путь: {value}")
     if any(ord(char) < 32 for char in value):
         raise ValueError("Управляющие символы запрещены в пути")
@@ -137,10 +137,11 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
         raise ValueError("Контрольная сумма требований не совпадает")
     requirements_text = requirements_bytes.decode("utf-8")
     bundle_root = packet / prefix / "sdd"
+    decision = sdd_bundle.decision_basis(entry)
     descriptor = entry.get("sdd_input")
     if not isinstance(descriptor, dict):
         raise ValueError("Редакция не содержит SDD-вход")
-    sdd_bundle.verify_descriptor(bundle_root, requirements_text, descriptor)
+    sdd_bundle.verify_descriptor(bundle_root, requirements_text, descriptor, allow_decision=decision is not None)
     files = {name: (bundle_root / relative_path(name)).read_bytes() for name in descriptor["files"]}
     if {name: digest(data) for name, data in files.items()} != descriptor["files"]:
         raise ValueError("SDD-вход изменился во время чтения")
@@ -151,15 +152,27 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
         "stage_id": entry["stage_id"], "stage_revision": entry["stage_revision"],
         "stage_sha256": stage_hash, "delivery_binding": binding,
     }
+    if decision is not None:
+        input_binding["delivery_decision"] = decision
     prepared = []
     paths = set()
-    for change in package["changes"]:
+    changes = package.get("changes")
+    if not isinstance(changes, list) or not changes:
+        raise ValueError("Пакет не задаёт путей импорта changes")
+    for change in changes:
+        if (not isinstance(change, dict) or change.get("contour") not in {"backend", "frontend"}
+                or not isinstance(change.get("change_id"), str)
+                or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", change["change_id"])
+                or relative_path(change.get("target_root")).name != "openspec"):
+            raise ValueError("Небезопасный адрес импорта")
         root = code_root / relative_path(change["target_root"])
         config = root / "config.yaml"
         plain_path(code_root, config)
         if not config.is_file():
             raise ValueError(f"Отсутствует OpenSpec config: {config}")
-        target = root / "changes" / change["change_id"]
+        imported_id = (change["change_id"] + "-rev-" + f"{revision:03d}" + "-" + descriptor["sha256"][:8]
+                       if decision else change["change_id"])
+        target = root / "changes" / imported_id
         plain_path(code_root, target)
         target_key = target.relative_to(code_root).as_posix().casefold()
         if any(target_key == previous or target_key.startswith(previous + "/") or previous.startswith(target_key + "/") for previous in paths):
@@ -175,6 +188,10 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
         contents = {name[len(source_prefix):]: data for name, data in files.items() if name.startswith(source_prefix)}
         local_binding = {**input_binding, "target_root": change["target_root"], "change_id": change["change_id"], "contour": change["contour"]}
         metadata = (json.dumps(local_binding, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+        if any(".git" in relative_path(name).parts for name in contents):
+            raise ValueError("Git metadata запрещены во входе")
+        if ".analyst-input.json" in contents:
+            raise ValueError("Вход занимает служебный путь .analyst-input.json")
         contents[".analyst-input.json"] = metadata
         existing = target.exists()
         if existing:
@@ -187,11 +204,13 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
                 plain_path(code_root, path)
                 if not path.is_file() or path.read_bytes() != data:
                     raise ValueError(f"Существующий change не совпадает с точным входом: {path}")
-        prepared.append({"target": target, "root": root, "change": change, "contents": contents, "existing": existing})
+        prepared.append({"target": target, "root": root, "change": change, "imported_id": imported_id, "contents": contents, "existing": existing})
     allowed_paths = [item["target"].relative_to(code_root).as_posix() for item in prepared if item["existing"]]
-    source_check = sdd_bundle.verify_sources(bundle_root, descriptor, code_root, allowed_receiver_paths=allowed_paths)
+    source_check = ({"status": "not-performed", "basis": sdd_bundle.DECISION_MODE}
+                    if decision is not None else
+                    sdd_bundle.verify_sources(bundle_root, descriptor, code_root, allowed_receiver_paths=allowed_paths))
     # Source inspection may take time; recheck the whole input before any write.
-    sdd_bundle.verify_descriptor(bundle_root, requirements_text, descriptor)
+    sdd_bundle.verify_descriptor(bundle_root, requirements_text, descriptor, allow_decision=decision is not None)
     created_targets: list[Path] = []
     created_parents: list[Path] = []
     if apply:
@@ -212,7 +231,7 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
                 plain_tree(item["target"])
                 if any((item["target"] / name).read_bytes() != data for name, data in item["contents"].items()):
                     raise ValueError("Принятые файлы изменились во время размещения")
-            sdd_bundle.verify_descriptor(bundle_root, requirements_text, descriptor)
+            sdd_bundle.verify_descriptor(bundle_root, requirements_text, descriptor, allow_decision=decision is not None)
         except Exception:
             for path in reversed(created_targets):
                 if path.is_dir() and not path.is_symlink():
@@ -229,15 +248,16 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
         "sdd_input_sha256": descriptor["sha256"], "sdd_sha256": descriptor["sha256"], "source": source_check,
         "changes": [{"path": str(item["target"]), "existing": item["existing"],
                      "working_directory": str(item["root"].parent),
-                     "commands": [["openspec", "status", "--change", item["change"]["change_id"], "--json"],
-                                  ["openspec", "validate", item["change"]["change_id"], "--strict", "--no-interactive", "--json"]]}
+                     "commands": [["openspec", "status", "--change", item["imported_id"], "--json"],
+                                  ["openspec", "validate", item["imported_id"], "--strict", "--no-interactive", "--json"]]}
                     for item in prepared],
         "materials": ({"path": str(bundle_root.parent / "materials"),
                        "sha256": descriptor["materials"]["sha256"],
                        "file_count": len(descriptor["materials"]["files"])}
                       if "materials" in descriptor else None),
+        "delivery_decision": decision,
         "runtime_validation": "not-performed", "receipt_created": False,
-        "next_action": "receiver-validate-openspec-then-record-receipt" if apply else "review-then-receiver-apply",
+        "next_action": ("receiver-record-receipt" if decision else "receiver-validate-openspec-then-record-receipt") if apply else "review-then-receiver-apply",
     }
 
 
