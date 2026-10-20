@@ -45,6 +45,8 @@ SBER_ATTRIBUTE_CODES = {
     "epic": ("epic", "epic_key", "parent"),
     "releases": ("release", "releases", "fix_versions", "fixversion"),
 }
+SBER_ROLE_FIELDS = {"estimation_for_analyze": "AN", "estimation_for_dev_front": "FE",
+                    "estimation_for_dev_back": "BE", "estimation_qa": "QA"}
 SBER_FIELDS = ("key", "summary", "suit", "status", "priority", "attributes", "epic", "created_at", "updated_at")
 SOURCE_FIELDS = ("summary", "issue_type", "status", "assignee", "estimate", "epic", "releases", "created_at", "updated_at")
 DEFAULT_CONFIG = {
@@ -330,7 +332,8 @@ def next_action(run: dict) -> dict:
             "selection": {"query_semantics": step["query"], "requested_keys": step["requested_keys"], "epic_key": step["epic_key"]},
             "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
             "requirements": ["read-only", "exact-scope", "all-statuses", "full-response", "report-pagination",
-                             "request-all-role-estimates", "missing-field-is-not-zero", "preserve-raw-response",
+                             "request-all-role-estimates", "request-attributes-or-equivalent-estimate-fields",
+                             "verify-returned-projection", "missing-field-is-not-zero", "preserve-raw-response",
                              "task-role-from-prefix-not-assignee", "skip-outside-supported-roles",
                              "history-before-status-or-date-application"],
             **({"release_membership": {"accepted_evidence": ["card-fields", "selected-query", "links"],
@@ -591,6 +594,8 @@ def role_from_summary(summary: str) -> str | None:
 
 
 def sber_estimate_definition(code: str, name: str) -> dict | None:
+    if code.casefold() in SBER_ROLE_FIELDS:
+        return {"name": name, "role": SBER_ROLE_FIELDS[code.casefold()], "unit": "person-days"}
     combined = " ".join(re.sub(r"[^0-9a-zа-яё]+", " ", f"{code} {name}".casefold()).split())
     if code.casefold() in {item.casefold() for item in SBER_ATTRIBUTE_CODES["estimate"]}:
         return {"name": name, "role": None, "unit": "story-points", "general": True}
@@ -620,6 +625,14 @@ def source_estimates(record: dict, provider: str, summary: str) -> tuple[dict | 
         definition = sber_estimate_definition(attribute["code"], attribute["name"])
         if definition:
             definitions.append((attribute["code"], definition, True, attribute["value"]))
+    # Some exports flatten custom attributes into the card or its fields object.
+    # Keep attribute values authoritative when the same code occurs twice.
+    attribute_codes = {item[0].casefold() for item in definitions}
+    for code, value in fields.items():
+        if code.casefold() in SBER_ROLE_FIELDS and code.casefold() not in attribute_codes:
+            definition = sber_estimate_definition(code, code)
+            if definition:
+                definitions.append((code, definition, True, value))
     for field_id, definition, found, raw in definitions:
         role = definition.get("role")
         if role and found:
@@ -643,7 +656,7 @@ def source_estimates(record: dict, provider: str, summary: str) -> tuple[dict | 
         general_state = "value"
     elif general is None:
         present = attribute_records(record)[1]
-        general_state = "absent" if present else "not-returned"
+        general_state = "absent" if present or alias_value(fields, ESTIMATE_ALIASES)[0] else "not-returned"
     if not role_values and general is not None:
         role = role_from_summary(summary)
         if role in {"AN", "BE", "FE"}:
@@ -822,6 +835,16 @@ def ingest_command(args: argparse.Namespace) -> int:
             step["call"] = call
         records, record_path = full_issue_records(payload)
         cards = [compact_issue(record, step["provider"], forced_epic=step.get("epic_key")) for record in records]
+        if working.get("collection_mode") == "adaptive" and working["scope"]["intent"] == "update-planning":
+            tool = step["call"]["tool"].casefold().replace("_", ".")
+            missing_estimates = collection_diagnostics({"cards": {"sbertrek": cards}})["estimate_fields_not_returned"]
+            if "exportjson" in tool and missing_estimates:
+                raise ValueError(
+                    "estimate-projection-not-returned: " + ", ".join(missing_estimates)
+                    + ". Экспорт не содержит полей оценок. Проверь текущую схему MCP и запроси "
+                    "attributes либо эквивалентные поля; повтори полный ответ на тот же pending step. "
+                    "Явный null допустим, неполученное поле не доказывает отсутствия оценки."
+                )
         if step["stage"].endswith("source-release"):
             from tracker_release_evidence import validate_membership
             validate_membership(working, step, cards)
@@ -1347,6 +1370,26 @@ def verified_result(run_id: str) -> tuple[dict, dict]:
     return completion, result
 
 
+def collection_diagnostics(run: dict) -> dict:
+    cards = run["cards"]["sbertrek"]
+    missing = [card["key"] for card in cards
+               if role_from_summary(card.get("summary", ""))
+               and card.get("field_observations", {}).get("estimate") == "not-returned"
+               and all(card.get("role_estimate_observations", {}).get(role) == "not-returned"
+                       for role in ROLES)]
+    return {
+        "estimate_fields_not_returned": sorted(missing),
+        "projection_review_required": bool(missing),
+        "message": (
+            "Поля оценок не получены; это не пустые оценки в трекере. Проверь текущую схему MCP "
+            "и проекцию: attributes либо поддерживаемые поля оценок. Не копируй параметры "
+            "старого вызова без проверки. Не заменяй ответ завершённого шага. Для уже завершённого сбора "
+            "сохрани ограничение оценок; отдельные снимки истории не дополняют оценки результата. "
+            "Проверка проекции не отменяет сбор истории, включая задачи created/todo."
+        ) if missing else None,
+    }
+
+
 def result_status_command(args: argparse.Namespace) -> int:
     completion, result = verified_result(args.run_id)
     root = run_root(args.run_id)
@@ -1369,6 +1412,19 @@ def result_status_command(args: argparse.Namespace) -> int:
             "reconciled": str(root / "reconciled.json"),
             "reconciled_sha256": completion["reconciled_sha256"],
         } if planning_allowed else None,
+    }
+    # Stored completion describes collection only. Expose the requested workflow
+    # separately, without rewriting historical results or their checksums.
+    completion["collection_complete"] = True
+    completion["report_allowed"] = True
+    completion["collection_diagnostics"] = collection_diagnostics(load_run(args.run_id))
+    completion["next_action"] = completion["planning_update"]["next_action"]
+    completion["workflow_complete"] = result["scope"]["intent"] == "read-only" or completion["planning_update"]["actualization_complete"]
+    completion["final_response_allowed"] = not planning_allowed
+    completion["response_contract"] = {
+        **completion["response_contract"],
+        "delivery": "progress" if planning_allowed else "final",
+        "must_continue": planning_allowed,
     }
     print(json.dumps(completion, ensure_ascii=False, indent=2))
     return 0

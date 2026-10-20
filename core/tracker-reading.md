@@ -44,9 +44,12 @@ Legacy-сбор использует только `issue.exportJson`, TQL в `qu
 инвентарём проекта.
 
 Цикл: `begin -> next_action -> ingest -> reconcile -> result-status`.
-Только `result-status` с `tracker-read-reconciled`, `workflow_complete: true`
-и `final_response_allowed: true` разрешает дословный итог из
-`response_contract.text`. Не составляй сводку из сырых ответов вручную.
+Только `result-status` с `tracker-read-reconciled`, `collection_complete: true`
+и `report_allowed: true` разрешает дословный отчёт из `response_contract.text`.
+Для update-planning это промежуточное сообщение: `final_response_allowed: false`,
+`response_contract.must_continue: true`; сразу выполни верхнеуровневый `next_action`
+(он совпадает с `planning_update.next_action`). Не заканчивай ход на отчёте чтения.
+Для read-only разрешён финальный ответ. Не составляй сводку из сырых ответов вручную.
 
 ## Полный ответ и повтор
 
@@ -106,3 +109,24 @@ Run сохраняет `scope.json`, `run.json`, `run-status.json`,
 `providers/sbertrek.json`, `reconciled.json`, `report.md`, `completion-status.json`.
 Проверка результата связывает область, нормализованные факты и контрольные суммы;
 изменённый отчёт не разрешает применение.
+
+## Проверка полей оценок
+
+Перед вызовом проверь актуальную схему MCP. В проекцию экспорта включи `attributes`
+либо подтверждённые схемой эквивалентные поля оценок; название аргумента проекции
+определяется текущим инструментом, а не старым call-file. Не запрашивай `issue_key`.
+После ответа проверь наличие полей, а не только число карточек. Явный `null` и
+неполученное поле различаются; отсутствие всех полей оценок требует проверки
+проекции и формата ответа, а не вывода «оценок в трекере нет».
+`result-status.collection_diagnostics` показывает такие карточки, в том числе
+для ранее собранных run. Не правь их raw/reconciled и не создавай замену run.
+Новый adaptive update-planning импорт issue.exportJson без полей оценок у ролевых
+карточек останавливается с `estimate-projection-not-returned`: проверь проекцию,
+повтори полный экспорт и ingest в тот же pending step. Явные null и возвращённый
+пустой attributes допустимы. Для уже reconciled run диагностика не переписывает
+результат: сохраняй ограничение оценок и продолжай проверку владельцев и истории.
+Отдельный snapshot истории подтверждает статус/назначения, но не дополняет оценки
+reconciled; не обещай восстановить их через history-review.
+Нулевое число `work_items` означает отсутствие положительных ролевых оценок,
+а не отсутствие задач для actualization или истории. `execution-preview` читает
+исходные `issues`; сбор истории обязателен и для created/todo без оценок.

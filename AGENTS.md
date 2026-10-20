@@ -103,7 +103,7 @@ This repository defines a reusable workflow harness.
 - SberTrek uses only `issue.exportJson` with TQL in `query`, `attributes` in the projection and `max_results=50`. Do not substitute text search, per-key details, link traversal, invented pagination or alternative queries.
 - Prefer the full file created by MCP. A full inline JSON response may be captured verbatim outside the run. Never summarize, reconstruct or copy raw responses into the run. Identical import is a no-op; a different response for a completed step, malformed JSON or a stale `step_id` is fatal.
 - Exactly 50 cards remain visible limitations. History is outside this protocol; facts that require it remain `unknown` with `history-not-collected`.
-- `reconcile` saves the normalized SberTrek result and returns `result-status`. Only its checksum-validated `response_contract.text`, with `workflow_complete: true` and `final_response_allowed: true`, authorizes the verbatim user report.
+- `reconcile` saves the normalized SberTrek result and returns `result-status`. `collection_complete: true` and `report_allowed: true` authorize its checksum-validated verbatim report. For update-planning, `final_response_allowed: false` and `response_contract.must_continue: true` require a progress message followed by `next_action`; never end the turn at collection or skip history for created/todo tasks. Read-only permits a final report. Inspect `collection_diagnostics`: missing estimate fields do not prove empty estimates.
 
 ## First launch and workspace ownership
 

@@ -117,7 +117,8 @@ python3 scripts/trackerctl.py scope-preview --project-root "$PROJECT_ROOT" --qua
 2. Продолжай существующий незавершённый run, а не начинай повторный сбор.
    Ошибка ingest требует исправленного полного ответа на тот же шаг.
 3. Дождись успешного `result-status`. Выведи его `response_contract.text`
-   отдельным сообщением дословно. Этот отчёт завершает только фазу чтения.
+   отдельным промежуточным сообщением дословно. `report_allowed: true` разрешает
+   отчёт; `final_response_allowed: false` запрещает завершить ход на нём.
 4. При `planning_application_allowed: true` продолжи по
    `planning_update.next_action` в рамках исходной команды актуализации.
    Подготовь таблицы сверки; запись выполняй после команды применения показанных
@@ -127,7 +128,8 @@ python3 scripts/trackerctl.py scope-preview --project-root "$PROJECT_ROOT" --qua
 Перед применением повторно проверь `result-status`, если работа прерывалась.
 Не меняй intent завершённого read-only run или его разрешения вручную.
 Проверенные результаты чтения не являются доказательством записи в проект:
-`workflow_complete` относится к сбору и сверке, а
+`collection_complete` относится к сбору и сверке; `workflow_complete` — ко всему
+запрошенному действию. Состояние
 `planning_update.actualization_complete: false` означает, что tracker-команда
 не выполняла актуализацию. Не выдавай её отчёт за обновлённый Гант.
 

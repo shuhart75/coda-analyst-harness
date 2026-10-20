@@ -271,6 +271,23 @@ class AdaptiveHistoryTests(unittest.TestCase):
         result = self.ingest(run, {'issues': [self.source_issue('SBER-1')]})
         self.assertEqual(result['status'], 'tracker-read-ready')
 
+    def test_created_task_without_estimates_still_requires_history(self):
+        self.registry(self.project, 'owner', ['| CORE | SBER-1 | - | real | BE | planned |'])
+        self.save_sources()
+        run = self.ingest(self.begin(), {'issues': [{
+            'key': 'SBER-1', 'summary': '[BE] New task', 'suit': 'story',
+            'status': 'created', 'assignee': None, 'attributes': [],
+        }]})
+        self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
+        status = self.run_tool(self.state, 'result-status', '--run-id', run['run_id'])
+        self.assertFalse(status['final_response_allowed'])
+        self.assertEqual(status['counts']['work_items'], 0)
+        before = self.snapshot()
+        preview = self.run_tool(self.state, 'execution-preview', '--run-id', run['run_id'],
+                                '--project-root', str(self.project), '--feature', 'owner')
+        self.assertEqual(preview['next_action']['type'], 'collect-history')
+        self.assertEqual(self.snapshot(), before)
+
     def test_real_response_to_bound_review_without_project_writes(self):
         run_id = self.reconciled()
         preview = self.run_tool(self.state, 'execution-preview', '--run-id', run_id,
