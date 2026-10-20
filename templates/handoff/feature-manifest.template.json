@@ -37,7 +37,7 @@
       "frontend": 10
     },
     "estimate": "optional",
-    "jira_key": "optional",
+    "sbertrek_key": "optional",
     "confirmation_delivery": "automatic-non-blocking"
   },
   "testing_policy": {

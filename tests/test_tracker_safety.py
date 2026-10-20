@@ -23,7 +23,7 @@ class TrackerScopeSafetyTests(unittest.TestCase):
     sber_issue = test_trackerctl.DirectTrackerWorkflowTests.sber_issue
     registry = test_trackerctl.DirectTrackerWorkflowTests.registry
     call = test_tracker_history.AdaptiveHistoryTests.call
-    jira_issue = test_trackerctl.DirectTrackerWorkflowTests.jira_issue
+    source_issue = test_trackerctl.DirectTrackerWorkflowTests.source_issue
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -32,20 +32,20 @@ class TrackerScopeSafetyTests(unittest.TestCase):
         self.project = Path(temporary.name) / 'project'
         self.configure(self.state)
 
-    def test_scope_optional_epics_and_identity_requests(self):
-        self.registry(self.project, 'owner', ['| INTERNAL | JIRA-1 | - | real | BE | done |'])
+    def test_scope_optional_epics_and_own_keys(self):
+        self.registry(self.project, 'owner', ['| INTERNAL | SBER-1 | - | real | BE | done |'])
         self.write(self.project / 'features/owner/execution/tracker-scope.json',
-                   {'schema_version': 1, 'epics': {'jira': ['JIRA-10', 'JIRA-20']}})
+                   {'schema_version': 1, 'epics': {'sbertrek': ['SBER-10', 'SBER-20']}})
         preview = self.run_tool(self.state, 'scope-preview', '--project-root', str(self.project),
                                 '--feature', 'owner', '--provider', 'sbertrek')
         self.assertEqual([item['id'] for item in preview['scope_choices']], ['tasks', 'epics', 'combined'])
-        self.assertEqual(preview['features'][0]['epics']['jira'], ['JIRA-10', 'JIRA-20'])
-        self.assertEqual(preview['epics']['owner'], [])
-        self.assertEqual({item['source_key'] for item in preview['identity_requests']}, {'JIRA-1', 'JIRA-10', 'JIRA-20'})
-        self.assertEqual(preview['scope']['ids'], [])
+        self.assertEqual(preview['features'][0]['epics']['sbertrek'], ['SBER-10', 'SBER-20'])
+        self.assertEqual(preview['epics']['owner'], ['SBER-10', 'SBER-20'])
+        self.assertNotIn('identity_requests', preview)
+        self.assertEqual(preview['scope']['ids'], ['SBER-1'])
 
     def test_combined_and_multiple_epics_use_selected_provider(self):
-        for provider in ('jira', 'sbertrek'):
+        for provider in ('sbertrek',):
             for kind in ('epic', 'combined'):
                 with self.subTest(provider=provider, kind=kind), tempfile.TemporaryDirectory() as directory:
                     state = Path(directory)
@@ -63,46 +63,30 @@ class TrackerScopeSafetyTests(unittest.TestCase):
                     if kind == 'combined':
                         self.run_tool(state, *args, '--epic-id', 'TEST-4', expected=2)
 
-    def test_identity_lookup_uses_reference_not_equal_own_key(self):
-        for provider, key in [('jira', 'JIRA-1'), ('sbertrek', 'SBER-7')]:
-            args = ['identity-lookup', '--source-provider', provider, '--key', key]
-            prepared = self.run_tool(self.state, *args)
-            response = self.write(self.state / 'identity.json', [self.sber_issue('SBER-7', jira_key='JIRA-1')])
-            call = self.write(self.state / 'call.json', self.call('sbertrek', prepared['query_semantics']))
-            result = self.run_tool(self.state, *args, '--response-file', str(response), '--call-file', str(call))
-            self.assertEqual(result['pairs'], [{'jira': 'JIRA-1', 'sbertrek': 'SBER-7'}])
-            self.assertFalse(result['facts_application_allowed'])
-            self.assertEqual(result['unresolved'], [])
-        self.write(response, [self.sber_issue('SBER-7', jira_key='JIRA-1'), self.sber_issue('SBER-8', jira_key='JIRA-1')])
-        prepared = self.run_tool(self.state, 'identity-lookup', '--source-provider', 'jira', '--key', 'JIRA-1')
-        self.write(call, self.call('sbertrek', prepared['query_semantics']))
-        self.run_tool(self.state, 'identity-lookup', '--source-provider', 'jira', '--key', 'JIRA-1',
-                      '--response-file', str(response), '--call-file', str(call), expected=2)
 
     def test_combined_collection_counts_union_once_and_retries_missing_registry_task(self):
-        run = self.run_tool(self.state, 'begin', '--scope-kind', 'combined', '--scope-provider', 'jira',
-                            '--scope-id', 'JIRA-1', '--epic-id', 'JIRA-10', '--epic-id', 'JIRA-20',
+        run = self.run_tool(self.state, 'begin', '--scope-kind', 'combined', '--scope-provider', 'sbertrek',
+                            '--scope-id', 'SBER-1', '--epic-id', 'SBER-10', '--epic-id', 'SBER-20',
                             '--label', 'Test', '--scope-source', 'confirmed')
         action = run['next_action']
-        issue = self.jira_issue('JIRA-2', roles={'BE': 1, 'QA': 2})
+        issue = self.source_issue('SBER-2', roles={'BE': 1, 'QA': 2})
         response = self.write(self.state / 'union.json', {'issues': [issue]})
-        call = self.write(self.state / 'union-call.json', self.call('jira', action['selection']['query_semantics']))
+        call = self.write(self.state / 'union-call.json', self.call('sbertrek', action['selection']['query_semantics']))
         ready = self.run_tool(self.state, 'ingest', '--run-id', run['run_id'], '--step-id', action['step_id'],
                               '--response-file', str(response), '--call-file', str(call), '--response-source', 'mcp-file')
         self.assertEqual(ready['next_action']['type'], 'verify-missing-tasks')
-        self.assertEqual(ready['next_action']['keys'], ['JIRA-1'])
+        self.assertEqual(ready['next_action']['keys'], ['SBER-1'])
         retry = self.run_tool(self.state, 'retry-missing', '--run-id', run['run_id'])
         action = retry['next_action']
-        self.assertEqual(action['selection']['requested_keys'], ['JIRA-1'])
-        response = self.write(self.state / 'retry.json', {'issues': [self.jira_issue('JIRA-1', roles={'BE': 1})]})
-        call = self.write(self.state / 'retry-call.json', self.call('jira', action['selection']['query_semantics']))
+        self.assertEqual(action['selection']['requested_keys'], ['SBER-1'])
+        response = self.write(self.state / 'retry.json', {'issues': [self.source_issue('SBER-1', roles={'BE': 1})]})
+        call = self.write(self.state / 'retry-call.json', self.call('sbertrek', action['selection']['query_semantics']))
         self.run_tool(self.state, 'ingest', '--run-id', run['run_id'], '--step-id', action['step_id'],
                       '--response-file', str(response), '--call-file', str(call), '--response-source', 'mcp-file')
         result = self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         self.assertEqual(result['status'], 'tracker-read-reconciled')
         saved = json.loads((self.state / 'tracker-runs' / run['run_id'] / 'run.json').read_text())
-        self.assertEqual([card['key'] for card in saved['cards']['jira']], ['JIRA-1', 'JIRA-2'])
-        self.assertEqual(saved['cards']['sbertrek'], [])
+        self.assertEqual([card['key'] for card in saved['cards']['sbertrek']], ['SBER-1', 'SBER-2'])
 
     def test_preflight_blocks_main_wrong_feature_and_mode(self):
         self.project.mkdir()
@@ -132,7 +116,7 @@ class TrackerScopeSafetyTests(unittest.TestCase):
         from tracker_history import pin_history_response
         path = self.state / 'raw.json'
         with patch.dict(os.environ, {'ANALYST_HARNESS_STATE_ROOT': str(self.state)}):
-            provenance = {'provider': 'jira', 'key': 'JIRA-1', 'call': self.call('jira')}
+            provenance = {'provider': 'sbertrek', 'key': 'SBER-1', 'call': self.call('sbertrek')}
             pin_history_response('20260918T054027Z-fb23b050', path, b'original', provenance)
             pin_history_response('20260918T054027Z-fb23b050', path, b'original')
             with self.assertRaisesRegex(ValueError, 'raw history changed'):

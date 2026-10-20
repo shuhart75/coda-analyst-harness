@@ -66,6 +66,8 @@ def pagination_window(payload: dict, mapping: dict, call: dict, count: int) -> t
 
 
 def validate_call(call: dict, provider: str) -> None:
+    if provider != "sbertrek":
+        raise ValueError("Поддерживается только sbertrek")
     if not isinstance(call, dict) or call.get("provider") != provider:
         raise ValueError("Call provider does not match collection scope")
     if not isinstance(call.get("tool"), str) or not call["tool"].strip():
@@ -89,16 +91,8 @@ def validate_call(call: dict, provider: str) -> None:
     check_credentials(call["arguments"])
 
 
-JIRA_MAPPING = {
-    "key": "/key", "assignee": "/assignee/key", "status": "/status/name",
-    "events": "/changelogs", "at": "/created", "changes": "/items",
-    "field": "/field", "from": "/from_id", "to": "/to_id",
-    "assignment_field": "assignee", "status_field": "status",
-}
-
-
 def history_field_coverage(entry: dict) -> set[str]:
-    mapping = entry.get('mapping', JIRA_MAPPING if entry['provider'] == 'jira' else {})
+    mapping = entry.get('mapping', {})
     arguments = entry.get('call', {}).get('arguments', {})
     selected_path = mapping.get('request_fields')
     coverage = {'assignment', 'status'}
@@ -161,7 +155,7 @@ def validate_snapshot_assignment(payload, snapshot_mapping: dict, history_mappin
 def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, check_fields=True) -> tuple[TaskHistory, list[str]]:
     from tracker_workflow import digest_object
 
-    mapping = entry.get("mapping", JIRA_MAPPING if entry["provider"] == "jira" else None)
+    mapping = entry.get("mapping")
     if not isinstance(mapping, dict):
         raise ValueError("History mapping is required: select events or text and a task key source")
     if "key" in mapping:
@@ -426,12 +420,10 @@ def review_history(args) -> int:
     rules = StatusRules(**{name: frozenset(values) for name, values in manifest["status_rules"].items()})
     status_sets(rules)
     provider = manifest["provider"]
-    if provider not in {"jira", "sbertrek"}:
+    if provider not in {"sbertrek"}:
         raise ValueError("Explicit history provider is required")
     if result["scope"].get("tracker_mode") == "single" and provider != result["scope"]["provider"]:
         raise ValueError("History provider must match the selected single tracker")
-    if provider == "jira" and not load_run(args.run_id)["config"]["jira_enabled"]:
-        raise ValueError("Jira is disabled for this run")
     known_roles = load_run(args.run_id)["config"].get("participants", {}).get(provider, {})
     from tracker_history_text import validate_participants
     validate_participants(participants, known_roles)
@@ -480,7 +472,7 @@ def review_history(args) -> int:
         history = replace(history, task_key=f"{entry['key']}/{entry['role']}")
         histories[identity] = (targets[0]["feature"], history)
         evidence.append({"key": entry["key"], "role": entry["role"], "sha256": entry["sha256"], "call": entry["call"],
-                         "mapping": entry.get("mapping", JIRA_MAPPING), "status_aliases": entry.get("status_aliases", {}),
+                         "mapping": entry.get("mapping", {}), "status_aliases": entry.get("status_aliases", {}),
                          "sources": sources, "limitations": limits})
         limitations.extend(f"{entry['key']}:{limit}" for limit in limits)
     reviews, missing_history, qa_blockers = [], [], []
@@ -498,7 +490,7 @@ def review_history(args) -> int:
             for row in (row for table in tables for row in table):
                 if row.get("Role", "").upper() not in {"FE", "BE"}:
                     continue
-                key = row.get("Jira" if provider == "jira" else "SberTrek", "").split("/")[0].strip()
+                key = row.get("SberTrek", "").split("/")[0].strip()
                 if member_keys is not None and key not in member_keys:
                     continue
                 if key in deleted_keys | skipped_keys:

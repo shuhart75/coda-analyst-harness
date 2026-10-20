@@ -24,16 +24,16 @@ class ReleasePartitionTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.project = Path(temporary.name)
-        self.scope = {'kind': 'release', 'provider': 'jira', 'ids': ['release-1']}
+        self.scope = {'kind': 'release', 'provider': 'sbertrek', 'ids': ['release-1']}
         self.rows = [{'feature': 'feature', 'task_id': f'TASK-{index}', 'role': 'FE', 'kind': 'real',
-                      'jira_key': f'JIRA-{index}'} for index in range(1, 4)]
+                      'sbertrek_key': f'SBER-{index}'} for index in range(1, 4)]
         self.rows.append({'feature': 'feature', 'task_id': 'QA-FEATURE', 'role': 'QA',
                           'registry': 'features/feature/execution/tasks.md', 'saved_facts': {'Estimate (дн)': '10'}})
-        self.issues = [{'jira_key': f'JIRA-{index}', 'development': {'state': 'unknown'},
+        self.issues = [{'sbertrek_key': f'SBER-{index}', 'development': {'state': 'unknown'},
                         'releases': [{'key': 'release-1' if index == 1 else 'release-2'}]} for index in range(1, 4)]
 
     def calculate(self, members=None):
-        return qa_groups(self.project, 'feature', self.rows, self.issues, self.scope, members or {'JIRA-1'})
+        return qa_groups(self.project, 'feature', self.rows, self.issues, self.scope, members or {'SBER-1'})
 
     def test_partition_preserves_sum_members_and_original_id(self):
         result = self.calculate()
@@ -42,7 +42,7 @@ class ReleasePartitionTests(unittest.TestCase):
         self.assertEqual(groups[0]['members'], ['TASK-1'])
         self.assertEqual(groups[1]['members'], ['TASK-2', 'TASK-3'])
         self.assertEqual(sum(Decimal(group['estimate']) for group in groups), Decimal(10))
-        self.assertEqual(groups[0]['history_keys'], ['JIRA-1/FE'])
+        self.assertEqual(groups[0]['history_keys'], ['SBER-1/FE'])
 
     def test_saved_partition_is_idempotent_and_not_consolidated_in_feature_run(self):
         first = self.calculate()
@@ -64,13 +64,13 @@ class ReleasePartitionTests(unittest.TestCase):
         self.assertEqual(groups[0]['members'], ['TASK-1'])
         self.assertEqual(groups[1]['members'], ['TASK-2', 'TASK-3'])
         self.assertEqual(sum(Decimal(group['estimate']) for group in groups), Decimal(10))
-        self.scope['release_decisions'] = {'JIRA-1': 'release-1'}
+        self.scope['release_decisions'] = {'SBER-1': 'release-1'}
         self.assertEqual(self.calculate()['reason'], 'confirm-sole-release-owner')
 
     def test_missing_cards_and_multiple_releases_require_review(self):
         self.issues[0]['releases'].append({'key': 'release-2'})
         self.assertEqual(self.calculate()['reason'], 'confirm-sole-release-owner')
-        self.scope['release_decisions'] = {'JIRA-1': 'release-1'}
+        self.scope['release_decisions'] = {'SBER-1': 'release-1'}
         self.assertTrue(self.calculate()['ready'])
         self.issues[0]['releases'][0]['name'] = 'Release one'
         self.scope['ids'] = ['Release one']
@@ -102,7 +102,7 @@ class ReleasePartitionTests(unittest.TestCase):
 
     def test_release_member_cancellation_uses_tracker(self):
         self.issues[2]['development']['state'] = 'excluded'
-        result = self.calculate({'JIRA-1', 'JIRA-3'})
+        result = self.calculate({'SBER-1', 'SBER-3'})
         self.assertEqual(result['groups'][0]['members'], ['TASK-1'])
         self.assertEqual(result['groups'][1]['members'], ['TASK-2'])
 
@@ -142,7 +142,7 @@ class ReleasePartitionTests(unittest.TestCase):
             read_registry(path)
 
     def test_full_release_uses_existing_qa_without_remainder(self):
-        result = self.calculate({'JIRA-1', 'JIRA-2', 'JIRA-3'})
+        result = self.calculate({'SBER-1', 'SBER-2', 'SBER-3'})
         self.assertEqual(len(result['groups']), 1)
         self.assertEqual(result['groups'][0]['task_id'], 'QA-FEATURE')
         self.assertEqual(Decimal(result['groups'][0]['estimate']), Decimal(10))
@@ -154,38 +154,38 @@ class ReleasePartitionTests(unittest.TestCase):
     def test_scope_ownership_reads_keys_but_does_not_relax_selected_schema(self):
         path = self.project / 'features/other/execution/tasks.md'
         path.parent.mkdir(parents=True)
-        path.write_text('| Task ID | Jira | Estimate FE | Estimate BE |\n'
-                        '|---|---|---|---|\n| OTHER | JIRA-99 | 3 | 4 |\n')
-        result = {'scope': self.scope, 'issues': [{'jira_key': 'JIRA-1', 'summary': '[BE] New'}]}
+        path.write_text('| Task ID | SberTrek | Estimate FE | Estimate BE |\n'
+                        '|---|---|---|---|\n| OTHER | SBER-99 | 3 | 4 |\n')
+        result = {'scope': self.scope, 'issues': [{'sbertrek_key': 'SBER-1', 'summary': '[BE] New'}]}
         owners = release_owners(self.project, result)
         self.assertEqual(owners['blockers'], [])
         self.assertEqual(owners['items'][0]['basis'], 'analyst-required')
         self.assertIn('[BE] New', owners['ownership_table'])
-        self.assertIn('JIRA-1', owners['ownership_table'])
+        self.assertIn('SBER-1', owners['ownership_table'])
         self.assertIn('нужно решение аналитика', owners['ownership_table'])
-        result['issues'][0]['jira_key'] = 'JIRA-99'
+        result['issues'][0]['sbertrek_key'] = 'SBER-99'
         self.assertEqual(release_owners(self.project, result)['selected_features'], ['other'])
         with self.assertRaises(ValueError):
             read_registry(path)
-        path.write_text(path.read_text().replace('| OTHER | JIRA-99 | 3 | 4 |', '| OTHER | JIRA-99 | 3 |'))
+        path.write_text(path.read_text().replace('| OTHER | SBER-99 | 3 | 4 |', '| OTHER | SBER-99 | 3 |'))
         self.assertEqual(release_owners(self.project, result)['blockers'][0]['reason'], 'ownership-index-unreadable')
 
     def test_confirmed_scope_and_unprefixed_role_are_separate_from_raw_cards(self):
-        result = {'scope': self.scope, 'issues': [{'jira_key': 'JIRA-1', 'sbertrek_key': 'ST-9',
+        result = {'scope': self.scope, 'issues': [{'sbertrek_key': 'SBER-1',
             'summary': 'BE Save | selected simulation\nwith parameters', 'task_role': 'BE',
             'epic': {'key': 'EPIC-1', 'name': 'Simulation'}}]}
         ownership = release_owners(self.project, result)
-        self.assertIn('ST-9 | JIRA-1 | BE Save \\| selected simulation with parameters', ownership['ownership_table'])
+        self.assertIn('SBER-1 | BE Save \\| selected simulation with parameters', ownership['ownership_table'])
         self.assertIn('EPIC-1 Simulation', ownership['ownership_table'])
         self.assertTrue(ownership['items'][0]['question_required'])
         (self.project / 'features/new-feature').mkdir(parents=True)
         answer = self.project / 'answer.txt'
         answer.write_text('All tasks belong to new-feature; TASK-1 is BE.')
         result = {'scope': self.scope, 'issues': [], 'work_items': [],
-                  'skipped': [{'jira_key': 'TASK-1', 'summary': 'Unprefixed work',
+                  'skipped': [{'sbertrek_key': 'TASK-1', 'summary': 'Unprefixed work',
                                'reason': 'outside-supported-roles', 'role_estimates': {},
                                'development': {'state': 'unknown'}}]}
-        decisions = {'schema_version': 1, 'provider': 'jira', 'release': 'release-1',
+        decisions = {'schema_version': 1, 'provider': 'sbertrek', 'release': 'release-1',
                      'analyst_confirmed': True, 'source': {'file': str(answer),
                      'sha256': hashlib.sha256(answer.read_bytes()).hexdigest(), 'quote': answer.read_text()},
                      'tasks': [{'key': 'TASK-1', 'feature': 'new-feature', 'role': 'BE'}]}
@@ -206,7 +206,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     run_tool = test_tracker_history.AdaptiveHistoryTests.run_tool
     configure = test_tracker_history.AdaptiveHistoryTests.configure
     write = test_tracker_history.AdaptiveHistoryTests.write
-    jira_issue = test_tracker_history.AdaptiveHistoryTests.jira_issue
+    source_issue = test_tracker_history.AdaptiveHistoryTests.source_issue
     git = test_tracker_history.AdaptiveHistoryTests.git
     save_sources = test_tracker_history.AdaptiveHistoryTests.save_sources
     call = test_tracker_history.AdaptiveHistoryTests.call
@@ -214,14 +214,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
     raw_history = test_tracker_history.AdaptiveHistoryTests.raw_history
     snapshot = test_tracker_history.AdaptiveHistoryTests.snapshot
 
-    def begin_release(self, provider='jira'):
+    def begin_release(self, provider='sbertrek'):
         return self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', provider,
                              '--scope-id', 'REL-1', '--label', 'Release', '--scope-source', 'analyst',
                              '--intent', 'update-planning')
 
     def linked_call(self, run, payload=None, mapping=None, basis='links'):
         call = self.call(run['next_action']['provider'], run['next_action']['selection']['query_semantics'])
-        payload = payload or {'owner': 'REL-1', 'edges': [{'type': 'ships', 'target': 'JIRA-1'}], 'size': 1, 'offset': 0}
+        payload = payload or {'owner': 'REL-1', 'edges': [{'type': 'ships', 'target': 'SBER-1'}], 'size': 1, 'offset': 0}
         source = self.write(self.state / 'links.json', payload)
         call['release_membership'] = {'schema_version': 1, 'sources': [{
             'response_file': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
@@ -240,21 +240,21 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_membership_confirmation_is_scoped_and_preserves_other_limitations(self):
         run = self.begin_release()
-        call = self.linked_call(run, {'items': [{'key': 'JIRA-1'}]},
+        call = self.linked_call(run, {'items': [{'key': 'SBER-1'}]},
                                 {'records': '/items', 'member_key': '/key'}, 'selected-query')
-        self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, call)
+        self.ingest(run, {'issues': [self.source_issue('SBER-1')]}, call)
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         membership = copy.deepcopy(call['release_membership'])
-        confirmation = self.membership_confirmation(run, ['JIRA-1'])
+        confirmation = self.membership_confirmation(run, ['SBER-1'])
         membership['analyst_confirmation'] = confirmation
         source_path = Path(membership['sources'][0]['response_file'])
         original = source_path.read_bytes()
         args = ('release-preview', '--run-id', run['run_id'], '--project-root', str(self.project),
                 '--membership', str(self.state / 'membership.json'))
-        for field, value in [('run_id', '20260922T085505Z-ffffffff'), ('provider', 'sbertrek'),
+        for field, value in [('run_id', '20260922T085505Z-ffffffff'), ('provider', 'unsupported'),
                              ('release', 'REL-2'), ('analyst_confirmed', False), ('complete', False),
-                             ('member_keys', []), ('member_keys', ['JIRA-1', 'JIRA-1']),
-                             ('member_keys', ['JIRA-1', 'JIRA-2']),
+                             ('member_keys', []), ('member_keys', ['SBER-1', 'SBER-1']),
+                             ('member_keys', ['SBER-1', 'SBER-2']),
                              ('source', {**confirmation['source'], 'sha256': '0' * 64}),
                              ('source', {**confirmation['source'], 'quote': 'invented approval'})]:
             with self.subTest(field=field, value=value):
@@ -272,33 +272,33 @@ class ReleaseWorkflowTests(unittest.TestCase):
         from tracker_release_evidence import review_membership
         from unittest.mock import patch
         with patch.dict(os.environ, {'ANALYST_HARNESS_STATE_ROOT': str(self.state)}), patch('tracker_workflow.load_run', return_value={
-                'scope': {}, 'collection_mode': 'adaptive', 'steps': [{'provider': 'jira',
-                'query': run['next_action']['selection']['query_semantics']}], 'cards': {'jira': [{'key': 'JIRA-1'}]}}):
-            result = {'scope': {'kind': 'release', 'provider': 'jira', 'ids': ['REL-1']},
+                'scope': {}, 'collection_mode': 'adaptive', 'steps': [{'provider': 'sbertrek',
+                'query': run['next_action']['selection']['query_semantics']}], 'cards': {'sbertrek': [{'key': 'SBER-1'}]}}):
+            result = {'scope': {'kind': 'release', 'provider': 'sbertrek', 'ids': ['REL-1']},
                       'limitations': ['release-result-incomplete:membership-completeness-not-proven',
-                                      'jira-result-limit-reached:50', 'history-incomplete']}
+                                      'sbertrek-result-limit-reached:50', 'history-incomplete']}
             reviewed = review_membership(run['run_id'], result, membership)
-        self.assertIn('jira-result-limit-reached:50', reviewed['limitations'])
+        self.assertIn('sbertrek-result-limit-reached:50', reviewed['limitations'])
         self.assertIn('history-incomplete', reviewed['limitations'])
         self.assertIn('release-membership:source-completeness-unproven:analyst-confirmed', reviewed['limitations'])
         self.assertIn('release-result-incomplete:membership-completeness-not-proven', result['limitations'])
 
     def test_analyst_confirmation_does_not_hide_explicit_missing_pages(self):
         run = self.begin_release()
-        call = self.linked_call(run, {'items': [{'key': 'JIRA-1'}], 'total': 2, 'has_next': True},
+        call = self.linked_call(run, {'items': [{'key': 'SBER-1'}], 'total': 2, 'has_next': True},
                                 {'records': '/items', 'member_key': '/key', 'total': '/total',
                                  'has_next': '/has_next'}, 'selected-query')
-        self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, call)
+        self.ingest(run, {'issues': [self.source_issue('SBER-1')]}, call)
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         membership = call['release_membership']
-        membership['analyst_confirmation'] = self.membership_confirmation(run, ['JIRA-1'])
+        membership['analyst_confirmation'] = self.membership_confirmation(run, ['SBER-1'])
         path = self.write(self.state / 'membership.json', membership)
         self.run_tool(self.state, 'release-preview', '--run-id', run['run_id'], '--project-root', str(self.project),
                       '--membership', str(path), expected=2)
 
     def test_link_evidence_without_editing_cards_and_unknown_not_zero(self):
         run = self.begin_release()
-        issue = self.jira_issue('JIRA-1')
+        issue = self.source_issue('SBER-1')
         original = copy.deepcopy(issue)
         call = self.linked_call(run)
         result = self.ingest(run, {'issues': [issue]}, call)
@@ -316,28 +316,28 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_selected_query_mapping_accepts_changed_tool_and_response_shape(self):
         run = self.begin_release()
-        call = self.linked_call(run, {'response': {'members': [{'identity': {'key': 'JIRA-1'}}]}},
+        call = self.linked_call(run, {'response': {'members': [{'identity': {'key': 'SBER-1'}}]}},
                                 {'records': '/response/members', 'member_key': '/identity/key'}, 'selected-query')
         call['release_membership']['sources'][0]['call']['tool'] = 'new-installation-v99-search'
-        self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, call)
+        self.ingest(run, {'issues': [self.source_issue('SBER-1')]}, call)
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         report = self.run_tool(self.state, 'result-status', '--run-id', run['run_id'])
         self.assertIn('release-result-incomplete:membership-completeness-not-proven', report['limitations'])
 
-    def test_sbertrek_links_use_same_evidence_contract_without_jira_calls(self):
+    def test_sbertrek_links_use_same_evidence_contract_without_external_calls(self):
         from test_trackerctl import DirectTrackerWorkflowTests
 
         run = self.begin_release('sbertrek')
-        issue = DirectTrackerWorkflowTests.sber_issue(self, 'JIRA-1', jira_key='OTHER-1')
+        issue = DirectTrackerWorkflowTests.sber_issue(self, 'SBER-1', external_reference='OTHER-1')
         self.ingest(run, {'issues': [issue]}, self.linked_call(run))
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         report = self.run_tool(self.state, 'result-status', '--run-id', run['run_id'])
-        self.assertEqual(report['counts']['jira'], 0)
-        self.assertEqual(report['counts']['matched'], 0)
+        self.assertEqual(report['counts']['sbertrek'], 1)
+        self.assertNotIn('matched', report['counts'])
 
     def test_complete_unpaginated_capability_is_bound_to_real_description(self):
         run = self.begin_release()
-        call = self.linked_call(run, {'items': [{'key': 'JIRA-1'}]},
+        call = self.linked_call(run, {'items': [{'key': 'SBER-1'}]},
                                 {'records': '/items', 'member_key': '/key'}, 'selected-query')
         quote = 'Returns all release members; this operation has no pagination.'
         capability = self.write(self.state / 'capabilities.json', {'description': quote})
@@ -347,30 +347,30 @@ class ReleaseWorkflowTests(unittest.TestCase):
                                          'sha256': hashlib.sha256(capability.read_bytes()).hexdigest(), 'quote': quote}
         bad = copy.deepcopy(call)
         bad['release_membership']['sources'][0]['unpaginated_contract']['quote'] = 'invented guarantee'
-        self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, bad, expected=2)
-        self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, call)
+        self.ingest(run, {'issues': [self.source_issue('SBER-1')]}, bad, expected=2)
+        self.ingest(run, {'issues': [self.source_issue('SBER-1')]}, call)
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         report = self.run_tool(self.state, 'result-status', '--run-id', run['run_id'])
         self.assertNotIn('release-result-incomplete:membership-completeness-not-proven', report['limitations'])
 
     def test_pages_are_separate_immutable_sources_not_hand_merged_json(self):
         run = self.begin_release()
-        call = self.linked_call(run, {'owner': 'REL-1', 'edges': [{'type': 'ships', 'target': 'JIRA-1'}],
+        call = self.linked_call(run, {'owner': 'REL-1', 'edges': [{'type': 'ships', 'target': 'SBER-1'}],
                                       'size': 2, 'offset': 0})
         second = copy.deepcopy(call['release_membership']['sources'][0])
         source = self.write(self.state / 'links-page-two.json', {
-            'owner': 'REL-1', 'edges': [{'type': 'ships', 'target': 'JIRA-2'}], 'size': 2, 'offset': 1})
+            'owner': 'REL-1', 'edges': [{'type': 'ships', 'target': 'SBER-2'}], 'size': 2, 'offset': 1})
         second.update(response_file=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
         second['call']['arguments']['page'] = 2
         call['release_membership']['sources'].append(second)
-        self.ingest(run, {'issues': [self.jira_issue('JIRA-1'), self.jira_issue('JIRA-2')]}, call)
+        self.ingest(run, {'issues': [self.source_issue('SBER-1'), self.source_issue('SBER-2')]}, call)
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         self.assertNotIn('release-result-incomplete:membership-completeness-not-proven',
                          self.run_tool(self.state, 'result-status', '--run-id', run['run_id'])['limitations'])
 
     def test_boolean_pagination_covers_all_link_pages(self):
         run = self.begin_release()
-        call = self.linked_call(run, {'owner': 'REL-1', 'edges': [{'type': 'ships', 'target': 'JIRA-1'}],
+        call = self.linked_call(run, {'owner': 'REL-1', 'edges': [{'type': 'ships', 'target': 'SBER-1'}],
                                       'offset': 0, 'more': True, 'total': 2},
                                 {'records': '/edges', 'member_key': '/target', 'release_root': '/owner',
                                  'relation': '/type', 'relation_value': 'ships', 'start': '/offset',
@@ -378,19 +378,19 @@ class ReleaseWorkflowTests(unittest.TestCase):
         second = copy.deepcopy(call['release_membership']['sources'][0])
         second['mapping'].pop('total')
         source = self.write(self.state / 'last-page.json', {'owner': 'REL-1',
-                            'edges': [{'type': 'ships', 'target': 'JIRA-2'}], 'offset': 1, 'more': False})
+                            'edges': [{'type': 'ships', 'target': 'SBER-2'}], 'offset': 1, 'more': False})
         second.update(response_file=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
         second['call']['arguments']['offset'] = 1
         call['release_membership']['sources'].append(second)
         bad = copy.deepcopy(call)
         inconsistent = self.write(self.state / 'inconsistent-last-page.json', {'owner': 'REL-1',
-                                 'edges': [{'type': 'ships', 'target': 'JIRA-2'}], 'offset': 1, 'more': True})
+                                 'edges': [{'type': 'ships', 'target': 'SBER-2'}], 'offset': 1, 'more': True})
         bad_source = bad['release_membership']['sources'][1]
         bad_source.update(response_file=str(inconsistent), sha256=hashlib.sha256(inconsistent.read_bytes()).hexdigest())
         bad_source['call']['tool'] = 'inconsistent-reader'
-        rejected = self.ingest(run, {'issues': [self.jira_issue('JIRA-1'), self.jira_issue('JIRA-2')]}, bad, expected=2)
+        rejected = self.ingest(run, {'issues': [self.source_issue('SBER-1'), self.source_issue('SBER-2')]}, bad, expected=2)
         self.assertIn('continuation', rejected['error'])
-        self.ingest(run, {'issues': [self.jira_issue('JIRA-1'), self.jira_issue('JIRA-2')]}, call)
+        self.ingest(run, {'issues': [self.source_issue('SBER-1'), self.source_issue('SBER-2')]}, call)
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         self.assertNotIn('release-result-incomplete:membership-completeness-not-proven',
                          self.run_tool(self.state, 'result-status', '--run-id', run['run_id'])['limitations'])
@@ -406,14 +406,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 source['call']['selection'] = 'another release'
             else:
                 source['sha256'] = '0' * 64
-            self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, call, expected=2)
+            self.ingest(run, {'issues': [self.source_issue('SBER-1')]}, call, expected=2)
         self.assertEqual(self.begin_release()['run_id'], run['run_id'])
-        self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, self.linked_call(run))
+        self.ingest(run, {'issues': [self.source_issue('SBER-1')]}, self.linked_call(run))
 
     def test_pausing_application_preserves_reconciliation_and_requires_confirmation(self):
         run = self.begin_release()
-        issue = self.jira_issue('JIRA-1')
-        issue['fields']['fixVersions'] = [{'name': 'REL-1'}]
+        issue = self.source_issue('SBER-1')
+        issue['fields']['releases'] = [{'name': 'REL-1'}]
         self.ingest(run, {'issues': [issue]})
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         before = self.run_tool(self.state, 'result-status', '--run-id', run['run_id'])
@@ -432,29 +432,29 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_new_feature_without_gantt_and_unrelated_role_columns_does_not_block_history(self):
         path = self.project / 'features/owner/execution/tasks.md'
         path.parent.mkdir(parents=True)
-        path.write_text('| Task ID | Jira | Kind | Role | Status | Estimate (дн) |\n'
-                        '|---|---|---|---|---|---|\n| FIRST | JIRA-1 | real | BE | unknown | - |\n'
+        path.write_text('| Task ID | SberTrek | Kind | Role | Status | Estimate (дн) |\n'
+                        '|---|---|---|---|---|---|\n| FIRST | SBER-1 | real | BE | unknown | - |\n'
                         '| QA-OWNER | - | real | QA | unknown | - |\n')
         unrelated = self.project / 'features/cohorts/execution/tasks.md'
         unrelated.parent.mkdir(parents=True)
-        unrelated.write_text('| Task ID | Jira | Estimate FE | Estimate BE |\n'
-                             '|---|---|---|---|\n| OTHER | JIRA-99 | 3 | 4 |\n')
+        unrelated.write_text('| Task ID | SberTrek | Estimate FE | Estimate BE |\n'
+                             '|---|---|---|---|\n| OTHER | SBER-99 | 3 | 4 |\n')
         self.save_sources()
         unrelated.write_text(unrelated.read_text().replace('| 3 | 4 |', '| 8 | 4 |'))
         original = unrelated.read_bytes()
         run = self.begin_release()
-        issue = self.jira_issue('JIRA-1')
-        issue['fields']['fixVersions'] = [{'name': 'REL-1'}]
+        issue = self.source_issue('SBER-1')
+        issue['fields']['releases'] = [{'name': 'REL-1'}]
         self.ingest(run, {'issues': [issue]})
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         preview = self.run_tool(self.state, 'release-preview', '--run-id', run['run_id'], '--project-root', str(self.project))
         self.assertTrue(preview['execution']['ownership_ready'])
         source = self.write(self.state / 'history.json', self.raw_history())
         manifest = {'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'analyst rules',
-                    'provider': 'jira', 'participants': {'dev': 'BE', 'qa': 'QA'},
+                    'provider': 'sbertrek', 'participants': {'dev': 'BE', 'qa': 'QA'},
                     'status_rules': {'not_started': ['todo'], 'qa_completed': ['done']},
-                    'responses': [{'provider': 'jira', 'key': 'JIRA-1', 'role': 'BE', 'call': self.call('jira'),
-                                   'response_file': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+                    'responses': [{'provider': 'sbertrek', 'key': 'SBER-1', 'role': 'BE', 'call': self.call('sbertrek'),
+                                   'mapping': dict(test_tracker_history.HISTORY_MAPPING), 'response_file': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
                                    'status_aliases': {'Done': 'done'}}]}
         recorded = self.write(self.state / 'manifest.json', manifest)
         review = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'], '--project-root', str(self.project),
@@ -473,14 +473,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def check_new_release_feature_history(self, analyst_membership=False):
         from test_trackerctl import DirectTrackerWorkflowTests
-        from tracker_history import JIRA_MAPPING
+        from test_tracker_history import HISTORY_MAPPING
 
         self.write(self.project / 'features/owner/requirements.md', 'Existing feature')
         self.save_sources()
         before = self.snapshot()
         run = self.begin_release('sbertrek')
         keys = ['ST-1', 'ST-2', 'ST-3']
-        cards = [DirectTrackerWorkflowTests.sber_issue(self, key, jira_key=f'JIRA-{index}',
+        cards = [DirectTrackerWorkflowTests.sber_issue(self, key, external_reference=f'SBER-{index}',
                  summary='BE Work' if index < 3 else 'Unprefixed work') for index, key in enumerate(keys, 1)]
         call = self.linked_call(run, {'items': [{'key': key} for key in keys]},
                                 {'records': '/items', 'member_key': '/key'}, 'selected-query')
@@ -541,7 +541,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for key in keys[:2]:
             history = {**self.raw_history(), 'key': key, 'total': 3, 'has_next': False}
             source = self.write(self.state / f'{key}-inline.json', {'content': [{'text': json.dumps(history)}]})
-            mapping = {**JIRA_MAPPING, **{name: '/content/0/text' + JIRA_MAPPING[name]
+            mapping = {**HISTORY_MAPPING, **{name: '/content/0/text' + HISTORY_MAPPING[name]
                        for name in ('key', 'assignee', 'status', 'events')},
                        'total': '/content/0/text/total', 'has_next': '/content/0/text/has_next'}
             manifest['responses'].append({'provider': 'sbertrek', 'key': key, 'role': 'BE',
@@ -597,10 +597,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.run_tool(self.state, *review_args)['review_file'], review['review_file'])
         registry = self.project / 'features/owner/execution/tasks.md'
         registry.parent.mkdir()
-        registry.write_text('| Task ID | Jira | SberTrek | Kind | Role | Status | Estimate (дн) |\n'
+        registry.write_text('| Task ID | SberTrek | Retired reference | Kind | Role | Status | Estimate (дн) |\n'
                             '|---|---|---|---|---|---|---|\n'
-                            '| JIRA-1/BE | JIRA-1 | ST-1 | real | BE | unknown | - |\n'
-                            '| JIRA-2/BE | JIRA-2 | ST-2 | real | BE | unknown | - |\n'
+                            '| SBER-1/BE | ST-1 | SBER-1 | real | BE | unknown | - |\n'
+                            '| SBER-2/BE | ST-2 | SBER-2 | real | BE | unknown | - |\n'
                             '| QA-OWNER | - | - | real | QA | unknown | 2 |\n')
         manifest['reviewed_registries'] = {'features/owner/execution/tasks.md': hashlib.sha256(registry.read_bytes()).hexdigest()}
         manifest['expected_head'] = self.git('rev-parse', 'HEAD').strip()
@@ -635,58 +635,58 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
         path = self.project / 'features/other/execution/tasks.md'
         path.parent.mkdir(parents=True)
-        path.write_text('| Task ID | Jira | Kind | Role | Status |\n|---|---|---|---|---|\n'
-                        '| JIRA-1/BE | JIRA-1 | real | BE | unknown |\n')
+        path.write_text('| Task ID | SberTrek | Kind | Role | Status |\n|---|---|---|---|---|\n'
+                        '| SBER-1/BE | SBER-1 | real | BE | unknown |\n')
         self.write(self.project / 'features/owner/requirements.md', 'Existing feature')
         self.save_sources()
-        result = {'scope': {'kind': 'release', 'provider': 'jira', 'ids': ['REL-1']},
-                  'issues': [{'jira_key': 'JIRA-1', 'task_role': 'BE', 'confirmed_feature': 'owner'}],
+        result = {'scope': {'kind': 'release', 'provider': 'sbertrek', 'ids': ['REL-1']},
+                  'issues': [{'sbertrek_key': 'SBER-1', 'task_role': 'BE', 'confirmed_feature': 'owner'}],
                   'excluded': [], 'work_items': []}
         preview = preview_execution(self.project, None, None, result)
         self.assertFalse(preview['ownership_ready'])
         self.assertIn('confirmed-owner-conflicts-with-registry', str(preview['blockers']))
-        path.write_text(path.read_text().replace('| JIRA-1 |', '| JIRA-2 |'))
+        path.write_text(path.read_text().replace('| SBER-1 |', '| SBER-2 |'))
         self.save_sources()
         preview = preview_execution(self.project, None, None, result)
         self.assertFalse(preview['ownership_ready'])
         self.assertIn('unconfirmed-internal-id-collision', str(preview['blockers']))
 
-    def test_release_membership_is_checked_and_jira_id_is_not_a_task_key(self):
-        run = self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', 'jira',
+    def test_release_membership_is_checked_and_external_id_is_not_a_task_key(self):
+        run = self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', 'sbertrek',
                             '--scope-id', '12345', '--label', 'Release', '--scope-source', 'analyst', '--intent', 'read-only')
-        self.assertEqual(run['next_action']['selection']['query_semantics'], 'fixVersion = "12345"')
-        result = self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, expected=2)
+        self.assertEqual(run['next_action']['selection']['query_semantics'], 'release-members:"12345"')
+        result = self.ingest(run, {'issues': [self.source_issue('SBER-1')]}, expected=2)
         self.assertIn('membership', result['error'])
 
     def test_explicit_role_keeps_release_membership_after_remainder_collection(self):
         registry = self.project / 'features/owner/execution/tasks.md'
         registry.parent.mkdir(parents=True)
-        registry.write_text('| Task ID | Jira | Kind | Role | Status | Estimate (дн) |\n'
+        registry.write_text('| Task ID | SberTrek | Kind | Role | Status | Estimate (дн) |\n'
                             '|---|---|---|---|---|---|\n'
-                            '| FIRST | JIRA-1 | real | BE | unknown | - |\n'
-                            '| REST | JIRA-2 | real | BE | unknown | - |\n'
+                            '| FIRST | SBER-1 | real | BE | unknown | - |\n'
+                            '| REST | SBER-2 | real | BE | unknown | - |\n'
                             '| QA | - | real | QA | unknown | 4 |\n')
         self.save_sources()
         run = self.begin_release()
-        issue = self.jira_issue('JIRA-1')
-        issue['fields'].update(summary='Work without prefix', fixVersions=[{'name': 'REL-1'}])
+        issue = self.source_issue('SBER-1')
+        issue['fields'].update(summary='Work without prefix', releases=[{'name': 'REL-1'}])
         self.ingest(run, {'issues': [issue]})
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         answer = self.state / 'answer.txt'
-        answer.write_text('JIRA-1 is BE work in owner.')
-        decisions = {'schema_version': 1, 'provider': 'jira', 'release': 'REL-1', 'analyst_confirmed': True,
+        answer.write_text('SBER-1 is BE work in owner.')
+        decisions = {'schema_version': 1, 'provider': 'sbertrek', 'release': 'REL-1', 'analyst_confirmed': True,
                      'source': {'file': str(answer), 'sha256': hashlib.sha256(answer.read_bytes()).hexdigest(),
                                 'quote': answer.read_text()},
-                     'tasks': [{'key': 'JIRA-1', 'feature': 'owner', 'role': 'BE'}]}
-        source = self.write(self.state / 'remainder.json', {'issues': [self.jira_issue('JIRA-2')]})
+                     'tasks': [{'key': 'SBER-1', 'feature': 'owner', 'role': 'BE'}]}
+        source = self.write(self.state / 'remainder.json', {'issues': [self.source_issue('SBER-2')]})
         manifest = self.write(self.state / 'manifest.json', {
             'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'analyst rules',
-            'provider': 'jira', 'participants': {}, 'status_rules': {}, 'responses': [],
+            'provider': 'sbertrek', 'participants': {}, 'status_rules': {}, 'responses': [],
             'release_scope_decisions': decisions,
-            'unavailable_history': {'JIRA-1/BE': 'access unavailable', 'JIRA-2/BE': 'access unavailable'},
-            'supplemental_responses': [{'keys': ['JIRA-2'], 'response_file': str(source),
+            'unavailable_history': {'SBER-1/BE': 'access unavailable', 'SBER-2/BE': 'access unavailable'},
+            'supplemental_responses': [{'keys': ['SBER-2'], 'response_file': str(source),
                                        'sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
-                                       'call': self.call('jira', 'key IN ("JIRA-2")')}]})
+                                       'call': self.call('sbertrek', 'unit = "SBER-2"')}]})
         review = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
                                '--project-root', str(self.project), '--manifest', str(manifest))
         groups = review['features'][0]['qa_groups']
@@ -720,10 +720,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         result_path = self.state / 'tracker-runs' / run['run_id'] / 'reconciled.json'
         original_result = result_path.read_bytes()
-        from tracker_workflow import compact_issue, merged_value
+        from tracker_workflow import compact_issue
         original_registry = registry.read_bytes()
         remainder = DirectTrackerWorkflowTests.sber_issue(self, 'ST-2', status=status, summary=summary)
-        self.assertIsNone(merged_value('releases', compact_issue(remainder, 'sbertrek'), None)[0])
+        self.assertEqual(compact_issue(remainder, 'sbertrek')['releases'], [])
         source = self.write(self.state / 'remainder.json', {
             'issues': [remainder]})
         original_source = source.read_bytes()
@@ -780,46 +780,46 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_release_remainder_history_and_independent_qa_groups(self):
         path = self.project / 'features/owner/execution/tasks.md'
         path.parent.mkdir(parents=True)
-        path.write_text('| Task ID | Jira | Kind | Role | Status | Estimate (дн) |\n'
+        path.write_text('| Task ID | SberTrek | Kind | Role | Status | Estimate (дн) |\n'
                         '|---|---|---|---|---|---|\n'
-                        '| FIRST | JIRA-1 | real | BE | done | 2 |\n'
-                        '| SECOND | JIRA-2 | real | BE | planned | 2 |\n'
+                        '| FIRST | SBER-1 | real | BE | done | 2 |\n'
+                        '| SECOND | SBER-2 | real | BE | planned | 2 |\n'
                         '| QA-OWNER | - | real | QA | done | 8 |\n')
         self.save_sources()
-        run = self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', 'jira',
+        run = self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', 'sbertrek',
                             '--scope-id', 'Release one', '--label', 'Release', '--scope-source', 'analyst',
                             '--intent', 'update-planning')
-        first = self.jira_issue('JIRA-1', roles={'BE': 2, 'QA': 8})
-        first['fields']['fixVersions'] = [{'id': '101', 'name': 'Release one'}]
-        skipped = self.jira_issue('JIRA-3', roles={'BE': 10})
+        first = self.source_issue('SBER-1', roles={'BE': 2, 'QA': 8})
+        first['fields']['releases'] = [{'id': '101', 'name': 'Release one'}]
+        skipped = self.source_issue('SBER-3', roles={'BE': 10})
         skipped['fields']['summary'] = '[DevOps] Skip this'
-        skipped['fields']['fixVersions'] = [{'id': '101', 'name': 'Release one'}]
+        skipped['fields']['releases'] = [{'id': '101', 'name': 'Release one'}]
         self.ingest(run, {'issues': [first, skipped]})
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         preview = self.run_tool(self.state, 'release-preview', '--run-id', run['run_id'], '--project-root', str(self.project))
-        self.assertEqual(preview['next_action']['keys'], ['JIRA-2'])
+        self.assertEqual(preview['next_action']['keys'], ['SBER-2'])
         self.assertEqual(len(preview['skipped']), 1)
-        second = self.jira_issue('JIRA-2', roles={'BE': 2})
+        second = self.source_issue('SBER-2', roles={'BE': 2})
         response = self.write(self.state / 'remainder.json', {'issues': [second]})
         histories = []
-        for key in ('JIRA-1', 'JIRA-2'):
+        for key in ('SBER-1', 'SBER-2'):
             raw = self.raw_history()
             raw['key'] = key
             raw.update(total=3, start=0)
-            if key == 'JIRA-2':
+            if key == 'SBER-2':
                 raw['status']['name'] = 'todo'
                 raw['changelogs'] = raw['changelogs'][:2]
                 raw['total'] = 2
             source = self.write(self.state / (key + '.json'), raw)
-            histories.append({'provider': 'jira', 'key': key, 'role': 'BE', 'call': self.call('jira'),
+            histories.append({'provider': 'sbertrek', 'key': key, 'role': 'BE', 'call': self.call('sbertrek'),
                               'response_file': str(source), 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
-                              'mapping': {**test_tracker_history.JIRA_MAPPING, 'total': '/total', 'start': '/start'},
+                              'mapping': {**test_tracker_history.HISTORY_MAPPING, 'total': '/total', 'start': '/start'},
                               'status_aliases': {'Done': 'done'}})
         manifest = self.write(self.state / 'manifest.json', {
             'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'test analyst decision',
-            'provider': 'jira', 'participants': {'dev': 'BE', 'qa': 'QA'},
+            'provider': 'sbertrek', 'participants': {'dev': 'BE', 'qa': 'QA'},
             'status_rules': {'not_started': ['todo'], 'qa_completed': ['done']}, 'responses': histories,
-            'supplemental_responses': [{'keys': ['JIRA-2'], 'call': self.call('jira', 'key IN ("JIRA-2")'),
+            'supplemental_responses': [{'keys': ['SBER-2'], 'call': self.call('sbertrek', 'unit = "SBER-2"'),
                                        'response_file': str(response), 'sha256': hashlib.sha256(response.read_bytes()).hexdigest()}]})
         before = path.read_bytes()
         review = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
@@ -830,7 +830,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIsNone(groups[1]['qa'])
         self.assertEqual(groups[1]['application_mode'], 'partition-only')
         self.assertNotIn('SECOND', [row['task_id'] for row in review['comparison']['rows']])
-        self.assertEqual(review['application_scope']['member_keys'], ['JIRA-1', 'JIRA-3'])
+        self.assertEqual(review['application_scope']['member_keys'], ['SBER-1', 'SBER-3'])
         self.assertEqual([row['task_id'] for row in review['application_scope']['protected_rows']], ['SECOND'])
         self.assertEqual([Decimal(group['estimate']) for group in groups], [Decimal(4), Decimal(4)])
         self.assertEqual(len([row for row in review['comparison']['rows'] if row['role'] == 'QA']), 2)
@@ -887,7 +887,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(applied['status'], 'qa-application-verified')
         clean_registry = path.read_text()
         path.write_text(clean_registry.replace(f"| {groups[1]['task_id']} | - |",
-                                               f"| {groups[1]['task_id']} | JIRA-999 |"))
+                                               f"| {groups[1]['task_id']} | SBER-999 |"))
         copied_identity = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],
                                         '--project-root', str(self.project), expected=2)
         self.assertTrue(any(error.get('reason') == 'New QA group must not copy tracker identities'
@@ -912,13 +912,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
                                            '--project-root', str(self.project), expected=2)
         self.assertTrue(any(error.get('reason') == 'Task outside release changed or was removed'
                             and error['task_id'] == groups[1]['task_id'] for error in existing_remainder['errors']))
-        path.write_text(unchanged.replace('| SECOND | JIRA-2 | real | BE | planned | 2 |',
-                                          '| SECOND | JIRA-2 | real | BE | done | 9 |'))
+        path.write_text(unchanged.replace('| SECOND | SBER-2 | real | BE | planned | 2 |',
+                                          '| SECOND | SBER-2 | real | BE | done | 9 |'))
         outside = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],
                                 '--project-root', str(self.project), expected=2)
         self.assertTrue(any(error['reason'] == 'Task outside release changed or was removed'
                             for error in outside['errors'] if 'reason' in error))
-        path.write_text(unchanged.replace('| SECOND | JIRA-2 | real | BE | planned | 2 |\n', ''))
+        path.write_text(unchanged.replace('| SECOND | SBER-2 | real | BE | planned | 2 |\n', ''))
         removed = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],
                                 '--project-root', str(self.project), expected=2)
         self.assertTrue(any(error.get('reason') == 'Task outside release changed or was removed'

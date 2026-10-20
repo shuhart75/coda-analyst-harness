@@ -313,7 +313,7 @@ def requested_returns_contract(schema_version: int = 2) -> dict[str, Any]:
             "path": "revisions/<NNN>/returns/tasks.md",
             "meaning": "Уже согласованная разработчиками разбивка по задачам",
             "estimate": "optional",
-            "jira_key": "optional",
+            "sbertrek_key": "optional",
         },
         "task_results": {
             "path": "revisions/<NNN>/returns/tasks/<task-id>.md",

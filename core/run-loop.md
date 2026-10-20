@@ -71,11 +71,11 @@ A failed check does not advance the run. Repeated failure reaches the configured
 
 ## Technical Decomposition Invariants
 
-- Analysts transmit one immutable delivery contract with a manifest and, for OpenSpec, derived proposal/spec. Developers own design/tasks and future Jira decomposition.
+- Analysts transmit one immutable delivery contract with a manifest and, for OpenSpec, derived proposal/spec. Developers own design/tasks and future SberTrek decomposition.
 - Developer SDD acknowledges each new revision once with an immutable `returns/receipt.json` containing the exact revision and requirements checksum. No receipt means the revision is new; a receipt from an older revision never carries forward.
 - `returns/tasks.md` appears only after developers have agreed the decomposition. The analytical workflow has no proposal or confirmation state for it.
 - Each task has one independently implementable technical result and direct links to `REQ-*`.
-- Estimate and Jira key are optional developer metadata.
+- Estimate and SberTrek key are optional developer metadata.
 - Target size is 1-3 days for one executor. Maximum size is 5 days for backend and 10 days for frontend; an explicitly estimated excess requires a reason.
 - Publication of `tasks.md` is a background result for the analyst and never gates development.
 - The analyst decides separately how to use returned tasks in actual-progress. Approved planning baselines remain immutable.

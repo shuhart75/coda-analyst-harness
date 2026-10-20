@@ -436,7 +436,7 @@ class RequirementsExchangeTests(unittest.TestCase):
                     "path": "revisions/<NNN>/returns/tasks.md",
                     "meaning": "Уже согласованная разработчиками разбивка по задачам",
                     "estimate": "optional",
-                    "jira_key": "optional",
+                    "sbertrek_key": "optional",
                 },
                 "task_results": {
                     "path": "revisions/<NNN>/returns/tasks/<task-id>.md",

@@ -19,7 +19,7 @@ import test_trackerctl
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).parent / 'fixtures/release-actualization/expected.json'
-FIELDS = ('Task ID', 'SberTrek', 'Jira', 'Summary', 'Kind', 'Role', 'Estimate (дн)',
+FIELDS = ('Task ID', 'SberTrek', 'Summary', 'Kind', 'Role', 'Estimate (дн)',
           'Executor', 'Planned Start', 'Planned Finish', 'Actual Start', 'Actual Finish',
           'Status', 'Progress %', 'Related Stories')
 NETWORK_GUARD = '''import sys
@@ -85,10 +85,9 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         self.initial_main = self.git(self.remote, 'rev-parse', 'main')
         self.write(self.state / 'tracker-config.json', {
             'schema_version': 4, 'primary_provider': 'sbertrek', 'setup_complete': True,
-            'jira_enabled': False, 'projects': {'sbertrek': ['LAB'], 'jira': []},
-            'development_issue_types': ['story', 'task'], 'participants': {'sbertrek': {}, 'jira': {}},
-            'status_rules': {'sbertrek': {'completed': ['done'], 'excluded': ['cancelled']},
-                             'jira': {'completed': [], 'excluded': []}}})
+            'projects': {'sbertrek': ['LAB']},
+            'development_issue_types': ['story', 'task'], 'participants': {'sbertrek': {}},
+            'status_rules': {'sbertrek': {'completed': ['done'], 'excluded': ['cancelled']}}})
 
     def collab(self, *args):
         return self.collaboration(self.workspace, self.environment, *args)
@@ -101,7 +100,7 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
 
     def row(self, task_id, *, estimate='2', status='unknown', progress='unknown'):
         role = task_id.split('/')[-1] if '/' in task_id else 'QA'
-        return dict(zip(FIELDS, (task_id, task_id.split('/')[0] if '/' in task_id else '-', '-',
+        return dict(zip(FIELDS, (task_id, task_id.split('/')[0] if '/' in task_id else '-',
                                 'Synthetic ' + task_id, 'real', role, estimate,
                                 {'BE': 'B1', 'FE': 'F1', 'QA': 'Q1'}[role],
                                 '2026-09-01', '2026-09-02', '-', '-', status, progress, 'STORY-REGISTRY')))

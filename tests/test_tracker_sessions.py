@@ -13,19 +13,19 @@ class TrackerSessionTests(unittest.TestCase):
     configure = test_tracker_release.ReleaseWorkflowTests.configure
     git = test_tracker_release.ReleaseWorkflowTests.git
     write = test_tracker_release.ReleaseWorkflowTests.write
-    jira_issue = test_tracker_release.ReleaseWorkflowTests.jira_issue
+    source_issue = test_tracker_release.ReleaseWorkflowTests.source_issue
     call = test_tracker_release.ReleaseWorkflowTests.call
     ingest = test_tracker_release.ReleaseWorkflowTests.ingest
 
     def begin(self, release):
-        return self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', 'jira',
+        return self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', 'sbertrek',
                              '--scope-id', release, '--label', release, '--scope-source', 'analyst',
                              '--intent', 'update-planning')
 
     def reconcile(self, release):
         run = self.begin(release)
-        card = self.jira_issue('JIRA-1')
-        card['fields']['fixVersions'] = [{'name': release}]
+        card = self.source_issue('SBER-1')
+        card['fields']['releases'] = [{'name': release}]
         self.ingest(run, {'issues': [card]})
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         return run['run_id']
@@ -36,7 +36,7 @@ class TrackerSessionTests(unittest.TestCase):
             'execution_scope': {'run_ids': [run_id]}, 'last_saved_commit': 'b' * 40}]})
 
     def resume(self, release, *extra, expected=0):
-        return self.run_tool(self.state, 'resume', '--scope-kind', 'release', '--scope-provider', 'jira',
+        return self.run_tool(self.state, 'resume', '--scope-kind', 'release', '--scope-provider', 'sbertrek',
                              '--scope-id', release, '--intent', 'update-planning', *extra, expected=expected)
 
     def state_bytes(self):
@@ -102,7 +102,7 @@ class TrackerSessionTests(unittest.TestCase):
 
     def test_release_begin_requires_explicit_intent_without_creating_run(self):
         before = self.state_bytes()
-        self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', 'jira',
+        self.run_tool(self.state, 'begin', '--scope-kind', 'release', '--scope-provider', 'sbertrek',
                       '--scope-id', 'REL-1', '--label', 'Release', '--scope-source', 'analyst', expected=2)
         self.assertEqual(self.state_bytes(), before)
 

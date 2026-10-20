@@ -109,7 +109,7 @@ class HandoffLifecycleTests(unittest.TestCase):
             "estimate_days": None,
             "estimate_source": None,
             "size_exception_reason": None,
-            "jira_key": None,
+            "sbertrek_key": None,
             "requirements": ["REQ-DEMO-001"],
             "scenarios": ["SCN-DEMO-001"],
             "impacts": ["IMP-DEMO-001"],
@@ -151,7 +151,7 @@ class HandoffLifecycleTests(unittest.TestCase):
                 "estimate_days": None,
                 "estimate_source": None,
                 "size_exception_reason": None,
-                "jira_key": None,
+                "sbertrek_key": None,
                 "requirements": ["REQ-DEMO-001"],
                 "scenarios": ["SCN-DEMO-001"],
                 "impacts": ["IMP-DEMO-001"],
@@ -177,7 +177,7 @@ class HandoffLifecycleTests(unittest.TestCase):
             "estimate_days": None,
             "estimate_source": None,
             "size_exception_reason": None,
-            "jira_key": None,
+            "sbertrek_key": None,
             "requirements": ["REQ-DEMO-001"],
             "scenarios": ["SCN-DEMO-001"],
             "impacts": ["IMP-DEMO-001"],
@@ -443,7 +443,7 @@ IMP-LEGACY-DEMO-001
                     "estimate_days": None,
                     "estimate_source": None,
                     "size_exception_reason": None,
-                    "jira_key": "KODA-1",
+                    "sbertrek_key": "KODA-1",
                     "requirements": ["REQ-DEMO-001"],
                     "scenarios": ["SCN-DEMO-001"],
                     "impacts": ["IMP-DEMO-001"],
@@ -478,7 +478,7 @@ IMP-LEGACY-DEMO-001
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             implementation_path = handoff / "revisions/001/returns/implementation-results/DEV-BE-001/001/receipt.json"
             implementation = json.loads(implementation_path.read_text(encoding="utf-8"))
-            self.assertEqual(implementation["jira_key"], "KODA-1")
+            self.assertEqual(implementation["sbertrek_key"], "KODA-1")
             self.assertEqual([item["requirement"] for item in implementation["requirement_results"]], ["REQ-DEMO-001"])
             self.assertEqual([item["scenario"] for item in implementation["scenario_results"]], ["SCN-DEMO-001"])
             implementation.update({

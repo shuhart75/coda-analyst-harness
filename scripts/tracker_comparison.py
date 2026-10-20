@@ -102,7 +102,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
         if row.get('summary'):
             title += ": " + cell(row['summary'])
         lines.append(f"| {title} | {previous} | {proposed} | {bounds}; {notes} | {estimates} |")
-    name = "Jira" if provider == "jira" else "SberTrek"
+    name = "SberTrek"
     choices = [f"Принять сроки {name} для всех задач", f"Принять сроки и статусы {name} для всех задач",
                "Оставить текущие сроки и статусы для всех задач", "Свой вариант"]
     fields = [["Actual Start", "Actual Finish"], ["Actual Start", "Actual Finish", "Status", "Progress %"], [], None]

@@ -78,12 +78,12 @@ class QuarterDeliveryIntegrationTests(unittest.TestCase):
         paths = tracker_execution.registry_paths(self.root)
         self.assertEqual({project_layout.delivery_key(self.root, path) for path in paths}, {self.q3key, self.q4key})
         self.assertEqual(set(tracker_scope.select_features(self.root, '2026-Q4', None)), {self.q4key})
-        selected = tracker_scope.preview_scope(self.root, 'jira', '2026-Q4', None)
+        selected = tracker_scope.preview_scope(self.root, 'sbertrek', '2026-Q4', None)
         self.assertIn('ITEM-100', json.dumps(selected))
         self.assertNotIn('ITEM-300', json.dumps(selected))
-        result = {'scope': {'kind': 'release', 'provider': 'jira', 'ids': ['release-one']},
-                  'issues': [{'jira_key': 'ITEM-100', 'sbertrek_key': None, 'summary': 'FE Expansion', 'task_role': 'FE'},
-                             {'jira_key': 'ITEM-300', 'sbertrek_key': None, 'summary': 'FE MVP', 'task_role': 'FE'}]}
+        result = {'scope': {'kind': 'release', 'provider': 'sbertrek', 'ids': ['release-one']},
+                  'issues': [{'sbertrek_key': 'ITEM-100', 'summary': 'FE Expansion', 'task_role': 'FE'},
+                             {'sbertrek_key': 'ITEM-300', 'summary': 'FE MVP', 'task_role': 'FE'}]}
         owners = tracker_release.release_owners(self.root, result)
         self.assertEqual({item['key']: item['features'] for item in owners['items']},
                          {'ITEM-100': [self.q4key], 'ITEM-300': [self.q3key]})

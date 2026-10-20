@@ -61,7 +61,7 @@ def release_owners(project: Path, result: dict) -> dict:
     from tracker_registry import read_registry
 
     provider = result["scope"]["provider"]
-    column = "Jira" if provider == "jira" else "SberTrek"
+    column = "SberTrek"
     owners, epics, blockers = {}, {}, []
     for path in registry_paths(project):
         feature = delivery_key(project, path)
@@ -72,7 +72,7 @@ def release_owners(project: Path, result: dict) -> dict:
                              "message": str(error)})
             continue
         for row in (row for table in tables for row in table):
-            for key_column in ("Jira", "SberTrek"):
+            for key_column in ("SberTrek",):
                 key = row.get(key_column, "").split("/")[0].strip()
                 if key and key not in {"-", "—"}:
                     owners.setdefault((key_column, key), set()).add(feature)
@@ -86,8 +86,7 @@ def release_owners(project: Path, result: dict) -> dict:
     proposals = []
     for issue in result["issues"]:
         key = issue.get(provider + "_key")
-        exact = owners.get((column, key), set()) | owners.get(
-            ("SberTrek" if provider == "jira" else "Jira", issue.get("sbertrek_key" if provider == "jira" else "jira_key")), set())
+        exact = owners.get((column, key), set())
         epic = (issue.get("epic") or {}).get("key")
         confirmed = issue.get("confirmed_feature")
         candidates = {confirmed} if confirmed else exact or epics.get(epic, set())
@@ -96,7 +95,7 @@ def release_owners(project: Path, result: dict) -> dict:
             blockers.append({"reason": "confirmed-owner-conflicts-with-registry", "key": key,
                              "confirmed_feature": confirmed, "registry_features": sorted(exact)})
         proposals.append({"key": key, "summary": issue.get("summary"),
-                          "jira_key": issue.get("jira_key"), "sbertrek_key": issue.get("sbertrek_key"),
+                          "sbertrek_key": issue.get("sbertrek_key"),
                           "epic": issue.get("epic"),
                           "features": sorted(candidates),
                           "role": issue.get("task_role"),
@@ -108,12 +107,12 @@ def release_owners(project: Path, result: dict) -> dict:
 
     basis_labels = {"analyst-confirmed": "подтверждено аналитиком", "registry": "связь в реестре",
                     "associated-epic": "привязанный эпик", "analyst-required": "нужно решение аналитика"}
-    table = ["| SberTrek | Jira | Название стори / задачи | Роль | Эпик | Фича | Основание |",
-             "|---|---|---|---|---|---|---|"]
+    table = ["| SberTrek | Название стори / задачи | Роль | Эпик | Фича | Основание |",
+             "|---|---|---|---|---|---|"]
     for proposal in proposals:
         epic = proposal.get("epic") or {}
         table.append("| " + " | ".join(cell(value) for value in (
-            proposal["sbertrek_key"], proposal["jira_key"], proposal["summary"], proposal["role"],
+            proposal["sbertrek_key"], proposal["summary"], proposal["role"],
             " ".join(str(epic.get(field) or "") for field in ("key", "name")).strip(),
             ", ".join(proposal["features"]), basis_labels[proposal["basis"]])) + " |")
     return {"items": proposals, "ownership_table": "\n".join(table),
@@ -173,7 +172,7 @@ def release_preview_command(args) -> int:
 
 def supplement_result(run_id: str, project: Path, result: dict, responses: list[dict]) -> dict:
     from tracker_workflow import (load_run, response_file, digest_bytes, full_issue_records,
-                                  compact_issue, append_cards, reconcile_data, jql_keys, tql_units)
+                                  compact_issue, append_cards, reconcile_data, tql_units)
     from tracker_history import validate_call, pin_history_response
     from tracker_execution import preview_execution
 
@@ -189,7 +188,7 @@ def supplement_result(run_id: str, project: Path, result: dict, responses: list[
             raise ValueError("Supplement must read only registered affected-feature remainder keys")
         call = entry["call"]
         validate_call(call, provider)
-        if call.get("selection") != (jql_keys(keys) if provider == "jira" else tql_units(keys)):
+        if call.get("selection") != tql_units(keys):
             raise ValueError("Supplement call selection differs from the exact remainder keys")
         path, raw, payload = response_file(entry["response_file"], run_id)
         if digest_bytes(raw) != entry["sha256"]:

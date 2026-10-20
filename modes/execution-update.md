@@ -61,7 +61,7 @@ Track real work with or without a recorded planning baseline.
 - agreed developer task lists received through the exchange catalog
 - optional materialization of selected returned tasks into task candidates or actual execution tasks
 
-When a returned developer task is materialized into real work, keep `returns/tasks.md` as the factual source. The analyst may use or replace optional developer estimates and may link Jira keys, but does not edit the returned decomposition or block development.
+When a returned developer task is materialized into real work, keep `returns/tasks.md` as the factual source. The analyst may use or replace optional developer estimates and may link SberTrek keys, but does not edit the returned decomposition or block development.
 
 QA estimates come from an explicit analyst answer or the tracker's dedicated QA
 estimate. A source card with FE and QA estimates supplies separate role evidence.
@@ -85,8 +85,8 @@ QA-ресурса. Если FE нет, ориентир — следующий �
 
 ## Read-only tracker evidence
 
-Reading SberTrek and Jira follows `core/tracker-reading.md` and does not itself
-switch mode or authorize changes to execution artifacts. SberTrek is primary; Jira
+Reading SberTrek and SberTrek follows `core/tracker-reading.md` and does not itself
+switch mode or authorize changes to execution artifacts. SberTrek is primary; SberTrek
 fills missing values, while conflicting populated assignees and estimates require
 the analyst's decision. This protocol does not read history.
 
@@ -130,7 +130,7 @@ collected history without source evidence, invent dates, or bypass source/branch
 - Resolve analytics through `workspace.py project-root`. Check Git state with `git -C "$PROJECT_ROOT"`, never from the harness root. An ignored analytics directory in the harness does not mean its files are untracked in their own repository.
 - Read the canonical feature registry `features/<feature>/execution/tasks.md` and `planning/actualization.md`. Legacy slice registries remain supported; do not create slices or duplicate tasks merely to satisfy tooling.
 - Individual task cards and `execution/actual-progress.md` are supporting evidence, not interchangeable generator inputs. Prepare a missing registry only from confirmed facts and explicit authorization; do not guess missing estimates, dates, story membership or resource assignments.
-- Use `templates/execution/tasks.template.md` for internal `Task ID` and optional confirmed `Jira`. A local real QA task needs no tracker key. `QA-COHORT` renders as `TASK_QA_COHORT`; record the preserved alias in Notes, not as a tracker-issued identifier.
+- Use `templates/execution/tasks.template.md` for internal `Task ID` and optional confirmed `SberTrek`. A local real QA task needs no tracker key. `QA-COHORT` renders as `TASK_QA_COHORT`; record the preserved alias in Notes, not as a tracker-issued identifier.
 - Ролевой PLAN использует все задачи соответствующей роли внутри подтверждённой фичи; формула и legacy-совместимость описаны в `templates/planning/actualization.template.md` и `core/entity-model.md`. Принадлежность задачи к фиче не угадывается по похожему названию. Follow-up может описывать связи с существующими историями, включая список ID; это не повод создавать новые истории или дублировать QA.
 - A confirmed missing story baseline is represented by `Baseline State = absent` in actualization.md with both baseline cells empty. This is independent of virtual/materialized; it does not require retrospective plan approval. Keep explicit task links and source evidence. Missing actualization.md itself still blocks generation, except for a plan-only feature with an explicit decision under `core/forecast-exclusions.md` or `core/forecast-preservation.md`.
 - An absent-baseline story has no generated `PLAN` bar; its task links and computed progress remain in export comments, while the tasks render normally. Never label execution-derived dates as an approved plan. Existing approved baseline snapshots remain protected.
@@ -155,7 +155,7 @@ collected history without source evidence, invent dates, or bypass source/branch
 - `Progress %` допускает число от 0 до 100 с дробной частью через точку либо `unknown`. Реестр сохраняет согласованное значение (например, `85.7`); целочисленное заполнение полосы PlantUML округляется, дробный процент остаётся в подписи задачи.
 - Отменённые `cancelled`/`canceled`, как и `superseded`, остаются в исходном реестре и комментариях экспорта, но не в расписании и не в проценте PLAN. Отмена задачи не утверждает отмену фичи и не изменяет baseline.
 - Кандидаты из `task-candidates.md` не получают даты, дорожки и резерв ресурсов. Они остаются комментариями в actual-progress до явной материализации в реестр `real` или `virtual`; статус предложения сам по себе не разрешает планирование.
-- Legacy-значение `Jira = KEY/ROLE` читается как ключ `KEY` и ролевой идентификатор `KEY/ROLE`, без повторного суффикса. Несовпадение суффикса с колонкой `Role` и дубли после нормализации блокируют генерацию. Исходный реестр автоматически не переписывается.
+- Legacy-значение `SberTrek = KEY/ROLE` читается как ключ `KEY` и ролевой идентификатор `KEY/ROLE`, без повторного суффикса. Несовпадение суффикса с колонкой `Role` и дубли после нормализации блокируют генерацию. Исходный реестр автоматически не переписывается.
 - Not-started tasks must not render before the current date marker. On each regeneration, if their planned date is stale, the generator shifts only the rendered bar to today or the next open day.
 - Inside a feature, not-started backend/API tasks lead frontend tasks. Frontend bars start no earlier than 3 open days after the earliest not-started backend/API bar in the same feature.
 - Not-started tasks must be capacity-scheduled by `documents/planning/team.md`: no resource lane above 100% on an open workday, and available resources should be used before pushing work later.

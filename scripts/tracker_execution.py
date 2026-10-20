@@ -22,11 +22,11 @@ def feature_qa_estimate(issues: list[dict]) -> dict:
     total = Decimal("0")
     sources, missing, seen = [], [], set()
     for issue in issues:
-        identity = (issue.get("jira_key"), issue.get("sbertrek_key"))
+        identity = issue.get("sbertrek_key")
         if identity in seen:
             continue
         seen.add(identity)
-        key = issue.get("jira_key") or issue.get("sbertrek_key")
+        key = issue.get("sbertrek_key")
         estimate = issue.get("role_estimates", {}).get("QA")
         if estimate is None:
             missing.append(key)
@@ -115,15 +115,14 @@ def preview_execution(
         for table_number, table in enumerate(tables, start=1):
             for row_number, row in enumerate(table, start=1):
                 role = overlay.normalize_role(row.get("Role", ""))
-                jira, jira_invalid = read_key(row.get("Jira", ""), role)
                 sbertrek, sber_invalid = read_key(row.get("SberTrek", ""), role)
                 reference = {
                     "feature": delivery_key(project, path), "registry": relative,
                     "table": table_number, "row": row_number,
-                    "task_id": row.get("Task ID") or row.get("Jira") or "",
+                    "task_id": row.get("Task ID") or row.get("SberTrek") or "",
                     "role": role, "kind": row.get("Kind", "").casefold(),
-                    "jira_key": jira, "sbertrek_key": sbertrek,
-                    "invalid_key": jira_invalid or sber_invalid,
+                    "sbertrek_key": sbertrek,
+                    "invalid_key": sber_invalid,
                     "saved_facts": {name: row.get(name, "") for name in
                                     ("Actual Start", "Actual Finish", "Completed By", "Status", "Progress %", "Estimate", "Estimate (дн)", "Details", "Notes")},
                     "registry_fields": dict(row),
@@ -145,15 +144,15 @@ def preview_execution(
             owner, role = issue.get("confirmed_feature"), issue.get("task_role")
             if not owner or role not in {"BE", "FE"}:
                 continue
-            if any(issue.get(field) and row.get(field) == issue[field]
-                   for row in rows for field in ("jira_key", "sbertrek_key")):
+            if any(issue.get("sbertrek_key") and row.get("sbertrek_key") == issue["sbertrek_key"]
+                   for row in rows):
                 continue
-            identity = issue.get("jira_key") or issue.get("sbertrek_key")
+            identity = issue.get("sbertrek_key")
             reference = {
                 "feature": owner, "registry": (layout_feature_root(project, owner) / "execution/tasks.md").relative_to(project).as_posix(),
                 "table": None, "row": None, "task_id": f"{identity}/{role}",
                 "summary": issue.get("summary"),
-                "role": role, "kind": "real", "jira_key": issue.get("jira_key"),
+                "role": role, "kind": "real",
                 "sbertrek_key": issue.get("sbertrek_key"), "invalid_key": False,
                 "saved_facts": {}, "uncommitted": False, "registration_required": True,
             }
@@ -162,19 +161,19 @@ def preview_execution(
 
     if index_sha and deliveries is None and not feature and result.get('scope', {}).get('kind') != 'release':
         owners = {row['feature'] for row in rows for issue in [*result['issues'], *result['excluded']]
-                  if any(issue.get(field) and row.get(field) == issue[field] for field in ('jira_key', 'sbertrek_key'))}
+                  if issue.get('sbertrek_key') and row.get('sbertrek_key') == issue['sbertrek_key']}
         selected = {key: value for key, value in selected.items() if key in owners}
 
     items = []
     for issue in [*result["issues"], *result["excluded"]]:
-        jira_key, sbertrek_key = issue.get("jira_key"), issue.get("sbertrek_key")
-        identity = jira_key or sbertrek_key
+        sbertrek_key = issue.get("sbertrek_key")
+        identity = sbertrek_key
         matched = [
             row for row in rows
-            if (jira_key and row["jira_key"] == jira_key) or (sbertrek_key and row["sbertrek_key"] == sbertrek_key)
+            if (sbertrek_key and row["sbertrek_key"] == sbertrek_key)
         ]
         roles = [item for item in result["work_items"]
-                 if item.get("jira_key") == jira_key and item.get("sbertrek_key") == sbertrek_key]
+                 if item.get("sbertrek_key") == sbertrek_key]
         reasons = []
         owners = sorted({row["feature"] for row in matched})
         if not matched:
@@ -197,12 +196,6 @@ def preview_execution(
             row["role"] in {"FE", "BE"} and row["role"] != issue["task_role"] for row in matched
         ):
             reasons.append("registry-role-conflicts-with-task-prefix")
-        if any(
-            (jira_key and row["jira_key"] and row["jira_key"] != jira_key)
-            or (sbertrek_key and row["sbertrek_key"] and row["sbertrek_key"] != sbertrek_key)
-            for row in matched
-        ):
-            reasons.append("registry-pair-conflicts-with-reconciliation")
         for role in sorted({row["role"] for row in matched}):
             if sum(row["role"] == role for row in matched) > 1:
                 reasons.append(f"duplicate-registry-role:{role}")
@@ -213,15 +206,13 @@ def preview_execution(
                 continue
             if not any(row["role"] == item["role"] for row in matched):
                 reasons.append(f"new-role-needs-confirmation:{item['role']}")
-        identities = {item["work_item_id"] for item in roles} | {key for key in (jira_key, sbertrek_key) if key}
+        identities = {item["work_item_id"] for item in roles} | {key for key in (sbertrek_key,) if key}
         identities.update(row["task_id"] for row in matched if row.get("registration_required"))
         local_collisions = [row for row in rows if row not in matched and row["task_id"] in identities]
         if local_collisions:
             reasons.append("unconfirmed-internal-id-collision")
-        if issue.get("reason") == "jira-counterpart-absent":
-            reasons.append("excluded-counterpart-needs-disposition")
         entry = {
-            "tracker_key": identity, "jira_key": jira_key, "sbertrek_key": sbertrek_key,
+            "tracker_key": identity, "sbertrek_key": sbertrek_key,
             "summary": issue.get("summary"),
             "owners": owners, "targets": matched, "work_item_ids": [item["work_item_id"] for item in roles],
             "internal_id_collisions": local_collisions, "blockers": sorted(set(reasons)),

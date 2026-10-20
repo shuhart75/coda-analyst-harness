@@ -29,16 +29,14 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
 
     def configure(self, state: Path) -> None:
         self.write(state / "tracker-config.json", {
-            "schema_version": 4,
+            "schema_version": 5,
             "primary_provider": "sbertrek",
             "setup_complete": True,
-            "jira_enabled": True,
-            "projects": {"sbertrek": ["RSCON"], "jira": ["RSCON"]},
+            "projects": {"sbertrek": ["RSCON"]},
             "development_issue_types": ["story", "task"],
-            "participants": {"sbertrek": {}, "jira": {}},
+            "participants": {"sbertrek": {}},
             "status_rules": {
                 "sbertrek": {"completed": ["done"], "excluded": ["cancelled"]},
-                "jira": {"completed": ["Done"], "excluded": ["Cancelled"]},
             },
         })
 
@@ -53,13 +51,13 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
         return self.run_tool(state, *args)
 
     def sber_issue(
-        self, key: str, *, jira_key: str | None = None, summary: str | None = None,
+        self, key: str, *, external_reference: str | None = None, summary: str | None = None,
         status: str = "created", issue_type: str = "story", general: float | None = None,
         roles: dict[str, float] | None = None,
     ) -> dict:
         attributes = []
-        if jira_key:
-            attributes.append({"code": "issue_key", "name": "Объект Jira", "value": jira_key})
+        if external_reference:
+            attributes.append({"code": "issue_key", "name": "Объект SberTrek", "value": external_reference})
         if general is not None:
             attributes.append({"code": "story_points", "name": "Относительная сложность", "value": general})
         names = {"AN": "Анализ", "BE": "Разработка BE", "FE": "Разработка FE", "QA": "Тестирование"}
@@ -72,7 +70,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             "created_at": "2026-08-01T08:00:00+00:00", "updated_at": "2026-08-02T08:00:00+00:00",
         }
 
-    def jira_issue(
+    def source_issue(
         self, key: str, *, summary: str | None = None, status: str = "To Do",
         roles: dict[str, float] | None = None,
     ) -> dict:
@@ -80,11 +78,11 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             "summary": summary or f"[BE] Task {key}", "issuetype": {"name": "Story"},
             "status": {"name": status}, "assignee": None,
             "created": "2026-08-01T08:00:00+00:00", "updated": "2026-08-02T08:00:00+00:00",
-            "fixVersions": [],
+            "releases": [], "attributes": [],
         }
-        ids = {"AN": "customfield_15062", "BE": "customfield_15014", "FE": "customfield_15015", "QA": "customfield_15064"}
-        for role, value in (roles or {}).items():
-            fields[ids[role]] = value
+        names = {"AN": "Анализ", "BE": "Разработка BE", "FE": "Разработка FE", "QA": "Тестирование"}
+        fields["attributes"] = [{"code": "estimate_" + role.lower(), "name": names[role], "value": value}
+                                for role, value in (roles or {}).items()]
         return {"key": key, "fields": fields}
 
     def ingest(self, state: Path, payload: dict, response: object, *, expected: int = 0, name: str = "response") -> dict:
@@ -107,135 +105,10 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             payload = self.run_tool(state, "config-status", expected=3)
             self.assertEqual(payload["next_question"], payload["response_contract"]["text"])
 
-    def test_sbertrek_epic_to_jira_and_role_work_items(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            current = self.begin(state, "sbertrek", "epic", "RSCON-7000")
-            self.assertEqual(current["protocol"], "direct-tracker-v1")
-            self.assertEqual(current["next_action"]["arguments"]["query"], 'unit IN linkedUnitsOf("unit = \'RSCON-7000\'", "Состоит из")')
-            current = self.ingest(state, current, {"issues": [
-                self.sber_issue("RSCON-7001", jira_key="RSCON-3001", summary="[FE] Form", general=5),
-                self.sber_issue("RSCON-7002", summary="[BE] Local", roles={"BE": 2}),
-            ]}, name="sber")
-            self.assertEqual(current["next_action"]["provider"], "jira")
-            self.assertEqual(current["next_action"]["arguments"]["jql"], 'key IN ("RSCON-3001")')
-            current = self.ingest(state, current, {"issues": [self.jira_issue("RSCON-3001", roles={"FE": 8, "QA": 3})]}, name="jira")
-            blocked = self.run_tool(state, "reconcile", "--run-id", current["run_id"], expected=3)
-            self.assertEqual(blocked["allowed_next_action"], "resolve-conflict")
-            self.assertEqual(blocked["next_action"]["task"]["sbertrek_key"], "RSCON-7001")
-            self.assertIn("Приоритет SberTrek для этой и всех последующих", blocked["next_question"])
-            current = self.run_tool(
-                state, "resolve-conflict", "--run-id", current["run_id"],
-                "--task-key", "RSCON-7001", "--choice", "sbertrek",
-            )
-            reconciliation, result = self.reconcile(state, current)
-            self.assertFalse(reconciliation["final_response_allowed"])
-            self.assertEqual(reconciliation["allowed_next_action"], "result-status")
-            self.assertNotIn("response_contract", reconciliation)
-            completion = self.run_tool(state, "result-status", "--run-id", current["run_id"])
-            self.assertTrue(completion["final_response_allowed"])
-            self.assertEqual(result["counts"]["matched"], 1)
-            paired = next(item for item in result["issues"] if item["sbertrek_key"] == "RSCON-7001")
-            self.assertEqual(paired["role_estimates"]["FE"]["value"], 5)
-            self.assertEqual(paired["role_estimates"]["QA"]["value"], 3)
-            self.assertEqual(paired["role_estimates"]["QA"]["source"], "jira")
-            self.assertEqual(result["summary"]["story_points_total"], 10)
-            self.assertIn("role_estimates.FE", {item["field"] for item in result["discrepancies"]})
-            summaries = {item["summary"] for item in result["work_items"]}
-            self.assertIn("FE Form", summaries)
-            self.assertIn("BE Local", summaries)
-            official = completion["response_contract"]["text"]
-            self.assertIn("Задачи:", official)
-            self.assertIn("SberTrek RSCON-7001; Jira RSCON-3001; [FE] Form", official)
-            self.assertIn("оценки: AN -, BE -, FE 5.0, QA 3.0", official)
-            self.assertIn("RSCON-3001/FE; FE Form; оценка: 5.0", official)
-            self.assertIn("RSCON-3001/QA; QA Form; оценка: 3.0", official)
-            status = self.run_tool(state, "run-status", "--run-id", current["run_id"])
-            self.assertEqual(status["allowed_next_action"], "result-status")
-            self.assertFalse(status["final_response_allowed"])
 
-    def test_conflicts_are_asked_one_task_at_a_time_and_default_applies_forward(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001", "RSCON-7002", "RSCON-7003")
-            current = self.ingest(state, current, {"issues": [
-                self.sber_issue("RSCON-7001", jira_key="RSCON-3001", summary="[FE] First", roles={"FE": 5}),
-                self.sber_issue("RSCON-7002", jira_key="RSCON-3002", summary="[FE] Second", roles={"FE": 6}),
-                self.sber_issue("RSCON-7003", jira_key="RSCON-3003", summary="[FE] Third", roles={"FE": 7}),
-            ]}, name="sber")
-            current = self.ingest(state, current, {"issues": [
-                self.jira_issue("RSCON-3001", summary="[FE] First", roles={"FE": 4}),
-                self.jira_issue("RSCON-3002", summary="[FE] Second", roles={"FE": 4}),
-                self.jira_issue("RSCON-3003", summary="[FE] Third", roles={"FE": 4}),
-            ]}, name="jira")
-            blocked = self.run_tool(state, "reconcile", "--run-id", current["run_id"], expected=3)
-            self.assertEqual(blocked["next_action"]["task"]["sbertrek_key"], "RSCON-7001")
-            blocked = self.run_tool(
-                state, "resolve-conflict", "--run-id", current["run_id"],
-                "--task-key", "RSCON-7001", "--choice", "jira", expected=3,
-            )
-            self.assertEqual(blocked["next_action"]["task"]["sbertrek_key"], "RSCON-7002")
-            current = self.run_tool(
-                state, "resolve-conflict", "--run-id", current["run_id"],
-                "--task-key", "RSCON-7002", "--choice", "sbertrek", "--apply-to-following",
-            )
-            _, result = self.reconcile(state, current)
-            values = {item["sbertrek_key"]: item["role_estimates"]["FE"]["value"] for item in result["issues"]}
-            self.assertEqual(values, {"RSCON-7001": 4, "RSCON-7002": 6, "RSCON-7003": 7})
 
-    def test_custom_resolution_can_mix_sources(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
-            sber = self.sber_issue("RSCON-7001", jira_key="RSCON-3001", summary="[FE] Form", roles={"FE": 5})
-            sber["attributes"].append({"code": "assigned_to", "name": "Исполнитель", "value": {"externalId": "1", "fullName": "Иван Иванов"}})
-            current = self.ingest(state, current, {"issues": [sber]}, name="sber")
-            jira = self.jira_issue("RSCON-3001", summary="[FE] Form", roles={"FE": 4})
-            jira["fields"]["assignee"] = {"accountId": "other", "displayName": "Пётр Петров"}
-            current = self.ingest(state, current, {"issues": [jira]}, name="jira")
-            blocked = self.run_tool(state, "reconcile", "--run-id", current["run_id"], expected=3)
-            fields = {item["field"] for item in blocked["next_action"]["task"]["conflicts"]}
-            self.assertEqual(fields, {"assignee", "role_estimates.FE"})
-            custom = self.write(state / "responses" / "custom.json", {
-                "assignee": "jira", "role_estimates.FE": "sbertrek",
-            })
-            current = self.run_tool(
-                state, "resolve-conflict", "--run-id", current["run_id"],
-                "--task-key", "RSCON-7001", "--choice", "custom", "--custom-file", str(custom),
-            )
-            _, result = self.reconcile(state, current)
-            issue = result["issues"][0]
-            self.assertEqual(issue["assignee"]["name"], "Пётр Петров")
-            self.assertEqual(issue["role_estimates"]["FE"]["value"], 5)
-            self.assertEqual(issue["role_estimate_sources"]["FE"], "sbertrek")
 
-    def test_equal_assignee_names_ignore_provider_ids(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
-            sber = self.sber_issue("RSCON-7001", jira_key="RSCON-3001")
-            sber["attributes"].append({"code": "assigned_to", "name": "Исполнитель", "value": {"externalId": "1", "fullName": "Иван Иванов"}})
-            current = self.ingest(state, current, {"issues": [sber]}, name="sber")
-            jira = self.jira_issue("RSCON-3001")
-            jira["fields"]["assignee"] = {"accountId": "other", "displayName": "Иван Иванов"}
-            current = self.ingest(state, current, {"issues": [jira]}, name="jira")
-            _, result = self.reconcile(state, current)
-            self.assertEqual(result["counts"]["discrepancies"], 0)
-            self.assertEqual(result["issues"][0]["assignee"]["id"], "1")
 
-    def test_jira_business_marker_does_not_create_assignee_conflict(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
-            sber = self.sber_issue("RSCON-7001", jira_key="RSCON-3001")
-            sber["attributes"].append({"code": "assigned_to", "name": "Исполнитель", "value": {"externalId": "1", "fullName": "Иван Иванов"}})
-            current = self.ingest(state, current, {"issues": [sber]}, name="sber")
-            jira = self.jira_issue("RSCON-3001")
-            jira["fields"]["assignee"] = {"accountId": "other", "displayName": "Иван Иванов [B]"}
-            current = self.ingest(state, current, {"issues": [jira]}, name="jira")
-            _, result = self.reconcile(state, current)
-            self.assertEqual(result["counts"]["discrepancies"], 0)
-            self.assertEqual(result["issues"][0]["assignee"]["name"], "Иван Иванов")
 
     def test_sbertrek_tasks_route_uses_only_explicit_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -245,70 +118,10 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             current = self.ingest(state, current, {"issues": [self.sber_issue("RSCON-7001"), self.sber_issue("RSCON-7002")]})
             self.assertEqual(current["allowed_next_action"], "reconcile")
 
-    def test_jira_tasks_reverse_lookup_uses_issue_key(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            current = self.begin(state, "jira", "tasks", "RSCON-3002", "RSCON-3001")
-            self.assertEqual(current["next_action"]["arguments"]["jql"], 'key IN ("RSCON-3001", "RSCON-3002")')
-            current = self.ingest(state, current, {"issues": [self.jira_issue("RSCON-3001"), self.jira_issue("RSCON-3002")]}, name="jira")
-            self.assertEqual(current["next_action"]["arguments"]["query"], 'issue_key = "RSCON-3001" or issue_key = "RSCON-3002"')
-            current = self.ingest(state, current, {"issues": [self.sber_issue("RSCON-7001", jira_key="RSCON-3001")]}, name="sber")
-            _, result = self.reconcile(state, current)
-            self.assertEqual(result["counts"]["matched"], 1)
-            self.assertEqual(result["counts"]["issues"], 2)
 
-    def test_jira_assignee_with_display_name_only_is_accepted(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            current = self.begin(state, "jira", "tasks", "RSCON-3001")
-            issue = self.jira_issue("RSCON-3001")
-            issue["fields"]["assignee"] = {"display_name": "Иван Реутов"}
-            current = self.ingest(state, current, {"issues": [issue]}, name="jira")
-            current = self.ingest(state, current, {"issues": []}, name="sber")
-            _, result = self.reconcile(state, current)
-            self.assertEqual(result["issues"][0]["assignee"], {"id": None, "name": "Иван Реутов"})
 
-    def test_jira_epic_discovers_sbertrek_epic_then_members(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            current = self.begin(state, "jira", "epic", "RSCON-3000")
-            self.assertEqual(current["next_action"]["arguments"]["jql"], '"Epic Link" = "RSCON-3000"')
-            current = self.ingest(state, current, {"issues": [self.jira_issue("RSCON-3001")]}, name="jira-members")
-            self.assertEqual(current["next_action"]["arguments"]["query"], 'issue_key = "RSCON-3000"')
-            discovery = self.sber_issue("RSCON-7000", jira_key="RSCON-3000", issue_type="epic")
-            current = self.ingest(state, current, {"issues": [discovery]}, name="discovery")
-            self.assertEqual(current["next_action"]["arguments"]["query"], 'unit IN linkedUnitsOf("unit = \'RSCON-7000\'", "Состоит из")')
-            current = self.ingest(state, current, {"issues": [self.sber_issue("RSCON-7001", jira_key="RSCON-3001")]}, name="sber-members")
-            self.assertEqual(current["allowed_next_action"], "reconcile")
-            _, result = self.reconcile(state, current)
-            self.assertEqual(result["counts"]["matched"], 1)
 
-    def test_jira_epic_without_sbertrek_counterpart_still_completes(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            current = self.begin(state, "jira", "epic", "RSCON-3000")
-            current = self.ingest(state, current, {"issues": [self.jira_issue("RSCON-3001")]}, name="jira")
-            current = self.ingest(state, current, {"issues": []}, name="empty")
-            self.assertEqual(current["allowed_next_action"], "reconcile")
-            self.assertIn("sbertrek-counterpart-epic-not-found:RSCON-3000", current["limitations"])
 
-    def test_confirmed_missing_jira_counterpart_excludes_sbertrek_issue(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            state = Path(temp)
-            current = self.begin(state, "sbertrek", "tasks", "RSCON-7001", "RSCON-7002")
-            current = self.ingest(state, current, {"issues": [
-                self.sber_issue("RSCON-7001", jira_key="RSCON-3001"),
-                self.sber_issue("RSCON-7002"),
-            ]}, name="sber")
-            error = self.write(state / "responses" / "error.json", {"error": "An issue with key 'RSCON-3001' does not exist for field 'key'."})
-            current = self.run_tool(
-                state, "ingest-error", "--run-id", current["run_id"],
-                "--step-id", current["next_action"]["step_id"], "--error-file", str(error),
-            )
-            _, result = self.reconcile(state, current)
-            self.assertEqual(result["counts"]["excluded"], 1)
-            self.assertEqual(result["counts"]["issues"], 1)
-            self.assertEqual(result["issues"][0]["sbertrek_key"], "RSCON-7002")
 
     def test_begin_and_ingest_are_idempotent_but_conflicting_repeat_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -551,7 +364,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
         path = project / "features" / feature / location
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            "| Task ID | Jira | SberTrek | Kind | Role | Status |\n"
+            "| Task ID | SberTrek | Retired reference | Kind | Role | Status |\n"
             "|---|---|---|---|---|---|\n" + "\n".join(rows) + "\n", encoding="utf-8",
         )
         return path
@@ -571,7 +384,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
                 "| BACK | DEMO-2 | ST-2 | real | BE | cancelled |",
             ], "slices/legacy/execution/tasks.md")
             before = {path: path.read_bytes() for path in project.rglob("*") if path.is_file()}
-            for provider, keys in (("jira", ["DEMO-1", "DEMO-2"]), ("sbertrek", ["ST-1", "ST-2"])):
+            for provider, keys in (("sbertrek", ["DEMO-1", "DEMO-2"]),):
                 preview = self.run_tool(
                     state, "scope-preview", "--project-root", str(project),
                     "--feature", "example", "--provider", provider,
@@ -604,7 +417,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             })
             preview = self.run_tool(
                 state, "scope-preview", "--project-root", str(project),
-                "--quarter", "2026-Q3", "--provider", "jira",
+                "--quarter", "2026-Q3", "--provider", "sbertrek",
             )
             self.assertEqual(preview["scope"]["ids"], ["DEMO-1", "DEMO-2"])
             self.assertEqual([item["feature"] for item in preview["features"]], ["cohorts", "plan-only", "release"])
@@ -612,7 +425,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             self.assertIn("execution-registry-missing:plan-only", preview["limitations"])
             scoped = self.run_tool(
                 state, "scope-preview", "--project-root", str(project),
-                "--quarter", "2026-Q3", "--feature", "cohorts", "--provider", "jira",
+                "--quarter", "2026-Q3", "--feature", "cohorts", "--provider", "sbertrek",
             )
             self.assertEqual(scoped["scope"]["ids"], ["DEMO-1"])
 
@@ -627,8 +440,10 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             self.write(gantt / "actual-progress-features.json", {
                 "schema_version": 1, "features": {"first": "first", "second": "second"},
             })
-            preview = self.run_tool(state, "scope-preview", "--project-root", str(project), "--quarter", "2026-Q3", "--provider", "jira")
+            preview = self.run_tool(state, "scope-preview", "--project-root", str(project), "--quarter", "2026-Q3", "--provider", "sbertrek")
             self.assertEqual(preview["shared_keys"], {"DEMO-1": ["first", "second"]})
+            for feature in ("first", "second"):
+                self.registry(project, feature, ["| FRONT | - | OLD-1 | real | FE | done |"] )
             empty = self.run_tool(state, "scope-preview", "--project-root", str(project), "--quarter", "2026-Q3", "--provider", "sbertrek")
             self.assertEqual(empty["scope"]["ids"], [])
             self.assertEqual(empty["next_action"]["type"], "clarify-tracker-scope")
@@ -642,9 +457,10 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             self.registry(project, "example", [
                 f"| INTERNAL-{index} | DEMO-{index} | | real | FE | done |" for index in range(1, 52)
             ])
-            preview = self.run_tool(state, "scope-preview", "--project-root", str(project), "--feature", "example", "--provider", "jira")
+            preview = self.run_tool(state, "scope-preview", "--project-root", str(project), "--feature", "example", "--provider", "sbertrek")
             self.assertEqual(len(preview["scope"]["ids"]), 51)
             self.assertIn("requested-keys-exceed-response-limit:51:50", preview["limitations"])
+            self.registry(project, "example", [f"| INTERNAL-{index} | - | OLD-{index} | real | FE | done |" for index in range(1, 52)])
             unknown = self.run_tool(state, "scope-preview", "--project-root", str(project), "--feature", "example", "--provider", "sbertrek")
             self.assertEqual(unknown["scope"]["ids"], [])
             self.assertEqual(len(unknown["omitted"]), 51)
@@ -653,7 +469,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp)
             self.run_tool(state, "init-config")
-            args = ("scope-preview", "--project-root", "/does-not-exist", "--feature", "example", "--provider", "jira")
+            args = ("scope-preview", "--project-root", "/does-not-exist", "--feature", "example", "--provider", "sbertrek")
             stopped = self.run_tool(state, *args, expected=3)
             self.assertTrue(stopped["must_stop"])
             self.assertNotIn("scope", stopped)
@@ -670,11 +486,11 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             self.configure(state)
             self.registry(project, "example", ["| FRONT | DEMO-1/QA | | real | FE | done |"])
             for options in (("--feature", "../example"), ("--quarter", "2026-Q9"), ("--feature", "example")):
-                self.run_tool(state, "scope-preview", "--project-root", str(project), "--provider", "jira", *options, expected=2)
+                self.run_tool(state, "scope-preview", "--project-root", str(project), "--provider", "sbertrek", *options, expected=2)
             external = Path(temp) / "external"
             external.mkdir()
             (project / "features/linked").symlink_to(external, target_is_directory=True)
-            self.run_tool(state, "scope-preview", "--project-root", str(project), "--provider", "jira", "--feature", "linked", expected=2)
+            self.run_tool(state, "scope-preview", "--project-root", str(project), "--provider", "sbertrek", "--feature", "linked", expected=2)
 
 
 if __name__ == "__main__":

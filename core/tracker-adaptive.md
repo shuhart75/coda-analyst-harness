@@ -55,12 +55,9 @@ python3 scripts/trackerctl.py resume --scope-kind release --scope-provider sbert
 Просьба дать резюме не разрешает продолжать сбор, применять данные или менять
 цель. После явной остановки выполняй только отдельно разрешённую диагностику.
 
-Новый `begin` по умолчанию адаптивный и работает только с указанным `--scope-provider`.
-`--adaptive` остаётся совместимым явным обозначением. `--legacy` предназначен
-только для совместимости со старым протоколом, не для обычной актуализации.
-Факты второго трекера не читаются, даже для заполнения пробелов. Только явная команда
-сравнить два трекера разрешает `--compare-trackers`. В однотрекерном режиме
-`reconcile` нормализует один источник, не ищет пары. Режим старого run не меняется.
+Новый `begin` по умолчанию адаптивный. Единственный провайдер — `sbertrek`;
+его параметр необязателен. `--adaptive` остаётся явным обозначением,
+`--legacy` — совместимостью с точным экспортом. `reconcile` нормализует один источник.
 
 ## Область и соответствия
 
@@ -82,10 +79,10 @@ python3 scripts/trackerctl.py resume --scope-kind release --scope-provider sbert
 Необязательный источник: `features/<feature>/execution/tracker-scope.json`:
 
 ```json
-{"schema_version": 1, "epics": {"jira": ["EXAMPLE-1", "EXAMPLE-2"], "sbertrek": []}}
+{"schema_version": 1, "epics": {"sbertrek": ["EXAMPLE-1", "EXAMPLE-2"]}}
 ```
 
-`scope-preview` показывает `scope_choices`, `epics`, `identity_requests`.
+`scope-preview` показывает `scope_choices`, `epics`.
 Сохраняй выбранные эпики только после подтверждения, в допустимой рабочей ветке.
 В single/adaptive `begin --scope-kind epic` принимает повторяемый `--scope-id`.
 Для объединения используй `--scope-kind combined`: `--scope-id` для задач и
@@ -93,18 +90,10 @@ python3 scripts/trackerctl.py resume --scope-kind release --scope-provider sbert
 Ограничения полноты/лимита сохраняются. Не интерпретируй отсутствие карточки
 в эпике как удаление. В квартале сохраняй порядок фич и показывай их области отдельно.
 
-Поиск идентичности не является сравнением фактов. Если известны только ключи
-другого трекера, выполни `identity-lookup --source-provider <jira|sbertrek> --key KEY`
-после готового config gate. Команда задаёт точную область чтения SberTrek:
-для Jira ищется `issue_key`, для SberTrek читается его собственный ключ и `issue_key`.
-Инструмент выбирается по актуальным возможностям MCP. Передай полный ответ и
-реальный вызов через `--response-file` и `--call-file`; `selection` равен
-`query_semantics`. Используй только проверенные `pairs`, не сроки, оценки или статусы
-второго трекера. Нет пары/доступа или несколько соответствий означает неопределённость,
-не удаление. Не ищи Jira-номер как собственный номер SberTrek и наоборот.
-Не сравнивай по названию или совпадению номеров. Затем подтверди полученную область
-выбранного провайдера. При применении сохрани обе колонки ключей у того же Task ID,
-не создавай вторую задачу; повтори execution-preview после просмотра такого diff.
+Если известны только старые внешние ключи, запроси подтверждённые собственные
+ключи SberTrek. Совпадение номера или названия не доказывает идентичность.
+Сохраняй `Task ID`; не создавай вторую локальную задачу при регистрации ключа.
+
 
 ## Защита записи
 
@@ -256,7 +245,7 @@ FE/BE-работы независимо от наличия QA-оценок.
 
 ```json
 {
-  "provider": "jira",
+  "provider": "sbertrek",
   "tool": "имя из текущего описания MCP",
   "arguments": {},
   "operation": "read-only",
@@ -268,8 +257,7 @@ FE/BE-работы независимо от наличия QA-оценок.
 
 Записывай только реально выполненный вызов. Не сохраняй токены, cookies и
 заголовки авторизации. Если они передаются аргументами, требуется безопасный
-коннектор; не записывай такой вызов. Проверки ключей, склейки по Объект Jira,
-конфликтов и полных ответов остаются. Неизвестная структура карточек блокируется,
+коннектор; не записывай такой вызов. Проверки собственных ключей, области и полных ответов остаются. Неизвестная структура карточек блокируется,
 а не пересказывается моделью. Автоматическое объединение страниц карточек в этой
 версии не поддерживается: ограничения полноты остаются видимыми.
 
@@ -304,16 +292,16 @@ python3 scripts/trackerctl.py history-review --run-id RUN --project-root PROJECT
   "analyst_confirmed": true,
   "decision_source": "ссылка на подтверждение ролей и статусов",
   "feature": "example",
-  "provider": "jira",
+  "provider": "sbertrek",
   "participants": {"developer-id": "FE", "tester-id": "QA"},
   "status_rules": {"not_started": ["todo"], "development_review": ["review"], "qa_completed": ["ready-uat", "done"], "cancelled": ["cancelled"]},
   "responses": [{
-    "provider": "jira", "key": "EXAMPLE-1", "role": "FE",
+    "provider": "sbertrek", "key": "EXAMPLE-1", "role": "FE",
     "response_file": "/absolute/path/full-response.json",
     "sha256": "SHA256 полного файла",
     "status_aliases": {"Done": "done"},
     "call": {
-      "provider": "jira", "tool": "актуальный инструмент истории", "arguments": {},
+      "provider": "sbertrek", "tool": "актуальный инструмент истории", "arguments": {},
       "operation": "read-only", "capability_source": "описание MCP",
       "captured_at": "2026-09-16T09:00:00+03:00"
     }
@@ -337,9 +325,7 @@ python3 scripts/trackerctl.py history-review --run-id RUN --project-root PROJECT
 ID людей и статусов разных систем не смешиваются. Для подтверждённых dirty-реестров
 передай `reviewed_registries` (путь -> SHA256) и `expected_head` из предпросмотра.
 
-Jira по умолчанию: `/key`, `/assignee/key`, `/status/name`, `/changelogs`;
-в событии `/created`, `/items`; в изменении `/field`, `/from_id`, `/to_id`.
-Для другой структуры response содержит `mapping` с JSON Pointer к исходным
+Каждый структурированный response содержит явный `mapping` с JSON Pointer к исходным
 данным: `events`, `at`, `field`, `from`, `to`. `changes` нужен только для вложенного
 массива изменений; без него каждое событие само является изменением.
 `assignment_field` и `status_field` задают разные точные значения типа изменения.
