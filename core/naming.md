@@ -72,7 +72,7 @@ deployed behavior. Legacy inputs and returns are not renamed or rebound automati
 - derived analyst SDD: selected delivery `sdd/package.json` and `sdd/<contour>/<change-id>/` under core/sdd-input.md
 - returned task list: `returns/tasks.md`
 - execution registry: `tasks.md`
-- detailed task note: `<JIRA>.md`
+- detailed task note: `<SBER>.md`
 - prototypes: `prototype.html`, `notes.md`
 - baseline version note: `baseline/current/VERSION.md`
 - release root: `release.md`

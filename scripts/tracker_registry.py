@@ -20,7 +20,7 @@ def read_registry(path: Path, *, identity_only: bool = False) -> tuple[list[list
         if not line.strip().startswith("|"):
             continue
         headers = [overlay.clean_cell(cell) for cell in line.strip().strip("|").split("|")]
-        if not ({"Task ID", "Jira"} & set(headers)):
+        if not ({"Task ID", "SberTrek"} & set(headers)):
             continue
         if not identity_only and any(re.fullmatch(r"Estimate\s+(AN|BE|FE|QA)(?:\s.*)?", header) for header in headers):
             raise ValueError(f"Ролевые оценки допустимы в отчёте, не вместо Estimate (дн) в реестре: {path}")
@@ -34,9 +34,9 @@ def read_registry(path: Path, *, identity_only: bool = False) -> tuple[list[list
             if len(row.strip().strip("|").split("|")) != len(headers):
                 raise ValueError(f"Повреждена строка реестра: {path}")
     tables = [rows for headers, rows in overlay.parse_table_blocks(path)
-              if "Task ID" in headers or "Jira" in headers]
+              if "Task ID" in headers or "SberTrek" in headers]
     if tables:
         return tables, None if any(tables) else "empty-registry"
     if LEGACY_NO_TASKS.fullmatch(path.read_text(encoding="utf-8")):
         return [], "legacy-no-active-tasks"
-    raise ValueError(f"Нет читаемого реестра Task ID/Jira: {path}")
+    raise ValueError(f"Нет читаемого реестра Task ID/SberTrek: {path}")

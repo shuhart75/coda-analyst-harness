@@ -253,9 +253,9 @@ class BaselineRunObservationTests(unittest.TestCase):
         self.run_id = "reviewed-release-run"
         self.run_root = self.project / "run-evidence"
         self.run_root.mkdir()
-        self.result = {"scope": {"kind": "release", "intent": "update-planning", "provider": "jira", "ids": ["release-one"]},
-                       "issues": [{"jira_key": "BE-ONE", "development": {"state": "completed"}}],
-                       "skipped": [{"jira_key": "DOC-ONE"}], "excluded": [{"jira_key": "REMOVED-ONE"}]}
+        self.result = {"scope": {"kind": "release", "intent": "update-planning", "provider": "sbertrek", "ids": ["release-one"]},
+                       "issues": [{"sbertrek_key": "BE-ONE", "development": {"state": "completed"}}],
+                       "skipped": [{"sbertrek_key": "DOC-ONE"}], "excluded": [{"sbertrek_key": "REMOVED-ONE"}]}
         self.completion = {"reconciled_sha256": "verified-result-hash"}
         self.history = {"run_id": self.run_id, "reconciled_sha256": self.completion["reconciled_sha256"],
                         "status": "history-review-ready", "project_root": str(self.project),

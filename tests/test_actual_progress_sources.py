@@ -27,7 +27,7 @@ def load_tool(name: str):
 OVERLAY = load_tool("sync-actual-progress-overlay")
 EXPANDER = load_tool("expand-plantuml-includes")
 BASELINE = load_tool("actualization_baseline")
-HEADER = "| Task ID | Jira | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories |"
+HEADER = "| Task ID | SberTrek | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories |"
 SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
 
@@ -139,7 +139,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
             "| QA-REST | | QA Remainder | real | QA | 1 | Q2 | 2026-09-08 | 2026-09-09 | 2026-09-08 | | in-progress | unknown | STORY-COHORT |",
         ])
         self.map.write_text(self.map.read_text().replace('ITEM-100/FE, QA-COHORT', 'FIRST, SECOND, QA-COHORT, QA-REST'))
-        config = {'schema_version': 1, 'provider': 'jira', 'total_estimate': '2', 'groups': [
+        config = {'schema_version': 1, 'provider': 'sbertrek', 'total_estimate': '2', 'groups': [
             {'task_id': 'QA-COHORT', 'members': ['FIRST'], 'release': 'one', 'estimate': '1'},
             {'task_id': 'QA-REST', 'members': ['SECOND'], 'release': None, 'estimate': '1'}]}
         path = self.feature / 'execution/qa-groups.json'
@@ -178,7 +178,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         legacy = self.feature / "slices/demo/execution/tasks.md"
         legacy.parent.mkdir(parents=True)
         legacy.write_text(
-            "| Jira | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
+            "| SberTrek | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
             "|---|---|---|---|---|---|---|---|\n"
             "| ITEM-200 | FE extra | real | FE | 2 | 2026-09-07 | in_progress | unknown |\n",
             encoding="utf-8",
@@ -313,7 +313,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         legacy = self.feature / "slices/legacy/execution/tasks.md"
         legacy.parent.mkdir(parents=True)
         legacy.write_text(
-            "| Jira | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
+            "| SberTrek | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
             "|---|---|---|---|---|---|---|---|\n"
             "| ITEM-200 | Additional | real | BE | 2 | 2026-09-01 | planned | 0 |\n",
             encoding="utf-8",
@@ -566,7 +566,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "LOCAL-QA.*уточни оценку у аналитика"):
                     OVERLAY.load_tasks(self.feature)
 
-    def test_legacy_role_qualified_jira_keeps_one_role_suffix(self) -> None:
+    def test_legacy_role_qualified_tracker_key_keeps_one_role_suffix(self) -> None:
         self.write_tasks([
             "| | ITEM-100/FE | FE List | real | FE | 5 | F1 | 2026-09-01 | 2026-09-04 | 2026-09-01 | | in-review | 75 | STORY-COHORT |",
             "| QA-COHORT | ITEM-100/QA | QA Check | real | QA | 2 | Q2 | 2026-09-03 | 2026-09-09 | 2026-09-03 | | in-progress | 30 | STORY-COHORT |",
@@ -590,7 +590,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIn("TASK_ITEM_100_QA]", self.target.read_text())
         self.assertNotIn("TASK_ITEM_100_QA_QA]", self.target.read_text())
 
-    def test_legacy_jira_role_conflict_blocks_without_writes(self) -> None:
+    def test_legacy_tracker_role_conflict_blocks_without_writes(self) -> None:
         self.registry.write_text(self.registry.read_text().replace(
             "| | ITEM-100 |", "| | ITEM-100/BE |",
         ), encoding="utf-8")
@@ -654,7 +654,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         legacy = self.feature / "slices/legacy/execution/tasks.md"
         legacy.parent.mkdir(parents=True)
         legacy.write_text(
-            "| Jira | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
+            "| SberTrek | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
             "|---|---|---|---|---|---|---|---|\n"
             "| ITEM-200 | QA Additional | real | QA | | 2026-09-01 | planned | 0 |\n",
             encoding="utf-8",

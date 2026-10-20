@@ -124,7 +124,7 @@ def check_development(project: Path, review: dict) -> list[dict]:
             raise ValueError('Development registry is outside project')
         tables, _ = read_registry(path)
         matches = [row for table in tables for row in table
-                   if (row.get('Task ID') or row.get('Jira') or '') == update['task_id']
+                   if (row.get('Task ID') or row.get('SberTrek') or '') == update['task_id']
                    and row.get('Role') == update['role']]
         if update.get('action') == 'delete-current-execution':
             if matches:

@@ -253,7 +253,7 @@ class ForecastExclusionTests(unittest.TestCase):
         registry = feature / "execution/tasks.md"
         registry.parent.mkdir()
         registry.write_text(
-            "| Task ID | Jira | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories |\n"
+            "| Task ID | SberTrek | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories |\n"
             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
             f"| {task_id} | | Active work | real | FE | 5 | F1 | | | 2026-08-31 | 2026-09-07 | completed | 100 | STORY-ACTIVE |\n",
             encoding="utf-8",

@@ -25,7 +25,7 @@ class ActualProgressRoleWorkItemsTests(unittest.TestCase):
         execution.mkdir(parents=True)
         (execution / "tasks.md").write_text(
             "\n".join([
-                "| Jira | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories | Details |",
+                "| SberTrek | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories | Details |",
                 "|---|---|---|---|---:|---|---|---|---|---|---|---:|---|---|",
                 *rows,
                 "",

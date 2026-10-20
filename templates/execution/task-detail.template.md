@@ -4,7 +4,7 @@ Feature: `../../../feature.md`
 Slice: `../../slice.md`  
 Дата обновления: `<YYYY-MM-DD>`
 
-## Jira
+## SberTrek
 
 ## Kind
 - `real`

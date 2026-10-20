@@ -92,15 +92,14 @@ def select_features(project: Path, quarter: str | None, feature: str | None,
 def preview_scope(project: Path, provider: str, quarter: str | None, feature: str | None,
                   deliveries: list[str] | None = None) -> dict:
     project = project.expanduser().resolve()
-    if provider not in {"jira", "sbertrek"}:
-        raise ValueError("Требуется явный провайдер jira или sbertrek")
+    if provider not in {"sbertrek"}:
+        raise ValueError("Требуется явный провайдер sbertrek")
     selected = select_features(project, quarter, feature, deliveries)
     references: dict[str, list[dict]] = {}
     omitted = []
-    identity_requests = []
     epics = {}
     limitations = ["known-registry-tasks-only", "new-epic-members-not-discovered"]
-    column = "Jira" if provider == "jira" else "SberTrek"
+    column = "SberTrek"
     if quarter and any(not entry.get("order_confirmed") for entry in selected.values()):
         limitations.append("feature-order-and-roster-need-confirmation")
     for name, entry in selected.items():
@@ -108,25 +107,18 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
         if not directory.is_dir():
             raise ValueError(f"Фича не найдена: {directory}")
         association = inside_project(project, directory / "execution/tracker-scope.json")
-        entry["epics"] = {"jira": [], "sbertrek": []}
+        entry["epics"] = {"sbertrek": []}
         if association.exists():
             config = json.loads(association.read_text(encoding="utf-8"))
             if (not isinstance(config, dict) or config.get("schema_version") != 1
-                    or not isinstance(config.get("epics", {}), dict)
-                    or set(config.get("epics", {})) - {"jira", "sbertrek"}):
+                    or not isinstance(config.get("epics", {}), dict)):
                 raise ValueError(f"Некорректная конфигурация эпиков: {association}")
-            for source, keys in config.get("epics", {}).items():
+            for source, keys in (("sbertrek", config.get("epics", {}).get("sbertrek", [])),):
                 if not isinstance(keys, list) or any(not isinstance(key, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*-[1-9][0-9]*", key) for key in keys):
                     raise ValueError(f"Некорректные ключи эпиков: {association}")
                 entry["epics"][source] = list(dict.fromkeys(keys))
             entry["sources"].append(association.relative_to(project).as_posix())
         epics[name] = entry["epics"][provider]
-        if not epics[name]:
-            other = "sbertrek" if provider == "jira" else "jira"
-            identity_requests.extend({"feature": name, "kind": "epic", "source_provider": other,
-                                      "source_key": key, "target_provider": provider,
-                                      "purpose": "identity-only", "for_choices": ["epics", "combined"]}
-                                     for key in entry["epics"][other])
         registry = inside_project(project, directory / "execution/tasks.md")
         paths = ([registry] if registry.is_file() else []) + sorted(directory.glob("slices/*/execution/tasks.md"))
         entry["registries"] = [path.relative_to(project).as_posix() for path in paths]
@@ -141,7 +133,7 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
             for index, row in enumerate(rows, start=1):
                 reference = {
                     "feature": name, "registry": path.relative_to(project).as_posix(),
-                    "row": index, "task_id": row.get("Task ID") or row.get("Jira") or "",
+                    "row": index, "task_id": row.get("Task ID") or row.get("SberTrek") or "",
                     "role": row.get("Role", ""), "status": row.get("Status", ""),
                 }
                 kind = row.get("Kind", "").casefold()
@@ -153,15 +145,6 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
                     continue
                 key = row.get(column, "").strip()
                 if key in {"", "-", "—"}:
-                    other = "sbertrek" if provider == "jira" else "jira"
-                    other_key = row.get("SberTrek" if other == "sbertrek" else "Jira", "").strip()
-                    matched = re.fullmatch(r"([A-Z][A-Z0-9_]*-[1-9][0-9]*)(?:/(AN|BE|FE|QA))?", other_key)
-                    if matched:
-                        if matched.group(2) and matched.group(2) != row.get("Role", "").upper():
-                            raise ValueError(f"Роль в ключе не совпадает с Role: {path}: {other_key}")
-                        identity_requests.append({**reference, "kind": "task", "source_provider": other,
-                                                  "source_key": matched.group(1), "target_provider": provider,
-                                                  "purpose": "identity-only", "for_choices": ["tasks", "combined"]})
                     omitted.append({**reference, "reason": f"no-confirmed-{provider}-key"})
                     continue
                 legacy = re.fullmatch(r"([A-Z][A-Z0-9_]*-[1-9][0-9]*)/(AN|BE|FE|QA)", key)
@@ -185,7 +168,7 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
         "project_root": str(project), "quarter": quarter,
         "scope": {"kind": "tasks", "provider": provider, "ids": sorted(references), "intent": "update-planning"},
         "features": list(selected.values()),
-        "epics": epics, "identity_requests": identity_requests,
+        "epics": epics,
         "scope_choices": [
             {"id": "tasks", "label": "Актуализировать по номерам задач в фиче"},
             {"id": "epics", "label": "По эпикам", "epics": epics, "confirm_or_supply_epics": True},
@@ -196,6 +179,5 @@ def preview_scope(project: Path, provider: str, quarter: str | None, feature: st
         "requires_analyst_confirmation": True, "tracker_calls_performed": False,
         "next_action": {"type": "confirm-scope" if references else "clarify-tracker-scope",
                         "required_choice": ["tasks", "epics", "combined"],
-                        "epic_confirmation_for": ["epics", "combined"],
-                        "identity_resolution_required": bool(identity_requests)},
+                        "epic_confirmation_for": ["epics", "combined"]},
     }

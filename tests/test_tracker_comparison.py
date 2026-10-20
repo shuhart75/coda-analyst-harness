@@ -12,14 +12,14 @@ class TrackerComparisonTests(unittest.TestCase):
                    'Status': 'done', 'Progress %': '100', 'Details': 'Analyst confirmed'}
         target = {'feature': 'feature', 'task_id': 'DEV', 'role': 'BE', 'registry': 'tasks.md',
                   'saved_facts': current}
-        preview = {'items': [{'jira_key': 'TEST-1', 'targets': [target]}],
+        preview = {'items': [{'sbertrek_key': 'TEST-1', 'targets': [target]}],
                    'feature_qa_proposals': [{'feature': 'feature', 'existing_targets': []}]}
         development = {'started_at': None, 'finished_at': None, 'state': 'completed',
                        'started_by': '2026-08-03T10:00:00+03:00', 'completed_by': '2026-08-04T10:00:00+03:00'}
         review = {'feature': 'feature', 'tasks': {'TEST-1/BE': {'development': development,
                                                             'limitations': ['history-incomplete']}},
                   'qa': {}, 'limitations': ['history-incomplete']}
-        result = build_comparison(preview, [review], 'jira')
+        result = build_comparison(preview, [review], 'sbertrek')
         self.assertIn('Analyst confirmed', result['table'])
         self.assertIn('2026-08-01', result['table'])
         self.assertIsNone(result['rows'][0]['history']['started_at'])

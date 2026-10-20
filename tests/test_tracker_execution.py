@@ -57,11 +57,11 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         return {str(path.relative_to(self.project)): path.read_bytes()
                 for path in self.project.rglob("*") if path.is_file()}
 
-    def result(self, roles: tuple[str, ...] = ("BE",), *, jira_key: str | None = "JIRA-1") -> dict:
-        issue = {"jira_key": jira_key, "sbertrek_key": "ST-1"}
+    def result(self, roles: tuple[str, ...] = ("BE",), *, sbertrek_key: str | None = "SBER-1") -> dict:
+        issue = {"sbertrek_key": sbertrek_key}
         return {
             "issues": [issue], "excluded": [],
-            "work_items": [{**issue, "role": role, "work_item_id": f"{jira_key or 'ST-1'}/{role}"} for role in roles],
+            "work_items": [{**issue, "role": role, "work_item_id": f"{sbertrek_key or 'ST-1'}/{role}"} for role in roles],
         }
 
     def preview(self, result: dict | None = None, feature: str | None = "owner", quarter: str | None = None) -> dict:
@@ -78,7 +78,7 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
     def test_quarter_layout_preserves_roster_titles_order_and_mapping(self) -> None:
         gantt = self.project / "planning/2026-Q3/gantt"
         for name, key in (("zeta", 1), ("alpha", 2), ("obsolete", 3)):
-            self.registry(self.project, name, [f"| CORE | JIRA-{key} | ST-{key} | real | BE | done |"])
+            self.registry(self.project, name, [f"| CORE | SBER-{key} | ST-{key} | real | BE | done |"])
             path = gantt / f"includes/actual-progress/FEATURE-{name}.puml"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("' existing\n")
@@ -95,36 +95,36 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
             ],
         })
         before = self.snapshot()
-        payload = preview_scope(self.project, "jira", "2026-Q3", None)
+        payload = preview_scope(self.project, "sbertrek", "2026-Q3", None)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual([entry["feature"] for entry in payload["features"]], ["zeta", "alpha"])
         self.assertEqual([entry["title"] for entry in payload["features"]], ["First feature", "Second feature"])
         self.assertEqual([entry["priority"] for entry in payload["features"]], [1, 2])
-        self.assertEqual(payload["scope"]["ids"], ["JIRA-1", "JIRA-2"])
+        self.assertEqual(payload["scope"]["ids"], ["SBER-1", "SBER-2"])
         self.save_sources()
         execution = preview_execution(self.project, "2026-Q3", None, self.result())
         self.assertEqual(execution["selected_features"], ["zeta", "alpha"])
-        single = preview_scope(self.project, "jira", "2026-Q3", "zeta")
+        single = preview_scope(self.project, "sbertrek", "2026-Q3", "zeta")
         self.assertEqual([entry["feature"] for entry in single["features"]], ["zeta"])
         with self.assertRaisesRegex(ValueError, "не включена"):
-            preview_scope(self.project, "jira", "2026-Q3", "obsolete")
+            preview_scope(self.project, "sbertrek", "2026-Q3", "obsolete")
         layout = json.loads((gantt / "actual-progress-layout.json").read_text())
         layout["analyst_confirmed"] = False
         self.write(gantt / "actual-progress-layout.json", layout)
         with self.assertRaises(ValueError):
-            preview_scope(self.project, "jira", "2026-Q3", None)
+            preview_scope(self.project, "sbertrek", "2026-Q3", None)
 
     def test_legacy_quarter_order_is_not_claimed_as_confirmed_priority(self) -> None:
-        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         self.write(self.project / "planning/2026-Q3/gantt/actual-progress-features.json", {
             "schema_version": 1, "features": {"owner": "owner"},
         })
-        payload = preview_scope(self.project, "jira", "2026-Q3", None)
+        payload = preview_scope(self.project, "sbertrek", "2026-Q3", None)
         self.assertIn("feature-order-and-roster-need-confirmation", payload["limitations"])
 
     def test_exact_pair_and_roles_find_existing_root_and_legacy_rows(self) -> None:
-        self.registry(self.project, "owner", ["| CORE | JIRA-1/BE | ST-1 | real | BE | done |"])
-        self.registry(self.project, "owner", ["| QA-LOCAL | JIRA-1 | ST-1 | real | QA | planned |"],
+        self.registry(self.project, "owner", ["| CORE | SBER-1/BE | ST-1 | real | BE | done |"])
+        self.registry(self.project, "owner", ["| QA-LOCAL | SBER-1 | ST-1 | real | QA | planned |"],
                       "slices/legacy/execution/tasks.md")
         self.save_sources()
         payload = self.preview(self.result(("BE", "QA")))
@@ -135,7 +135,7 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
 
     def test_duplicate_role_in_another_slice_is_blocked_before_writes(self) -> None:
         for location in ("execution/tasks.md", "slices/other/execution/tasks.md"):
-            self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"], location)
+            self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"], location)
         self.save_sources()
         payload = self.preview()
         self.assertFalse(payload["ownership_ready"])
@@ -143,8 +143,8 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         self.assertEqual(len(payload["items"][0]["targets"]), 2)
 
     def test_owner_outside_quarter_is_shown_not_silently_reassigned(self) -> None:
-        self.registry(self.project, "selected", ["| OTHER | JIRA-2 | ST-2 | real | BE | done |"])
-        self.registry(self.project, "real-owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        self.registry(self.project, "selected", ["| OTHER | SBER-2 | ST-2 | real | BE | done |"])
+        self.registry(self.project, "real-owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         self.write(self.project / "planning/2026-Q3/gantt/actual-progress-features.json", {
             "schema_version": 1, "features": {"selected": "selected"},
         })
@@ -153,24 +153,23 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["owners"], ["real-owner"])
         self.assertIn("owner-outside-selected-scope", self.reasons(payload))
 
-    def test_duplicates_across_features_and_conflicting_tracker_pairs_are_visible(self) -> None:
-        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-2 | real | BE | done |"])
-        self.registry(self.project, "other", ["| SECOND | JIRA-2 | ST-1 | real | BE | done |"])
+    def test_duplicate_key_across_features_is_visible(self) -> None:
+        self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-2 | real | BE | done |"])
+        self.registry(self.project, "other", ["| SECOND | SBER-1 | ST-1 | real | BE | done |"])
         self.save_sources()
         payload = self.preview()
         self.assertIn("multiple-feature-owners", self.reasons(payload))
-        self.assertIn("registry-pair-conflicts-with-reconciliation", self.reasons(payload))
         self.assertEqual(payload["items"][0]["owners"], ["other", "owner"])
 
     def test_new_qa_role_is_not_placed_into_the_fe_slice_automatically(self) -> None:
-        self.registry(self.project, "owner", ["| FRONT | JIRA-1 | ST-1 | real | FE | done |"])
+        self.registry(self.project, "owner", ["| FRONT | SBER-1 | ST-1 | real | FE | done |"])
         self.save_sources()
         payload = self.preview(self.result(("FE", "QA")))
         self.assertIn("new-role-needs-confirmation:QA", self.reasons(payload))
         self.assertEqual([row["role"] for row in payload["items"][0]["targets"]], ["FE"])
 
     def test_internal_id_is_not_a_tracker_mapping_but_blocks_collision(self) -> None:
-        self.registry(self.project, "owner", ["| JIRA-1/BE | | | real | BE | done |"])
+        self.registry(self.project, "owner", ["| SBER-1/BE | | | real | BE | done |"])
         self.save_sources()
         payload = self.preview()
         self.assertIn("task-owner-not-confirmed", self.reasons(payload))
@@ -178,18 +177,18 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["targets"], [])
 
     def test_dirty_or_untracked_owner_is_not_accepted_as_confirmed_source(self) -> None:
-        path = self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        path = self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         self.save_sources()
         path.write_text(path.read_text() + "\nUnreviewed change\n", encoding="utf-8")
         payload = self.preview()
         self.assertIn("uncommitted-owner-registry", self.reasons(payload))
-        self.registry(self.project, "owner", ["| TEST | JIRA-1 | ST-1 | real | QA | planned |"],
+        self.registry(self.project, "owner", ["| TEST | SBER-1 | ST-1 | real | QA | planned |"],
                       "slices/new/execution/tasks.md")
         payload = self.preview(self.result(("BE", "QA")))
         self.assertIn("uncommitted-owner-registry", self.reasons(payload))
 
     def test_unrelated_legacy_invalid_key_is_visible_without_inventing_identity(self) -> None:
-        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         self.registry(self.project, "legacy", ["| QA-LOCAL | QA-LOCAL | | real | QA | done |"])
         self.save_sources()
         payload = self.preview()
@@ -198,7 +197,7 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         self.assertEqual(payload["warnings"][0]["reference"]["feature"], "legacy")
 
     def test_deleted_registry_cannot_hide_an_old_owner(self) -> None:
-        path = self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        path = self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         self.save_sources()
         path.unlink()
         payload = self.preview()
@@ -206,20 +205,20 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         self.assertIn("task-owner-not-confirmed", self.reasons(payload))
 
     def test_empty_root_and_slice_registries_do_not_block_either_preview(self) -> None:
-        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         for location in ("execution/tasks.md", "slices/empty/execution/tasks.md"):
             self.registry(self.project, "empty", [], location)
         self.save_sources()
         payload = self.preview()
         self.assertTrue(payload["ownership_ready"])
         self.assertEqual([warning["reason"] for warning in payload["warnings"]], ["empty-registry"] * 2)
-        scope = preview_scope(self.project, "jira", None, "empty")
+        scope = preview_scope(self.project, "sbertrek", None, "empty")
         self.assertEqual(scope["scope"]["ids"], [])
         self.assertEqual(scope["next_action"]["type"], "clarify-tracker-scope")
         self.assertEqual(sum(value.startswith("empty-registry:") for value in scope["limitations"]), 2)
 
     def test_exact_legacy_no_tasks_document_is_visible_but_not_a_blocker(self) -> None:
-        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         path = self.registry(self.project, "legacy", [])
         path.write_text("# Implementation tasks\n\nЭтот slice зафиксирован как imported existing coverage.\n\n"
                         "- Активных implementation tasks в рамках текущего harness не заведено.\n"
@@ -229,38 +228,38 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         payload = self.preview()
         self.assertTrue(payload["ownership_ready"])
         self.assertEqual(payload["warnings"][0]["reason"], "legacy-no-active-tasks")
-        scope = preview_scope(self.project, "jira", None, "legacy")
+        scope = preview_scope(self.project, "sbertrek", None, "legacy")
         self.assertEqual(scope["scope"]["ids"], [])
-        path.write_text(path.read_text() + "\nTask: JIRA-1\n", encoding="utf-8")
+        path.write_text(path.read_text() + "\nTask: SBER-1\n", encoding="utf-8")
         self.assertIn("unreadable-registry", self.reasons(self.preview()))
 
     def test_malformed_or_unknown_registry_still_blocks_global_ownership(self) -> None:
-        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         path = self.registry(self.project, "legacy", [])
         self.save_sources()
-        for content in ("", "# Tasks\nNo data yet", "| Jira | Role |\n|---|\n",
-                        "| Jira | Role |\n|---|---|\n| JIRA-1 |\n",
-                        "| Jira | Jira |\n|---|---|\n",
+        for content in ("", "# Tasks\nNo data yet", "| SberTrek | Role |\n|---|\n",
+                        "| SberTrek | Role |\n|---|---|\n| SBER-1 |\n",
+                        "| SberTrek | SberTrek |\n|---|---|\n",
                         "| Task ID | Role |\n| no separator | BE |\n"):
             with self.subTest(content=content):
                 path.write_text(content, encoding="utf-8")
                 self.assertIn("unreadable-registry", self.reasons(self.preview()))
                 with self.assertRaises(ValueError):
-                    preview_scope(self.project, "jira", None, "legacy")
+                    preview_scope(self.project, "sbertrek", None, "legacy")
 
     def test_empty_first_table_does_not_hide_later_owner_or_duplicate(self) -> None:
         path = self.registry(self.project, "owner", [])
         header = path.read_text()
-        path.write_text(header + "\n" + header.rstrip() + "\n| CORE | JIRA-1 | ST-1 | real | BE | done |\n",
+        path.write_text(header + "\n" + header.rstrip() + "\n| CORE | SBER-1 | ST-1 | real | BE | done |\n",
                         encoding="utf-8")
         self.save_sources()
         self.assertTrue(self.preview()["ownership_ready"])
-        self.assertEqual(preview_scope(self.project, "jira", None, "owner")["scope"]["ids"], ["JIRA-1"])
-        self.registry(self.project, "other", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        self.assertEqual(preview_scope(self.project, "sbertrek", None, "owner")["scope"]["ids"], ["SBER-1"])
+        self.registry(self.project, "other", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         self.assertIn("multiple-feature-owners", self.reasons(self.preview()))
 
-    def test_completed_run_reuses_saved_pairs_without_new_mcp_or_state_writes(self) -> None:
-        self.registry(self.project, "owner", ["| CORE | | ST-1 | real | BE | done |"])
+    def test_completed_run_reuses_saved_cards_without_new_mcp_or_state_writes(self) -> None:
+        self.registry(self.project, "owner", ["| CORE | ST-1 | | real | BE | done |"])
         self.save_sources()
         current = self.begin(self.state, "sbertrek", "tasks", "ST-1", intent="update-planning")
         current = self.ingest(self.state, current, {"issues": [self.sber_issue("ST-1", roles={"BE": 2})]})
@@ -283,7 +282,7 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         self.assertIn("Read-only", blocked["error"])
 
     def test_reviewed_dirty_registry_requires_exact_head_and_content(self) -> None:
-        path = self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        path = self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         self.save_sources()
         head = self.git("rev-parse", "HEAD").strip()
         path.write_text(path.read_text() + "\nReviewed change\n", encoding="utf-8")
@@ -301,9 +300,9 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
 
     def test_reviewed_registry_does_not_bypass_ownership_or_new_role_checks(self) -> None:
-        self.registry(self.project, "owner", ["| CORE | JIRA-1 | ST-1 | real | BE | done |"])
+        self.registry(self.project, "owner", ["| CORE | SBER-1 | ST-1 | real | BE | done |"])
         self.save_sources()
-        path = self.registry(self.project, "outside", ["| DUPLICATE | JIRA-1 | ST-1 | real | BE | done |"])
+        path = self.registry(self.project, "outside", ["| DUPLICATE | SBER-1 | ST-1 | real | BE | done |"])
         reviewed = {path.relative_to(self.project).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()}
         payload = preview_execution(self.project, None, "owner", self.result(("BE", "QA")),
                                     reviewed, self.git("rev-parse", "HEAD").strip())
@@ -314,7 +313,7 @@ class TrackerExecutionPreviewTests(unittest.TestCase):
         self.assertFalse(payload["ownership_ready"])
 
     def test_cli_review_requires_explicit_confirmation_and_exact_paths(self) -> None:
-        path = self.registry(self.project, "owner", ["| CORE | | ST-1 | real | BE | done |"])
+        path = self.registry(self.project, "owner", ["| CORE | ST-1 | | real | BE | done |"])
         self.save_sources()
         path.write_text(path.read_text() + "\nReviewed change\n", encoding="utf-8")
         head = self.git("rev-parse", "HEAD").strip()

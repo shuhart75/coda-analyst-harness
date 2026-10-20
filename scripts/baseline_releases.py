@@ -313,7 +313,7 @@ def observe_run(project, run_id, review_file):
     if history.get("status") != "history-review-ready" or history.get("project_root") != str(project):
         raise ValueError("История не проверена либо относится к другому проекту")
     provider = scope.get("provider")
-    if provider not in {"jira", "sbertrek"}:
+    if provider not in {"sbertrek"}:
         raise ValueError("Нет однозначного провайдера релиза")
     field = provider + "_key"
     records = [*result.get("issues", []), *result.get("skipped", []), *result.get("excluded", [])]

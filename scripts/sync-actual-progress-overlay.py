@@ -585,7 +585,7 @@ def validate_task_row(row: dict[str, str], path: Path) -> None:
             raise ValueError(f"{path}: требуется заполненное поле {column}")
     if normalize_role(row["Role"]) not in ROLE_COLORS or row["Kind"].lower() not in {"real", "virtual"}:
         raise ValueError(f"{path}: неизвестный Role или Kind")
-    task_id = clean_cell(row.get("Task ID", "")) or f"{row.get('Jira', '')}/{row.get('Role', '')}"
+    task_id = clean_cell(row.get("Task ID", "")) or f"{row.get('SberTrek', '')}/{row.get('Role', '')}"
     if not unestimated_actual(row):
         validate_estimate(row.get("Estimate (дн)", ""), path, task_id)
     progress = clean_cell(row["Progress %"])
@@ -644,19 +644,19 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
     registry = feature_dir / "execution/tasks.md"
     paths = ([registry] if registry.exists() else []) + sorted(feature_dir.glob("slices/*/execution/tasks.md"))
     for path in paths:
-        rows = first_table_with(path, "Task ID") or first_table_with(path, "Jira")
+        rows = first_table_with(path, "Task ID") or first_table_with(path, "SberTrek")
         if not rows:
-            raise ValueError(f"{path}: нет непустого реестра Task ID/Jira; Гант сохранён")
+            raise ValueError(f"{path}: нет непустого реестра Task ID/SberTrek; Гант сохранён")
         for row in rows:
             completed_by = validate_completion_bound(row, path)
-            tracker_key = clean_cell(row.get("Jira", ""))
+            tracker_key = clean_cell(row.get("SberTrek", ""))
             if tracker_key in {"-", "—"}:
                 tracker_key = ""
             explicit_id = clean_cell(row.get("Task ID", ""))
             if explicit_id in {"-", "—"}:
                 explicit_id = ""
             if not tracker_key and not explicit_id:
-                raise ValueError(f"{path}: требуется Task ID или подтверждённый Jira")
+                raise ValueError(f"{path}: требуется Task ID или подтверждённый SberTrek")
             if path == registry or "Task ID" in row:
                 validate_task_row(row, path)
             status = clean_cell(row.get("Status", "planned"))
@@ -669,7 +669,7 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
             legacy_key = re.fullmatch(r"([^/]+)/(AN|BE|FE|QA)", tracker_key, re.IGNORECASE)
             if legacy_key:
                 if legacy_key.group(2).upper() != normalized_role:
-                    raise ValueError(f"{path}: роль в Jira {tracker_key} не совпадает с Role {role}")
+                    raise ValueError(f"{path}: роль в SberTrek {tracker_key} не совпадает с Role {role}")
                 tracker_key = legacy_key.group(1)
             task_id = explicit_id or (f"{tracker_key}/{normalized_role}" if (kind == "real" or legacy_key) and normalized_role in ROLE_COLORS else tracker_key)
             if task_id in tasks:
@@ -1488,7 +1488,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             references = story.replaced_by + story.residual_virtual_tasks + story.additional_tasks
             for reference in references:
                 if reference in tasks and any(task.task_id != reference and task.tracker_key == reference for task in tasks.values()):
-                    raise ValueError(f"{feature_dir}: неоднозначная ссылка Task ID/Jira {reference}")
+                    raise ValueError(f"{feature_dir}: неоднозначная ссылка Task ID/SberTrek {reference}")
                 if reference not in tasks and not any(task.tracker_key == reference for task in tasks.values()):
                     raise ValueError(f"{feature_dir}: история {story.story_id} ссылается на отсутствующую задачу {reference}")
             known_excluded = any(tasks[task_id].status.lower() in EXCLUDED_STATUSES

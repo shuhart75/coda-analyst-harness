@@ -12,18 +12,25 @@ import test_trackerctl
 import test_tracker_execution
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from tracker_history import JIRA_MAPPING, combine_history_parts, decode_history, history_field_coverage, pagination_window, pointer, validate_call
+from tracker_history import combine_history_parts, decode_history, history_field_coverage, pagination_window, pointer, validate_call
 from tracker_lifecycle import StatusRules, calculate_task
 from tracker_execution import feature_qa_estimate
 from tracker_workflow import response_json
 
+
+HISTORY_MAPPING = {
+    "key": "/key", "assignee": "/assignee/key", "status": "/status/name",
+    "events": "/changelogs", "at": "/created", "changes": "/items",
+    "field": "/field", "from": "/from_id", "to": "/to_id",
+    "assignment_field": "assignee", "status_field": "status",
+}
 
 class AdaptiveHistoryTests(unittest.TestCase):
     run_tool = test_trackerctl.DirectTrackerWorkflowTests.run_tool
     configure = test_trackerctl.DirectTrackerWorkflowTests.configure
     write = test_trackerctl.DirectTrackerWorkflowTests.write
     registry = test_trackerctl.DirectTrackerWorkflowTests.registry
-    jira_issue = test_trackerctl.DirectTrackerWorkflowTests.jira_issue
+    source_issue = test_trackerctl.DirectTrackerWorkflowTests.source_issue
     setUp = test_tracker_execution.TrackerExecutionPreviewTests.setUp
     git = test_tracker_execution.TrackerExecutionPreviewTests.git
     save_sources = test_tracker_execution.TrackerExecutionPreviewTests.save_sources
@@ -36,8 +43,8 @@ class AdaptiveHistoryTests(unittest.TestCase):
                 'captured_at': '2026-08-10T12:00:00+03:00'}
 
     def begin(self, intent='update-planning'):
-        return self.run_tool(self.state, 'begin', '--scope-kind', 'tasks', '--scope-provider', 'jira',
-                             '--scope-id', 'JIRA-1', '--label', 'Test', '--scope-source', 'analyst',
+        return self.run_tool(self.state, 'begin', '--scope-kind', 'tasks', '--scope-provider', 'sbertrek',
+                             '--scope-id', 'SBER-1', '--label', 'Test', '--scope-source', 'analyst',
                              '--intent', intent)
 
     def ingest(self, run, data, call=None, expected=0):
@@ -50,15 +57,15 @@ class AdaptiveHistoryTests(unittest.TestCase):
                              '--call-file', str(recorded), expected=expected)
 
     def reconciled(self, intent='update-planning'):
-        self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |'])
+        self.registry(self.project, 'owner', ['| CORE | SBER-1 | - | real | BE | done |'])
         self.save_sources()
         run = self.begin(intent)
-        run = self.ingest(run, {'issues': [self.jira_issue('JIRA-1', roles={'BE': 2})]})
+        run = self.ingest(run, {'issues': [self.source_issue('SBER-1', roles={'BE': 2})]})
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         return run['run_id']
 
     def raw_history(self):
-        return {'key': 'JIRA-1', 'assignee': {'key': 'qa'}, 'status': {'name': 'Done'},
+        return {'key': 'SBER-1', 'assignee': {'key': 'qa'}, 'status': {'name': 'Done'},
                 'changelogs': [
                     {'created': '2026-08-01T12:00:00+03:00', 'items': [
                         {'field': 'assignee', 'to_id': 'dev'}]},
@@ -71,17 +78,17 @@ class AdaptiveHistoryTests(unittest.TestCase):
     def manifest(self):
         response = self.write(self.state / 'history-response.json', self.raw_history())
         return {'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'confirmed test mapping',
-                'feature': 'owner', 'provider': 'jira', 'participants': {'dev': 'BE', 'qa': 'QA'},
+                'feature': 'owner', 'provider': 'sbertrek', 'participants': {'dev': 'BE', 'qa': 'QA'},
                 'status_rules': {'not_started': ['todo'], 'qa_completed': ['done']},
-                'responses': [{'provider': 'jira', 'key': 'JIRA-1', 'role': 'BE',
-                               'response_file': str(response), 'sha256': hashlib.sha256(response.read_bytes()).hexdigest(),
-                               'call': self.call('jira'), 'status_aliases': {'Done': 'done'}}]}
+                'responses': [{'provider': 'sbertrek', 'key': 'SBER-1', 'role': 'BE',
+                               'mapping': dict(HISTORY_MAPPING), 'response_file': str(response), 'sha256': hashlib.sha256(response.read_bytes()).hexdigest(),
+                               'call': self.call('sbertrek'), 'status_aliases': {'Done': 'done'}}]}
 
     def test_filtered_history_requires_assignment_and_status_coverage(self):
         run_id = self.reconciled()
         manifest = self.manifest()
         entry = manifest['responses'][0]
-        entry['mapping'] = {**JIRA_MAPPING, 'start': '/start', 'total': '/total',
+        entry['mapping'] = {**HISTORY_MAPPING, 'start': '/start', 'total': '/total',
                             'request_fields': '/filter/field'}
         raw = self.raw_history()
         raw.update(start=0, total=1, changelogs=raw['changelogs'][2:])
@@ -92,7 +99,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
         result = self.run_tool(self.state, 'history-review', '--run-id', run_id,
                                '--project-root', str(self.project), '--manifest', str(manifest_path))
         self.assertEqual(result['status'], 'history-collection-incomplete')
-        self.assertIn('JIRA-1/BE', result['pending_history'])
+        self.assertIn('SBER-1/BE', result['pending_history'])
         assignments = self.raw_history()
         assignments.update(start=0, total=2, changelogs=assignments['changelogs'][:2])
         response = self.write(self.state / 'assignments-only.json', assignments)
@@ -112,10 +119,10 @@ class AdaptiveHistoryTests(unittest.TestCase):
                       '--project-root', str(self.project), '--manifest', str(manifest_path), expected=2)
 
     def test_empty_status_filter_never_proves_not_started(self):
-        raw = {'key': 'JIRA-1', 'status': {'name': 'todo'}, 'assignee': {'key': None},
+        raw = {'key': 'SBER-1', 'status': {'name': 'todo'}, 'assignee': {'key': None},
                'changelogs': [], 'start': 0, 'total': 0}
         entry = self.manifest()['responses'][0]
-        entry['mapping'] = {**JIRA_MAPPING, 'start': '/start', 'total': '/total'}
+        entry['mapping'] = {**HISTORY_MAPPING, 'start': '/start', 'total': '/total'}
         entry['call']['arguments']['filter'] = {'field': 'status'}
         observed = datetime.fromisoformat(entry['call']['captured_at'])
         for mapped in (False, True):
@@ -130,7 +137,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
 
     def test_field_selection_uses_real_arguments_without_equating_developer_and_assignee(self):
         entry = self.manifest()['responses'][0]
-        entry['mapping'] = {**JIRA_MAPPING, 'request_fields': '/options/kinds'}
+        entry['mapping'] = {**HISTORY_MAPPING, 'request_fields': '/options/kinds'}
         for selected, expected in ((['status'], {'status'}), (['developer'], set()),
                                    (['assignee', 'status'], {'assignment', 'status'})):
             with self.subTest(selected=selected):
@@ -154,15 +161,15 @@ class AdaptiveHistoryTests(unittest.TestCase):
                                    (replace(history, current_status='todo'), limits, {'assignment'})])
 
     def test_actual_mcp_filter_attributes_does_not_prove_complete_history(self):
-        raw = {'key': 'JIRA-1', 'status': {'name': 'todo'}, 'assignee': {'key': None},
+        raw = {'key': 'SBER-1', 'status': {'name': 'todo'}, 'assignee': {'key': None},
                'changelogs': [], 'start': 0, 'total': 0}
         entry = self.manifest()['responses'][0]
         entry['provider'] = 'sbertrek'
-        entry['mapping'] = {**JIRA_MAPPING, 'assignment_field': 'assigned_to',
+        entry['mapping'] = {**HISTORY_MAPPING, 'assignment_field': 'assigned_to',
                             'start': '/start', 'total': '/total'}
         for name in ('filter_attributes', 'filterAttributes', 'filter-attributes'):
             with self.subTest(name=name):
-                entry['call']['arguments'] = {'key': 'JIRA-1', name: ['status']}
+                entry['call']['arguments'] = {'key': 'SBER-1', name: ['status']}
                 history, limits = decode_history(raw, entry, datetime.fromisoformat(entry['call']['captured_at']))
                 self.assertFalse(history.complete)
                 self.assertIn('history-field-coverage-not-proven', limits)
@@ -258,10 +265,10 @@ class AdaptiveHistoryTests(unittest.TestCase):
         run = self.begin()
         self.assertEqual(run['next_action']['type'], 'collect-tracker-data')
         self.assertNotIn('tool', run['next_action'])
-        bad = self.call('jira', 'unrelated scope')
-        self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]}, bad, expected=2)
+        bad = self.call('sbertrek', 'unrelated scope')
+        self.ingest(run, {'issues': [self.source_issue('SBER-1')]}, bad, expected=2)
         self.assertEqual(self.begin()['run_id'], run['run_id'])
-        result = self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]})
+        result = self.ingest(run, {'issues': [self.source_issue('SBER-1')]})
         self.assertEqual(result['status'], 'tracker-read-ready')
 
     def test_real_response_to_bound_review_without_project_writes(self):
@@ -303,8 +310,8 @@ class AdaptiveHistoryTests(unittest.TestCase):
         source = self.raw_history()
         source['total'] = 3
         source['start'] = 0
-        entry = {'key': 'JIRA-1', 'role': 'BE', 'provider': 'sbertrek',
-                 'mapping': {**JIRA_MAPPING, 'total': '/total', 'start': '/start'}, 'status_aliases': {'Done': 'done'}}
+        entry = {'key': 'SBER-1', 'role': 'BE', 'provider': 'sbertrek',
+                 'mapping': {**HISTORY_MAPPING, 'total': '/total', 'start': '/start'}, 'status_aliases': {'Done': 'done'}}
         history, limits = decode_history(source, entry, datetime.fromisoformat('2026-08-10T12:00:00+03:00'))
         self.assertTrue(history.complete)
         self.assertEqual(limits, [])
@@ -375,10 +382,10 @@ class AdaptiveHistoryTests(unittest.TestCase):
                 name = 'code' if change['field'] == 'status' else 'identity'
                 change['old'] = {name: change.get('from_id')}
                 change['new'] = {name: change.get('to_id')}
-        mapping = {name: value for name, value in JIRA_MAPPING.items() if name not in {'from', 'to'}}
+        mapping = {name: value for name, value in HISTORY_MAPPING.items() if name not in {'from', 'to'}}
         mapping.update(status_from='/old/code', status_to='/new/code', assignment_from='/old/identity',
                        assignment_to='/new/identity', total='/total', start='/start')
-        entry = {'provider': 'sbertrek', 'key': 'JIRA-1', 'role': 'BE', 'mapping': mapping,
+        entry = {'provider': 'sbertrek', 'key': 'SBER-1', 'role': 'BE', 'mapping': mapping,
                  'status_aliases': {'Done': 'done'}}
         history, limits = decode_history(source, entry, datetime.fromisoformat('2026-08-10T12:00:00+03:00'))
         self.assertEqual(limits, [])
@@ -393,8 +400,8 @@ class AdaptiveHistoryTests(unittest.TestCase):
         source['changelogs'].append({'items': [{'field': 'status', 'from_id': 'done', 'to_id': 'todo'}]})
         source['status']['name'] = 'todo'
         source['assignee']['key'] = 'dev'
-        entry = {'key': 'JIRA-1', 'role': 'BE', 'provider': 'jira',
-                 'mapping': {**JIRA_MAPPING, 'total': '/total', 'start': '/start'}}
+        entry = {'key': 'SBER-1', 'role': 'BE', 'provider': 'sbertrek',
+                 'mapping': {**HISTORY_MAPPING, 'total': '/total', 'start': '/start'}}
         history, limits = decode_history(source, entry, datetime.fromisoformat('2026-08-10T12:00:00+03:00'))
         self.assertFalse(history.complete)
         self.assertEqual(history.events, ())
@@ -413,12 +420,12 @@ class AdaptiveHistoryTests(unittest.TestCase):
         source.write_bytes((Path(__file__).parent / 'fixtures/tracker-history-text.json').read_bytes())
         entry.update(response_file=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
                      mapping={'request_key': '/key', 'text': '/output'})
-        entry['call'].update(tool='current-history-display', arguments={'key': 'JIRA-1'})
-        snapshot = self.write(self.state / 'card.json', {'key': 'JIRA-1', 'assignee': {'key': 'qa'},
+        entry['call'].update(tool='current-history-display', arguments={'key': 'SBER-1'})
+        snapshot = self.write(self.state / 'card.json', {'key': 'SBER-1', 'assignee': {'key': 'qa'},
                                                        'status': {'name': 'Done'}})
         entry['snapshot'] = {'response_file': str(snapshot), 'sha256': hashlib.sha256(snapshot.read_bytes()).hexdigest(),
-                             'call': {**self.call('jira'), 'tool': 'current-card-reader', 'arguments': {'key': 'JIRA-1'}},
-                             'mapping': {name: JIRA_MAPPING[name] for name in ('key', 'assignee', 'status')}}
+                             'call': {**self.call('sbertrek'), 'tool': 'current-card-reader', 'arguments': {'key': 'SBER-1'}},
+                             'mapping': {name: HISTORY_MAPPING[name] for name in ('key', 'assignee', 'status')}}
         return manifest
 
     def test_declared_text_parser_flows_through_review_without_rewriting_sources(self):
@@ -437,7 +444,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
         args = ('history-review', '--run-id', run_id, '--project-root', str(self.project), '--manifest', str(path))
         review = self.run_tool(self.state, *args)
         self.assertEqual(review['pending_history_dates'], [])
-        calculation = review['features'][0]['tasks']['JIRA-1/BE']['development']
+        calculation = review['features'][0]['tasks']['SBER-1/BE']['development']
         self.assertIsNone(calculation['started_at'])
         self.assertEqual(calculation['finished_at'], '2026-08-02T12:00:00+00:00')
         self.assertEqual(self.run_tool(self.state, *args)['review_file'], review['review_file'])
@@ -463,14 +470,14 @@ class AdaptiveHistoryTests(unittest.TestCase):
         review = self.run_tool(self.state, *args)
         self.assertEqual(review['status'], 'history-review-ready')
         self.assertEqual(review['pending_history_dates'], [])
-        self.assertEqual(review['features'][0]['tasks']['JIRA-1/BE']['development']['finished_at'],
+        self.assertEqual(review['features'][0]['tasks']['SBER-1/BE']['development']['finished_at'],
                          '2026-08-03T12:00:00+00:00')
         self.assertEqual(review['evidence'][0]['mapping']['text_extraction'], extraction)
         self.assertEqual(self.run_tool(self.state, *args)['review_file'], review['review_file'])
         extraction['segments'][3].update(kind='unresolved', reason='Removal semantics require checking')
         self.write(path, manifest)
         pending = self.run_tool(self.state, *args)
-        self.assertEqual(pending['pending_history_dates'], ['JIRA-1/BE'])
+        self.assertEqual(pending['pending_history_dates'], ['SBER-1/BE'])
         self.assertIsNone(pending['comparison'])
         self.assertEqual(raw_path.read_text(), text)
         self.assertEqual(self.snapshot(), before)
@@ -485,31 +492,31 @@ class AdaptiveHistoryTests(unittest.TestCase):
         args = ('history-review', '--run-id', run_id, '--project-root', str(self.project), '--manifest', str(path))
         review = self.run_tool(self.state, *args)
         self.assertEqual(review['status'], 'history-collection-incomplete')
-        self.assertEqual(review['next_action']['dated_source_required'], ['JIRA-1/BE'])
+        self.assertEqual(review['next_action']['dated_source_required'], ['SBER-1/BE'])
         self.assertIsNone(review['comparison'])
         self.assertFalse(review['date_proposals_allowed'])
         self.assertEqual(len(review['evidence'][0]['sources']), 2)
         self.assertIsNone(review['features'][0]['qa']['started_at'])
         self.assertIsNone(review['features'][0]['qa']['finished_at'])
-        manifest['unavailable_history_dates'] = {'JIRA-1/BE': 'Checked installed capabilities: only undated display available'}
+        manifest['unavailable_history_dates'] = {'SBER-1/BE': 'Checked installed capabilities: only undated display available'}
         self.write(path, manifest)
         reviewed = self.run_tool(self.state, *args)
         self.assertEqual(reviewed['next_action']['type'], 'review-with-analyst')
-        self.assertIn('JIRA-1:history-text-requires-dated-source', reviewed['limitations'])
+        self.assertIn('SBER-1:history-text-requires-dated-source', reviewed['limitations'])
         self.assertFalse(reviewed['planning_application_allowed'])
         self.assertEqual(reviewed['features'][0]['qa']['progress_percent'], 100)
         self.assertIsNone(reviewed['features'][0]['qa']['finished_at'])
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(raw_path.read_bytes(), raw)
         self.assertEqual(self.run_tool(self.state, *args)['review_file'], reviewed['review_file'])
-        manifest['unavailable_history_dates'] = {'JIRA-1/BE': ''}
+        manifest['unavailable_history_dates'] = {'SBER-1/BE': ''}
         self.write(path, manifest)
         self.assertIn('capability-check reason', self.run_tool(self.state, *args, expected=2)['error'])
 
     def test_separate_snapshot_rejects_another_provider(self):
         run_id = self.reconciled()
         manifest = self.text_manifest()
-        manifest['responses'][0]['snapshot']['call']['provider'] = 'sbertrek'
+        manifest['responses'][0]['snapshot']['call']['provider'] = 'unsupported'
         path = self.write(self.state / 'manifest.json', manifest)
         failure = self.run_tool(self.state, 'history-review', '--run-id', run_id,
                                 '--project-root', str(self.project), '--manifest', str(path), expected=2)
@@ -526,7 +533,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
         path = self.write(self.state / 'manifest.json', manifest)
         args = ('history-review', '--run-id', run_id, '--project-root', str(self.project), '--manifest', str(path))
         review = self.run_tool(self.state, *args)
-        self.assertEqual(review['pending_history_dates'], ['JIRA-1/BE'])
+        self.assertEqual(review['pending_history_dates'], ['SBER-1/BE'])
         for source in (entry, entry['snapshot']):
             raw = Path(source['response_file'])
             previous = raw.read_bytes()
@@ -561,9 +568,9 @@ class AdaptiveHistoryTests(unittest.TestCase):
 
     def test_history_terminal_flag_uses_actual_request_not_invented_offset(self):
         payload = {**self.raw_history(), 'more': False}
-        entry = {'key': 'JIRA-1', 'role': 'BE', 'provider': 'jira',
-                 'call': {**self.call('jira'), 'arguments': {'offset': 0}},
-                 'mapping': {**JIRA_MAPPING, 'has_next': '/more', 'request_start': '/offset'}}
+        entry = {'key': 'SBER-1', 'role': 'BE', 'provider': 'sbertrek',
+                 'call': {**self.call('sbertrek'), 'arguments': {'offset': 0}},
+                 'mapping': {**HISTORY_MAPPING, 'has_next': '/more', 'request_start': '/offset'}}
         observed = datetime.fromisoformat('2026-08-10T12:00:00+03:00')
         history, limits = decode_history(payload, entry, observed)
         self.assertTrue(history.complete)
@@ -585,8 +592,8 @@ class AdaptiveHistoryTests(unittest.TestCase):
         source['changelogs'][-1]['items'][0].update(from_id='1', to_id='2',
                                                  from_string='To Do', to_string='Done')
         source.update(total=3, start=0)
-        entry = {'key': 'JIRA-1', 'role': 'BE', 'provider': 'jira',
-                 'mapping': {**JIRA_MAPPING, 'status_from': '/from_string', 'status_to': '/to_string',
+        entry = {'key': 'SBER-1', 'role': 'BE', 'provider': 'sbertrek',
+                 'mapping': {**HISTORY_MAPPING, 'status_from': '/from_string', 'status_to': '/to_string',
                              'total': '/total', 'start': '/start'},
                  'status_aliases': {'Done': 'done', 'To Do': 'todo'}}
         history, limits = decode_history(source, entry, datetime.fromisoformat('2026-08-10T12:00:00+03:00'))
@@ -604,8 +611,8 @@ class AdaptiveHistoryTests(unittest.TestCase):
 
     def test_another_development_role_on_same_card_requires_registry_correction(self):
         run_id = self.reconciled()
-        self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |',
-                                              '| FRONT | JIRA-1 | - | real | FE | planned |'])
+        self.registry(self.project, 'owner', ['| CORE | SBER-1 | - | real | BE | done |',
+                                              '| FRONT | SBER-1 | - | real | FE | planned |'])
         self.save_sources()
         manifest = self.write(self.state / 'manifest.json', self.manifest())
         review = self.run_tool(self.state, 'history-review', '--run-id', run_id,
@@ -614,8 +621,8 @@ class AdaptiveHistoryTests(unittest.TestCase):
 
     def test_unknown_assignee_and_partial_metadata_do_not_prove_exact_dates(self):
         source = self.raw_history()
-        entry = {'key': 'JIRA-1', 'role': 'BE', 'provider': 'jira', 'status_aliases': {'Done': 'done'},
-                 'mapping': {**JIRA_MAPPING, 'total': '/total', 'start': '/start'}}
+        entry = {'key': 'SBER-1', 'role': 'BE', 'provider': 'sbertrek', 'status_aliases': {'Done': 'done'},
+                 'mapping': {**HISTORY_MAPPING, 'total': '/total', 'start': '/start'}}
         observed = datetime.fromisoformat('2026-08-10T12:00:00+03:00')
         source.update(total=4, start=0)
         history, limits = decode_history(source, entry, observed)
@@ -630,22 +637,13 @@ class AdaptiveHistoryTests(unittest.TestCase):
         for changes in ({'operation': 'write'}, {'arguments': {'headers': {'Authorization': 'secret'}}},
                         {'captured_at': '2999-01-01T00:00:00+00:00'}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
-                validate_call({**self.call('jira'), **changes}, 'jira')
+                validate_call({**self.call('sbertrek'), **changes}, 'sbertrek')
 
-    def test_explicit_comparison_still_collects_second_tracker(self):
-        run = self.run_tool(self.state, 'begin', '--scope-kind', 'tasks', '--scope-provider', 'jira',
-                            '--scope-id', 'JIRA-1', '--label', 'Test', '--scope-source', 'analyst',
-                            '--adaptive', '--compare-trackers')
-        run = self.ingest(run, {'issues': [self.jira_issue('JIRA-1')]})
-        self.assertEqual(run['next_action']['provider'], 'sbertrek')
-        self.run_tool(self.state, 'begin', '--scope-kind', 'tasks', '--scope-provider', 'jira',
-                      '--scope-id', 'JIRA-1', '--label', 'Test', '--scope-source', 'analyst',
-                      '--adaptive', expected=2)
 
-    def test_sbertrek_single_does_not_collect_jira(self):
+    def test_sbertrek_single_ignores_external_reference(self):
         run = self.run_tool(self.state, 'begin', '--scope-kind', 'tasks', '--scope-provider', 'sbertrek',
                             '--scope-id', 'ST-1', '--label', 'Test', '--scope-source', 'analyst', '--adaptive')
-        card = test_trackerctl.DirectTrackerWorkflowTests.sber_issue(self, 'ST-1', jira_key='JIRA-1')
+        card = test_trackerctl.DirectTrackerWorkflowTests.sber_issue(self, 'ST-1', external_reference='SBER-1')
         run = self.ingest(run, [card])
         self.assertEqual(run['status'], 'tracker-read-ready')
 
@@ -658,7 +656,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
         review = self.run_tool(self.state, *args)
         self.assertEqual(review['next_action']['type'], 'collect-history')
         self.assertFalse(review['date_proposals_allowed'])
-        manifest['unavailable_history'] = {'JIRA-1/BE': 'History endpoint unavailable'}
+        manifest['unavailable_history'] = {'SBER-1/BE': 'History endpoint unavailable'}
         self.write(path, manifest)
         review = self.run_tool(self.state, *args)
         self.assertEqual(review['next_action']['type'], 'review-with-analyst')
@@ -667,31 +665,31 @@ class AdaptiveHistoryTests(unittest.TestCase):
     def test_wrong_history_provider_is_rejected(self):
         run_id = self.reconciled()
         manifest = self.manifest()
-        manifest['provider'] = 'sbertrek'
+        manifest['provider'] = 'unsupported'
         path = self.write(self.state / 'manifest.json', manifest)
         result = self.run_tool(self.state, 'history-review', '--run-id', run_id,
                                '--project-root', str(self.project), '--manifest', str(path), expected=2)
-        self.assertIn('selected single tracker', result['error'])
+        self.assertIn('provider', result['error'])
 
     def test_qa_estimates_are_summed_once_and_missing_is_not_zero(self):
-        first = {'jira_key': 'JIRA-1', 'role_estimates': {'QA': {'value': 2.5, 'unit': 'story-points'}}}
-        second = {'jira_key': 'JIRA-2', 'role_estimates': {'QA': {'value': 1, 'unit': 'person-days'}}}
-        missing = {'jira_key': 'JIRA-3'}
+        first = {'sbertrek_key': 'SBER-1', 'role_estimates': {'QA': {'value': 2.5, 'unit': 'story-points'}}}
+        second = {'sbertrek_key': 'SBER-2', 'role_estimates': {'QA': {'value': 1, 'unit': 'person-days'}}}
+        missing = {'sbertrek_key': 'SBER-3'}
         estimate = feature_qa_estimate([first, second, first, missing])
         self.assertEqual(estimate['value'], 3.5)
         self.assertEqual(estimate['target_count'], 1)
-        self.assertEqual(estimate['unestimated_keys'], ['JIRA-3'])
+        self.assertEqual(estimate['unestimated_keys'], ['SBER-3'])
         self.assertIsNone(feature_qa_estimate([missing])['value'])
         with self.assertRaises(ValueError):
-            feature_qa_estimate([{'jira_key': 'JIRA-1', 'role_estimates': {'QA': {'value': 2, 'unit': 'hours'}}}])
+            feature_qa_estimate([{'sbertrek_key': 'SBER-1', 'role_estimates': {'QA': {'value': 2, 'unit': 'hours'}}}])
 
     def test_absence_confirmation_keeps_run_and_proposes_deletion(self):
-        self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |'])
+        self.registry(self.project, 'owner', ['| CORE | SBER-1 | - | real | BE | done |'])
         self.save_sources()
         run = self.begin()
-        response = self.write(self.state / 'absent.json', {'error': 'Issue JIRA-1 does not exist'})
-        call = self.write(self.state / 'absence-call.json', self.call('jira', 'JIRA-1'))
-        args = ('confirm-absence', '--run-id', run['run_id'], '--key', 'JIRA-1',
+        response = self.write(self.state / 'absent.json', {'error': 'Issue SBER-1 does not exist'})
+        call = self.write(self.state / 'absence-call.json', self.call('sbertrek', 'SBER-1'))
+        args = ('confirm-absence', '--run-id', run['run_id'], '--key', 'SBER-1',
                 '--response-file', str(response), '--call-file', str(call), '--decision-source', 'analyst reply')
         self.run_tool(self.state, *args, expected=2)
         confirmed = self.run_tool(self.state, *args, '--analyst-confirmed')
@@ -704,7 +702,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
         self.assertFalse(preview['writes_performed'])
 
     def test_empty_page_does_not_prove_deletion(self):
-        self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |'])
+        self.registry(self.project, 'owner', ['| CORE | SBER-1 | - | real | BE | done |'])
         self.save_sources()
         run = self.ingest(self.begin(), {'issues': []})
         blocked = self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'], expected=2)
@@ -712,16 +710,16 @@ class AdaptiveHistoryTests(unittest.TestCase):
         self.assertFalse(blocked['next_action']['deletion_allowed'])
         retry = self.run_tool(self.state, 'retry-missing', '--run-id', run['run_id'])
         self.assertEqual(retry['run_id'], run['run_id'])
-        self.ingest(retry, {'issues': [self.jira_issue('OTHER-1')]}, expected=2)
-        collected = self.ingest(retry, {'issues': [self.jira_issue('JIRA-1')]})
+        self.ingest(retry, {'issues': [self.source_issue('OTHER-1')]}, expected=2)
+        collected = self.ingest(retry, {'issues': [self.source_issue('SBER-1')]})
         self.assertEqual(collected['next_action']['type'], 'reconcile')
 
     def test_one_feature_qa_proposal_replaces_per_card_role_creation(self):
-        self.registry(self.project, 'owner', ['| CORE | JIRA-1 | - | real | BE | done |',
+        self.registry(self.project, 'owner', ['| CORE | SBER-1 | - | real | BE | done |',
                                               '| QA-ONE | - | - | real | QA | planned |',
                                               '| QA-TWO | - | - | real | QA | planned |'])
         self.save_sources()
-        run = self.ingest(self.begin(), {'issues': [self.jira_issue('JIRA-1', roles={'BE': 2, 'QA': 3})]})
+        run = self.ingest(self.begin(), {'issues': [self.source_issue('SBER-1', roles={'BE': 2, 'QA': 3})]})
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         preview = self.run_tool(self.state, 'execution-preview', '--run-id', run['run_id'],
                                 '--project-root', str(self.project), '--feature', 'owner')
@@ -735,9 +733,9 @@ class AdaptiveHistoryTests(unittest.TestCase):
     def test_explicit_qa_interval_requires_both_registry_dates(self):
         run_id = self.reconciled()
         registry = self.project / 'features/owner/execution/tasks.md'
-        template = ('| Task ID | Jira | Kind | Role | Status | Actual Start | Actual Finish | Completed By |\n'
+        template = ('| Task ID | SberTrek | Kind | Role | Status | Actual Start | Actual Finish | Completed By |\n'
                     '|---|---|---|---|---|---|---|---|\n'
-                    '| CORE | JIRA-1 | real | BE | done | | | |\n'
+                    '| CORE | SBER-1 | real | BE | done | | | |\n'
                     '| QA-LOCAL | | real | QA | done | 2026-08-02 | FINISH | 2026-08-03 |\n')
         registry.write_text(template.replace('FINISH', ''))
         self.save_sources()
