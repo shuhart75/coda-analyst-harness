@@ -139,7 +139,7 @@ def preview_execution(
             raise ValueError(f"Подтверждённая версия реестра не совпадает: {relative}")
 
     proposed_rows = []
-    if result.get("scope", {}).get("kind") == "release":
+    if any(issue.get("confirmed_feature") for issue in result["issues"]):
         for issue in result["issues"]:
             owner, role = issue.get("confirmed_feature"), issue.get("task_role")
             if not owner or role not in {"BE", "FE"}:

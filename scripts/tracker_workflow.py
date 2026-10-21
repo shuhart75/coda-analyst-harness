@@ -47,7 +47,6 @@ SBER_ATTRIBUTE_CODES = {
 }
 SBER_ROLE_FIELDS = {"estimation_for_analyze": "AN", "estimation_for_dev_front": "FE",
                     "estimation_for_dev_back": "BE", "estimation_qa": "QA"}
-SBER_FIELDS = ("key", "summary", "suit", "status", "priority", "attributes", "epic", "created_at", "updated_at")
 SOURCE_FIELDS = ("summary", "issue_type", "status", "assignee", "estimate", "epic", "releases", "created_at", "updated_at")
 DEFAULT_CONFIG = {
     "schema_version": CONFIG_SCHEMA_VERSION,
@@ -324,13 +323,17 @@ def next_action(run: dict) -> dict:
         if run["status"] == "tracker-read-reconciled":
             return {"type": "result-status", "command": [sys.executable, ctl, "result-status", "--run-id", run["run_id"]]}
         return {"type": "stop", "command": None}
-    tool, arguments = "issue.exportJson", {"query": step["query"], "fields": list(SBER_FIELDS), "max_results": MAX_RESULTS}
+    tool, arguments = "issue.exportJson", {"query": step["query"], "attributes": ["assigned_to", "story_points", "estimation_for_dev", *SBER_ROLE_FIELDS], "max_results": MAX_RESULTS}
     if run.get("collection_mode") == "adaptive":
         return {
             "type": "collect-tracker-data", "provider": step["provider"],
             "step_id": step["step_id"], "stage": step["stage"],
             "selection": {"query_semantics": step["query"], "requested_keys": step["requested_keys"], "epic_key": step["epic_key"]},
             "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
+            "export_hint": {"tool": "issue.exportJson", "projection_argument": "attributes",
+                            "attributes": ["assigned_to", "story_points", "estimation_for_dev", *SBER_ROLE_FIELDS],
+                            "verify_against_current_capabilities": True,
+                            "note": "В проверенной установке fields возвращал только базовые поля; attributes возвращает оценки."},
             "requirements": ["read-only", "exact-scope", "all-statuses", "full-response", "report-pagination",
                              "request-all-role-estimates", "request-attributes-or-equivalent-estimate-fields",
                              "verify-returned-projection", "missing-field-is-not-zero", "preserve-raw-response",
@@ -1454,6 +1457,10 @@ def execution_preview_command(args: argparse.Namespace) -> int:
         raise ValueError("Read-only сверка не разрешает фазу актуализации")
     from tracker_execution import preview_execution
 
+    if getattr(args, "decisions", None):
+        from tracker_release import apply_scope_decisions
+        _, _, decisions = response_file(args.decisions, args.run_id)
+        result = apply_scope_decisions(Path(args.project_root).resolve(), result, decisions)
     reviewed = dict(args.reviewed_registry)
     if len(reviewed) != len(args.reviewed_registry):
         raise ValueError("Реестр указан для подтверждения несколько раз")
@@ -1466,12 +1473,22 @@ def execution_preview_command(args: argparse.Namespace) -> int:
     )
     payload["run_id"] = args.run_id
     payload["reconciled_sha256"] = completion["reconciled_sha256"]
+    payload["ownership_decisions"] = {
+        "argument": "--decisions",
+        "history_manifest_field": "release_scope_decisions" if result["scope"]["kind"] == "release" else "scope_decisions",
+        "run_id": args.run_id, "scope": result["scope"],
+        "evidence_required": ["analyst_confirmed", "source.file", "source.sha256", "source.quote"],
+        "writes_before_history_required": False,
+    }
     if payload["ownership_ready"] and load_run(args.run_id).get("collection_mode") == "adaptive":
         payload["date_proposals_allowed"] = False
         payload["fact_priority"] = ["analyst-confirmation", "assignment-and-status-history", "current-state-only"]
         payload["next_action"] = {
             "type": "collect-history", "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
             "provider": result["scope"]["provider"],
+            "keys": sorted({item["sbertrek_key"] for item in payload["items"]
+                            if any(target["role"] in {"BE", "FE"} for target in item["targets"])}),
+            "include_registered_feature_tasks": True,
             "required_before_date_proposals": True,
             "required_before_status_proposals": True,
             "command": [sys.executable, str(Path(__file__).with_name("trackerctl.py")), "history-review",
@@ -1501,6 +1518,7 @@ def parser() -> argparse.ArgumentParser:
     execution.add_argument("--feature")
     execution.add_argument('--delivery', action='append', help='Exact delivery key; repeat for several deliveries')
     execution.add_argument("--reviewed-registry", nargs=2, action="append", default=[], metavar=("PATH", "SHA256"))
+    execution.add_argument("--decisions", help="Confirmed task ownership decisions for this exact run")
     execution.add_argument("--expected-head")
     execution.add_argument("--analyst-confirmed", action="store_true")
     execution.set_defaults(handler=execution_preview_command)
