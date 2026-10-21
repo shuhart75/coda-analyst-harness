@@ -186,9 +186,15 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIsNone(OVERLAY.load_tasks(self.feature)["ITEM-200/FE"].progress)
 
     def test_unknown_progress_does_not_allow_invalid_completed_by(self) -> None:
-        self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |").replace(
-            "| Related Stories |", "| Completed By | Related Stories |",
-        ).replace("| in-review | unknown |", "| done | unknown | 2026-09-09 |"), encoding="utf-8")
+        headers, rows = OVERLAY.parse_table_blocks(self.registry)[0]
+        headers.insert(headers.index("Related Stories"), "Completed By")
+        for row in rows:
+            row["Completed By"] = ""
+            if row["Role"] == "FE":
+                row.update({"Status": "done", "Progress %": "unknown", "Completed By": "2026-09-09"})
+        self.registry.write_text("| " + " | ".join(headers) + " |\n|" + "---|" * len(headers) + "\n" +
+                                 "".join("| " + " | ".join(row[h] for h in headers) + " |\n" for row in rows),
+                                 encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "Completed By"):
             OVERLAY.load_tasks(self.feature)
 

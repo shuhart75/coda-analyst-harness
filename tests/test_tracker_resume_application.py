@@ -166,10 +166,15 @@ class EpicResumeApplicationTests(unittest.TestCase):
         for i, (key, role) in enumerate(zip(self.keys, roles)):
             row = self.row(key + '/' + role, status='created')
             row.update({'Executor': '', 'Planned Start': '', 'Planned Finish': '', 'Related Stories': ''})
+            if i < 16:
+                row['Task ID'] = f'LOCAL-{i+1}/{role}'
             rows.append(row)
         qa = self.row('QA-REGISTRY', estimate='7', status='created')
         qa.update({'Executor': '', 'Planned Start': '', 'Planned Finish': '', 'Related Stories': ''})
+        qa['SberTrek'] = self.keys[0]
         self.write_registry(self.registry, rows[:16] + [qa])
+        self.registry.write_text(self.registry.read_text().replace('Task ID', 'Jira'))
+        legacy_registry_bytes = self.registry.read_bytes()
         group = {'schema_version': 1, 'provider': 'sbertrek', 'total_estimate': '7', 'groups': [
             {'task_id': 'QA-REGISTRY', 'members': [row['Task ID'] for row in rows[:16]], 'estimate': '7'}]}
         self.write(self.groups_path, group)
@@ -282,6 +287,13 @@ class EpicResumeApplicationTests(unittest.TestCase):
         preview = self.collab('save-preview','--review-file',reviewed['review_file'])
         self.assertEqual(preview['qa_verified_runs'],[self.run_id])
         self.assertEqual(preview['confluence_verified'],['2026-Q4'])
+        self.assertEqual(self.registry.read_bytes(), legacy_registry_bytes)
+        self.assertEqual(read_registry(self.registry)[0][0][-1]['Task ID'], 'QA-REGISTRY')
+        from importlib import import_module
+        tasks = import_module('sync-actual-progress-overlay').load_tasks(self.feature)
+        self.assertEqual(tasks['QA-REGISTRY'].tracker_key, self.keys[0])
+        self.assertNotIn(self.keys[0] + '/QA', tasks)
+        self.assertEqual(tasks['LOCAL-1/FE'].tracker_key, self.keys[0])
         self.assertEqual(self.snapshot(self.inputs),inputs_before)
         self.assertEqual(self.snapshot(run_dir),raw_before)
         self.assertTrue(all(path.read_bytes()==data for path,data in {**preserved,**plans}.items()))
