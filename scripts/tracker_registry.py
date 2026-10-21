@@ -19,7 +19,7 @@ def registry_headers(headers: list[str]) -> bool:
     )
 
 
-def read_registry(path: Path, *, identity_only: bool = False) -> tuple[list[list[dict[str, str]]], str | None]:
+def read_registry_blocks(path: Path, *, identity_only: bool = False) -> tuple[list[tuple[list[str], list[dict[str, str]]]], str | None]:
     overlay = import_module("sync-actual-progress-overlay")
     lines = path.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
@@ -48,12 +48,17 @@ def read_registry(path: Path, *, identity_only: bool = False) -> tuple[list[list
             # its values as SberTrek keys, even when their spelling matches one.
             rows = [{**row, "Task ID": row.get("Jira", "")} for row in rows]
             legacy = True
-        tables.append(rows)
+        tables.append((headers, rows))
     if tables:
-        return tables, "legacy-local-identities" if legacy else None if any(tables) else "empty-registry"
+        return tables, "legacy-local-identities" if legacy else None if any(rows for _, rows in tables) else "empty-registry"
     if LEGACY_NO_TASKS.fullmatch(path.read_text(encoding="utf-8")):
         return [], "legacy-no-active-tasks"
     raise ValueError(f"Нет читаемого реестра Task ID/SberTrek: {path}")
+
+
+def read_registry(path: Path, *, identity_only: bool = False) -> tuple[list[list[dict[str, str]]], str | None]:
+    blocks, note = read_registry_blocks(path, identity_only=identity_only)
+    return [rows for _, rows in blocks], note
 
 
 def require_new_registry_format(project: Path, path: Path) -> None:

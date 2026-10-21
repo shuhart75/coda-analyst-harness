@@ -639,15 +639,18 @@ def completion_finish_only(task: Task) -> bool:
 
 
 def load_tasks(feature_dir: Path) -> dict[str, Task]:
+    from tracker_registry import read_registry_blocks
+
     tasks: dict[str, Task] = {}
     tracker_roles: set[tuple[str, str]] = set()
     registry = feature_dir / "execution/tasks.md"
     paths = ([registry] if registry.exists() else []) + sorted(feature_dir.glob("slices/*/execution/tasks.md"))
     for path in paths:
-        rows = first_table_with(path, "Task ID") or first_table_with(path, "SberTrek")
+        blocks, _ = read_registry_blocks(path)
+        rows = [(headers, row) for headers, table in blocks for row in table]
         if not rows:
             raise ValueError(f"{path}: нет непустого реестра Task ID/SberTrek; Гант сохранён")
-        for row in rows:
+        for headers, row in rows:
             completed_by = validate_completion_bound(row, path)
             tracker_key = clean_cell(row.get("SberTrek", ""))
             if tracker_key in {"-", "—"}:
@@ -657,7 +660,7 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
                 explicit_id = ""
             if not tracker_key and not explicit_id:
                 raise ValueError(f"{path}: требуется Task ID или подтверждённый SberTrek")
-            if path == registry or "Task ID" in row:
+            if path == registry or "Task ID" in headers:
                 validate_task_row(row, path)
             status = clean_cell(row.get("Status", "planned"))
             progress_value = row.get("Progress %", "")
