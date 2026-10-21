@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from project_layout import feature_root as layout_feature_root, quarter_root, logical_path, layout, delivery_selection
+from project_layout import feature_root as layout_feature_root, quarter_root, logical_path, layout, delivery_selection, delivery_key
 
 from contextlib import redirect_stdout
 from importlib import import_module
@@ -77,7 +77,18 @@ def set_scope(args, api) -> int:
     if not args.analyst_confirmed or not args.reason.strip():
         raise ValueError('Execution scope requires the analyst decision and its reason')
     features, quarters = sorted(set(args.feature)), sorted(set(args.quarter))
-    if work['feature'] not in features:
+    index = layout(analytics)
+    if index:
+        # Store delivery keys, but accept an unambiguous historical feature alias.
+        features = sorted({delivery_key(analytics, layout_feature_root(analytics, key)) for key in features})
+        owner = work['feature']
+        if owner in index['deliveries']:
+            owner_matches = [key for key in features if key == owner]
+        else:
+            owner_matches = [key for key in features if index['deliveries'][key]['feature_id'] == owner]
+        if len(owner_matches) != 1:
+            raise ValueError('Execution scope must include exactly one delivery of the active owning feature')
+    elif work['feature'] not in features:
         raise ValueError('Execution scope must include the active owning feature')
     for feature in features:
         if not api.SLUG_PATTERN.fullmatch(feature):
@@ -101,7 +112,7 @@ def set_scope(args, api) -> int:
                 raise ValueError('Tracker run must allow application before scope registration')
     scope = {'features': features, 'quarters': quarters, 'run_ids': run_ids,
              'reason': args.reason, 'confirmed_at': api.utc_now()}
-    if layout(analytics):
+    if index:
         bindings = list(delivery_selection(analytics, features).values())
         if any(binding['quarter'] not in quarters for binding in bindings):
             raise ValueError('Execution scope must include the registered quarter of every selected delivery')
@@ -187,6 +198,9 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
                 current = api.git(analytics, 'hash-object', '--no-filters', '--', path)
                 if not target.is_file() or current.returncode != 0 or current.stdout.strip() != previous.stdout.strip():
                     raise ValueError(f'Historical estimate archive is immutable: {path}')
+        if re.fullmatch(r'features/[^/]+/(?:slices/[^/]+/)?execution/tasks\.md', logical_path(analytics, path)) and target.is_file():
+            from tracker_registry import require_new_registry_format
+            require_new_registry_format(analytics, target)
         classified.append({'path': path, 'kind': kind})
     reviewed_runs = set()
     if scope.get('run_ids') or review_files:

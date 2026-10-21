@@ -10,7 +10,7 @@ import re
 import subprocess
 
 from tracker_scope import inside_project, select_features
-from tracker_registry import read_registry
+from tracker_registry import read_registry, require_new_registry_format
 
 
 REGISTRY = re.compile(r"features/[^/]+/(?:slices/[^/]+/)?execution/tasks\.md")
@@ -105,6 +105,11 @@ def preview_execution(
         if not path.is_file():
             raise ValueError(f"Реестр недоступен: {relative}")
         sources[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+        try:
+            require_new_registry_format(project, path)
+        except ValueError as error:
+            blockers.append({"reason": "invalid-new-registry-format", "registry": relative, "message": str(error)})
+            continue
         try:
             tables, note = read_registry(path, identity_only=delivery_key(project, path) not in selected)
         except ValueError:

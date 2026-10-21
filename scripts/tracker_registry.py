@@ -54,3 +54,64 @@ def read_registry(path: Path, *, identity_only: bool = False) -> tuple[list[list
     if LEGACY_NO_TASKS.fullmatch(path.read_text(encoding="utf-8")):
         return [], "legacy-no-active-tasks"
     raise ValueError(f"Нет читаемого реестра Task ID/SberTrek: {path}")
+
+
+def require_new_registry_format(project: Path, path: Path) -> None:
+    """Compatibility reads do not authorize creating another legacy registry."""
+    from tracker_execution import git
+
+    project, path = project.resolve(), path.resolve()
+    if not path.is_relative_to(project):
+        raise ValueError('Registry is outside project')
+    relative = path.relative_to(project).as_posix()
+    # Compare to HEAD, not the index: staging a new file must not bypass this gate.
+    if git(project, 'ls-tree', '--name-only', '-z', 'HEAD', '--', relative).strip('\0\n'):
+        return
+    overlay = import_module('sync-actual-progress-overlay')
+    tables = [(headers, rows) for headers, rows in overlay.parse_table_blocks(path)
+              if registry_headers(headers)]
+    if (not tables or any(not {'Task ID', 'SberTrek'} <= set(headers) or 'Jira' in headers
+                          or any(row.get('Task ID', '').strip() in {'', '-', '—'} for row in rows)
+                          for headers, rows in tables)):
+        raise ValueError(f'New registry requires Task ID and SberTrek columns, nonempty local Task ID, and no Jira column: {relative}')
+
+
+def check_protected_rows(project: Path, protected_rows: list[dict]) -> list[dict]:
+    """Match old identity-less rows by content and multiplicity, never by Jira."""
+    from collections import Counter, defaultdict
+
+    grouped = defaultdict(list)
+    for reference in protected_rows:
+        grouped[reference['registry']].append(reference)
+    errors = []
+
+    def identity(row):
+        value = row.get('Task ID') or row.get('SberTrek') or ''
+        return '' if value.strip() in {'', '-', '—'} else value
+
+    def fields(row, allowed):
+        return tuple(sorted((key, value) for key, value in row.items() if key not in allowed))
+
+    for relative, references in grouped.items():
+        registry = (project / relative).resolve()
+        if not registry.is_relative_to(project):
+            raise ValueError('Protected registry is outside project')
+        tables, _ = read_registry(registry) if registry.is_file() else ([], None)
+        rows = [row for table in tables for row in table]
+        anonymous = defaultdict(list)
+        for reference in references:
+            allowed = frozenset(reference.get('allowed_fields', []))
+            if not identity({'Task ID': reference['task_id']}):
+                anonymous[allowed].append(reference)
+                continue
+            matches = [row for row in rows if identity(row) == reference['task_id']]
+            if len(matches) != 1 or fields(matches[0], allowed) != fields(reference['registry_fields'], allowed):
+                errors.append({'task_id': reference['task_id'], 'registry': relative,
+                               'reason': 'Task outside release changed or was removed'})
+        for allowed, items in anonymous.items():
+            expected = Counter(fields(item['registry_fields'], allowed) for item in items)
+            actual = Counter(fields(row, allowed) for row in rows if not identity(row))
+            if any(actual[value] != count for value, count in expected.items()):
+                errors.append({'task_id': '', 'registry': relative,
+                               'reason': 'Protected rows without identity changed or their multiplicity differs'})
+    return errors
