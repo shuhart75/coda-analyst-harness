@@ -404,6 +404,9 @@ def review_history(args) -> int:
         result["scope"] = {**result["scope"], "release_decisions": manifest.get("release_decisions", {})}
         from tracker_release_evidence import review_membership
         result = review_membership(args.run_id, result, manifest.get("release_membership"))
+    elif manifest.get("scope_decisions") is not None:
+        from tracker_release import apply_scope_decisions
+        result = apply_scope_decisions(project, result, manifest["scope_decisions"])
     preview = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
                                 manifest.get("reviewed_registries", {}), manifest.get("expected_head"),
                                 manifest.get('deliveries'))

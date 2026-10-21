@@ -18,9 +18,13 @@ def apply_scope_decisions(project: Path, result: dict, decisions: dict | None) -
     if decisions is None:
         return result
     scope = result["scope"]
+    if scope["kind"] == "release":
+        matching_scope = decisions.get("release") == scope["ids"][0]
+    else:
+        matching_scope = decisions.get("run_id") == result.get("run_id") and decisions.get("scope") == scope
     if (decisions.get("schema_version") != 1 or decisions.get("analyst_confirmed") is not True
-            or decisions.get("provider") != scope["provider"] or decisions.get("release") != scope["ids"][0]):
-        raise ValueError("Confirmed release scope decisions must match the selected provider and release")
+            or decisions.get("provider") != scope["provider"] or not matching_scope):
+        raise ValueError("Confirmed scope decisions must match the selected provider and release or exact run scope")
     source = decisions["source"]
     raw = Path(source["file"]).read_bytes()
     if (hashlib.sha256(raw).hexdigest() != source["sha256"] or not source.get("quote", "").strip()
