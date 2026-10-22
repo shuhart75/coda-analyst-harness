@@ -319,6 +319,28 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         failed_generation = self.generate(expected=1)
         self.assertIn('QA', failed_generation.stdout + failed_generation.stderr)
         self.assertEqual(self.snapshot(self.gantt), old_outputs)
+        # Read-only history remains available on main; writing the partition is gated.
+        active_branch = self.git(self.project, 'branch', '--show-current')
+        original_main = self.git(self.project, 'rev-parse', 'main')
+        self.git(self.project, 'update-ref', 'refs/heads/main', self.initial_head)
+        self.git(self.project, 'switch', 'main')
+        main_before = self.snapshot(self.project)
+        blocked_main = self.review('on-main')
+        self.assertFalse(blocked_main['analytics_write_gate']['ready'])
+        self.assertIn('qa-partition-edit', blocked_main['analytics_write_gate']['required_before'])
+        self.run_tool(self.state, 'application-preflight', '--project-root', str(self.project),
+                      '--feature', 'registry', expected=2)
+        self.assertEqual(self.snapshot(self.project), main_before)
+        self.git(self.project, 'switch', active_branch)
+        self.git(self.project, 'update-ref', 'refs/heads/main', original_main)
+        (self.state / 'active-mode.md').write_text('mode: requirements\n')
+        wrong_mode = self.review('wrong-mode')
+        self.assertFalse(wrong_mode['analytics_write_gate']['ready'])
+        self.run_tool(self.state, 'application-preflight', '--project-root', str(self.project),
+                      '--feature', 'registry', expected=2)
+        self.assertEqual(self.snapshot(self.project), source_before)
+        (self.state / 'active-mode.md').write_text('mode: execution-update\n')
+        self.assertTrue(self.review('ready-to-partition')['analytics_write_gate']['ready'])
         preflight = self.run_tool(self.state, 'application-preflight', '--project-root', str(self.project), '--feature', 'registry')
         self.assertEqual(preflight['status'], 'tracker-application-preflight-ready')
         self.run_tool(self.state, 'application-preflight', '--project-root', str(self.project),

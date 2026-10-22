@@ -37,6 +37,13 @@ This repository defines a reusable workflow harness.
 
 ## Mandatory tracker stop gate
 
+- До первой правки execution-источников (включая qa-groups.json и остаточную QA)
+  проверь `analytics_write_gate` и выполни возвращённые `application-preflight`:
+  `core/tracker-release.md`. Сбор истории остаётся доступен при запрете записи.
+  Перед первой правкой кандидата/baseline установи `release-finalization`,
+  подготовь активную рабочую ветку и выполни `baselinectl.py --project PROJECT_ROOT
+  preflight`. Отказ нельзя откладывать до save: `modes/release-finalization.md`.
+
 - Цель задаёт текущий запрос аналитика, не completed_work и не имя папки ответов.
   После потери контекста и готового config-status используй trackerctl.py resume
   с точными scope и intent по core/tracker-adaptive.md. Не подставляй старый run,
@@ -103,7 +110,7 @@ This repository defines a reusable workflow harness.
 - SberTrek uses only `issue.exportJson` with TQL in `query`, `attributes` in the projection and `max_results=50`. Do not substitute text search, per-key details, link traversal, invented pagination or alternative queries.
 - Prefer the full file created by MCP. A full inline JSON response may be captured verbatim outside the run. Never summarize, reconstruct or copy raw responses into the run. Identical import is a no-op; a different response for a completed step, malformed JSON or a stale `step_id` is fatal.
 - Exactly 50 cards remain visible limitations. History is outside this protocol; facts that require it remain `unknown` with `history-not-collected`.
-- `reconcile` saves the normalized SberTrek result and returns `result-status`. `collection_complete: true` and `report_allowed: true` authorize its checksum-validated verbatim report. For update-planning, `final_response_allowed: false` and `response_contract.must_continue: true` require a progress message followed by `next_action`; never end the turn at collection or skip history for created/todo tasks. Read-only permits a final report. Inspect `collection_diagnostics`: missing estimate fields do not prove empty estimates.
+- `reconcile` saves the normalized SberTrek result and returns the verified result with its next action; `result-status` and `run-status` repeat the same effective completion flags without writing. `collection_complete: true` and `report_allowed: true` authorize its checksum-validated verbatim report. For update-planning, `final_response_allowed: false` and `response_contract.must_continue: true` require a progress message followed by `next_action`; never end the turn at collection or skip history for created/todo tasks. Read-only permits a final report. Inspect `collection_diagnostics`: missing estimate fields do not prove empty estimates.
 
 ## First launch and workspace ownership
 
@@ -293,7 +300,7 @@ Context summaries, checkpoints and research files are internal harness operation
 - Normalize `SP`, story points and person-days to `story-points` using `1 SP = 1 person-day`. Use only SberTrek estimates. Infer AN/BE/FE from one unambiguous prefix only when no role estimate exists; never count a general estimate again after role decomposition.
 - Treat epic and release as independent grouping dimensions. Never infer that an epic equals an analytical feature without an explicit mapping.
 - Current completed and excluded statuses remain authoritative. This protocol does not read history, so any lifecycle fact requiring an assignment handoff remains `unknown` and is disclosed as `history-not-collected`.
-- Run the exact linear protocol `config-status -> begin -> (next_action MCPP call -> ingest)* -> reconcile -> result-status`. One user request owns one run. Never create another run, choose another query or use a subagent while it is unfinished.
+- Run the linear collection protocol `config-status -> begin -> (next_action MCP call -> ingest)* -> reconcile`, then follow its next action. Use `result-status` to reread the verified result. One user request owns one run. Never create another run, choose another query or use a subagent while it is unfinished.
 - Pass each full MCP JSON to `ingest` with its returned `step_id`; never reconstruct cards or edit raw responses. A missing card does not prove deletion.
 - A failed ingest remains active and retryable. Correct the full response and retry the same `step_id`; do not abandon the run, start another run or present tracker facts manually. Missing `created_at` or `updated_at` is a visible limitation, not a collection failure.
 - The tracker report exposes every populated role estimate as a source work item `<tracker-key>/<role>`. Application first maps it to confirmed execution work: AN and QA belong to the feature, and an FE card's QA estimate must not duplicate existing QA. Preserve internal IDs and independent QA facts; never create per-card AN work merely because development is still assigned to an analyst. A base tracker-key reference in actualization expands to its mapped role work items.

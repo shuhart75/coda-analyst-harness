@@ -170,6 +170,8 @@ def release_preview_command(args) -> int:
                                      "same_run": True, "then": "history-review"}
         else:
             output["next_action"] = {"type": "resolve-execution-ownership", "same_run": True}
+    from tracker_safety import application_write_gate
+    output["analytics_write_gate"] = application_write_gate(project, ownership["selected_features"])
     print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0
 

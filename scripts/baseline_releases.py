@@ -28,15 +28,21 @@ def _id(value):
     return value
 
 
-def _guard(project):
+def _guard(project, *, observation_only=False):
+    from tracker_safety import require_write_context
+
     project = Path(project).resolve()
-    result = subprocess.run(["git", "-C", str(project), "symbolic-ref", "--short", "HEAD"], capture_output=True, text=True)
-    root = subprocess.run(["git", "-C", str(project), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
-    if root.returncode or Path(root.stdout.strip()).resolve() != project:
-        raise ValueError("PROJECT_ROOT должен быть корнем самостоятельного Git-репозитория")
-    if result.returncode or result.stdout.strip() in {"main", "master"}:
-        raise ValueError("Запись baseline требует рабочую ветку, отличную от main/master")
+    modes = ("execution-update", "release-finalization") if observation_only else ("release-finalization",)
+    require_write_context(project, modes=modes)
     return project
+
+
+def preflight(project):
+    from tracker_safety import require_write_context
+
+    context = require_write_context(project, modes=("release-finalization",))
+    return {"status": "baseline-preflight-ready", **context,
+            "writes_performed": False, "content_approved": False}
 
 
 def _path(project):
@@ -93,7 +99,7 @@ def _eligible(observation):
 
 def observe(project, observation):
     """Persist a reviewed release observation; changing scope invalidates preparation."""
-    project = _guard(project)
+    project = _guard(project, observation_only=True)
     observation = _observation(observation)
     state = _load(project)
     release_id = observation["release_id"]
@@ -119,7 +125,7 @@ def scan(project):
 
 
 def defer(project, release_id, reason):
-    project = _guard(project)
+    project = _guard(project, observation_only=True)
     if not _text(reason):
         raise ValueError("Укажите причину отсрочки")
     state = _load(project)
@@ -292,7 +298,7 @@ def observe_run(project, run_id, review_file):
     """
     from tracker_workflow import verified_result, run_root, digest_object
 
-    project = _guard(project)
+    project = _guard(project, observation_only=True)
     completion, result = verified_result(run_id)
     scope = result.get("scope", {})
     if scope.get("kind") != "release" or scope.get("intent") != "update-planning" or len(scope.get("ids", [])) != 1:

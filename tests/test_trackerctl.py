@@ -266,7 +266,7 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
             current = self.begin(state, "sbertrek", "tasks", "RSCON-7001")
             current = self.ingest(state, current, {"issues": [self.sber_issue("RSCON-7001")]})
             reconciliation, _ = self.reconcile(state, current)
-            self.assertEqual(reconciliation["allowed_next_action"], "result-status")
+            self.assertEqual(reconciliation["allowed_next_action"], "report")
             clean = self.run_tool(state, "result-status", "--run-id", current["run_id"])
             self.assertEqual(clean["response_contract"]["type"], "emit-verbatim")
             report = Path(clean["paths"]["report"])
@@ -282,8 +282,8 @@ class DirectTrackerWorkflowTests(unittest.TestCase):
                     self.sber_issue("RSCON-7001", roles={"FE": 5, "QA": 2}),
                 ]})
                 reconciled, result = self.reconcile(state, current)
-                self.assertNotIn("planning_update", reconciled)
-                self.assertFalse(reconciled["final_response_allowed"])
+                self.assertEqual(reconciled["planning_update"]["state"], "pending" if intent == "update-planning" else "not-requested")
+                self.assertEqual(reconciled["final_response_allowed"], intent == "read-only")
                 before = {path: path.read_bytes() for path in state.rglob("*") if path.is_file()}
                 completion = self.run_tool(state, "result-status", "--run-id", current["run_id"])
                 update = completion["planning_update"]

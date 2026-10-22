@@ -104,6 +104,36 @@ class TrackerContinuationTests(unittest.TestCase):
                 self.assertFalse(result['response_contract']['must_continue'])
                 self.assertIsNone(result['next_action'])
                 self.assertEqual(result['workflow_complete'], applied)
+                status = self.run_tool(state, 'run-status', '--run-id', run['run_id'])
+                for field in ('workflow_complete', 'final_response_allowed', 'next_action', 'response_contract'):
+                    self.assertEqual(status[field], result[field])
+
+    def test_all_status_surfaces_agree_and_legacy_completion_is_not_rewritten(self):
+        for intent in ('read-only', 'update-planning'):
+            with self.subTest(intent=intent), tempfile.TemporaryDirectory() as folder:
+                state = Path(folder)
+                run = self.start(state, intent, kind='release')
+                self.ingest(state, run, [{**self.card(), 'attributes': [], 'releases': ['TEST-1']}])
+                reconciled = self.run_tool(state, 'reconcile', '--run-id', run['run_id'])
+                root = state / 'tracker-runs' / run['run_id']
+                for legacy in (False, True):
+                    if legacy:
+                        path = root / 'completion-status.json'
+                        value = json.loads(path.read_text())
+                        value.pop('completion_contract_version')
+                        value.pop('collection_complete')
+                        value.update(workflow_complete=True, final_response_allowed=True)
+                        value['response_contract'] = {'type': 'emit-verbatim',
+                            'text': value['response_contract']['text'], 'additional_commentary_allowed': False}
+                        self.write(path, value)
+                    before = {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
+                    for command in ('run-status', 'result-status'):
+                        status = self.run_tool(state, command, '--run-id', run['run_id'])
+                        for field in ('workflow_complete', 'collection_complete', 'final_response_allowed',
+                                      'response_contract', 'next_action'):
+                            self.assertEqual(status[field], reconciled[field], (legacy, command, field))
+                        self.assertEqual(status['workflow_complete'], intent == 'read-only')
+                    self.assertEqual(before, {p: p.read_bytes() for p in root.rglob('*') if p.is_file()})
 
     def test_flat_estimates_and_null_are_distinct_from_missing(self):
         for nested in (False, True):

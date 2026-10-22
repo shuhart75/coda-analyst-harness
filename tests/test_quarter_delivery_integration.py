@@ -130,6 +130,9 @@ class QuarterDeliveryIntegrationTests(unittest.TestCase):
         self.assertFalse(checks['baseline_review_required'])
         self.assertEqual(checks['baseline_release_candidates'], [])
         from baseline_releases import observe
+        from write_context_fixture import configure_write_context
+        state = configure_write_context(self, self.root, 'feature/migrate', self.q4key)
+        (state / 'active-mode.md').write_text('mode: execution-update\n')
         observe(self.root, {'release_id': 'ready-release', 'membership_complete': True,
                             'membership_evidence': 'reviewed full membership',
                             'tasks': [{'id': 'closed-task', 'closed': True, 'evidence': 'explicit closure'}]})

@@ -589,7 +589,9 @@ def review_history(args) -> int:
                               "provider": provider, "application_requires_analyst_command": True}}
     destination = run_root(args.run_id) / "history" / (digest_object(output) + ".json")
     save_json(destination, output)
-    payload = {**output, "review_file": str(destination)}
+    from tracker_safety import application_write_gate
+    payload = {**output, "review_file": str(destination),
+               "analytics_write_gate": application_write_gate(project, preview['selected_features'])}
     if not pending_history:
         payload['after_registry_application'] = {
             'type': 'qa-application-check', 'required': True,
