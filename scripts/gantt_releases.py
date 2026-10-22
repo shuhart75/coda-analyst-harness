@@ -122,3 +122,49 @@ def validate_marker_evidence(proof, path):
             or not isinstance(proof.get('source'), str) or not proof['source'].strip()
             or not isinstance(proof.get('evidence'), str) or not proof['evidence'].strip()):
         raise ValueError(f'{path}: marker requires confirmed source and evidence')
+
+
+def apply_registry_markers(tasks, groups, project_root=None):
+    """Render facts already accepted in execution and deployment registries."""
+    def completed(task):
+        return (task.status.lower() in {'completed', 'done', 'closed'}
+                and task.progress == 100 and bool(task.actual_finish))
+
+    def mark(task_id, caption):
+        task = tasks[task_id]
+        if caption not in task.release_label.split(' · '):
+            task.release_label += ' · ' + caption
+
+    for group in groups:
+        ids = [group['task_id'], *group['members']]
+        if all(completed(tasks[task_id]) for task_id in ids):
+            for task_id in ids:
+                mark(task_id, 'QA ✓')
+    if project_root is None:
+        return
+    from baseline_releases import _load, _eligible, digest
+    releases = _load(Path(project_root))['releases']
+    for release_id, entry in releases.items():
+        deployment = entry.get('deployment', {})
+        observation = entry.get('observation', {})
+        if (entry.get('status') != 'promoted' or deployment.get('environment', '').strip().upper() != 'ПРОМ'
+                or not deployment.get('evidence') or not deployment.get('version')):
+            continue
+        if (observation.get('release_id') != release_id or not _eligible(observation)
+                or digest(observation) != entry.get('scope_hash')):
+            raise ValueError('Promoted release membership is inconsistent: ' + release_id)
+        keys = {task['id'] for task in observation['tasks']}
+        for group in groups:
+            if group.get('release') != release_id:
+                continue
+            for task_id in group['members']:
+                if tasks[task_id].tracker_key in keys:
+                    mark(task_id, 'ПРОМ ✓')
+            if all(tasks[task_id].tracker_key in keys for task_id in group['members']):
+                mark(group['task_id'], 'ПРОМ ✓')
+        for task in tasks.values():
+            if task.kind == 'real' and task.tracker_key in keys:
+                # Exact tracker membership, including AN outside a QA partition.
+                current = task.release_label.split(' · ')[0]
+                if current == release_id:
+                    mark(task.task_id, 'ПРОМ ✓')

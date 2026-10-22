@@ -639,7 +639,7 @@ def completion_finish_only(task: Task) -> bool:
                 and task.status.lower() in DONE_STATUSES and task.progress == 100)
 
 
-def load_tasks(feature_dir: Path) -> dict[str, Task]:
+def load_tasks(feature_dir: Path, project_root: Path | None = None) -> dict[str, Task]:
     from tracker_registry import read_registry_blocks
 
     tasks: dict[str, Task] = {}
@@ -765,9 +765,10 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
             raise ValueError(f"{groups_path}: состав QA не покрывает текущее исполнение")
         if total != Decimal(str(groups["total_estimate"])):
             raise ValueError(f"{groups_path}: сумма QA-оценок изменилась")
-    from gantt_releases import apply_task_releases, apply_task_markers
+    from gantt_releases import apply_task_releases, apply_task_markers, apply_registry_markers
     apply_task_releases(tasks, release_groups)
     apply_task_markers(tasks, feature_dir)
+    apply_registry_markers(tasks, release_groups, project_root)
     return tasks
 
 
@@ -1126,6 +1127,9 @@ def plantuml_label(value: str) -> str:
 def role_prefixed_summary(task: Task) -> str:
     role = role_for_task(task)
     summary = task.summary.strip()
+    if task.tracker_key:
+        summary = re.sub(rf"^{re.escape(task.tracker_key)}(?:/(?:AN|BE|FE|QA))?(?:\s*[:·-]\s*|\s+|$)",
+                         "", summary, flags=re.IGNORECASE)
     if role == "QA":
         summary = plantuml_label(summary)
         summary = re.sub(r"^QA\s+", "", summary, flags=re.IGNORECASE)
@@ -1135,7 +1139,8 @@ def role_prefixed_summary(task: Task) -> str:
                 "", summary, flags=re.IGNORECASE,
             )
     if role not in ROLE_COLORS:
-        return plantuml_label(summary)
+        identity = task.tracker_key or f"лок. {task.task_id}"
+        return plantuml_label(f"{identity} · {summary}")
     prefix_roles = set(ROLE_COLORS) if role == "QA" else {role}
     bracketed = re.match(r"^\s*\[\s*([^\]]+)\s*\]\s*", summary)
     if bracketed and normalize_role(bracketed.group(1)) in prefix_roles:
@@ -1144,8 +1149,12 @@ def role_prefixed_summary(task: Task) -> str:
         plain = re.match(r"^\s*([^\s:_/\-]+)(?=[\s:_/\-])\s*[:_\-/]?\s*", summary)
         if plain and normalize_role(plain.group(1)) in prefix_roles:
             summary = summary[plain.end():].strip()
+    if task.tracker_key:
+        summary = re.sub(rf"^{re.escape(task.tracker_key)}(?:/(?:AN|BE|FE|QA))?(?:\s*[:·-]\s*|\s+|$)",
+                         "", summary, flags=re.IGNORECASE)
     suffix = f" · {task.release_label}" if task.release_label else ""
-    return plantuml_label(f"{role} {summary}{suffix}")
+    identity = task.tracker_key or f"лок. {task.task_id}"
+    return plantuml_label(f"{identity} · {role} {summary}{suffix}")
 
 
 def story_type(story: StoryMap, tasks: dict[str, Task]) -> str:
@@ -1481,7 +1490,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             expected = snapshot.get("actualization_baseline", {}).get(logical_path(project_root, relative_map))
             if expected is not None and baseline_rows(actualization_path) != expected:
                 raise ValueError(f"{actualization_path}: approved actualization baseline was modified")
-        tasks = load_tasks(feature_dir)
+        tasks = load_tasks(feature_dir, project_root)
         for baseline in scope.role_baselines.get(feature_slug, []):
             alias = f"PLAN_{to_alias(feature_slug)}_{baseline.role}"
             if alias in aliases:

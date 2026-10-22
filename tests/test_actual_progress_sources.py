@@ -718,7 +718,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "уточни оценку у аналитика"):
             OVERLAY.load_tasks(self.feature)
 
-    def test_qa_label_omits_source_number_but_keeps_traceability(self) -> None:
+    def test_qa_label_prefixes_source_number_once(self) -> None:
         original = self.registry.read_text()
         for summary in ("[FE] List", "ITEM-100 FE List", "QA ITEM-100/QA FE List", "QA List"):
             with self.subTest(summary=summary):
@@ -729,9 +729,9 @@ class ActualProgressSourcesTests(unittest.TestCase):
                 self.assertEqual(tasks["ITEM-100/QA"].tracker_key, "ITEM-100")
                 self.assertEqual(tasks["ITEM-100/QA"].estimate, 2)
                 self.assertEqual(tasks["ITEM-100/FE"].estimate, 5)
-                self.assertEqual(OVERLAY.role_prefixed_summary(tasks["ITEM-100/QA"]), "QA List · релиз не уточнён")
+                self.assertEqual(OVERLAY.role_prefixed_summary(tasks["ITEM-100/QA"]), "ITEM-100 · QA List · релиз не уточнён")
                 schedules = OVERLAY.task_schedules(tasks, set(), OVERLAY.harness_today(), OVERLAY.DEFAULT_TEAM_RESOURCES)
-                self.assertTrue(OVERLAY.render_task(tasks["ITEM-100/QA"], schedules)[0].startswith("[QA List · релиз не уточнён] as [TASK_ITEM_100_QA]"))
+                self.assertTrue(OVERLAY.render_task(tasks["ITEM-100/QA"], schedules)[0].startswith("[ITEM-100 · QA List · релиз не уточнён] as [TASK_ITEM_100_QA]"))
 
     def test_absent_baseline_does_not_waive_missing_task_dates(self) -> None:
         self.absent_baseline()
