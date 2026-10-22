@@ -296,14 +296,20 @@ class SddExchangeTests(unittest.TestCase):
             return path
 
         cycle.write_receipt = receipt
+        environment_before = dict(os.environ)
         with patch.dict(os.environ, self.environment):
-            cycle.setUp()
-            original = cycle.files(cycle.packet)
-            cycle.test_accepted_cleanup_preserves_shared_files_archive_and_review_lookup()
-            self.assertEqual(cycle.files(cycle.archive), original)
-            self.assertIn("revisions/001/sdd/backend/show-result/proposal.md", original)
-            self.assertEqual(json.loads(original["revisions/001/returns/receipt.json"])["schema_version"], 2)
-            self.assertFalse(cycle.packet.exists())
+            try:
+                cycle.setUp()
+                original = cycle.files(cycle.packet)
+                cycle.test_accepted_cleanup_preserves_shared_files_archive_and_review_lookup()
+                self.assertEqual(cycle.files(cycle.archive), original)
+                self.assertIn("revisions/001/sdd/backend/show-result/proposal.md", original)
+                self.assertEqual(json.loads(original["revisions/001/returns/receipt.json"])["schema_version"], 2)
+                self.assertFalse(cycle.packet.exists())
+            finally:
+                # Nested fixtures must restore their environment before the outer context exits.
+                cycle.doCleanups()
+        self.assertEqual(dict(os.environ), environment_before)
 
     def test_close_stage_rejects_unrecorded_sdd_only_change(self):
         self.authorize()
