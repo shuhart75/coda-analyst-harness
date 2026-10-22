@@ -110,6 +110,9 @@ def set_scope(args, api) -> int:
             completion, _ = verified_result(run_id)
             if not completion['planning_application_allowed']:
                 raise ValueError('Tracker run must allow application before scope registration')
+    previous_runs = set(work.get('execution_scope', {}).get('run_ids', []))
+    if not previous_runs <= set(run_ids):
+        raise ValueError('Keep every registered tracker run when extending execution scope')
     scope = {'features': features, 'quarters': quarters, 'run_ids': run_ids,
              'reason': args.reason, 'confirmed_at': api.utc_now()}
     if index:
@@ -120,6 +123,11 @@ def set_scope(args, api) -> int:
     if getattr(args, 'include_planning', False):
         check_draft_planning(analytics, scope, api)
         scope['include_planning'] = True
+    if getattr(args, 'include_creation', False):
+        from execution_creation import creation_paths
+        _, additions = creation_paths(analytics, scope, api, registering=True)
+        scope['include_creation'] = True
+        scope['creation_deliveries'] = additions
     work['execution_scope'] = scope
     api.write_state(root, state)
     print(json.dumps({'status': 'execution-scope-registered', 'branch': work['branch'],
@@ -149,7 +157,8 @@ def path_kind(path: str, scope: dict) -> str | None:
             and parts[0] == 'planning' and parts[1] in scope['quarters']):
         relative = '/'.join(parts[2:])
         if (relative in {'plan-state.md', 'retrospective.md', 'gantt/README.md', 'gantt/order.txt',
-                         'gantt/closed-days.txt', 'gantt/quarter-plan.puml', 'gantt/commander-plan.puml'}
+                         'gantt/closed-days.txt', 'gantt/quarter-plan.puml', 'gantt/commander-plan.puml',
+                         'gantt/quarter-plan-confluence.puml', 'gantt/commander-plan-confluence.puml'}
                 or re.fullmatch(r'quarter/[a-zA-Z0-9-]+\.md', relative)
                 or re.fullmatch(r'gantt/preamble/(?:common|quarter-plan|commander-plan)\.puml', relative)
                 or re.fullmatch(r'gantt/includes/(?:quarter-plan|commander-plan)/FEATURE-[a-z0-9-]+\.puml', relative)):
@@ -185,11 +194,15 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
         raise ValueError('Register the confirmed feature/quarter set with set-execution-scope first')
     if scope.get('include_planning') is True:
         check_draft_planning(analytics, scope, api)
+    creation = {}
+    if scope.get('include_creation') is True:
+        from execution_creation import creation_paths
+        creation, _ = creation_paths(analytics, scope, api)
     classified = []
     for path in sorted(paths):
         api.exact_path(path)
         target = analytics / path
-        kind = passport_path_kind(analytics, path, scope) or path_kind(logical_path(analytics, path), scope)
+        kind = creation.get(path) or passport_path_kind(analytics, path, scope) or path_kind(logical_path(analytics, path), scope)
         if not kind or target.resolve() != target:
             raise ValueError(f'Path outside confirmed execution scope or linked: {path}')
         if re.fullmatch(r'features/[a-z0-9-]+/planning/estimates-\d{4}-Q[1-4]\.md', logical_path(analytics, path)):
@@ -228,13 +241,21 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
     expander = import_module('expand-plantuml-includes')
     for quarter in scope['quarters']:
         gantt = quarter_root(analytics, quarter) / 'gantt'
-        source, export = gantt / 'actual-progress.puml', gantt / 'actual-progress-confluence.puml'
-        dependencies = []
-        expanded = '\n'.join(expander.expand_file(source, [], dependencies=dependencies)).rstrip() + '\n'
-        if any(not path.is_relative_to(analytics) for path in dependencies) or export.resolve() != export:
-            raise ValueError('Gantt dependency is outside analytics or export is linked')
-        if export.read_text() != expanded:
-            raise ValueError(f'Confluence export differs from actual-progress: {quarter}; regenerate --actual-only')
+        views = ['actual-progress']
+        if scope.get('include_planning') is True:
+            views += ['quarter-plan', 'commander-plan']
+        for view in views:
+            source, export = gantt / (view + '.puml'), gantt / (view + '-confluence.puml')
+            if view != 'actual-progress' and not source.exists() and not export.exists():
+                continue
+            if not source.is_file() or not export.is_file():
+                raise ValueError(f'Missing source or Confluence export: {quarter}/{view}')
+            dependencies = []
+            expanded = '\n'.join(expander.expand_file(source, [], dependencies=dependencies)).rstrip() + '\n'
+            if any(not path.is_relative_to(analytics) for path in dependencies) or export.resolve() != export:
+                raise ValueError('Gantt dependency is outside analytics or export is linked')
+            if export.read_text() != expanded:
+                raise ValueError(f'Confluence export differs from {view}: {quarter}; expand the selected source')
         verified_quarters.append(quarter)
     baseline_candidates = __import__('baseline_releases').scan(analytics)
     return {'paths': classified, 'confluence_verified': verified_quarters,
