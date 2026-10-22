@@ -363,10 +363,24 @@ def main() -> int:
 
         if slug == "actual-progress":
             lines.extend(availability_lines(gantt_dir, overlay))
+        if slug == "actual-progress":
+            from gantt_releases import MARKER_LEGEND
+            lines.extend(["legend", MARKER_LEGEND, "end legend"])
         lines.append("@endgantt")
         target = gantt_dir / f"{slug}.puml"
         outputs[target] = "\n".join(lines).rstrip() + "\n"
 
+    from gantt_releases import milestone_overrides, rename_milestones
+    overrides = milestone_overrides(gantt_dir)
+    if overrides:
+        source = gantt_dir / 'actual-progress.puml'
+        expander = load_tool('expand-plantuml-includes')
+        expanded = "\n".join(expander.expand_file(source, [], outputs)).rstrip() + "\n"
+        seen = set()
+        # Derive renamed actual view; shared preambles and approved plans are immutable.
+        outputs[source] = rename_milestones(expanded, overrides, seen)
+        if seen != set(overrides):
+            raise ValueError('Release milestone aliases absent from actual-progress: ' + ', '.join(sorted(set(overrides) - seen)))
     sync_confluence_export(gantt_dir, outputs)
     if layout:
         exported = outputs[gantt_dir / "actual-progress-confluence.puml"]

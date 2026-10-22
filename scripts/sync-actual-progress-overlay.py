@@ -142,6 +142,7 @@ class Task:
     related_stories: list[str]
     completed_by: str = ""
     qa_members: tuple[str, ...] = ()
+    release_label: str = ""
 
 
 @dataclass
@@ -733,12 +734,14 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
             )
             if role_for_task(tasks[task_id]) == "QA":
                 validate_estimate(row.get("Оценка (дн)" if russian else "Estimate (дн)", ""), path, task_id)
+    release_groups = []
     groups_path = feature_dir / "execution/qa-groups.json"
     if groups_path.exists():
         from decimal import Decimal
         groups = json.loads(groups_path.read_text(encoding="utf-8"))
         if groups.get("schema_version") != 1:
             raise ValueError(f"{groups_path}: неизвестная схема QA-групп")
+        release_groups = groups["groups"]
         seen, qa_ids, total = set(), set(), Decimal(0)
         for group in groups["groups"]:
             task_id, members = group["task_id"], group["members"]
@@ -762,6 +765,9 @@ def load_tasks(feature_dir: Path) -> dict[str, Task]:
             raise ValueError(f"{groups_path}: состав QA не покрывает текущее исполнение")
         if total != Decimal(str(groups["total_estimate"])):
             raise ValueError(f"{groups_path}: сумма QA-оценок изменилась")
+    from gantt_releases import apply_task_releases, apply_task_markers
+    apply_task_releases(tasks, release_groups)
+    apply_task_markers(tasks, feature_dir)
     return tasks
 
 
@@ -1138,7 +1144,8 @@ def role_prefixed_summary(task: Task) -> str:
         plain = re.match(r"^\s*([^\s:_/\-]+)(?=[\s:_/\-])\s*[:_\-/]?\s*", summary)
         if plain and normalize_role(plain.group(1)) in prefix_roles:
             summary = summary[plain.end():].strip()
-    return plantuml_label(f"{role} {summary}")
+    suffix = f" · {task.release_label}" if task.release_label else ""
+    return plantuml_label(f"{role} {summary}{suffix}")
 
 
 def story_type(story: StoryMap, tasks: dict[str, Task]) -> str:

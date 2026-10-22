@@ -77,7 +77,7 @@ def create(destination, *, raw_history=False):
         immutable = {}
         for directory in (fixture.inputs, fixture.state / 'tracker-runs'):
             for path in directory.rglob('*'):
-                if path.is_file():
+                if path.is_file() and path != fixture.state / 'tracker-runs' / fixture.run_id / 'history-current.json':
                     immutable[str(path.relative_to(destination))] = digest(path)
         for path in fixture.state.glob('*-response.json'):
             immutable[str(path.relative_to(destination))] = digest(path)

@@ -152,7 +152,7 @@ def validate_snapshot_assignment(payload, snapshot_mapping: dict, history_mappin
         raise ValueError('Snapshot assignee mapping does not select the history assignment field: use ' + value_path)
 
 
-def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, check_fields=True) -> tuple[TaskHistory, list[str]]:
+def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, check_fields=True, require_snapshot=True) -> tuple[TaskHistory, list[str]]:
     from tracker_workflow import digest_object
 
     mapping = entry.get("mapping")
@@ -272,6 +272,8 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, c
     if {"history-event-timestamps-not-returned", "history-text-extraction-unresolved"}.intersection(limits):
         normalized = []
     normalized.sort(key=lambda event: event.at)
+    if not require_snapshot:
+        return TaskHistory(key, entry["role"], observed, None, "", tuple(normalized), complete), limits
     snapshot_mapping = entry["snapshot"]["mapping"] if snapshot is not None else mapping
     snapshot_payload = snapshot if snapshot is not None else payload
     if not isinstance(snapshot_mapping, dict):
@@ -478,6 +480,20 @@ def review_history(args) -> int:
                          "mapping": entry.get("mapping", {}), "status_aliases": entry.get("status_aliases", {}),
                          "sources": sources, "limitations": limits})
         limitations.extend(f"{entry['key']}:{limit}" for limit in limits)
+    # A changed QA meaning requires an explicit exception, not a generic mapping approval.
+    completion_codes = {'ready_for_uat', 'Готов к ПСИ', 'Готов к ИФТ', 'ИФТ', 'ПСИ'}
+    observed_codes = set(rules.development_completed)
+    for _, history in histories.values():
+        observed_codes.add(history.current_status)
+        observed_codes.update(value for event in history.events if event.status for value in event.status)
+    omitted = (completion_codes & observed_codes) - set(rules.qa_completed)
+    if omitted:
+        override = manifest.get('qa_completion_override', {})
+        if (override.get('analyst_confirmed') is not True
+                or not all(isinstance(override.get(key), str) and override[key].strip()
+                           for key in ('reason', 'source', 'quote'))):
+            raise ValueError('QA completion semantics changed for ' + ', '.join(sorted(omitted))
+                             + '; use the established QA completion meaning or record an explicit qa_completion_override with reason, source and analyst quote')
     reviews, missing_history, qa_blockers = [], [], []
     deleted_keys = {issue.get(provider + "_key") for issue in result["excluded"]
                     if issue.get("reason") == "confirmed-source-deletion"}
@@ -563,6 +579,7 @@ def review_history(args) -> int:
               "head": preview["head"], "registry_sha256": preview["registry_sha256"],
               "features": reviews, "evidence": evidence, "limitations": limitations,
               "status_rules": manifest["status_rules"],
+              "qa_completion_override": manifest.get("qa_completion_override"),
               "feature_qa_proposals": preview["feature_qa_proposals"],
               "proposed_registrations": preview["proposed_registrations"],
               "qa_application_blockers": qa_blockers,
@@ -589,6 +606,7 @@ def review_history(args) -> int:
                               "provider": provider, "application_requires_analyst_command": True}}
     destination = run_root(args.run_id) / "history" / (digest_object(output) + ".json")
     save_json(destination, output)
+    save_json(run_root(args.run_id) / "history-current.json", {"file": str(destination)})
     from tracker_safety import application_write_gate
     payload = {**output, "review_file": str(destination),
                "analytics_write_gate": application_write_gate(project, preview['selected_features'])}

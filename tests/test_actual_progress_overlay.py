@@ -69,9 +69,9 @@ class ActualProgressRoleWorkItemsTests(unittest.TestCase):
             self.assertIn("TASK_RSCON_100_AN", content)
             self.assertIn("TASK_RSCON_100_FE", content)
             self.assertIn("TASK_RSCON_100_QA", content)
-            self.assertIn("[FE Списковая форма legacy]", content)
+            self.assertIn("[FE Списковая форма legacy · релиз не уточнён]", content)
             self.assertNotIn("[[FE]", content)
-            self.assertIn("[QA Shared delivery]", content)
+            self.assertIn("[QA Shared delivery · релиз не уточнён]", content)
 
     def test_duplicate_tracker_role_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

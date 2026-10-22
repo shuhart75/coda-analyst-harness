@@ -45,7 +45,8 @@ def resume_command(args) -> int:
         scope = run['scope']
         matches = (scope['kind'] == args.scope_kind and scope['provider'] == args.scope_provider
                    and set(scope['ids']) == set(args.scope_id) and scope['intent'] == args.intent
-                   and set(scope.get('epic_ids', [])) == set(args.epic_id))
+                   and set(scope.get('epic_ids', [])) == set(args.epic_id)
+                   and bool(scope.get('include_history')) == bool(getattr(args, 'include_history', False)))
         if not matches:
             if args.run_id:
                 raise ValueError('Requested run does not match the current request scope and intent')

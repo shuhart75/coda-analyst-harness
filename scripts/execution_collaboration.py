@@ -160,7 +160,7 @@ def path_kind(path: str, scope: dict) -> str | None:
             r'includes/actual-progress/FEATURE-[a-z0-9-]+\.puml', relative
         ):
             return 'generated-quarter-view'
-        if relative in {'actual-progress-features.json', 'actual-progress-layout.json', 'preamble/actual-progress.puml'}:
+        if relative in {'actual-progress-features.json', 'actual-progress-layout.json', 'releases.json', 'preamble/actual-progress.puml'}:
             return 'execution-view-source'
         if re.fullmatch(r'[a-z0-9-]*decision[a-z0-9-]*\.md', relative):
             return 'execution-view-decision'
