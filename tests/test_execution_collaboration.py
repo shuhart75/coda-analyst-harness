@@ -93,6 +93,9 @@ class ExecutionCollaborationTests(unittest.TestCase):
         target.write_text(content)
 
     def planning_scope(self):
+        for view in ('quarter-plan', 'commander-plan'):
+            self.change(f'planning/2026-Q3/gantt/{view}.puml', '@startgantt\n@endgantt\n')
+            self.change(f'planning/2026-Q3/gantt/{view}-confluence.puml', '@startgantt\n@endgantt\n')
         self.change('planning/2026-Q3/plan-state.md', 'Status: `draft`\n')
         return self.collaboration(self.workspace, self.environment, 'set-execution-scope',
                                   '--feature', 'registry', '--quarter', '2026-Q3', '--include-planning',
