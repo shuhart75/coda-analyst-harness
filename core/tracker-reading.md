@@ -43,8 +43,10 @@ Legacy-сбор использует только `issue.exportJson`, TQL в `qu
 закрытые карточки тоже нужны. Не подменяй запрос поиском по тексту или полным
 инвентарём проекта.
 
-Цикл: `begin -> next_action -> ingest -> reconcile -> result-status`.
-Только `result-status` с `tracker-read-reconciled`, `collection_complete: true`
+Цикл сбора: `begin -> next_action -> ingest -> reconcile`, затем возвращённый
+`next_action`. `result-status` повторно читает проверенный результат.
+`reconcile`, `run-status` и `result-status` после сверки возвращают одинаковые
+признаки завершения. Ответ с `tracker-read-reconciled`, `collection_complete: true`
 и `report_allowed: true` разрешает дословный отчёт из `response_contract.text`.
 Для update-planning это промежуточное сообщение: `final_response_allowed: false`,
 `response_contract.must_continue: true`; сразу выполни верхнеуровневый `next_action`
@@ -169,3 +171,12 @@ capabilities. Не путай имя аргумента проекции с по
 только ради обхода расхождения читателей. После обновления обвязки повтори
 проверку применения и генерацию с прежним действующим обзором, если исходные
 файлы не менялись; повторный сбор ответов и подтверждение прежних решений не нужны.
+
+Для `update-planning` тип ответа `emit-progress-and-continue` требует показать
+промежуточную сводку и выполнить `next_action` в том же ходе, не ждать команды
+«продолжай». `collection_complete` означает только окончание сбора;
+`workflow_complete` становится true после зарегистрированного применения.
+Явная пауза разрешает итоговый ответ о паузе, но не завершает актуализацию.
+Старые completion-файлы читаются без перезаписи: эффективные признаки вычисляются
+из intent и сохранённого состояния применения. Новый сбор ради обновления
+формата completion не нужен. Контрольные суммы raw/reconciled/report сохраняются.

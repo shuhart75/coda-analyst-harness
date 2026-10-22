@@ -51,7 +51,7 @@ class TrackerSessionTests(unittest.TestCase):
         self.assertEqual(restored['run_id'], current)
         self.assertEqual(restored['scope']['ids'], ['REL-2'])
         self.assertEqual(Path(restored['run_json']), self.state / 'tracker-runs' / current / 'run.json')
-        self.assertEqual(restored['next_action']['type'], 'result-status')
+        self.assertEqual(restored['next_action']['type'], 'release-preview')
         self.assertTrue(restored['planning_application_allowed'])
         self.assertEqual(self.resume('REL-1', expected=2)['archived'][0]['state'], 'applied')
         self.resume('REL-2', '--run-id', old, expected=2)

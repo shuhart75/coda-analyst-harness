@@ -19,6 +19,8 @@ class BaselineReleaseTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.project = Path(self.temporary.name)
         subprocess.run(["git", "init", "-b", "feature/baseline", str(self.project)], check=True, capture_output=True)
+        from write_context_fixture import configure_write_context
+        self.state = configure_write_context(self, self.project, "feature/baseline")
         self.current = self.project / "baseline" / "current"
         self.candidate = self.project / "releases" / "release-one" / "baseline-candidate"
         for root, content in ((self.current, "before"), (self.candidate, "after")):

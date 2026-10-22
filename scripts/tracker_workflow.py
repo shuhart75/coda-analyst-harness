@@ -354,10 +354,14 @@ def next_action(run: dict) -> dict:
 
 
 def status_payload(run: dict) -> dict:
+    if run["status"] == "tracker-read-reconciled":
+        payload = result_status_payload(run["run_id"])
+        payload.update(must_stop=False, allowed_next_action=(payload["next_action"] or {"type": "report"})["type"])
+        return payload
     action = next_action(run)
     payload = {
         "protocol": PROTOCOL, "run_id": run["run_id"], "status": run["status"], "scope": run['scope'],
-        "workflow_complete": run["status"] == "tracker-read-reconciled",
+        "workflow_complete": False, "collection_complete": False,
         "final_response_allowed": False,
         "must_stop": False,
         "allowed_next_action": action["type"], "next_action": action,
@@ -1306,11 +1310,16 @@ def reconcile_command(args: argparse.Namespace) -> int:
     (root / "report.md").write_text(render_report(result), encoding="utf-8")
     completion = {
         "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": args.run_id,
-        "status": "tracker-read-reconciled", "workflow_complete": True, "final_response_allowed": True,
+        "status": "tracker-read-reconciled", "completion_contract_version": 2,
+        "collection_complete": True, "workflow_complete": run["scope"]["intent"] == "read-only",
+        "final_response_allowed": run["scope"]["intent"] == "read-only",
         "planning_application_allowed": run["scope"]["intent"] == "update-planning",
         "counts": result["counts"], "summary": result["summary"], "limitations": result["limitations"],
         "reconciled_sha256": file_digest(root / "reconciled.json"), "report_sha256": file_digest(root / "report.md"),
-        "response_contract": {"type": "emit-verbatim", "text": official_text(result), "additional_commentary_allowed": False},
+        "response_contract": {"type": "emit-verbatim" if run["scope"]["intent"] == "read-only" else "emit-progress-and-continue",
+                              "text": official_text(result), "additional_commentary_allowed": False,
+                              "delivery": "final" if run["scope"]["intent"] == "read-only" else "progress",
+                              "must_continue": run["scope"]["intent"] == "update-planning"},
         "paths": {"reconciled": str(root / "reconciled.json"), "report": str(root / "report.md"), "completion_status": str(root / "completion-status.json")},
     }
     save_json(root / "completion-status.json", completion)
@@ -1340,15 +1349,25 @@ def verified_result(run_id: str) -> tuple[dict, dict]:
     if result != reconcile_data(run):
         raise ValueError("Результат не воспроизводится из сохранённой сверки")
     planning_allowed = run["scope"]["intent"] == "update-planning"
+    contract_version = completion.get("completion_contract_version", 1)
+    if contract_version not in (1, 2):
+        raise ValueError("Unknown completion-status contract version")
     expected = {
         "status": "tracker-read-reconciled",
-        "workflow_complete": True,
-        "final_response_allowed": True,
+        "workflow_complete": not planning_allowed if contract_version == 2 else True,
+        "final_response_allowed": not planning_allowed if contract_version == 2 else True,
         "planning_application_allowed": planning_allowed,
         "counts": result["counts"],
         "summary": result["summary"],
         "limitations": result["limitations"],
     }
+    if contract_version == 2:
+        expected["collection_complete"] = True
+        contract = completion.get("response_contract", {})
+        if (contract.get("must_continue") is not planning_allowed
+                or contract.get("delivery") != ("progress" if planning_allowed else "final")
+                or contract.get("type") != ("emit-progress-and-continue" if planning_allowed else "emit-verbatim")):
+            raise ValueError("Response contract in completion-status differs from collection intent")
     if any(
         completion.get(field) is not value if isinstance(value, bool) else completion.get(field) != value
         for field, value in expected.items()
@@ -1393,9 +1412,9 @@ def collection_diagnostics(run: dict) -> dict:
     }
 
 
-def result_status_command(args: argparse.Namespace) -> int:
-    completion, result = verified_result(args.run_id)
-    root = run_root(args.run_id)
+def result_status_payload(run_id: str) -> dict:
+    completion, result = verified_result(run_id)
+    root = run_root(run_id)
     planning_allowed = completion["planning_application_allowed"]
     preview_command = "release-preview" if result["scope"]["kind"] == "release" else "execution-preview"
     completion["planning_update"] = {
@@ -1405,31 +1424,37 @@ def result_status_command(args: argparse.Namespace) -> int:
             "type": preview_command,
             "command": [
                 sys.executable, str(Path(__file__).with_name("trackerctl.py")),
-                preview_command, "--run-id", args.run_id,
+                preview_command, "--run-id", run_id,
                 "--project-root", "<resolved-project-root>",
             ],
             "required_selection": "release members" if preview_command == "release-preview" else "--quarter YYYY-QN or --feature feature",
             "mode": "execution-update",
             "contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-actualization.md"),
-            "run_id": args.run_id,
+            "run_id": run_id,
             "reconciled": str(root / "reconciled.json"),
             "reconciled_sha256": completion["reconciled_sha256"],
         } if planning_allowed else None,
     }
-    # Stored completion describes collection only. Expose the requested workflow
-    # separately, without rewriting historical results or their checksums.
+    # Derive current workflow state without rewriting historical collection files.
+    completion["paths"].update(scope=str(root / "scope.json"), run_status=str(root / "run-status.json"),
+                               providers=str(root / "providers"))
     completion["collection_complete"] = True
     completion["report_allowed"] = True
-    completion["collection_diagnostics"] = collection_diagnostics(load_run(args.run_id))
+    completion["collection_diagnostics"] = collection_diagnostics(load_run(run_id))
     completion["next_action"] = completion["planning_update"]["next_action"]
     completion["workflow_complete"] = result["scope"]["intent"] == "read-only" or completion["planning_update"]["actualization_complete"]
     completion["final_response_allowed"] = not planning_allowed
     completion["response_contract"] = {
         **completion["response_contract"],
+        "type": "emit-progress-and-continue" if planning_allowed else "emit-verbatim",
         "delivery": "progress" if planning_allowed else "final",
         "must_continue": planning_allowed,
     }
-    print(json.dumps(completion, ensure_ascii=False, indent=2))
+    return completion
+
+
+def result_status_command(args: argparse.Namespace) -> int:
+    print(json.dumps(result_status_payload(args.run_id), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1471,6 +1496,8 @@ def execution_preview_command(args: argparse.Namespace) -> int:
     payload = preview_execution(
         Path(args.project_root), args.quarter, args.feature, result, reviewed, args.expected_head, args.delivery,
     )
+    from tracker_safety import application_write_gate
+    payload["analytics_write_gate"] = application_write_gate(Path(args.project_root).resolve(), payload["selected_features"])
     payload["run_id"] = args.run_id
     payload["reconciled_sha256"] = completion["reconciled_sha256"]
     payload["ownership_decisions"] = {

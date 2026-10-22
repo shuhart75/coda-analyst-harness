@@ -19,6 +19,7 @@ def main():
     run.add_argument("--run-id", required=True)
     run.add_argument("--review", required=True, type=Path)
     commands.add_parser("scan")
+    commands.add_parser("preflight")
     hashes = commands.add_parser("review-hashes")
     hashes.add_argument("--candidate", required=True, type=Path)
     defer = commands.add_parser("defer")
@@ -49,7 +50,11 @@ def main():
     reconciliation_promote.add_argument("--analyst-confirmed", action="store_true")
     args = parser.parse_args()
     try:
-        if args.command == "observe":
+        if args.command not in {"scan", "review-hashes", "preflight"}:
+            baseline._guard(args.project, observation_only=args.command in {"observe", "observe-run", "defer"})
+        if args.command == "preflight":
+            result = baseline.preflight(args.project)
+        elif args.command == "observe":
             result = baseline.observe(args.project, json.loads(args.observation.read_text()))
         elif args.command == "observe-run":
             result = baseline.observe_run(args.project, args.run_id, args.review)
