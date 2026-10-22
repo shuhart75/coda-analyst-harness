@@ -227,6 +227,9 @@ def active_run_id() -> str | None:
         path.unlink()
         return None
     if (run_root(run_id) / "completion-status.json").is_file():
+        run = load_run(run_id)
+        if run['scope'].get('include_history') and not result_status_payload(run_id)['workflow_complete']:
+            return run_id
         path.unlink()
         return None
     return run_id
@@ -1235,11 +1238,15 @@ def begin_command(args: argparse.Namespace) -> int:
         scope["epic_ids"] = unique_keys(args.epic_id)
     elif args.epic_id:
         raise ValueError("--epic-id используется только с combined")
+    if getattr(args, 'include_history', False):
+        if not args.adaptive:
+            raise ValueError('--include-history requires adaptive mode')
+        scope['include_history'] = True
     scope["tracker_mode"] = "single"
     active = active_run_id()
     if active:
         existing = load_run(active)
-        identity_fields = ("kind", "provider", "ids", "intent", "epic_ids")
+        identity_fields = ("kind", "provider", "ids", "intent", "epic_ids", "include_history")
         if all(existing["scope"].get(field) == scope.get(field) for field in identity_fields):
             if existing["scope"].get("tracker_mode", "single") != "single":
                 raise ValueError("Режим существующего run отличается; не заменяй его без явного abandon-run")
@@ -1326,7 +1333,8 @@ def reconcile_command(args: argparse.Namespace) -> int:
     run["status"] = "tracker-read-reconciled"
     run["completed_at"] = now()
     save_run(run)
-    release_active(args.run_id)
+    if not run['scope'].get('include_history'):
+        release_active(args.run_id)
     print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
     return 0
 
@@ -1450,6 +1458,26 @@ def result_status_payload(run_id: str) -> dict:
         "delivery": "progress" if planning_allowed else "final",
         "must_continue": planning_allowed,
     }
+    from tracker_history_status import status as history_status, collect_action
+    history = history_status(run_id, completion['reconciled_sha256'])
+    completion['history_status'] = history
+    if history['reports']:
+        completion['response_contract']['text'] = (
+            'Снимок первичного сбора карточек (до проверки истории):\n' + completion['response_contract']['text']
+            + '\nИстория сохранена отдельно; history-not-collected в первичном снимке не описывает текущее состояние. '
+            + 'Проверенные отчёты: ' + ', '.join(item['file'] for item in history['reports']))
+    if result['scope'].get('include_history') and result['scope']['intent'] == 'read-only':
+        current = history['current']
+        ready = bool(current and current['status'] == 'history-report-ready')
+        completion['workflow_complete'] = completion['final_response_allowed'] = ready
+        completion['next_action'] = None if ready else collect_action(
+            current['pending_history'] if current else [i['sbertrek_key'] for i in result['issues']])
+        completion['response_contract'].update(type='report-history' if ready else 'emit-progress-and-continue',
+                                              delivery='final' if ready else 'progress', must_continue=not ready)
+        completion['response_contract']['text'] = (
+            'История получена: ' + current['file'] if ready else
+            'Карточки собраны. Запрос истории ещё не завершён; продолжи collect-history в этом run.')
+        completion['response_contract']['additional_commentary_allowed'] = ready
     return completion
 
 
@@ -1516,6 +1544,8 @@ def execution_preview_command(args: argparse.Namespace) -> int:
             "keys": sorted({item["sbertrek_key"] for item in payload["items"]
                             if any(target["role"] in {"BE", "FE"} for target in item["targets"])}),
             "include_registered_feature_tasks": True,
+            "capability_check_required": True,
+            "history_read_guidance": "If unfiltered history.list fails, check supported workflow_status/assigned_to filters; preserve timestamps and pagination. Role confirmation gates interpretation, not reading.",
             "required_before_date_proposals": True,
             "required_before_status_proposals": True,
             "command": [sys.executable, str(Path(__file__).with_name("trackerctl.py")), "history-review",
@@ -1560,12 +1590,14 @@ def parser() -> argparse.ArgumentParser:
     resume.add_argument('--scope-id', action='append', required=True)
     resume.add_argument('--intent', choices=('read-only', 'update-planning'), required=True)
     resume.add_argument('--epic-id', action='append', default=[])
+    resume.add_argument('--include-history', action='store_true')
     resume.add_argument('--run-id')
     resume.set_defaults(handler=resume_command)
     begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, default="sbertrek"); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning")); begin.set_defaults(handler=begin_command)
     collection = begin.add_mutually_exclusive_group()
     collection.add_argument("--adaptive", dest="adaptive", action="store_true", default=True)
     collection.add_argument("--legacy", dest="adaptive", action="store_false")
+    begin.add_argument("--include-history", action="store_true", help="Collect dated history before completing a read-only request")
     begin.add_argument("--epic-id", action="append", default=[])
     from tracker_safety import application_preflight_command
     preflight = commands.add_parser("application-preflight")
@@ -1586,6 +1618,11 @@ def parser() -> argparse.ArgumentParser:
     status = commands.add_parser("run-status"); status.add_argument("--run-id", required=True); status.set_defaults(handler=run_status_command)
     ingest = commands.add_parser("ingest"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--step-id", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.set_defaults(handler=ingest_command)
     ingest.add_argument("--call-file")
+    report = commands.add_parser('history-report')
+    report.add_argument('--run-id', required=True)
+    report.add_argument('--manifest', required=True)
+    from tracker_history_status import history_report_command
+    report.set_defaults(handler=history_report_command)
     history = commands.add_parser("history-review")
     history.add_argument("--run-id", required=True)
     history.add_argument("--project-root", required=True)

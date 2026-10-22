@@ -78,6 +78,29 @@ class ActualProgressSourcesTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
         return result
 
+    def test_markers_render_without_changing_schedule_and_export(self):
+        import hashlib
+        self.quarter()
+        before = self.target.read_text()
+        proof = {'confirmed': True, 'source': 'accepted-review.json',
+                 'evidence': 'Task QA completed', 'date': '2026-09-08'}
+        markers = {'schema_version': 1,
+                   'sources': {'execution/tasks.md': hashlib.sha256(self.registry.read_bytes()).hexdigest()},
+                   'tasks': [{'task_id': 'ITEM-100/FE', 'qa': proof}]}
+        path = self.feature / 'execution/task-markers.json'
+        path.write_text(json.dumps(markers))
+        self.quarter()
+        self.assertEqual(self.target.read_text().replace(' · QA ✓', ''), before)
+        export = self.gantt / 'actual-progress-confluence.puml'
+        self.assertIn('QA ✓', export.read_text())
+        self.assertIn('Нет отметки — нет подтверждения', export.read_text())
+        source = self.gantt / 'actual-progress.puml'
+        self.assertEqual(export.read_text(), "\n".join(EXPANDER.expand_file(source, [])).rstrip() + "\n")
+        self.registry.write_text(self.registry.read_text() + '\n')
+        snapshot = self.snapshot()
+        self.quarter(success=False)
+        self.assertEqual(snapshot, self.snapshot())
+
     def test_root_registry_supports_local_real_qa_without_tracker_key(self) -> None:
         tasks = OVERLAY.load_tasks(self.feature)
         self.assertEqual(set(tasks), {"ITEM-100/FE", "QA-COHORT"})
@@ -131,6 +154,30 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIn('belongs to 2026-Q3, not 2026-Q4', failure.stderr)
         self.assertEqual(self.snapshot(), before)
 
+    def test_release_names_change_only_actual_view_and_preserve_dates_and_preamble(self):
+        preamble = self.gantt / 'preamble/actual-progress.puml'
+        preamble.parent.mkdir()
+        original = '[Old release] as [RELEASE] happens at 2026/09/20\n'
+        preamble.write_text(original)
+        config = {'schema_version': 1, 'releases': [
+            {'alias': 'RELEASE', 'release': 'REL-20', 'date': '2026-09-20',
+             'state': 'deployed', 'environment': 'ПРОМ', 'analyst_confirmed': True, 'evidence': 'analyst'}]}
+        path = self.gantt / 'releases.json'
+        path.write_text(json.dumps(config))
+        plan = (self.gantt / 'quarter-plan.puml').read_bytes()
+        self.quarter()
+        text = (self.gantt / 'actual-progress.puml').read_text()
+        self.assertIn('[Релиз REL-20 · ПРОМ · факт] as [RELEASE] happens at 2026/09/20', text)
+        self.assertEqual(preamble.read_text(), original)
+        self.assertEqual((self.gantt / 'quarter-plan.puml').read_bytes(), plan)
+        expanded = '\n'.join(EXPANDER.expand_file(self.gantt / 'actual-progress.puml', [])).rstrip() + '\n'
+        self.assertEqual((self.gantt / 'actual-progress-confluence.puml').read_text(), expanded)
+        before = (self.gantt / 'actual-progress.puml').read_bytes()
+        config['releases'][0]['date'] = '2026-09-21'
+        path.write_text(json.dumps(config))
+        self.quarter(success=False)
+        self.assertEqual((self.gantt / 'actual-progress.puml').read_bytes(), before)
+
     def test_release_qa_groups_generate_and_reject_overlapping_members(self) -> None:
         self.write_tasks([
             "| FIRST | ITEM-100 | FE First | real | FE | 2 | B2 | 2026-09-01 | 2026-09-02 | 2026-09-01 | 2026-09-02 | done | 100 | STORY-COHORT |",
@@ -149,6 +196,9 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertEqual((self.gantt / 'quarter-plan.puml').read_bytes(), before)
         self.assertIn('TASK_QA_REST', self.target.read_text())
         self.assertIn('TASK_QA_COHORT', self.target.read_text())
+        self.assertIn('FE First · one', self.target.read_text())
+        self.assertIn('QA Release · one', self.target.read_text())
+        self.assertIn('FE Second · релиз не уточнён', self.target.read_text())
         self.assertEqual(OVERLAY.load_tasks(self.feature)['QA-REST'].qa_members, ('SECOND',))
         config['groups'][1]['members'] = ['FIRST']
         path.write_text(json.dumps(config))
@@ -679,9 +729,9 @@ class ActualProgressSourcesTests(unittest.TestCase):
                 self.assertEqual(tasks["ITEM-100/QA"].tracker_key, "ITEM-100")
                 self.assertEqual(tasks["ITEM-100/QA"].estimate, 2)
                 self.assertEqual(tasks["ITEM-100/FE"].estimate, 5)
-                self.assertEqual(OVERLAY.role_prefixed_summary(tasks["ITEM-100/QA"]), "QA List")
+                self.assertEqual(OVERLAY.role_prefixed_summary(tasks["ITEM-100/QA"]), "QA List · релиз не уточнён")
                 schedules = OVERLAY.task_schedules(tasks, set(), OVERLAY.harness_today(), OVERLAY.DEFAULT_TEAM_RESOURCES)
-                self.assertTrue(OVERLAY.render_task(tasks["ITEM-100/QA"], schedules)[0].startswith("[QA List] as [TASK_ITEM_100_QA]"))
+                self.assertTrue(OVERLAY.render_task(tasks["ITEM-100/QA"], schedules)[0].startswith("[QA List · релиз не уточнён] as [TASK_ITEM_100_QA]"))
 
     def test_absent_baseline_does_not_waive_missing_task_dates(self) -> None:
         self.absent_baseline()
