@@ -137,6 +137,10 @@ def set_scope(args, api) -> int:
 
 
 def path_kind(path: str, scope: dict) -> str | None:
+    if path == 'planning/customers.json':
+        return 'customer-accounting'
+    if re.fullmatch(r'planning/\d{4}-Q[1-4]/reports/[a-z0-9-]+\.(?:md|json)', path) and path.split('/')[1] in scope['quarters']:
+        return 'execution-analysis'
     if path == 'planning/team.md':
         return 'shared-execution-source'
     parts = path.split('/')
@@ -214,6 +218,11 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
         if re.fullmatch(r'features/[^/]+/(?:slices/[^/]+/)?execution/tasks\.md', logical_path(analytics, path)) and target.is_file():
             from tracker_registry import require_new_registry_format
             require_new_registry_format(analytics, target)
+        if kind == 'customer-accounting':
+            from customer_accounting import read_json, check_registry_scope
+            previous = api.git(analytics, 'show', 'HEAD:planning/customers.json')
+            before = json.loads(previous.stdout) if previous.returncode == 0 else {}
+            check_registry_scope(analytics, before, read_json(target), scope)
         classified.append({'path': path, 'kind': kind})
     reviewed_runs = set()
     if scope.get('run_ids') or review_files:
