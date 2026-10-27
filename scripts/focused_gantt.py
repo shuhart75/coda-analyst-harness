@@ -6,6 +6,7 @@ move a task. Forecast starts and generated QA windows are not start evidence.
 from __future__ import annotations
 
 from datetime import date
+import json
 import re
 
 from actual_progress_scope import expanded_with_paths, load_forecast_scope
@@ -53,6 +54,58 @@ def without_deployed_tasks(text, tasks, overlay):
                if getattr(task, 'production_confirmed', False)}
     return '\n\n'.join(block for block in text.split('\n\n')
                        if not any(f'as [{alias}]' in block for alias in aliases)).rstrip() + '\n'
+
+
+def release_milestones(gantt_dir, selected, outputs):
+    """Keep confirmed release associations, never infer membership from dates."""
+    keys = {task.release_label.split(' · ')[0] for entry in selected
+            for task in entry['tasks'].values()
+            if task.kind != 'candidate' and task.status.lower() not in CANCELLED
+            and not getattr(task, 'production_confirmed', False)} - {'', 'релиз не уточнён'}
+    registry = gantt_dir / 'releases.json'
+    bindings = {}
+    if registry.exists():
+        # Use the same validation as the full view before consuming identity/state.
+        from gantt_releases import milestone_overrides
+        milestone_overrides(gantt_dir)
+        bindings = {item['alias']: item for item in json.loads(registry.read_text())['releases']}
+    pattern = re.compile(r'^\[[^\]\n]+\] as \[([^\]\n]+)\] happens at (\d{4}/\d{2}/\d{2})\s*$')
+    legacy = {}
+    for name in ('common.puml', 'actual-progress.puml'):
+        path = gantt_dir / 'preamble' / name
+        if not path.exists():
+            continue
+        text, _ = expanded_with_paths(path, outputs)
+        comments = []
+        for line in text.splitlines():
+            if line.startswith("'"):
+                comments.append(line)
+                continue
+            match = pattern.fullmatch(line)
+            if match:
+                context = '\n'.join(comments)
+                matches = [key for key in keys if re.search(
+                    r'(?<![\w-])' + re.escape(key) + r'(?![\w-])', context)]
+                deployed = re.search(r'установлен[аоы]?\s+в\s+ПРОМ|внедр[её]н[аоы]?\s+в\s+ПРОМ', context, re.I)
+                if len(matches) == 1 and not deployed:
+                    legacy[match[1]] = matches[0]
+            comments = []
+    full, _ = expanded_with_paths(gantt_dir / 'actual-progress.puml', outputs)
+    lines = full.splitlines()
+    result, days = [], []
+    for line in lines:
+        match = pattern.fullmatch(line)
+        if not match:
+            continue
+        alias, day = match.groups()
+        binding = bindings.get(alias)
+        included = (binding['state'] == 'planned' and binding['release'] in keys
+                    if binding else alias in legacy)
+        if included:
+            result.append(line)
+            result.extend(item for item in lines if item.startswith(f'[{alias}] '))
+            days.append(day)
+    return result, sorted(set(days))
 
 
 def prepare_focus(gantt_dir, overlay, outputs, sections, header, closed_days, order=None):
@@ -105,8 +158,11 @@ def prepare_focus(gantt_dir, overlay, outputs, sections, header, closed_days, or
         blocks.append(f"-- {label}: {entry['title']} --\n" + text)
     starts = [date.fromisoformat(value.replace('/', '-')) for text in blocks
               for value in re.findall(r'\b(?:starts|happens at) (\d{4}[-/]\d{2}[-/]\d{2})', text)]
+    milestones, highlighted_days = release_milestones(gantt_dir, selected, outputs)
+    starts += [date.fromisoformat(day.replace('/', '-')) for day in highlighted_days]
     start = min(starts, default=overlay.harness_today())
-    lines = header(gantt_dir, 'Текущие и следующая фича', start, closed_days, [])
+    lines = header(gantt_dir, 'Текущие и следующая фича', start, closed_days, highlighted_days)
+    lines += milestones
     lines += ["' Derived selection; dates/resources copied from full-quarter schedules."]
     lines += [f"' Focus {entry['state']}: {entry['feature']}" for entry in selected]
     unknown = [entry['feature'] for entry in entries if entry['state'] == 'unknown']

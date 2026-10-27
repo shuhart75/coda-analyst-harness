@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
+import json
 
 from test_productivity_forecast import tool, task
 import test_actual_progress_sources as sources
@@ -76,6 +77,49 @@ class FocusGenerationTests(unittest.TestCase):
     setUp = sources.ActualProgressSourcesTests.setUp
     quarter = sources.ActualProgressSourcesTests.quarter
     write_tasks = sources.ActualProgressSourcesTests.write_tasks
+
+    def test_selected_release_preserves_date_style_and_highlight(self):
+        (self.feature/'execution/qa-groups.json').write_text(json.dumps({
+            'schema_version': 1, 'provider': 'sbertrek', 'total_estimate': '2',
+            'groups': [{'task_id': 'QA-COHORT', 'members': ['ITEM-100/FE'],
+                        'release': 'RELEASE-10', 'estimate': '2'}]}))
+        preamble = self.gantt/'preamble/actual-progress.puml'
+        preamble.parent.mkdir()
+        preamble.write_text("' RELEASE-10 перенесён по решению аналитика\n"
+                            '[Selected] as [REL_SELECTED] happens at 2026/09/05\n'
+                            '[REL_SELECTED] is colored in Blue\n\n'
+                            "' RELEASE-100 — другая поставка\n"
+                            '[Other] as [REL_OTHER] happens at 2026/09/30\n\n'
+                            "' RELEASE-10 установлен в ПРОМ\n"
+                            '[Deployed] as [REL_DEPLOYED] happens at 2026/09/01\n')
+        self.quarter()
+        text = (self.gantt/'actual-progress-focus-confluence.puml').read_text()
+        self.assertIn('[Selected] as [REL_SELECTED] happens at 2026/09/05', text)
+        self.assertIn('[REL_SELECTED] is colored in Blue', text)
+        self.assertIn('2026/09/05 is colored in', text)
+        self.assertNotIn('REL_OTHER', text)
+        self.assertNotIn('REL_DEPLOYED', text)
+        self.assertEqual(text, (self.gantt/'actual-progress-focus.puml').read_text())
+        # Registry identity/state overrides legacy comments. A past planned date is retained.
+        entries = [{'alias': 'REL_SELECTED', 'release': 'RELEASE-10', 'date': '2026-09-05',
+                    'state': 'planned', 'analyst_confirmed': True, 'evidence': 'Confirmed release'},
+                   {'alias': 'REL_OTHER', 'release': 'RELEASE-100', 'date': '2026-09-30',
+                    'state': 'planned', 'analyst_confirmed': True, 'evidence': 'Other release'},
+                   {'alias': 'REL_DEPLOYED', 'release': 'RELEASE-10', 'date': '2026-09-01',
+                    'state': 'deployed', 'environment': 'ПРОМ', 'analyst_confirmed': True,
+                    'evidence': 'Deployment confirmed'}]
+        registry = self.gantt/'releases.json'
+        registry.write_text(json.dumps({'schema_version': 1, 'releases': entries}))
+        self.quarter()
+        text = (self.gantt/'actual-progress-focus-confluence.puml').read_text()
+        self.assertIn('[Релиз RELEASE-10 · план] as [REL_SELECTED]', text)
+        self.assertNotIn('REL_OTHER', text)
+        self.assertNotIn('REL_DEPLOYED', text)
+        entries[0].update(state='deployed', environment='ПРОМ')
+        registry.write_text(json.dumps({'schema_version': 1, 'releases': entries}))
+        self.quarter()
+        text = (self.gantt/'actual-progress-focus-confluence.puml').read_text()
+        self.assertNotIn('REL_SELECTED', text)
 
     def test_automatic_export_parity_no_global_milestones_and_same_dates(self):
         preamble = self.gantt/'preamble/actual-progress.puml'
