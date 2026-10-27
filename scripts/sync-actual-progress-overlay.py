@@ -322,6 +322,39 @@ def load_team_resources(project_root: Path) -> dict[str, list[str]]:
     return resources
 
 
+def load_resource_coefficients(project_root: Path) -> dict[str, float]:
+    """Absolute estimated output per available day; no role-efficiency multiplier."""
+    path = team_path(project_root)
+    if not path.exists():
+        return {}
+    result = {}
+    for row in first_table_with(path, "Resource"):
+        raw = clean_cell(row.get("Personal coefficient", ""))
+        if not raw:
+            continue
+        resource = normalize_executor(row.get("Resource", ""))
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"{path}: {resource}: invalid personal coefficient") from exc
+        if not resource or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{path}: {resource}: personal coefficient must be positive and finite")
+        result[resource] = min(1.0, value)
+    return result
+
+
+def forecast_duration(effort: float, coefficient: float) -> int:
+    if not math.isfinite(coefficient) or coefficient <= 0:
+        raise ValueError("Personal coefficient must be positive and finite")
+    coefficient = min(1.0, coefficient)
+    duration = effort / coefficient
+    nearest = round(duration)
+    # Roster coefficients are rounded to six decimals: avoid an extra day for 3/(3/7).
+    if abs(effort - nearest * coefficient) <= nearest * 0.0000005 + 1e-10:
+        duration = nearest
+    return max(1, math.ceil(duration))
+
+
 def load_resource_closed_days(project_root: Path) -> dict[str, set[date]]:
     """Read resource-specific unavailable intervals from the project roster."""
     path = team_path(project_root)
@@ -957,6 +990,7 @@ def schedule_not_started_task(
     occupied: dict[str, set[date]],
     closed_days: set[date],
     team_resources: dict[str, list[str]],
+    resource_coefficients: dict[str, float] | None = None,
 ) -> ScheduledTask:
     duration = task_duration(task)
     resources, note_source = candidate_resources(task, team_resources)
@@ -965,15 +999,19 @@ def schedule_not_started_task(
         return ScheduledTask(earliest, finish, "", shifted)
 
     best: tuple[date, date, int, str] | None = None
+    compare_finish = is_not_started(task) and any((resource_coefficients or {}).get(r, 1.0) != 1.0 for r in resources)
     for resource in resources:
+        coefficient = (resource_coefficients or {}).get(resource, 1.0)
+        duration = forecast_duration(task.estimate, coefficient) if is_not_started(task) else task_duration(task)
         start, finish = find_resource_slot(occupied, resource, earliest, duration, closed_days)
         load = len(occupied.get(resource, set()))
-        candidate = (start, finish, load, resource)
+        candidate = (finish, start, load, resource) if compare_finish else (start, finish, load, resource)
         if best is None or candidate < best:
             best = candidate
 
     assert best is not None
-    start, finish, _, resource = best
+    first, second, _, resource = best
+    start, finish = (second, first) if compare_finish else (first, second)
     reserve_resource(occupied, resource, start, finish, duration, closed_days)
     resource_note = f"Auto-assigned {resource} ({note_source})" if note_source else ""
     return ScheduledTask(start, finish, resource, shifted or start != earliest, resource_note)
@@ -984,8 +1022,9 @@ def task_schedules(
     closed_days: set[date],
     today: date,
     team_resources: dict[str, list[str]],
-    feature_priorities: dict[str, int] | None = None,
     resource_closed_days: dict[str, set[date]] | None = None,
+    feature_priorities: dict[str, int] | None = None,
+    resource_coefficients: dict[str, float] | None = None,
 ) -> dict[str, ScheduledTask]:
     tasks = {task_id: task for task_id, task in tasks.items()
              if task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES
@@ -1016,6 +1055,40 @@ def task_schedules(
                 closed_days,
             )
 
+    for task_id, task in tasks.items():
+        scheduled = schedules.get(task_id)
+        if (not scheduled or task.actual_finish or task.status.lower() in DONE_STATUSES
+                or task.progress == 100 or scheduled.assignee not in (resource_coefficients or {})):
+            continue
+        if task.progress is None or task.estimate is None or not task.actual_start:
+            scheduled.resource_note = "Коэффициент не применён: подтверждённый остаток неизвестен"
+            continue
+        # Replace only this task's forecast occupancy; retain historical days and other tasks.
+        resource = scheduled.assignee
+        occupied[resource] = set((resource_closed_days or {}).get(resource, set()))
+        for other_id, other in schedules.items():
+            if other.assignee != resource:
+                continue
+            end = min(other.finish, today - timedelta(days=1)) if other_id == task_id else other.finish
+            if end and end >= other.start:
+                reserve_resource(occupied, resource, other.start, end, None, closed_days)
+        remaining = task.estimate * (1 - task.progress / 100)
+        duration = forecast_duration(remaining, resource_coefficients[resource])
+        remaining_days = []
+        current = max(today, scheduled.start)
+        for _ in range(36500):
+            if is_open_day(current, closed_days) and current not in occupied.get(resource, set()):
+                remaining_days.append(current)
+                if len(remaining_days) == duration:
+                    break
+            current += timedelta(days=1)
+        else:
+            raise ValueError(f"{task.task_id}: cannot schedule remaining work")
+        future_start, finish = remaining_days[0], remaining_days[-1]
+        scheduled.finish = finish
+        scheduled.resource_note = f"Прогноз остатка {remaining:g} оценочных дней; коэффициент {resource_coefficients[resource]:g}"
+        reserve_resource(occupied, resource, future_start, finish, None, closed_days)
+
     not_started = [
         (task_id, task, *earliest_task_start(task, closed_days, today))
         for task_id, task in tasks.items()
@@ -1040,6 +1113,7 @@ def task_schedules(
                 occupied,
                 closed_days,
                 team_resources,
+                resource_coefficients,
             )
 
     schedule_phase({"AN", "BE"})
@@ -1063,6 +1137,7 @@ def task_schedules(
             occupied,
             closed_days,
             team_resources,
+            resource_coefficients,
         )
 
     for task_id, task, start, shifted in sorted(
@@ -1097,6 +1172,7 @@ def task_schedules(
             occupied,
             closed_days,
             team_resources,
+            resource_coefficients,
         )
 
     schedule_phase({"QA"})
@@ -1111,6 +1187,7 @@ def task_schedules(
             occupied,
             closed_days,
             team_resources,
+            resource_coefficients,
             )
 
     return schedules
@@ -1537,8 +1614,9 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         closed_days,
         harness_today(),
         team_resources,
-        layout.priorities if layout else None,
         resource_closed_days,
+        layout.priorities if layout else None,
+        load_resource_coefficients(project_root),
     )
 
     outputs: dict[Path, str] = {}
