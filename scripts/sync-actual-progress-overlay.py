@@ -98,12 +98,12 @@ ROLE_ALIASES = {
 
 NOT_STARTED_STATUSES = {
     "proposed", "предложен", "planned", "todo", "open", "backlog",
-    "not-started", "not_started",
+    "not-started", "not_started", "created", "создан",
 }
 DONE_STATUSES = {"done", "closed", "complete", "completed"}
 EXCLUDED_STATUSES = {"superseded", "cancelled", "canceled"}
 FE_AFTER_BE_OPEN_DAYS = 3
-QA_BEFORE_FE_FINISH_OPEN_DAYS = 1
+QA_REGRESSION_OPEN_DAYS = 3
 
 
 @dataclass
@@ -143,6 +143,8 @@ class Task:
     completed_by: str = ""
     qa_members: tuple[str, ...] = ()
     release_label: str = ""
+    release_id: str = ""
+    production_confirmed: bool = False
 
 
 @dataclass
@@ -792,6 +794,8 @@ def load_tasks(feature_dir: Path, project_root: Path | None = None) -> dict[str,
             seen.update(members)
             qa_ids.add(task_id)
             task.qa_members = tuple(members)
+            for member_id in [task_id, *members]:
+                tasks[member_id].release_id = group.get("release") or ""
         expected = {task.task_id for task in tasks.values() if task.kind == "real"
                     and role_for_task(task) in {"BE", "FE"} and task.status.lower() not in EXCLUDED_STATUSES}
         if seen != expected or qa_ids != {task.task_id for task in tasks.values() if task.kind == "real" and role_for_task(task) == "QA"}:
@@ -1017,6 +1021,26 @@ def schedule_not_started_task(
     return ScheduledTask(start, finish, resource, shifted or start != earliest, resource_note)
 
 
+def qa_end_after(last_finish: date, closed_days: set[date]) -> date:
+    """Three open days strictly after development, excluding the completion day."""
+    current = last_finish
+    remaining = QA_REGRESSION_OPEN_DAYS
+    while remaining:
+        current += timedelta(days=1)
+        if is_open_day(current, closed_days):
+            remaining -= 1
+    return current
+
+
+def qa_window_start(finish: date, duration: int, closed_days: set[date]) -> date:
+    current = finish
+    for _ in range(duration - 1):
+        current -= timedelta(days=1)
+        while not is_open_day(current, closed_days):
+            current -= timedelta(days=1)
+    return current
+
+
 def task_schedules(
     tasks: dict[str, Task],
     closed_days: set[date],
@@ -1026,9 +1050,14 @@ def task_schedules(
     feature_priorities: dict[str, int] | None = None,
     resource_coefficients: dict[str, float] | None = None,
 ) -> dict[str, ScheduledTask]:
-    tasks = {task_id: task for task_id, task in tasks.items()
-             if task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES
-             and not completion_bound_only(task) and not completion_finish_only(task)}
+    scope_tasks = {task_id: task for task_id, task in tasks.items()
+                   if task.kind != "candidate" and task.status.lower() not in EXCLUDED_STATUSES}
+    tasks = {task_id: task for task_id, task in scope_tasks.items()
+             if not completion_bound_only(task) and not completion_finish_only(task)}
+
+    def forecast_qa(task: Task) -> bool:
+        return (role_for_task(task) == "QA" and not task.actual_finish
+                and task.status.lower() not in DONE_STATUSES and task.progress != 100)
     schedules: dict[str, ScheduledTask] = {}
     occupied: dict[str, set[date]] = {
         resource: set(days) for resource, days in (resource_closed_days or {}).items()
@@ -1041,7 +1070,7 @@ def task_schedules(
         return (feature_priorities or {}).get(task_scope(task_key), len(feature_priorities or {}))
 
     for task_id, task in tasks.items():
-        if needs_forecast_schedule(task):
+        if needs_forecast_schedule(task) or forecast_qa(task):
             continue
         scheduled = fixed_task_schedule(task, closed_days, today, team_resources)
         if scheduled:
@@ -1100,7 +1129,8 @@ def task_schedules(
         phase_items = [
             item
             for item in not_started
-            if item[0] not in schedules and (role_for_task(item[1]) in roles if roles else True)
+            if item[0] not in schedules and role_for_task(item[1]) != "QA"
+            and (role_for_task(item[1]) in roles if roles else True)
         ]
         for task_id, task, start, shifted in sorted(
             phase_items,
@@ -1140,55 +1170,49 @@ def task_schedules(
             resource_coefficients,
         )
 
-    for task_id, task, start, shifted in sorted(
-        [item for item in not_started if item[0] not in schedules and role_for_task(item[1]) == "QA"],
-        key=lambda item: (priority(item[0]), item[2] or date.max, item[0]),
-    ):
-        feature_schedules = [
-            (item, schedules[item_id]) for item_id, item in tasks.items()
-            if item_id in schedules and task_scope(item_id) == task_scope(task_id)
-            and item.status.lower() not in EXCLUDED_STATUSES and role_for_task(item) != "QA"
-            and (not task.qa_members or item.task_id in task.qa_members)
-        ]
-        frontend = [scheduled for item, scheduled in feature_schedules if role_for_task(item) == "FE" and scheduled.finish]
-        if frontend:
-            first = min(frontend, key=lambda scheduled: scheduled.finish)
-            target = first.finish
-            for _ in range(QA_BEFORE_FE_FINISH_OPEN_DAYS):
-                target -= timedelta(days=1)
-                while not is_open_day(target, closed_days):
-                    target -= timedelta(days=1)
-            target = max(first.start, target)
-        else:
-            finishes = [scheduled.finish for _, scheduled in feature_schedules if scheduled.finish]
-            if not finishes:
-                continue
-            target = next_open_day(min(finishes) + timedelta(days=1), closed_days)
-        earliest = max(start, target)
-        schedules[task_id] = schedule_not_started_task(
-            task,
-            earliest,
-            shifted or earliest != start,
-            occupied,
-            closed_days,
-            team_resources,
-            resource_coefficients,
-        )
+    # Finish all non-QA forecasts before deriving the final release/feature endpoint.
+    schedule_phase(set())
 
-    schedule_phase({"QA"})
-    for task_id, task, start, shifted in sorted(
-        [item for item in not_started if item[0] not in schedules],
-        key=lambda item: (priority(item[0]), item[2] or date.max, ROLE_ORDER.get(role_for_task(item[1]), 90), item[0]),
-    ):
-        schedules[task_id] = schedule_not_started_task(
-            task,
-            start,
-            shifted,
-            occupied,
-            closed_days,
-            team_resources,
-            resource_coefficients,
-            )
+    qa_items = [(key, task) for key, task in tasks.items() if forecast_qa(task)]
+    for task_id, task in sorted(qa_items, key=lambda item: (
+            not bool(explicit_executor(item[1], team_resources)), priority(item[0]), item[0])):
+        members = []
+        for key, member in scope_tasks.items():
+            if role_for_task(member) == "QA":
+                continue
+            if task.release_id:
+                included = member.release_id == task.release_id
+            else:
+                included = (key.removesuffix(member.task_id).rstrip("/") == task_scope(task_id)
+                            and (not task.qa_members or member.task_id in task.qa_members))
+            if included:
+                members.append((key, member))
+        finishes = []
+        for key, member in members:
+            finish = parse_date(member.actual_finish)
+            if not finish and key in schedules:
+                finish = schedules[key].finish
+            if not finish:
+                raise ValueError(f"{task.task_id}: неизвестно окончание {member.task_id}; нельзя определить конец QA")
+            finishes.append(finish)
+        if not finishes:
+            raise ValueError(f"{task.task_id}: нет задач с окончанием для расчёта QA")
+        finish = qa_end_after(max(finishes), closed_days)
+        duration = max(QA_REGRESSION_OPEN_DAYS, task_duration(task))
+        start = qa_window_start(finish, duration, closed_days)
+        resources, note_source = candidate_resources(task, team_resources)
+        days = set(open_days_between(start, finish, closed_days))
+        available = [resource for resource in resources if not (days & occupied.get(resource, set()))]
+        if resources and not available:
+            raise ValueError(f"{task.task_id}: нет свободного QA-ресурса для обязательного окна {start}..{finish}")
+        resource = min(available, key=lambda r: (len(occupied.get(r, set())), r)) if available else ""
+        note = f"Прогноз QA: последняя задача {max(finishes)} + 3 рабочих дня; длительность {duration} рабочих дней"
+        if task.actual_start:
+            note += f"; фактическое начало в источнике {task.actual_start} сохранено"
+        if note_source:
+            note += f"; Auto-assigned {resource} ({note_source})"
+        schedules[task_id] = ScheduledTask(start, finish, resource, False, note)
+        reserve_resource(occupied, resource, start, finish, None, closed_days)
 
     return schedules
 
@@ -1289,20 +1313,22 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
     assignee = scheduled.assignee
     assignee_part = f" on {{{assignee}}}" if assignee else ""
     label = role_prefixed_summary(task)
+    if role_for_task(task) == "QA" and scheduled.resource_note.startswith("Прогноз QA:"):
+        label += " (прогноз QA)"
     if task.estimate is None:
         label += " (оценка неизвестна)"
     if task.progress is None:
         label += " (прогресс неизвестен)"
     elif task.progress != round(task.progress):
         label += f" ({task.progress:g}%)"
-    if needs_forecast_schedule(task) and not is_not_started(task):
+    if role_for_task(task) != "QA" and needs_forecast_schedule(task) and not is_not_started(task):
         label += " (прогноз; фактическое начало неизвестно)"
     lines = [
         f"[{label}] as [{alias}]{assignee_part} starts {fmt_date(scheduled.start)}",
         f"[{alias}] ends {fmt_date(scheduled.finish)}" if scheduled.finish else f"[{alias}] lasts {task_duration(task)} days",
         *progress_style(alias, role_color(role_for_task(task)), task.progress),
     ]
-    if needs_forecast_schedule(task) and not is_not_started(task):
+    if role_for_task(task) != "QA" and needs_forecast_schedule(task) and not is_not_started(task):
         lines.append(f"' Forecast only; full estimate, not confirmed remaining work: {task.task_id}; status={task.status}")
     elif scheduled.shifted:
         lines.append(f"' Shifted not-started task from stale/non-open plan: {task.task_id}")
@@ -1506,6 +1532,7 @@ def render_feature(
         sorted_tasks = sorted(
             active_tasks,
             key=lambda item: (
+                role_for_task(item) == "QA",
                 schedules[item.task_id].start if item.task_id in schedules else date.max,
                 ROLE_ORDER.get(role_for_task(item), 90),
                 task_order.get(item.task_id, 0),

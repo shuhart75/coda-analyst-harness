@@ -731,7 +731,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
                 self.assertEqual(tasks["ITEM-100/FE"].estimate, 5)
                 self.assertEqual(OVERLAY.role_prefixed_summary(tasks["ITEM-100/QA"]), "ITEM-100 · QA List · релиз не уточнён")
                 schedules = OVERLAY.task_schedules(tasks, set(), OVERLAY.harness_today(), OVERLAY.DEFAULT_TEAM_RESOURCES)
-                self.assertTrue(OVERLAY.render_task(tasks["ITEM-100/QA"], schedules)[0].startswith("[ITEM-100 · QA List · релиз не уточнён] as [TASK_ITEM_100_QA]"))
+                self.assertTrue(OVERLAY.render_task(tasks["ITEM-100/QA"], schedules)[0].startswith("[ITEM-100 · QA List · релиз не уточнён (прогноз QA)] as [TASK_ITEM_100_QA]"))
 
     def test_absent_baseline_does_not_waive_missing_task_dates(self) -> None:
         self.absent_baseline()

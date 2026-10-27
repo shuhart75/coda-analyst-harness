@@ -16,6 +16,7 @@ def label(value):
 def apply_task_releases(tasks, groups):
     """A validated QA partition supplies membership, including an unknown remainder."""
     for task in tasks.values():
+        task.production_confirmed = False
         if task.kind == 'real':
             task.release_label = 'релиз не уточнён'
     for group in groups:
@@ -115,6 +116,8 @@ def apply_task_markers(tasks, feature_dir):
                 if not release or proof.get('analyst_confirmed') is not True:
                     raise ValueError(f'{path}: production requires exact release membership and analyst confirmation')
             task.release_label += ' · ' + caption
+            if key == 'production':
+                task.production_confirmed = True
 
 
 def validate_marker_evidence(proof, path):
@@ -132,6 +135,8 @@ def apply_registry_markers(tasks, groups, project_root=None):
 
     def mark(task_id, caption):
         task = tasks[task_id]
+        if caption == 'ПРОМ ✓':
+            task.production_confirmed = True
         if caption not in task.release_label.split(' · '):
             task.release_label += ' · ' + caption
 

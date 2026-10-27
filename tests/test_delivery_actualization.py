@@ -64,6 +64,11 @@ class DeliveryActualizationTests(unittest.TestCase):
         self.write(self.groups_path, self.expected['groups'])
         self.rows['QA-REGISTRY']['Estimate (дн)'] = '7.2'
         self.rows['QA-REST']['Estimate (дн)'] = '1.8'
+        # Fixed QA end dates require separate capacity for overlapping release groups.
+        self.rows['QA-REGISTRY']['Executor'] = 'Q2'
+        self.rows['QA-REST']['Executor'] = 'Q3'
+        roster = self.project / 'planning/team.md'
+        roster.write_text(roster.read_text().replace('| QA | Q1 |', '| QA | Q1, Q2, Q3 |'))
         self.write_registry(self.registry, self.rows.values())
         (self.gantt / 'includes/actual-progress/FEATURE-kib-next.puml').write_text("' existing KIB\n")
         self.git(self.project, 'add', '--all')

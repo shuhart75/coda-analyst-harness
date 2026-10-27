@@ -85,6 +85,8 @@ def create(destination, *, raw_history=False):
         mutable = {'features/registry/execution/tasks.md', 'features/registry/execution/qa-groups.json',
                    'planning/2026-Q3/gantt/actual-progress.puml',
                    'planning/2026-Q3/gantt/actual-progress-confluence.puml',
+                   'planning/2026-Q3/gantt/actual-progress-focus.puml',
+                   'planning/2026-Q3/gantt/actual-progress-focus-confluence.puml',
                    'planning/2026-Q3/gantt/includes/actual-progress/FEATURE-registry.puml',
                    'planning/2026-Q3/gantt/includes/actual-progress/FEATURE-other.puml'}
         project_files = fixture.snapshot(fixture.project)
