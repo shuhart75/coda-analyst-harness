@@ -80,7 +80,11 @@ class ForecastExclusionTests(unittest.TestCase):
             "planning/2026-Q3/gantt/actual-progress.puml",
             "planning/2026-Q3/gantt/actual-progress-confluence.puml",
         })
-        self.assertEqual(set(before), set(after))
+        self.assertEqual(set(after) - set(before), {
+            'planning/2026-Q3/gantt/actual-progress-focus.puml',
+            'planning/2026-Q3/gantt/actual-progress-focus-confluence.puml',
+        })
+        self.assertTrue(set(before) <= set(after))
         view = (self.gantt / "actual-progress.puml").read_text()
         export = (self.gantt / "actual-progress-confluence.puml").read_text()
         self.assertIn("(PLAN; вне прогноза 2026-Q3)", view)
@@ -334,7 +338,11 @@ class ForecastExclusionTests(unittest.TestCase):
         before = self.snapshot()
         self.run_generator()
         after = self.snapshot()
-        self.assertEqual(set(before), set(after))
+        self.assertEqual(set(after) - set(before), {
+            'planning/2026-Q3/gantt/actual-progress-focus.puml',
+            'planning/2026-Q3/gantt/actual-progress-focus-confluence.puml',
+        })
+        self.assertTrue(set(before) <= set(after))
         self.assertEqual({path for path in before if before[path] != after[path]}, {
             "planning/2026-Q3/gantt/actual-progress.puml",
             "planning/2026-Q3/gantt/actual-progress-confluence.puml",
@@ -344,6 +352,11 @@ class ForecastExclusionTests(unittest.TestCase):
         self.assertEqual(view.count("!include includes/actual-progress/FORECAST-shared.puml"), 1)
         self.assertIn(self.forecast.read_text(), export)
         self.assertIn("TASK_OTHER_AN", export)
+        focused = (self.gantt / 'actual-progress-focus-confluence.puml').read_text()
+        self.assertIn('Focus next: optimizer', focused)
+        self.assertIn('FORECAST_OPT_BE', focused)
+        self.assertNotIn('TASK_OTHER_AN', focused)
+        self.assertNotIn('FORECAST_OTHER_FE', focused)
         self.assertNotIn("OPT_PLAN", export)
         self.assertNotIn("вне прогноза", view)
         self.assertIn("Preserved forecast: optimizer", view)

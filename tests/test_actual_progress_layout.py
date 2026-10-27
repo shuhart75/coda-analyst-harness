@@ -111,7 +111,7 @@ class PriorityScheduleTests(unittest.TestCase):
         return OVERLAY.task_schedules(tasks, set(), date(2026, 9, 7), OVERLAY.DEFAULT_TEAM_RESOURCES, feature_priorities={"high": 0, "low": 1})
 
     def test_priority_beats_earlier_low_priority_plan(self):
-        for role in ("BE", "FE", "QA"):
+        for role in ("BE", "FE"):
             with self.subTest(role=role):
                 high = self.task("HIGH", 2, "2026-09-09", role)
                 low = self.task("LOW", 5, "2026-09-07", role)

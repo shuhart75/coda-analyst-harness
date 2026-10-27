@@ -288,6 +288,7 @@ def main() -> int:
     if scope.role_baselines and not args.actual_only:
         raise ValueError("Ролевой PLAN требует --actual-only; исходные планы нельзя перегенерировать")
 
+    focus_sections = []
     for slug, title in VIEWS:
         if args.actual_only and slug != "actual-progress":
             continue
@@ -340,6 +341,8 @@ def main() -> int:
                     lines.append(f"' Decision source: {decision['source']}")
                 elif slug == "actual-progress" and excluded_slug in scope.preserved:
                     title += " (PLAN)"
+                if slug == "actual-progress":
+                    focus_sections.append((feature_slug(path), title, path))
                 lines.append(f"-- {title} --")
                 lines.append(f'!include {path.relative_to(gantt_dir).as_posix()}')
                 lines.append("")
@@ -417,6 +420,8 @@ def main() -> int:
             raise ValueError("Повторяющиеся идентификаторы PlantUML в ролевом PLAN и Ганте")
         if load_forecast_scope(project_root(gantt_dir), gantt_dir.parent.name) != scope:
             raise ValueError("Ролевой PLAN изменился во время генерации")
+    from focused_gantt import prepare_focus
+    prepare_focus(gantt_dir, overlay, outputs, focus_sections, header_lines, closed_days, order)
     overlay.publish_outputs(outputs)
     for path in outputs:
         print(f"Wrote {path}", flush=True)

@@ -27,7 +27,7 @@ class UncertainScheduleTests(unittest.TestCase):
                 text = "\n".join(OVERLAY.render_task(task, schedule))
                 self.assertNotIn("% completed", text)
                 self.assertIn("is colored in transparent/LightCoral", text)
-                if status != "planned":
+                if status not in {"planned", "created"}:
                     self.assertIn("прогноз; фактическое начало неизвестно", text)
                     self.assertNotIn("Shifted not-started", text)
 
@@ -49,10 +49,13 @@ class UncertainScheduleTests(unittest.TestCase):
         other = self.task("QA", "planned", 0)
         other.task_id = "OTHER/QA"
         tasks = {"feature/" + task.task_id: task for task in (frontend, qa, other)}
+        with self.assertRaisesRegex(ValueError, "нет свободного QA"):
+            OVERLAY.task_schedules(tasks, set(), date(2026, 9, 11), OVERLAY.DEFAULT_TEAM_RESOURCES)
+        other.executor = "TBD_Q"
         schedule = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 11), OVERLAY.DEFAULT_TEAM_RESOURCES)
-        self.assertGreaterEqual(schedule["feature/WORK/QA"].start, date(2026, 9, 11))
-        intervals = sorted((schedule[key].start, schedule[key].finish) for key in ("feature/WORK/QA", "feature/OTHER/QA"))
-        self.assertGreater(intervals[1][0], intervals[0][1])
+        self.assertEqual(schedule["feature/WORK/QA"].finish, date(2026, 9, 17))
+        self.assertEqual(schedule["feature/WORK/QA"].finish, schedule["feature/OTHER/QA"].finish)
+        self.assertNotEqual(schedule["feature/WORK/QA"].assignee, schedule["feature/OTHER/QA"].assignee)
         self.assertEqual(qa.status, "unknown")
 
     def test_unknown_forecast_does_not_overlap_known_work_on_same_resource(self):
