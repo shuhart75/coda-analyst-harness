@@ -1,0 +1,24 @@
+{
+  "id": "RM-DIRECTION",
+  "title": "<Направление>",
+  "path": "planning/roadmap/direction.md",
+  "card_id": "roadmap-direction",
+  "decision_state": "idea",
+  "maturity": "concept",
+  "horizon": "не определён",
+  "committed_date": null,
+  "realization": "not-confirmed",
+  "delivery_paths": [],
+  "superseded_by": null,
+  "history": [
+    {
+      "date": "YYYY-MM-DD",
+      "state": "idea",
+      "actor": "<Автор решения>",
+      "scope": "<Что именно предложено или принято>",
+      "source_ids": [
+        "decision-source"
+      ]
+    }
+  ]
+}

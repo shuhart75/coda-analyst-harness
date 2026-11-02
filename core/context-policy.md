@@ -102,3 +102,7 @@ Rules:
 - Keep code references relative to the registered repository and bind them to a full commit identifier; never store analyst-machine absolute code paths in requirements.
 - Delete or archive temporary research only after its accepted decisions are transferred to source-of-truth artifacts.
 - If context and source disagree, source wins and context must be updated.
+
+## Онтологическая модель
+
+Для краткого описания системы и материалов для LLM используй `core/ontology.md` и `PROJECT_ROOT/ontology/README.md`. Перед обзором проверяй catalogue через ontologyctl status/check и собирай только нужный разрез. Исходные документы остаются первичными; новый источник требует предметной сверки. Направления развития ведутся по `core/roadmap.md` и не подменяют текущее состояние.

@@ -343,3 +343,9 @@ record-change, аудитов и отмены прежнего кандидат�
 `planning/customers.json` и паспорте. Неизвестные связи не угадывай. Разделяй оценки
 и фактические человеко-дни; для отчёта по заказчикам сохраняй проверяемую выборку,
 основание периода и покрытие. Не приписывай разработку владельцу карточки QA/AN.
+
+## Product knowledge and future directions
+
+- For product overviews, presentations and ontology updates, follow `core/ontology.md`; read the project ontology index and a bounded topic bundle before opening primary sources.
+- Maintain future directions under `planning/roadmap/` by `core/roadmap.md`. A prototype decision is not a release, approved budget or committed date. Keep deferred/cancelled/replaced plans and decision history explicit.
+- After requirements, prototype or release changes, review affected ontology cards and sources. Never refresh hashes in place of substantive review or promote baseline through a summary update.

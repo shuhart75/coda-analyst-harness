@@ -37,6 +37,7 @@ ALLOWED_CONTENT_ROOTS = frozenset({
     "assets",
     "baseline",
     "context",
+    "ontology",
     "features",
     "planning",
     "quarters",
@@ -773,7 +774,7 @@ def source_import_report(repository: Path, base: str, candidate: str) -> dict:
             "status": status, "path": path,
             "removed_requirements": sorted(set(re.findall(requirements_pattern, before, re.MULTILINE)) - set(re.findall(requirements_pattern, after, re.MULTILINE))),
             "removed_scenarios": sorted(set(re.findall(scenario_pattern, before, re.MULTILINE)) - set(re.findall(scenario_pattern, after, re.MULTILINE))),
-            "protected_artifact": path.startswith(("baseline/", "planning/", "quarters/", "releases/")) or path in {"delivery-index.json", "migration-layout.json"} or path.endswith("/requirements.md"),
+            "protected_artifact": path.startswith(("baseline/", "ontology/", "planning/", "quarters/", "releases/")) or path in {"delivery-index.json", "migration-layout.json"} or path.endswith("/requirements.md"),
         })
     return {"base_commit": base, "candidate_commit": candidate, "changed_paths": changes,
             "deleted_paths": [item["path"] for item in changes if item["status"] == "D"]}

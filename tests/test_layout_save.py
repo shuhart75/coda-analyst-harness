@@ -60,6 +60,15 @@ class LayoutSaveTests(unittest.TestCase):
         self.assertEqual(self.git('branch', '--show-current'), 'codex/layout')
         self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
 
+    def test_reviewed_ontology_is_preserved_by_layout_save(self):
+        target = self.root / 'ontology/overview.md'
+        target.parent.mkdir()
+        target.write_text('Reviewed product knowledge\n')
+        self.paths['ontology/overview.md'] = hashlib.sha256(target.read_bytes()).hexdigest()
+        result = self.save()
+        self.assertEqual(result['status'], 'committed')
+        self.assertEqual(self.git('show', 'HEAD:ontology/overview.md'), 'Reviewed product knowledge')
+
     def test_changed_reviewed_bytes_do_not_stage(self):
         (self.root / 'delivery-index.json').write_text('{}')
         with self.assertRaises((ValueError, KeyError)):

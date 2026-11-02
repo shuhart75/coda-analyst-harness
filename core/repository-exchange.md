@@ -174,3 +174,11 @@ The blocked result reports `source-import-whitespace-errors`, the exact base and
 candidate commits, isolated checkout, complete Git diagnostic and a read-only
 inspection command. The candidate remains local and neither documents/main nor
 the remote target branch changes on failure. Retry preserves the same import.
+
+## Product ontology
+
+`ontology/` is analytical content alongside `baseline/`, `context/` and `planning/`.
+Source imports, reverse patches and layout migrations preserve its reviewed files.
+Local tool settings remain forbidden inside ontology; adding the content root does
+not relax path, deletion, source import review or publication checks. Roadmap data
+lives under `planning/roadmap/`; runtime bundles remain outside tracked content.
