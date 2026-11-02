@@ -1,0 +1,31 @@
+{
+  "source": {
+    "id": "source-id",
+    "path": "baseline/current/domain/aggregates.md",
+    "kind": "baseline",
+    "locator": "<версия и раздел>",
+    "sha256": "<SHA-256 проверенного файла>"
+  },
+  "card": {
+    "id": "capability-id",
+    "title": "<Название>",
+    "path": "ontology/capability-id.md",
+    "phase": "current",
+    "topics": [
+      "capability-id"
+    ],
+    "views": [
+      "executive",
+      "scenarios"
+    ],
+    "source_ids": [
+      "source-id"
+    ],
+    "required": false,
+    "review": {
+      "date": "YYYY-MM-DD",
+      "basis": "<Что проверено и на каком основании>"
+    },
+    "content_sha256": "<SHA-256 проверенной карточки>"
+  }
+}

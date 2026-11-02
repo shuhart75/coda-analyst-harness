@@ -93,3 +93,7 @@ These invariants apply to the receiving developer SDD in its own code workspace.
 - Return baseline and requirement feedback in the same revision's `returns/`; analyst review may happen later and never gates development or testing.
 - Derive processing state from the return sequence `receipt.json -> tasks.md -> tasks/<task-id>.md -> summary.md`; do not edit the analyst-owned manifest to acknowledge or track developer work.
 - The canonical return contract is defined in `core/developer-handoff.md`.
+
+## Актуальность описания продукта
+
+После содержательного изменения требований, решений, макета, тестов или релиза проверь влияние на ontology и roadmap по `core/ontology.md`. Включи в итог изменённые карточки либо явное объяснение отсутствия влияния. При блокирующем конфликте сохрани его в ограничениях; не объявляй обзор актуальным только по новым хешам. Проверка новых источников дополняет автоматическую проверку известных зависимостей.

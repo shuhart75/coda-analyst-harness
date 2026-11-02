@@ -33,6 +33,7 @@ Slash-команда и skill — разные сущности. Файл ком
 
 | Slash-команда | Точное имя skill | Основной договор |
 |---|---|---|
+| `/overview` | нет, читать договор напрямую | `core/ontology.md` |
 | `/feature` | нет — читать договор напрямую | `core/collaboration.md` |
 | `/requirements` | `coda-requirements` | `modes/requirements.md` |
 | `/planning` | `coda-planning` | `modes/planning.md` |

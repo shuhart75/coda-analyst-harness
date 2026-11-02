@@ -179,6 +179,8 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
                 self.assertTrue((analytics / relative).is_file(), relative)
             for forbidden in (".workflow", ".vscode"):
                 self.assertFalse((analytics / forbidden).exists())
+            self.assertTrue((analytics / "ontology/catalog.json").is_file())
+            self.assertTrue((analytics / "ontology/README.md").is_file())
             entrypoint = analytics / "AGENTS.md"
             entrypoint_text = entrypoint.read_text(encoding="utf-8")
             gigacode_text = (analytics / "GIGACODE.md").read_text(encoding="utf-8")

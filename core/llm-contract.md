@@ -451,3 +451,13 @@ record-change, аудитов и отмены прежнего кандидат�
 `planning/customers.json` и паспорте. Неизвестные связи не угадывай. Разделяй оценки
 и фактические человеко-дни; для отчёта по заказчикам сохраняй проверяемую выборку,
 основание периода и покрытие. Не приписывай разработку владельцу карточки QA/AN.
+
+## Product ontology and roadmap
+
+For system overviews and reusable product knowledge, follow `core/ontology.md`.
+Read the ontology index and one bounded bundle before opening primary sources;
+keep coverage gaps and evidence kinds visible. Before a presentation, check
+known dependencies and newly supplied sources. For future directions, follow
+`core/roadmap.md`: preserve decision history and distinguish decision state,
+maturity and realized deliveries. No prototype, test specification or summary
+update grants deployment confirmation or authority to rewrite baseline.

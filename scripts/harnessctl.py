@@ -96,6 +96,8 @@ def doctor_command(args: argparse.Namespace) -> int:
         run_tool(project, "validate-planning.py"),
         run_tool(project, "validate-trace.py", ["--strict"] if args.strict else []),
     ]
+    if (project / "ontology").exists() or (project / "planning/roadmap/index.json").exists():
+        codes.append(run_tool(project, "ontologyctl.py", ["check"]))
     handoff_tool = harness_root() / "scripts/handoffctl.py"
     for manifest in sorted(artifact_glob(project, "features/*/handoffs/*/handoff.json")):
         codes.append(
@@ -105,6 +107,10 @@ def doctor_command(args: argparse.Namespace) -> int:
             ).returncode
         )
     return 1 if any(codes) else 0
+
+
+def ontology_command(args: argparse.Namespace) -> int:
+    return run_tool(Path(args.project).resolve(), "ontologyctl.py", args.ontology_args)
 
 
 def language_check_command(args: argparse.Namespace) -> int:
@@ -142,7 +148,7 @@ def session_brief_command(args: argparse.Namespace) -> int:
         code_registry_path(),
         harness_root() / f"modes/{mode}.md",
     ]
-    paths: list[str] = []
+    paths: list[str] = ["ontology/README.md"]
     if args.feature:
         paths.extend(
             [
@@ -428,6 +434,11 @@ def plan_approve_command(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Internal analyst-harness runtime")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    ontology = sub.add_parser("ontology")
+    ontology.add_argument("project")
+    ontology.add_argument("ontology_args", nargs=argparse.REMAINDER)
+    ontology.set_defaults(func=ontology_command)
 
     doctor = sub.add_parser("doctor")
     doctor.add_argument("project")

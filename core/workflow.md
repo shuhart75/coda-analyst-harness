@@ -95,3 +95,7 @@ whole long-lived feature; never aggregate its different quarters automatically.
   - `real` implementation tasks
   - a `mixed` combination of both
 - when a planning story is replaced by real tasks, old virtual execution items should be marked as superseded or moved into residual scope explicitly
+
+## Описание продукта и планы развития
+
+Запросы «подготовь обзор системы», «собери презентацию» и «обнови описание системы» направляй в `core/ontology.md`. Это предметные запросы; сбор контекста и проверка свежести выполняются внутри процедуры. Обсуждение будущего и изменение направления веди по `core/roadmap.md` в planning. Обновление current после выпуска выполняй вместе со штатной финализацией baseline, не по дате плана.
