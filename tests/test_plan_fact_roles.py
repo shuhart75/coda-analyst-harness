@@ -88,13 +88,12 @@ class PlanFactRoleTests(unittest.TestCase):
                  "QA1": task("QA1", "QA", 2, "", executor="Q1"),
                  "QA2": task("QA2", "QA", 2, "", executor="Q1"),
                  "QA3": task("QA3", "QA", 1, "2026-09-01", 100, "Q1")}
-        with self.assertRaisesRegex(ValueError, "нет свободного QA"):
-            OVERLAY.task_schedules(tasks, set(), date(2026, 9, 7), OVERLAY.DEFAULT_TEAM_RESOURCES)
-        tasks["QA2"].executor = "Q2"
         schedules = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 7), OVERLAY.DEFAULT_TEAM_RESOURCES)
         self.assertEqual(schedules["QA1"].start, date(2026, 9, 10))
         self.assertEqual(schedules["QA2"].finish, schedules["QA1"].finish)
         self.assertEqual(schedules["QA3"].start, date(2026, 9, 1))
+        self.assertNotEqual(schedules["QA1"].assignee, schedules["QA2"].assignee)
+        self.assertEqual(tasks["QA2"].executor, "Q1")
 
     def test_be_only_qa_can_start_after_first_be_finishes(self):
         tasks = {"BE": task("BE", "BE", 2, "2026-09-07", executor="B1"),
