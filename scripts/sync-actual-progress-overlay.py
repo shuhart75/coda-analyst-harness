@@ -1203,10 +1203,32 @@ def task_schedules(
         resources, note_source = candidate_resources(task, team_resources)
         days = set(open_days_between(start, finish, closed_days))
         available = [resource for resource in resources if not (days & occupied.get(resource, set()))]
+        if not available and explicit_executor(task, team_resources):
+            # An executor is a preference for a forecast, not a reservation in
+            # another scenario. Completed tasks never enter this forecast loop.
+            available = [resource for resource in team_resources.get("QA", [])
+                         if not (days & occupied.get(resource, set()))]
+            if available:
+                note_source = f"forecast fallback from {task.executor}"
+        target_start, target_finish = start, finish
         if resources and not available:
-            raise ValueError(f"{task.task_id}: нет свободного QA-ресурса для обязательного окна {start}..{finish}")
-        resource = min(available, key=lambda r: (len(occupied.get(r, set())), r)) if available else ""
+            slots = []
+            for candidate in team_resources.get("QA", []) or resources:
+                try:
+                    first, last = find_resource_slot(occupied, candidate, start, duration, closed_days)
+                except ValueError:
+                    continue
+                slots.append((last, first, candidate != explicit_executor(task, team_resources),
+                              len(occupied.get(candidate, set())), candidate))
+            if not slots:
+                raise ValueError(f"{task.task_id}: нет свободного QA-ресурса после {start}")
+            finish, start, _, _, resource = min(slots)
+            note_source = f"forecast capacity from {task.executor or 'QA'}"
+        else:
+            resource = min(available, key=lambda r: (len(occupied.get(r, set())), r)) if available else ""
         note = f"Прогноз QA: последняя задача {max(finishes)} + 3 рабочих дня; длительность {duration} рабочих дней"
+        if (start, finish) != (target_start, target_finish):
+            note += f"; исходное окно {target_start}..{target_finish} сдвинуто по доступности QA на {start}..{finish}"
         if task.actual_start:
             note += f"; фактическое начало в источнике {task.actual_start} сохранено"
         if note_source:
