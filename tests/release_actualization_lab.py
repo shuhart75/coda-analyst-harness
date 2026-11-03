@@ -87,6 +87,8 @@ def create(destination, *, raw_history=False):
                    'planning/2026-Q3/gantt/actual-progress-confluence.puml',
                    'planning/2026-Q3/gantt/actual-progress-focus.puml',
                    'planning/2026-Q3/gantt/actual-progress-focus-confluence.puml',
+                   'planning/2026-Q3/gantt/actual-progress-estimates-only.puml',
+                   'planning/2026-Q3/gantt/actual-progress-estimates-only-confluence.puml',
                    'planning/2026-Q3/gantt/includes/actual-progress/FEATURE-registry.puml',
                    'planning/2026-Q3/gantt/includes/actual-progress/FEATURE-other.puml'}
         project_files = fixture.snapshot(fixture.project)

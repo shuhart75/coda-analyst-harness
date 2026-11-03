@@ -1545,7 +1545,8 @@ def render_feature(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str] | None = None) -> dict[Path, str]:
+def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str] | None = None,
+                    *, estimates_only: bool = False) -> dict[Path, str]:
     project_root = project_root.resolve()
     if not re.fullmatch(r"\d{4}-Q[1-4]", quarter_id):
         raise ValueError("Неверный идентификатор квартала")
@@ -1636,6 +1637,9 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
 
     if layout and set(feature_slugs) != set(layout.execution_features):
         raise ValueError("Состав задач не совпадает с подтверждённым описанием диаграммы")
+    coefficients = load_resource_coefficients(project_root)
+    if estimates_only:
+        coefficients = dict.fromkeys(coefficients, 1.0)
     scoped_schedules = task_schedules(
         scoped_tasks,
         closed_days,
@@ -1643,7 +1647,7 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
         team_resources,
         resource_closed_days,
         layout.priorities if layout else None,
-        load_resource_coefficients(project_root),
+        coefficients,
     )
 
     outputs: dict[Path, str] = {}
