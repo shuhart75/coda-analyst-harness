@@ -49,9 +49,6 @@ class UncertainScheduleTests(unittest.TestCase):
         other = self.task("QA", "planned", 0)
         other.task_id = "OTHER/QA"
         tasks = {"feature/" + task.task_id: task for task in (frontend, qa, other)}
-        with self.assertRaisesRegex(ValueError, "нет свободного QA"):
-            OVERLAY.task_schedules(tasks, set(), date(2026, 9, 11), OVERLAY.DEFAULT_TEAM_RESOURCES)
-        other.executor = "TBD_Q"
         schedule = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 11), OVERLAY.DEFAULT_TEAM_RESOURCES)
         self.assertEqual(schedule["feature/WORK/QA"].finish, date(2026, 9, 17))
         self.assertEqual(schedule["feature/WORK/QA"].finish, schedule["feature/OTHER/QA"].finish)

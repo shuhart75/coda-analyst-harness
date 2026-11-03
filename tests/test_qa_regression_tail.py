@@ -73,10 +73,41 @@ class QaRegressionTailTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'неизвестно окончание'):
             self.schedule({'b': dev, 'q': task('q', 'QA', 3, '', 'Q1')})
 
-    def test_unavailable_resource_does_not_silently_shift_strict_end(self):
-        with self.assertRaisesRegex(ValueError, 'нет свободного QA'):
-            self.schedule({'b': self.done('b', '2026-10-23'), 'q': task('q', 'QA', 3, '', 'Q1')},
-                          unavailable={'Q1': {date(2026, 10, 28)}})
+    def test_busy_qa_moves_to_next_available_window(self):
+        qa = task('q', 'QA', 3, '', 'Q1')
+        unavailable = {'Q1': {date(2026, 10, 28)}, 'Q2': {date(2026, 10, 28)}}
+        result = self.schedule({'b': self.done('b', '2026-10-23'), 'q': qa},
+                               unavailable=unavailable)['q']
+        self.assertEqual(result.start, date(2026, 10, 29))
+        self.assertEqual(result.finish, date(2026, 11, 2))
+        self.assertIn('сдвинуто по доступности QA', result.resource_note)
+        self.assertEqual(qa.executor, 'Q1')
+
+    def test_fully_unavailable_team_still_blocks(self):
+        with patch.object(tool, 'find_resource_slot', side_effect=ValueError('no slot')):
+            with self.assertRaisesRegex(ValueError, 'нет свободного QA'):
+                self.schedule({'b': self.done('b', '2026-10-23'), 'q': task('q', 'QA', 3, '', 'Q1')},
+                              unavailable={'Q1': {date(2026, 10, 28)}, 'Q2': {date(2026, 10, 28)}})
+
+    def test_forecast_falls_back_to_free_qa_without_changing_source(self):
+        qa = task('q', 'QA', 3, '', 'Q1')
+        result = self.schedule({'b': self.done('b', '2026-10-23'), 'q': qa},
+                               unavailable={'Q1': {date(2026, 10, 28)}})['q']
+        self.assertEqual(result.assignee, 'Q2')
+        self.assertEqual(result.finish, date(2026, 10, 28))
+        self.assertEqual(qa.executor, 'Q1')
+
+    def test_scenarios_allocate_same_work_independently(self):
+        tasks = {'b': task('b', 'BE', 3, '', 'B1'), 'q': task('q', 'QA', 3, '', 'Q1')}
+        unavailable = {'Q1': {date(2026, 11, 3)}}
+        scaled = self.schedule(tasks, coefficients={'B1': .5}, unavailable=unavailable)
+        unscaled = self.schedule(tasks, coefficients={'B1': 1}, unavailable=unavailable)
+        self.assertEqual(scaled['q'].assignee, 'Q1')
+        self.assertEqual(unscaled['q'].assignee, 'Q2')
+        self.assertEqual(scaled, self.schedule(tasks, coefficients={'B1': .5}, unavailable=unavailable))
+        self.assertEqual(unscaled, self.schedule(tasks, coefficients={'B1': 1}, unavailable=unavailable))
+        self.assertEqual(set(scaled), set(unscaled))
+        self.assertEqual(tasks['q'].executor, 'Q1')
 
     def test_created_work_uses_coefficient_without_inventing_progress(self):
         dev = replace(task('b', 'BE', 3, '', 'B1'), status='created', progress=None)

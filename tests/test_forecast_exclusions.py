@@ -83,6 +83,8 @@ class ForecastExclusionTests(unittest.TestCase):
         self.assertEqual(set(after) - set(before), {
             'planning/2026-Q3/gantt/actual-progress-focus.puml',
             'planning/2026-Q3/gantt/actual-progress-focus-confluence.puml',
+            'planning/2026-Q3/gantt/actual-progress-estimates-only.puml',
+            'planning/2026-Q3/gantt/actual-progress-estimates-only-confluence.puml',
         })
         self.assertTrue(set(before) <= set(after))
         view = (self.gantt / "actual-progress.puml").read_text()
@@ -341,6 +343,8 @@ class ForecastExclusionTests(unittest.TestCase):
         self.assertEqual(set(after) - set(before), {
             'planning/2026-Q3/gantt/actual-progress-focus.puml',
             'planning/2026-Q3/gantt/actual-progress-focus-confluence.puml',
+            'planning/2026-Q3/gantt/actual-progress-estimates-only.puml',
+            'planning/2026-Q3/gantt/actual-progress-estimates-only-confluence.puml',
         })
         self.assertTrue(set(before) <= set(after))
         self.assertEqual({path for path in before if before[path] != after[path]}, {

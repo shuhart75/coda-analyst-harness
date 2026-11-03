@@ -244,10 +244,11 @@ def load_tool(name: str):
     return module
 
 
-def sync_actual_progress_overlays(gantt_dir: Path, overlay) -> dict[Path, str]:
+def sync_actual_progress_overlays(gantt_dir: Path, overlay, *, estimates_only: bool = False) -> dict[Path, str]:
     layout = load_layout(gantt_dir)
     if layout:
-        return overlay.prepare_outputs(project_root(gantt_dir), gantt_dir.parent.name, layout.execution_features)
+        return overlay.prepare_outputs(project_root(gantt_dir), gantt_dir.parent.name, layout.execution_features,
+                                       estimates_only=estimates_only)
     feature_slugs = sorted(
         {
             feature_slug(path)
@@ -255,7 +256,35 @@ def sync_actual_progress_overlays(gantt_dir: Path, overlay) -> dict[Path, str]:
             for path in (gantt_dir / "includes" / view).glob("FEATURE-*.puml")
         }
     )
-    return overlay.prepare_outputs(project_root(gantt_dir), gantt_dir.parent.name, feature_slugs or None)
+    return overlay.prepare_outputs(project_root(gantt_dir), gantt_dir.parent.name, feature_slugs or None,
+                                   estimates_only=estimates_only)
+
+
+def prepare_estimates_only(gantt_dir: Path, overlay, outputs: dict[Path, str]) -> None:
+    """Expand the same full view using independently scheduled unit coefficients.
+
+    Keep alternate overlays in memory: canonical includes must retain their
+    productivity forecast. Preserved forecasts remain byte-for-byte sources.
+    """
+    alternate = {**outputs, **sync_actual_progress_overlays(gantt_dir, overlay, estimates_only=True)}
+    source = gantt_dir / 'actual-progress.puml'
+    expander = load_tool('expand-plantuml-includes')
+    content = '\n'.join(expander.expand_file(source, [], alternate)).rstrip() + '\n'
+    content = re.sub(r'^title .*$',
+                     f'title Реальный прогресс: прогноз по оценкам задач - {gantt_dir.parent.name}',
+                     content, count=1, flags=re.MULTILINE)
+    content = content.replace('end legend',
+        'Прогноз задач рассчитан без поправки на производительность (коэффициент 1).\n'
+        'Календарь, зависимости и загрузка учитываются. Сохранённые прогнозные блоки не пересчитаны.\n'
+        'end legend')
+    from gantt_releases import milestone_overrides, rename_milestones
+    overrides = milestone_overrides(gantt_dir)
+    if overrides:
+        content = rename_milestones(content, overrides, set())
+    target = gantt_dir / 'actual-progress-estimates-only.puml'
+    outputs[target] = content
+    outputs[gantt_dir / 'actual-progress-estimates-only-confluence.puml'] = (
+        '\n'.join(expander.expand_file(target, [], outputs)).rstrip() + '\n')
 
 
 def sync_confluence_export(gantt_dir: Path, contents: dict[Path, str]) -> None:
@@ -373,6 +402,7 @@ def main() -> int:
         target = gantt_dir / f"{slug}.puml"
         outputs[target] = "\n".join(lines).rstrip() + "\n"
 
+    prepare_estimates_only(gantt_dir, overlay, outputs)
     from gantt_releases import milestone_overrides, rename_milestones
     overrides = milestone_overrides(gantt_dir)
     if overrides:
