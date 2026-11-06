@@ -55,7 +55,7 @@ def validate_task(value, expected_kind=None):
     return value
 
 
-def work_keys(path, read, expected_kind=None):
+def work_keys(path, read, expected_kind=None, expected_owner_type=None):
     """Explicit path ownership for shared baseline/context and other work."""
     raw = read(WORK_BINDINGS)
     registry = json.loads(raw) if raw else {}
@@ -76,6 +76,8 @@ def work_keys(path, read, expected_kind=None):
     result = set()
     for task_id in ids:
         task = validate_task(registry.get('tasks', {}).get(task_id), expected_kind)
+        if expected_owner_type and task['owner']['type'] != expected_owner_type:
+            raise ValueError('Работа внутри поставки должна использовать эпик поставки, не квартальный')
         if path.startswith(('baseline/', 'releases/')) and task['kind'] != 'baseline':
             raise ValueError('Для baseline и закрытия релиза нужна задача [BASELINE]')
         if path.startswith('context/') and task['kind'] != 'context':

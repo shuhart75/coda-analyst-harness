@@ -192,6 +192,15 @@ class TaskResolutionTests(unittest.TestCase):
             self.assertEqual(len(state['attempts']), 1)
             self.assertEqual(len(state['evidence']), 2)
 
+    def test_delivery_context_cannot_be_redirected_to_quarter_epic(self):
+        files = {'features/demo/context/analysis-task.json': json.dumps(task_binding(kind='context'))}
+        with self.assertRaisesRegex(ValueError, 'эпик поставки'):
+            keys_for_paths(['features/demo/context/overview.md'], files.get)
+        bound = task_binding(kind='context')
+        bound['owner'] = {'type': 'delivery', 'id': 'demo'}
+        files['features/demo/context/analysis-task.json'] = json.dumps(bound)
+        self.assertEqual(keys_for_paths(['features/demo/context/overview.md'], files.get), {'RSCON-123'})
+
     def test_response_archive_is_verbatim(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -111,7 +111,8 @@ def keys_for_paths(paths, read) -> set[str]:
         from commit_tasks import work_keys
         work_kind = ('baseline' if path.startswith(('baseline/', 'releases/')) or relative.startswith('baseline/')
                      else 'context' if path.startswith('context/') or relative.startswith('context/') else None)
-        explicit = work_keys(path, read, work_kind or ('delivery' if matched or legacy_owner else None))
+        explicit = work_keys(path, read, work_kind or ('delivery' if matched or legacy_owner else None),
+                             'delivery' if matched or legacy_owner else None)
         if explicit is not None:
             work_task_keys.update(explicit)
             continue
@@ -122,7 +123,10 @@ def keys_for_paths(paths, read) -> set[str]:
             if not raw:
                 raise ValueError('Укажи поставку (поставки) или квартал для ' + path +
                                  '; найди или создай задачу [' + work_kind.upper() + '] в эпике владельца по core/commit-task-resolution.md')
-            work_task_keys.add(validate_binding(json.loads(raw), work_kind)['key'])
+            binding = validate_binding(json.loads(raw), work_kind)
+            if owner_root and binding['owner']['type'] != 'delivery':
+                raise ValueError('Работа внутри поставки должна использовать эпик поставки, не квартальный')
+            work_task_keys.add(binding['key'])
             continue
         if index:
             for root in roots:
