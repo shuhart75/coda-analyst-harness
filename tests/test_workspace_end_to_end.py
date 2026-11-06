@@ -305,6 +305,14 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
                     if path.is_file():
                         shared[path.relative_to(analytics).as_posix()] = '2026-Q3'
             write_planning_binding(analytics, shared=shared)
+            # Planning must reuse the quarter epic already confirmed by context.
+            context_binding = json.loads((analytics / 'context/analysis-task.json').read_text())
+            registry_path = analytics / 'planning/task-bindings.json'
+            registry = json.loads(registry_path.read_text())
+            quarter = context_binding['owner']['id']
+            registry['epics'][quarter]['key'] = context_binding['epic']
+            registry['quarters'][quarter]['epic'] = context_binding['epic']
+            registry_path.write_text(json.dumps(registry))
             self.assertEqual(
                 run(
                     "git", "add", "--", "features/from-root", "features/from-analytics", "planning/task-bindings.json", cwd=analytics
@@ -354,10 +362,8 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
             reduced_relative = "context/reduced-workspace.md"
             (analytics / reduced_relative).write_text("работа только в аналитическом репозитории\n", encoding="utf-8")
             self.assertEqual(run("git", "add", "--", reduced_relative, cwd=analytics).returncode, 0)
-            self.assertEqual(
-                run("git", "commit", "-m", "RSCON-123: work without source and code", cwd=analytics).returncode,
-                0,
-            )
+            committed = run("git", "commit", "-m", "RSCON-123: work without source and code", cwd=analytics)
+            self.assertEqual(committed.returncode, 0, committed.stdout + committed.stderr)
             review_branch = "feature/reduced-workspace"
             self.assertEqual(run("git", "push", "origin", f"HEAD:refs/heads/{review_branch}", cwd=analytics).returncode, 0)
             self.assertEqual(run("git", "fetch", "origin", review_branch, cwd=documents_work).returncode, 0)
