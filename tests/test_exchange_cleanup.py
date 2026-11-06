@@ -22,6 +22,8 @@ class ExchangeCleanupTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        from analysis_task_fixture import write_binding
+        write_binding(self.root / "features/delivery-one")
         self.code = self.root / "ordinary-code"
         self.remote = self.root / "remote.git"
         self.git(self.root, "init", "--bare", str(self.remote))
@@ -111,7 +113,7 @@ class ExchangeCleanupTests(unittest.TestCase):
         branch = "codex/cleanup-exchange-" + cleanup.digest(self.record)[:24]
         self.git(self.code, "switch", "-c", branch)
         self.git(self.code, "rm", "-r", "requirements-exchange/delivery-one", "unrelated.txt")
-        self.git(self.code, "-c", "user.name=Analyst Requirements Exchange", "-c", "user.email=analyst-harness@local.invalid", "commit", "-m", cleanup.MESSAGE)
+        self.git(self.code, "-c", "user.name=Analyst Requirements Exchange", "-c", "user.email=analyst-harness@local.invalid", "commit", "-m", "RSCON-123: " + cleanup.MESSAGE)
         self.git(self.code, "push", "origin", branch)
         with self.assertRaisesRegex(ValueError, "за границами"):
             self.publish()
@@ -123,7 +125,7 @@ class ExchangeCleanupTests(unittest.TestCase):
         self.git(self.code, "add", "unrelated.txt")
         self.git(self.code, "commit", "-m", "Change unrelated behavior")
         self.git(self.code, "rm", "-r", "requirements-exchange/delivery-one")
-        self.git(self.code, "-c", "user.name=Analyst Requirements Exchange", "-c", "user.email=analyst-harness@local.invalid", "commit", "-m", cleanup.MESSAGE)
+        self.git(self.code, "-c", "user.name=Analyst Requirements Exchange", "-c", "user.email=analyst-harness@local.invalid", "commit", "-m", "RSCON-123: " + cleanup.MESSAGE)
         self.git(self.code, "push", "origin", branch)
         with self.assertRaisesRegex(ValueError, "не принят в целевую ветку"):
             self.publish()

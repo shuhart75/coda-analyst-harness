@@ -110,6 +110,9 @@ def target_contains(api, clone, operation):
 
 
 def publish(api, project, feature, state_path, operation_path, operation, before, code_root):
+    snapshot_manifest = api.load_json(Path(operation["checkout"]) / api.EXCHANGE_DIR / feature / "manifest.json")
+    if snapshot_manifest.get("analysis_task") != api.delivery_analysis_task(project, feature):
+        raise ValueError("Задача на аналитику отличается от подготовленной передачи; требуется отдельное решение")
     clone = Path(operation['checkout'])
     entry = operation['entry']
     packet = clone / api.EXCHANGE_DIR / feature
@@ -167,6 +170,7 @@ def publish(api, project, feature, state_path, operation_path, operation, before
         publication_confirmed=merged, local_code_worktree_unchanged=True,
         operation=str(operation_path), replaced_candidates=operation['replaced_candidates'],
         merge_request_created=False, merge_request_create_url=operation.get('merge_request_create_url'),
+        merge_request_title='Передать требования по решению аналитика',
         next_action='receiver-import' if merged else 'human-merge-then-repeat-same-command')
 
 
@@ -175,6 +179,7 @@ def command(api, args):
         raise ValueError('Нужно явное решение аналитика и его формулировка --reason')
     project = Path(args.project).expanduser().resolve()
     feature = args.feature
+    api.delivery_analysis_task(project, feature)
     api.validate_feature(feature)
     feature_root = api.layout_feature_root(project, feature)
     state_path = feature_root / 'requirements-state.json'
@@ -212,6 +217,7 @@ def command(api, args):
 
 def prepare(api, args, project, feature_root, state, data, descriptor, materials, analyst, stage, before, target, area):
     feature = args.feature
+    api.delivery_analysis_task(project, feature)
     clone = area / ('checkout-' + uuid.uuid4().hex[:12])
     result = subprocess.run(['git', 'clone', '--quiet', '--single-branch', '--branch', target,
                              before['remote'], str(clone)], capture_output=True, text=True)
@@ -289,6 +295,7 @@ def prepare(api, args, project, feature_root, state, data, descriptor, materials
     manifest.pop('publication', None)
     manifest.setdefault('replaced_candidates', []).extend(replaced)
     api.install_root_contract(exchange)
+    manifest["analysis_task"] = api.delivery_analysis_task(project, feature)
     api.save_json(manifest_path, manifest)
     branch = 'requirements/decision/' + uuid.uuid4().hex[:20]
     checked_git(api, clone, 'switch', '--quiet', '-c', branch)
@@ -305,7 +312,7 @@ def prepare(api, args, project, feature_root, state, data, descriptor, materials
     staged = api.git_paths(clone, 'diff', '--cached', '--name-only', '-z')
     if any(not name.startswith(api.EXCHANGE_DIR + '/') for name in staged):
         raise ValueError('Индекс вышел за requirements-exchange')
-    message = 'Передать требования по решению аналитика'
+    message = api.delivery_message(project, [feature], 'Передать требования по решению аналитика')
     api.require_valid_commit_message(message)
     checked_git(api, clone, 'commit', '--quiet', '-m', message)
     return dict(schema_version=1, feature=feature, checkout=str(clone), entry=entry,

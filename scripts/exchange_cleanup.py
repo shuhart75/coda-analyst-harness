@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 
 from baseline_releases import digest
-from commit_message_policy import require_valid_commit_message
+from commit_message_policy import require_valid_commit_message, delivery_message
 from workspace import install_commit_message_hook
 
 MESSAGE = "Убрать архивированную передачу требований из рабочего каталога"
@@ -53,7 +53,7 @@ def _package_hash(root, commit, package):
     return digest(files)
 
 
-def _validate_request(root, commit, source_commit, target_commit, package, archive_hash):
+def _validate_request(root, commit, source_commit, target_commit, package, archive_hash, message):
     parents = _value(root, "rev-list", "--parents", "-n", "1", commit).split()
     if len(parents) != 2:
         raise ValueError("Ветка очистки должна содержать обычный коммит удаления")
@@ -62,7 +62,7 @@ def _validate_request(root, commit, source_commit, target_commit, package, archi
         raise ValueError("Ветка очистки не продолжает архивированный источник")
     if _git(root, "merge-base", "--is-ancestor", parent, target_commit, check=False).returncode:
         raise ValueError("Родитель коммита очистки не принят в целевую ветку")
-    if _value(root, "show", "-s", "--format=%B", commit) != MESSAGE or _value(root, "show", "-s", "--format=%an <%ae>", commit) != AUTHOR:
+    if _value(root, "show", "-s", "--format=%B", commit) != message or _value(root, "show", "-s", "--format=%an <%ae>", commit) != AUTHOR:
         raise ValueError("Обнаружена сторонняя ветка очистки")
     if _package_hash(root, parent, package) != archive_hash or _package_hash(root, commit, package) is not None:
         raise ValueError("Ветка очистки не соответствует точному архиву")
@@ -75,6 +75,7 @@ def _validate_request(root, commit, source_commit, target_commit, package, archi
 def publish_cleanup(project: Path, release_id: str, delivery_key: str) -> dict:
     from release_exchange import require_accepted_archive
 
+    message = delivery_message(project, [delivery_key], MESSAGE)
     record = require_accepted_archive(project, release_id, delivery_key)
     source = record["source"]
     if source.get("role") != "code":
@@ -99,7 +100,7 @@ def publish_cleanup(project: Path, release_id: str, delivery_key: str) -> dict:
 
     def response(status, commit):
         return {"status": status, "repository_url": repository, "target_branch": target,
-                "request_branch": branch, "request_commit": commit, "merge_request_created": False}
+                "request_branch": branch, "request_commit": commit, "merge_request_created": False, "merge_request_title": "Удалить архивные пакеты требований"}
 
     def recheck():
         current = require_accepted_archive(project, release_id, delivery_key)
@@ -120,7 +121,7 @@ def publish_cleanup(project: Path, release_id: str, delivery_key: str) -> dict:
             _git(clone, "fetch", "--quiet", "origin", ref)
             if _value(clone, "rev-parse", "FETCH_HEAD") != commit:
                 raise ValueError("Ветка очистки изменилась во время проверки")
-            _validate_request(clone, commit, source_commit, target_commit, package, archive_hash)
+            _validate_request(clone, commit, source_commit, target_commit, package, archive_hash, message)
         current_hash = _package_hash(clone, target_commit, package)
         if current_hash is None:
             if commit and not _git(clone, "merge-base", "--is-ancestor", commit, target_commit, check=False).returncode:
@@ -137,14 +138,14 @@ def publish_cleanup(project: Path, release_id: str, delivery_key: str) -> dict:
         _git(clone, "switch", "--quiet", "-c", branch)
         _git(clone, "read-tree", "HEAD")
         _git(clone, "rm", "--cached", "-r", "--", package)
-        require_valid_commit_message(MESSAGE)
+        require_valid_commit_message(message)
         hook = Path(_value(clone, "rev-parse", "--path-format=absolute", "--git-path", "hooks/commit-msg"))
         if not hook.resolve().is_relative_to(clone.resolve()):
             raise ValueError("commit-msg hook должен находиться внутри временного клона")
         install_commit_message_hook(clone, Path(__file__).resolve().with_name("commit_message_policy.py"))
-        _git(clone, "-c", "user.name=Analyst Requirements Exchange", "-c", "user.email=analyst-harness@local.invalid", "commit", "--quiet", "-m", MESSAGE)
+        _git(clone, "-c", "user.name=Analyst Requirements Exchange", "-c", "user.email=analyst-harness@local.invalid", "commit", "--quiet", "-m", message)
         commit = _value(clone, "rev-parse", "HEAD")
-        _validate_request(clone, commit, source_commit, target_commit, package, archive_hash)
+        _validate_request(clone, commit, source_commit, target_commit, package, archive_hash, message)
         recheck()
         # Check the live target once more before publication; never push its ref.
         live_target = _git(clone, "ls-remote", "--heads", "origin", "refs/heads/" + target).stdout.decode().split()

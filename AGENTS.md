@@ -349,3 +349,14 @@ record-change, аудитов и отмены прежнего кандидат�
 - For product overviews, presentations and ontology updates, follow `core/ontology.md`; read the project ontology index and a bounded topic bundle before opening primary sources.
 - Maintain future directions under `planning/roadmap/` by `core/roadmap.md`. A prototype decision is not a release, approved budget or committed date. Keep deferred/cancelled/replaced plans and decision history explicit.
 - After requirements, prototype or release changes, review affected ontology cards and sources. Never refresh hashes in place of substantive review or promote baseline through a summary update.
+
+## Связь коммитов с задачами
+
+- Правило привязки к SberTrack применяется к аналитическому проекту и его передачам в разработку. Отдельный Git-репозиторий обвязки (HARNESS_ROOT) и его worktree исключены: для их коммитов и PR задача не требуется. Каждая поставка обязательно связана с подтверждённой задачей SberTrack на аналитику (роль AN). Следуй `core/analysis-task-traceability.md`: храни связь в `analysis-task.json` выбранной поставки, включай её ключ в заголовок каждого коммита, включая автоматически созданные, merge и squash. Для нескольких поставок укажи все их ключи. Сохраняй смысловое описание изменения. Без подтверждённой связи останови сохранение и публикацию и запроси задачу; не подставляй BE/FE/QA или выдуманный номер. Проверяй сообщение до индексирования и сохраняй managed `commit-msg` hook; обход hook запрещён, сторонний hook bootstrap не перезаписывает. Планирование имеет одну подтверждённую задачу SberTrack на весь квартал, зарегистрированную в `planning/task-bindings.json`; её ключ обязателен в коммитах планирования. Перед коммитом при отсутствии связи поставки или квартального планирования запроси соответствующую задачу у аналитика и дождись ответа. Без связи коммит запрещён; для смешанного изменения нужны все соответствующие ключи.
+
+PR/MR связывается со всеми задачами из его коммитов. Ключи в заголовке и описании PR необязательны; используй смысловой заголовок.
+
+При «синкани репы» следуй `core/repository-exchange.md`: source-импорт также требует
+подтверждённых задач поставок и квартального планирования. Переноси согласованные
+связи из source; при `awaiting-analysis-task` задай `next_question` аналитику на Mac,
+сохрани его ответ для текущего импорта и повтори sync. До ответа не коммить и не push.

@@ -79,8 +79,16 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         self.inputs.mkdir()
         self.rows = {}
         self.prepare_sources()
+        from analysis_task_fixture import write_binding, write_planning_binding
+        shared = {'planning/team.md': '2026-Q3'}
+        for feature in (self.project / 'features').iterdir():
+            if feature.is_dir():
+                write_binding(feature)
+                for path in (feature / 'planning').glob('*.md'):
+                    shared[path.relative_to(self.project).as_posix()] = '2026-Q3'
+        write_planning_binding(self.project, ('2026-Q3', '2026-Q4'), shared=shared)
         self.git(self.project, 'add', '--', 'features', 'planning')
-        self.git(self.project, 'commit', '-m', 'Prepare offline release scenario')
+        self.git(self.project, 'commit', '-m', 'RSCON-123: Prepare offline release scenario')
         self.initial_head = self.git(self.project, 'rev-parse', 'HEAD')
         self.initial_main = self.git(self.remote, 'rev-parse', 'main')
         self.write(self.state / 'tracker-config.json', {

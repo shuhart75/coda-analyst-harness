@@ -25,7 +25,7 @@ class ExecutionCreationTests(unittest.TestCase):
         self.change('features/README.md','# Features\n\n[Registry](registry/README.md)\n')
         self.change('quarters/2026-Q3/plan-state.md','Status: draft\n')
         self.git(self.project,'add','--','features','planning','quarters','delivery-index.json')
-        self.git(self.project,'commit','-m','Prepare accepted quarter layout')
+        self.git(self.project,'commit','-m','RSCON-123: Prepare accepted quarter layout')
         self.initial_head=self.git(self.project,'rev-parse','HEAD')
         self.index=index
         self.scope('registry')  # Existing early registration must be recoverable.
@@ -33,6 +33,8 @@ class ExecutionCreationTests(unittest.TestCase):
             path=f'quarters/2026-Q3/features/{key}/deliveries/first'
             self.index['deliveries'][key]={'feature_id':key,'delivery_id':'first','quarter':'2026-Q3','path':path}
             self.change(path+'/README.md','# Delivery\n')
+            from analysis_task_fixture import write_binding
+            write_binding(self.project / path)
             self.change(path+'/execution/tasks.md','\n'.join([HEADER,SEPARATOR,
                 '| TASK/BE | TRACK-1 | Work | real | BE | 1 | B1 | 2026-09-01 | 2026-09-01 | | | planned | 0 | STORY-ONE |','']))
             for name in ('README.md','deliveries.md','requirements.md','backlog.md'):
@@ -61,7 +63,7 @@ class ExecutionCreationTests(unittest.TestCase):
         for path in ('delivery-index.json','features/README.md','features/alpha/requirements.md',
                      'features/beta/backlog.md','quarters/2026-Q3/gantt/quarter-plan-confluence.puml'):
             self.assertIn(path,paths)
-        command=preview['save_command'];command[command.index('--message')+1]='Save two deliveries and execution'
+        command=preview['save_command'];command[command.index('--message')+1]='RSCON-123: Save two deliveries and execution'
         result=test_collaboration.run(*command,env=self.environment)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertEqual(self.git(self.project,'status','--porcelain'),'')

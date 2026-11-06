@@ -13,7 +13,7 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from commit_message_policy import require_valid_commit_message
+from commit_message_policy import require_valid_commit_message, keys_for_paths, staged_keys, validate_binding, delivery_analysis_task, git_output
 from collaboration import load_state as load_collaboration_state, merge_request_create_url
 from workspace import install_commit_message_hook
 
@@ -863,9 +863,86 @@ def roundtrip_candidate(documents: Path, candidate: str, target: str, proof: dic
     )
 
 
-def connect_roundtrip_history(checkout: Path, branch: str, proof: dict) -> None:
+def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
+    """Read carried bindings and explicit receiver decisions before any commit."""
+    incoming = state["source_commit"]
+    base = state["base_commit"]
+    decision_path = checkout.parent / "task-decisions.json"
+    decisions = {}
+    if decision_path.exists():
+        decisions = json.loads(decision_path.read_text(encoding="utf-8"))
+        if decisions.get("source_commit") != incoming or decisions.get("base_commit") != base:
+            raise ValueError("Решение о задачах относится к другой версии импорта")
+    files = decisions.get("files", {})
+    if not isinstance(files, dict):
+        raise ValueError("Некорректные файлы связей импорта")
+    for path, value in files.items():
+        parts = Path(path).parts
+        if (not parts or Path(path).is_absolute() or ".." in parts or
+                not (path == "planning/task-bindings.json" or
+                     (parts[0] in {"features", "quarters"} and parts[-1] == "analysis-task.json"))):
+            raise ValueError("Решение импорта может содержать только файлы связей задач")
+        if path.endswith("analysis-task.json"):
+            validate_binding(value)
+        elif not isinstance(value, dict) or value.get("schema_version") != 1:
+            raise ValueError("Некорректный реестр квартальных связей")
+    common = git(checkout, "merge-base", "HEAD", incoming).stdout.strip()
+    if not common:
+        raise ValueError("Импорт не имеет общей истории с documents")
+    changed = git(checkout, "diff", "--name-only", "--no-renames", "-z", common, incoming)
+    if changed.returncode:
+        raise ValueError("Не удалось определить материалы импорта")
+    paths = [path for path in changed.stdout.split("\0") if path] + list(files)
+    def read(path):
+        if path in files:
+            return json.dumps(files[path], ensure_ascii=False)
+        # Source bindings travel with analytical materials. Target-only bindings
+        # remain available when an older source has not received them yet.
+        for revision in (incoming, "HEAD"):
+            result = git(checkout, "show", revision + ":" + path)
+            if not result.returncode:
+                return result.stdout
+        return None
+    keys = keys_for_paths(paths, read)
+    if not keys:
+        binding = decisions.get("analysis_task")
+        carried = read("context/analysis-task.json")
+        if binding is None and carried:
+            binding = json.loads(carried)
+        if binding is None:
+            raise ValueError("Какую задачу SberTrack на аналитику связать с общими изменениями этого импорта source?")
+        keys.add(validate_binding(binding)["key"])
+    return keys, files
+
+
+def pause_import_for_task(state_path: Path, state: dict, question: str) -> dict:
+    state.update({"status": "awaiting-analysis-task", "next_question": question,
+                  "message": question, "task_decisions_file": str(Path(state["checkout"]).parent / "task-decisions.json")})
+    atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
+    return dict(state)
+
+
+def commit_source_import(checkout: Path, keys: set[str], files: dict) -> None:
+    for path, value in files.items():
+        destination = checkout / path
+        if not destination.resolve().is_relative_to(checkout.resolve()):
+            raise ValueError("Файл связи выходит за пределы импорта")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if git(checkout, "add", "--", path).returncode:
+            raise ValueError("Не удалось подготовить файл связи " + path)
+    keys = keys | staged_keys(checkout)
+    message = ", ".join(sorted(keys)) + ": Предложить входящие аналитические изменения"
+    require_valid_commit_message(message, keys)
+    result = git(checkout, "-c", "user.name=Coda Analyst Harness", "-c", "user.email=coda-analyst-harness@local.invalid",
+                 "commit", "-m", message)
+    if result.returncode:
+        raise ValueError("Не удалось сохранить импорт: " + result.stderr.strip())
+
+
+def connect_roundtrip_history(checkout: Path, branch: str, proof: dict, keys: set[str]) -> None:
     before = git(checkout, "rev-parse", "HEAD^{tree}").stdout.strip()
-    message = "Связать историю подтверждённого возврата обратной заплаты"
+    message = ", ".join(sorted(keys)) + ": Связать историю подтверждённого возврата обратной заплаты"
     require_valid_commit_message(message)
     merge_args = ("-c", "user.name=Coda Analyst Harness", "-c", "user.email=coda-analyst-harness@local.invalid",
                   "merge", "--no-ff", "-m", message)
@@ -997,14 +1074,16 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     if not hook_path or not Path(hook_path).resolve().is_relative_to(checkout.resolve()):
         raise ValueError("commit-msg hook импорта должен находиться внутри изолированного клона")
     install_commit_message_hook(checkout, Path(__file__).with_name("commit_message_policy.py"))
-    if merge_head(checkout):
+    active_merge = merge_head(checkout)
+    if active_merge and (active_merge != incoming or analytics_origin_conflict_records(checkout)):
         raise ValueError(json.dumps({
             "status": "blocked", "reason": "source-analytics-merge-conflict",
             "message": "Разреши конфликт только в изолированной ветке импорта и создай смысловой merge-коммит, затем повтори sync.",
             "import_checkout": str(checkout), "request_branch": branch,
             "conflicts": analytics_origin_conflict_records(checkout),
         }, ensure_ascii=False))
-    require_clean(checkout, "Изолированный импорт")
+    if not active_merge:
+        require_clean(checkout, "Изолированный импорт")
     if branch in pending:
         fetched = git(checkout, "fetch", "--quiet", "origin", f"refs/heads/{branch}")
         if fetched.returncode or git(checkout, "rev-parse", "FETCH_HEAD").stdout.strip() != pending[branch]:
@@ -1014,21 +1093,30 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     fetched = git(checkout, "fetch", "--quiet", str(source), incoming)
     if fetched.returncode:
         raise ValueError("Исходный коммит незавершённого импорта недоступен")
+    task_keys, task_files = set(), {}
+    if active_merge or git(checkout, "merge-base", "--is-ancestor", incoming, "HEAD").returncode != 0:
+        try:
+            task_keys, task_files = import_task_context(checkout, state)
+        except ValueError as exc:
+            return pause_import_for_task(state_path, state, str(exc))
+    if active_merge:
+        try:
+            commit_source_import(checkout, task_keys, task_files)
+        except ValueError as exc:
+            return pause_import_for_task(state_path, state, str(exc))
     if git(checkout, "merge-base", "--is-ancestor", incoming, "HEAD").returncode != 0:
         if branch in pending or state.get("request_commit"):
             raise ValueError("Ветка импорта потеряла исходную историю; автоматическое повторное слияние source запрещено")
         for returned in git(checkout, "rev-list", incoming).stdout.splitlines():
             if returned in proofs and git(checkout, "merge-base", "--is-ancestor", returned, "HEAD").returncode:
-                connect_roundtrip_history(checkout, branch, proofs[returned])
+                connect_roundtrip_history(checkout, branch, proofs[returned], task_keys)
                 break
         snapshot = create_analytics_snapshot(
             root, documents, analytics_id, "source-analytics-merge", incoming,
             f"{SOURCE_REMOTE}/{BRANCH}", local_commit=state["base_commit"],
         )
-        message = "Предложить входящие аналитические изменения"
-        require_valid_commit_message(message)
         merged = git(checkout, "-c", "user.name=Coda Analyst Harness", "-c", "user.email=coda-analyst-harness@local.invalid",
-                     "merge", "--no-ff", incoming, "-m", message)
+                     "merge", "--no-ff", "--no-commit", incoming)
         if merged.returncode:
             conflicts = analytics_origin_conflict_records(checkout)
             snapshot = archive_snapshot_conflicts(root, snapshot, checkout, conflicts)
@@ -1041,8 +1129,27 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
                 "forbidden_alternatives": ["skip-source-merge", "overwrite-analytics-from-source"],
                 "detail": merged.stderr.strip(),
             }, ensure_ascii=False))
+        try:
+            commit_source_import(checkout, task_keys, task_files)
+        except ValueError as exc:
+            return pause_import_for_task(state_path, state, str(exc))
+    for field in ("next_question", "task_decisions_file", "message"):
+        state.pop(field, None)
     candidate = git(checkout, "rev-parse", "HEAD").stdout.strip()
     require_clean(checkout, "Изолированный импорт")
+    changed = git(checkout, "diff", "--name-only", "--no-renames", "-z", state["base_commit"], candidate)
+    if changed.returncode:
+        raise ValueError("Не удалось проверить задачи подготовленного импорта")
+    required = keys_for_paths(filter(None, changed.stdout.split("\0")),
+        lambda path: git_output(checkout, "show", candidate + ":" + path)
+        or git_output(checkout, "show", state["base_commit"] + ":" + path))
+    title = git(checkout, "log", "-1", "--format=%s").stdout.strip()
+    try:
+        require_valid_commit_message(title, required)
+    except ValueError as exc:
+        raise ValueError("Подготовленный импорт не содержит обязательных задач. "
+                         "Публикация остановлена; требуется решение аналитика о ветке, "
+                         "автоматическая перезапись истории запрещена. " + str(exc)) from exc
     require_nfc_paths(checkout, candidate, analytics_id)
     require_content_only(checkout, analytics_id)
     require_analytics_content_policy(root, source, checkout, incoming, candidate)
@@ -1083,6 +1190,7 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
     return {
         **state, "state_file": str(state_path), "merge_request_created": False,
+        "merge_request_title": "Предложить входящие аналитические изменения",
         "target_commit": target_commit, "source_has_newer_commit": source_commit != incoming,
         "target_changed_since_preparation": target_commit != state["base_commit"],
         "push_error": push_error, "merge_method": "merge-commit",
@@ -1365,7 +1473,20 @@ def update_feature_branch_command(args: argparse.Namespace) -> int:
         if operation == "feature-main-fast-forward":
             merged = git(analytics, "merge", "--ff-only", f"origin/{BRANCH}")
         else:
-            merge_message = f"Merge origin/{BRANCH} into {branch}"
+            state = load_collaboration_state(root)
+            work = state.get("active_work") or {}
+            if work.get("branch") != branch:
+                raise ValueError("Для слияния нужна активная поставка и её задача на аналитику")
+            changed = git(analytics, "diff", "--name-only", "--no-renames", "-z", local_commit, incoming_commit)
+            if changed.returncode:
+                raise ValueError("Не удалось проверить поставки входящих изменений")
+            keys = keys_for_paths(filter(None, changed.stdout.split("\0")),
+                lambda path: git_output(analytics, "show", incoming_commit + ":" + path)
+                or git_output(analytics, "show", local_commit + ":" + path))
+            if not keys:
+                deliveries = work.get("execution_scope", {}).get("features") or [work["feature"]]
+                keys = {delivery_analysis_task(analytics, item)["key"] for item in deliveries}
+            merge_message = ", ".join(sorted(keys)) + f": Merge origin/{BRANCH} into {branch}"
             require_valid_commit_message(merge_message)
             merged = git(
                 analytics,
@@ -1857,6 +1978,7 @@ def sync_command(args: argparse.Namespace) -> int:
                 "report_message": source_merge["message"],
                 "next_action": {
                     "awaiting-merge": "create-or-review-import-merge-request",
+                    "awaiting-analysis-task": "ask-analysis-task",
                     "deferred": "wait-for-source-revision",
                 }.get(source_merge["status"], "retry-import-push"),
                 "forbidden_claims": ["all-repositories-synchronized"],

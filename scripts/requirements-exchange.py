@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
 
-from commit_message_policy import require_valid_commit_message
+from commit_message_policy import require_valid_commit_message, delivery_analysis_task, delivery_message
 from workspace import install_commit_message_hook
 import delivery_stages as stages
 import sdd_audit
@@ -680,6 +680,7 @@ def prepare_in_exchange(
     requirements_text: str,
     analyst: str,
 ) -> dict[str, Any]:
+    analysis_task = delivery_analysis_task(project, feature)
     binding = require_exchange_delivery_binding(project, feature)
     approved_hash = require_confirmed_audit(project, feature, layout_feature_root(project, feature) / "requirements.md")
     if hashlib.sha256(requirements_bytes).hexdigest() != approved_hash:
@@ -804,6 +805,7 @@ def prepare_in_exchange(
         revisions[-1].update(sdd_input=sdd, returns_contract_version=2)
     if binding is not None:
         revisions[-1]["delivery_binding"] = binding
+    manifest["analysis_task"] = analysis_task
     save_json(manifest_path, manifest)
     validation = validate_manifest(manifest, feature_exchange)
     if validation:
@@ -930,6 +932,7 @@ def publish_to_code(
     analyst: str,
     target_branch: str | None = None,
 ) -> dict[str, Any]:
+    analysis_task = delivery_analysis_task(project, feature)
     binding = require_exchange_delivery_binding(project, feature)
     approved_hash = require_confirmed_audit(project, feature, layout_feature_root(project, feature) / "requirements.md")
     if hashlib.sha256(requirements_bytes).hexdigest() != approved_hash:
@@ -980,6 +983,8 @@ def publish_to_code(
             current = load_json(layout_feature_root(project, feature) / "requirements-state.json")
             stages.require_audit_stage(current, requirements_text)
             prepared_manifest = load_json(prepared["manifest_path"])
+            if not merged and prepared_manifest.get("analysis_task") != delivery_analysis_task(project, feature):
+                raise ValueError("Задача на аналитику изменилась после подготовки ветки; требуется отдельное решение о новой передаче")
             require_manifest_binding(project, feature, prepared_manifest)
             stages.require_manifest_history(current, prepared_manifest)
             prepared_entry = next(item for item in prepared_manifest["revisions"] if item["revision"] == prepared["revision"])
@@ -1009,6 +1014,7 @@ def publish_to_code(
                 "publication_confirmed": merged, "published_commit": target_commit if merged else None,
                 "request_commit": request_commit, "merge_request_created": False,
                 "merge_request_create_url": link.group(0) if link else None,
+                "merge_request_title": "Предложить редакцию требований для разработки",
                 "local_code_worktree_unchanged": True,
                 "publication_strategy": "review-branch", "target_branch_push_allowed": False,
                 "selection_reason": "Проверена целевая ветка" if merged else "Редакция предложена через отдельную ветку",
@@ -1159,7 +1165,7 @@ def publish_to_code(
                                            "identity_sha256": stages.checksum(identity), "request_branch": branch}
         save_json(prepared["manifest_path"], manifest)
         assert_exchange_only(clone)
-        message = "Предложить редакцию требований для разработки"
+        message = delivery_message(project, [feature], "Предложить редакцию требований для разработки")
         require_valid_commit_message(message)
         hook_path = git_value(clone, "rev-parse", "--path-format=absolute", "--git-path", "hooks/commit-msg")
         if not hook_path or not Path(hook_path).resolve().is_relative_to(clone.resolve()):
@@ -1187,6 +1193,7 @@ def prepare_command(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
     validate_feature(args.feature)
     require_exchange_delivery_binding(project, args.feature)
+    delivery_analysis_task(project, args.feature)
     feature_root = layout_feature_root(project, args.feature)
     requirements = feature_root / "requirements.md"
     if not requirements.is_file():
