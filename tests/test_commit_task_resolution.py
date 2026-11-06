@@ -201,6 +201,22 @@ class TaskResolutionTests(unittest.TestCase):
         files['features/demo/context/analysis-task.json'] = json.dumps(bound)
         self.assertEqual(keys_for_paths(['features/demo/context/overview.md'], files.get), {'RSCON-123'})
 
+    def test_baseline_and_context_use_same_epic_as_their_owner(self):
+        binding = task_binding(kind='context')
+        files = {'context/analysis-task.json': json.dumps(binding),
+                 'planning/task-bindings.json': json.dumps(dict(schema_version=1, quarters={},
+                     epics={'2026-Q3': dict(key='RSCON-901')}))}
+        with self.assertRaisesRegex(ValueError, 'том же эпике'):
+            keys_for_paths(['context/overview.md'], files.get)
+        binding['epic'] = 'RSCON-901'
+        files['context/analysis-task.json'] = json.dumps(binding)
+        self.assertEqual(keys_for_paths(['context/overview.md'], files.get), {'RSCON-123'})
+        binding['owner'] = {'type': 'delivery', 'id': 'demo'}
+        files = {'features/demo/analysis-task.json': json.dumps(task_binding()),
+                 'features/demo/context/analysis-task.json': json.dumps(binding)}
+        with self.assertRaisesRegex(ValueError, 'том же эпике'):
+            keys_for_paths(['features/demo/context/overview.md'], files.get)
+
     def test_response_archive_is_verbatim(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -108,7 +108,7 @@ def keys_for_paths(paths, read) -> set[str]:
                                  f'До разрешения задачи коммит запрещён; сохрани квартал в {PLANNING_BINDINGS}/shared_paths.')
             quarters.add(quarter)
             continue
-        from commit_tasks import work_keys
+        from commit_tasks import work_keys, require_owner_epic
         work_kind = ('baseline' if path.startswith(('baseline/', 'releases/')) or relative.startswith('baseline/')
                      else 'context' if path.startswith('context/') or relative.startswith('context/') else None)
         explicit = work_keys(path, read, work_kind or ('delivery' if matched or legacy_owner else None),
@@ -126,6 +126,7 @@ def keys_for_paths(paths, read) -> set[str]:
             binding = validate_binding(json.loads(raw), work_kind)
             if owner_root and binding['owner']['type'] != 'delivery':
                 raise ValueError('Работа внутри поставки должна использовать эпик поставки, не квартальный')
+            require_owner_epic(binding, read, owner_root)
             work_task_keys.add(binding['key'])
             continue
         if index:

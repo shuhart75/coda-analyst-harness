@@ -55,6 +55,27 @@ def validate_task(value, expected_kind=None):
     return value
 
 
+def require_owner_epic(task, read, delivery_root=None):
+    owner = task['owner']
+    expected = None
+    if owner['type'] == 'quarter':
+        raw = read('planning/task-bindings.json')
+        planning = json.loads(raw) if raw else {}
+        expected = (planning.get('epics', {}).get(owner['id'], {}).get('key')
+                    or planning.get('quarters', {}).get(owner['id'], {}).get('epic'))
+    else:
+        if delivery_root is None:
+            raw = read('delivery-index.json')
+            index = json.loads(raw) if raw else None
+            delivery_root = (index.get('deliveries', {}).get(owner['id'], {}).get('path')
+                             if index else 'features/' + owner['id'])
+        raw = read(delivery_root + '/analysis-task.json') if delivery_root else None
+        if raw:
+            expected = json.loads(raw).get('epic')
+    if expected and task['epic'] != expected:
+        raise ValueError('Задача должна находиться в том же эпике, что и её владелец')
+
+
 def work_keys(path, read, expected_kind=None, expected_owner_type=None):
     """Explicit path ownership for shared baseline/context and other work."""
     raw = read(WORK_BINDINGS)
@@ -76,6 +97,7 @@ def work_keys(path, read, expected_kind=None, expected_owner_type=None):
     result = set()
     for task_id in ids:
         task = validate_task(registry.get('tasks', {}).get(task_id), expected_kind)
+        require_owner_epic(task, read)
         if expected_owner_type and task['owner']['type'] != expected_owner_type:
             raise ValueError('Работа внутри поставки должна использовать эпик поставки, не квартальный')
         if path.startswith(('baseline/', 'releases/')) and task['kind'] != 'baseline':
