@@ -160,6 +160,8 @@ class QuarterDeliveryIntegrationTests(unittest.TestCase):
                     [target.relative_to(self.root).as_posix()], [], collaboration)
 
     def test_exchange_unaudited_delivery_fails_before_any_artifact_write(self):
+        from analysis_task_fixture import write_binding
+        write_binding(self.feature)
         before = {path.relative_to(self.root): path.read_bytes() for path in self.root.rglob('*')
                   if path.is_file() and '.git' not in path.parts}
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/requirements-exchange.py'),

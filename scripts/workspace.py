@@ -44,7 +44,7 @@ def install_commit_message_hook(repository: Path, policy_script: Path) -> Path:
     if configured.returncode == 0 and configured.stdout.strip() and HOOK_MARKER not in existing:
         raise ValueError(
             "Настроен несовместимый core.hooksPath; bootstrap остановлен, потому что "
-            "запрет идентификаторов трекеров в сообщениях коммитов нельзя гарантировать"
+            "проверку задач на аналитику в сообщениях коммитов нельзя гарантировать"
         )
     if existing and HOOK_MARKER not in existing:
         raise ValueError(
@@ -55,7 +55,7 @@ def install_commit_message_hook(repository: Path, policy_script: Path) -> Path:
     content = (
         "#!/bin/sh\n"
         f"# {HOOK_MARKER}\n"
-        f"exec python3 {shlex.quote(str(policy_script.resolve()))} \"$1\"\n"
+        f"exec python3 {shlex.quote(str(policy_script.resolve()))} \"$1\" --repository .\n"
     )
     temporary = hook.with_name(f".{hook.name}.analyst-harness.tmp")
     temporary.write_text(content, encoding="utf-8")

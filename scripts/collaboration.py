@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from commit_message_policy import require_valid_commit_message
+from commit_message_policy import require_valid_commit_message, delivery_analysis_task, delivery_message, working_keys
 
 
 BRANCH = "main"
@@ -507,7 +507,11 @@ def save_command(args: argparse.Namespace) -> int:
             "requested_paths": sorted(requested),
             "message": "Перечисли все и только изменённые пути относительно PROJECT_ROOT, без префикса documents/. Для актуализации используй save-preview; производный Гант сохраняется целиком.",
         }, ensure_ascii=False))
-    require_valid_commit_message(args.message)
+    deliveries = work.get("execution_scope", {}).get("features") or [work["feature"]]
+    required_keys = working_keys(analytics, requested)
+    if not required_keys:
+        required_keys = {delivery_analysis_task(analytics, key)["key"] for key in deliveries}
+    require_valid_commit_message(args.message, required_keys)
     from execution_collaboration import check_save, execution_mode
     if execution_mode(root) or work.get('execution_scope'):
         check_save(root, analytics, work, actual, args.review_file, sys.modules[__name__])
@@ -575,10 +579,17 @@ def submit_command(args: argparse.Namespace) -> int:
     state = load_state(root)
     work = require_active_work(root, analytics, state)
     require_clean(analytics)
+    deliveries = work.get("execution_scope", {}).get("features") or [work["feature"]]
     remote = fetch_main(analytics)
     local = head(analytics)
     if not is_ancestor(analytics, remote, local):
         raise ValueError("Рабочая ветка отстаёт от origin/main; сначала обнови рабочую ветку")
+    changed = git(analytics, "diff", "--name-only", "--no-renames", "-z", remote, local)
+    if changed.returncode:
+        raise ValueError("Не удалось проверить задачи для PR")
+    keys = working_keys(analytics, filter(None, changed.stdout.split("\0")))
+    review_title = "Обновить аналитические материалы"
+
     pushed = git(analytics, "push", "--set-upstream", "origin", f"HEAD:{work['branch']}")
     if pushed.returncode != 0:
         raise ValueError(f"Не удалось отправить рабочую ветку: {pushed.stderr.strip()}")
@@ -599,6 +610,7 @@ def submit_command(args: argparse.Namespace) -> int:
         ),
         "merge_request_created": False,
         "merge_request_create_url": create_url,
+        "merge_request_title": review_title,
         "next_action": (
             "Открыть форму создания запроса на слияние, создать запрос и принять его; "
             "после этого сообщить LLM: запрос на слияние принят."

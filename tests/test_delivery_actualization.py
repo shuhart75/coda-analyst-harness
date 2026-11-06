@@ -72,7 +72,7 @@ class DeliveryActualizationTests(unittest.TestCase):
         self.write_registry(self.registry, self.rows.values())
         (self.gantt / 'includes/actual-progress/FEATURE-kib-next.puml').write_text("' existing KIB\n")
         self.git(self.project, 'add', '--all')
-        self.git(self.project, 'commit', '-m', 'Prepare quarterly deliveries')
+        self.git(self.project, 'commit', '-m', 'RSCON-123: Prepare quarterly deliveries')
         before = self.snapshot(self.project)
         self.run_tool(self.state, 'config-status')
         run = self.run_tool(self.state, 'begin', '--adaptive', '--scope-kind', 'epic',

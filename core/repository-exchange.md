@@ -182,3 +182,54 @@ Source imports, reverse patches and layout migrations preserve its reviewed file
 Local tool settings remain forbidden inside ontology; adding the content root does
 not relax path, deletion, source import review or publication checks. Roadmap data
 lives under `planning/roadmap/`; runtime bundles remain outside tracked content.
+
+## Задачи SberTrack при импорте source
+
+Команда «синкани репы» обязана проверить задачи до первого нового коммита,
+включая служебные merge-коммиты связывания истории возврата.
+Связи выбираются с аналитиком на стороне source и передаются вместе с материалами:
+`analysis-task.json` поставки и `planning/task-bindings.json` для кварталов.
+Используй `core/analysis-task-traceability.md`. Для общих изменений вне поставок
+и планирования допустима подтверждённая задача AN в `context/analysis-task.json`
+с тем же форматом binding. Она не заменяет отсутствующие связи поставок и кварталов.
+
+Если связи нет, sync возвращает `source_import.status: awaiting-analysis-task`,
+`next_action: ask-analysis-task` и `source_import.next_question`. Задай этот вопрос
+аналитику на принимающей стороне и дождись ответа. Не подбирай задачу самостоятельно,
+не коммить и не отправляй импорт. Незавершённый импорт блокирует обратную заплату.
+
+После ответа агент сохраняет решение в возвращённый `task_decisions_file`:
+
+```json
+{
+  "source_commit": "точный source_commit из результата sync",
+  "base_commit": "точный base_commit из результата sync",
+  "files": {
+    "features/example/analysis-task.json": {
+      "schema_version": 1,
+      "provider": "sbertrek",
+      "role": "AN",
+      "key": "RSCON-1234",
+      "confirmation": "Точная цитата решения аналитика"
+    }
+  }
+}
+```
+
+Это пример, а не действующая связь. Для квартального планирования в `files`
+передай полный `planning/task-bindings.json`, сохранив существующие связи.
+Для общей работы без владельца вместо `files` допустим `analysis_task` с таким же
+подтверждённым объектом. Это решение действует только для указанных source/base.
+Не передавай общую задачу вместо отсутствующей связи конкретной поставки.
+После каждого ответа повторяй sync: он продолжает тот же импорт, задаёт следующий
+вопрос при необходимости и переносит файлы связей в итоговый коммит documents.
+В следующую обратную заплату эти файлы входят как обычные аналитические материалы.
+
+Перед коммитом повторно проверяется фактический Git index результата слияния.
+Конфликты разрешаются только в изолированном checkout. Не меняй обычный documents
+или зеркало source. Не меняй source/base решения ради продолжения другого импорта.
+Повторная отправка использует уже созданный коммит, без переписывания истории.
+
+Заголовок PR остаётся смысловым. PR связывается со всеми задачами из коммитов;
+перечислять их дополнительно в PR не требуется. Merge/squash-коммит должен сохранять
+обязательные ключи, при этом для source-import по-прежнему разрешён только merge.

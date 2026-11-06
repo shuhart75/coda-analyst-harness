@@ -202,7 +202,7 @@ class EpicResumeApplicationTests(unittest.TestCase):
             protected.append(path)
         self.git(self.project, 'add', '--', 'features', 'quarters', 'planning')
         self.git(self.project, 'add', '--', 'delivery-index.json')
-        self.git(self.project, 'commit', '-m', 'Prepare epic recovery sources')
+        self.git(self.project, 'commit', '-m', 'RSCON-123: Prepare epic recovery sources')
         self.initial_head = self.git(self.project, 'rev-parse', 'HEAD')
         preserved = {p:p.read_bytes() for p in protected}
         plans = {p:p.read_bytes() for p in self.gantt.glob('*-plan.puml')}
@@ -297,7 +297,7 @@ class EpicResumeApplicationTests(unittest.TestCase):
         self.assertEqual(self.snapshot(self.inputs),inputs_before)
         self.assertEqual(self.snapshot(run_dir),raw_before)
         self.assertTrue(all(path.read_bytes()==data for path,data in {**preserved,**plans}.items()))
-        command = preview['save_command'];command[command.index('--message')+1]='Save resumed epic execution'
+        command = preview['save_command'];command[command.index('--message')+1]='RSCON-123: Save resumed epic execution'
         self.command(*command)
         self.assertEqual(self.git(self.project,'status','--porcelain'),'')
         self.assertFalse(self.run_tool(self.state,'result-status','--run-id',self.run_id)['final_response_allowed'])

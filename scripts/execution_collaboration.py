@@ -141,12 +141,14 @@ def path_kind(path: str, scope: dict) -> str | None:
         return 'customer-accounting'
     if re.fullmatch(r'planning/\d{4}-Q[1-4]/reports/[a-z0-9-]+\.(?:md|json)', path) and path.split('/')[1] in scope['quarters']:
         return 'execution-analysis'
+    if path == 'planning/task-bindings.json':
+        return 'planning-task-binding'
     if path == 'planning/team.md':
         return 'shared-execution-source'
     parts = path.split('/')
     if len(parts) >= 3 and parts[0] == 'features' and parts[1] in scope['features']:
         relative = '/'.join(parts[2:])
-        if relative in {'planning/actualization.md', 'execution-context.md'} or re.fullmatch(
+        if relative in {'planning/actualization.md', 'execution-context.md', 'analysis-task.json'} or re.fullmatch(
             r'(?:slices/[a-z0-9-]+/)?execution/(?:[a-zA-Z0-9_./-]+)\.(?:md|json)', relative
         ):
             return 'execution-source'
@@ -198,6 +200,20 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
     scope = work.get('execution_scope')
     if not scope:
         raise ValueError('Register the confirmed feature/quarter set with set-execution-scope first')
+    if 'planning/task-bindings.json' in paths:
+        registry_path = analytics / 'planning/task-bindings.json'
+        current = json.loads(registry_path.read_text()) if registry_path.is_file() else {}
+        previous_result = api.git(analytics, 'show', 'HEAD:planning/task-bindings.json')
+        previous = json.loads(previous_result.stdout) if previous_result.returncode == 0 else {}
+        affected = {quarter for quarter in set(current.get('quarters', {})) | set(previous.get('quarters', {}))
+                    if current.get('quarters', {}).get(quarter) != previous.get('quarters', {}).get(quarter)}
+        for path in set(current.get('shared_paths', {})) | set(previous.get('shared_paths', {})):
+            old = previous.get('shared_paths', {}).get(path)
+            new = current.get('shared_paths', {}).get(path)
+            if old != new:
+                affected.update(value for value in (old, new) if value is not None)
+        if not affected <= set(scope['quarters']):
+            raise ValueError('Planning task binding is outside confirmed execution scope')
     if scope.get('include_planning') is True:
         check_draft_planning(analytics, scope, api)
     creation = {}
@@ -285,13 +301,15 @@ def save_preview(args, api) -> int:
     work = api.require_active_work(root, analytics, api.load_state(root))
     paths = api.changed_paths(analytics)
     checks = check_save(root, analytics, work, paths, args.review_file, api)
+    keys = api.working_keys(analytics, paths)
     command = ['python3', str(Path(api.__file__).resolve()), '--root', str(root), 'save',
-               '--message', '<semantic-message>']
+               '--message', ', '.join(sorted(keys)) + ': <semantic-message>']
     for path in sorted(paths):
         command.extend(['--path', path])
     for filename in args.review_file:
         command.extend(['--review-file', filename])
     print(json.dumps({'status': 'execution-save-preview', 'branch': work['branch'],
                       'head': api.head(analytics), **checks, 'save_command': command,
+                      'required_task_keys': sorted(keys),
                       'writes_performed': False, 'content_approved': False}, ensure_ascii=False, indent=2))
     return 0
