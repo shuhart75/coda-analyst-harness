@@ -7,9 +7,11 @@ import unittest
 from tests import test_workspace as fixture
 
 
-def binding(key):
-    return dict(schema_version=1, provider='sbertrek', role='AN', key=key,
-                confirmation='Analyst explicitly confirms this test scope')
+from analysis_task_fixture import task_binding
+
+
+def binding(key, kind='delivery'):
+    return task_binding(key, kind, '2026-Q4' if kind == 'planning' else None)
 
 
 class SourceTaskGateTests(unittest.TestCase):
@@ -50,10 +52,10 @@ class SourceTaskGateTests(unittest.TestCase):
         before = self.git(self.documents, 'rev-parse', 'HEAD')
         source_before = self.git(self.source, 'rev-parse', 'HEAD')
         exchange = self.sync()
-        self.assertEqual(exchange['next_action'], 'ask-analysis-task')
+        self.assertEqual(exchange['next_action'], 'resolve-commit-task')
         request = exchange['source_import']
         self.assertEqual(request['status'], 'awaiting-analysis-task')
-        self.assertIn('features/one', request['next_question'])
+        self.assertIn('features/one', request['resolution_reason'])
         checkout = Path(request['checkout'])
         self.assertEqual(self.git(checkout, 'rev-parse', 'HEAD'), before)
         self.assertEqual(self.git(self.remote, 'show-ref', '--heads'), before + ' refs/heads/main')
@@ -72,7 +74,7 @@ class SourceTaskGateTests(unittest.TestCase):
             'features/one/requirements.md': '# One\n',
             'features/one/analysis-task.json': json.dumps(binding('RSCON-111')),
             'planning/2026-Q4/notes.md': '# Plan\n',
-            'planning/task-bindings.json': json.dumps(dict(schema_version=1, quarters={'2026-Q4': binding('RSCON-222')})),
+            'planning/task-bindings.json': json.dumps(dict(schema_version=1, quarters={'2026-Q4': binding('RSCON-222', 'planning')})),
         })
         request = self.sync()['source_import']
         self.assertEqual(request['status'], 'awaiting-merge')
@@ -84,7 +86,7 @@ class SourceTaskGateTests(unittest.TestCase):
     def test_generic_answer_cannot_bypass_missing_delivery(self):
         self.change({'features/one/requirements.md': '# One\n'})
         request = self.sync()['source_import']
-        self.decide(request, analysis_task=binding('RSCON-111'))
+        self.decide(request, files={'context/analysis-task.json': binding('RSCON-111', 'context')})
         again = self.sync()['source_import']
         self.assertEqual(again['status'], 'awaiting-analysis-task')
         self.assertEqual(self.git(Path(again['checkout']), 'rev-parse', 'HEAD'), request['base_commit'])
@@ -93,7 +95,7 @@ class SourceTaskGateTests(unittest.TestCase):
         self.change({'context/shared.txt': 'Updated\n'})
         request = self.sync()['source_import']
         self.assertEqual(request['status'], 'awaiting-analysis-task')
-        self.decide(request, analysis_task=binding('RSCON-111'))
+        self.decide(request, files={'context/analysis-task.json': binding('RSCON-111', 'context')})
         ready = self.sync()['source_import']
         self.assertEqual(ready['status'], 'awaiting-merge')
         self.assertIn('RSCON-111:', self.git(Path(ready['checkout']), 'log', '-1', '--format=%s'))
@@ -101,7 +103,7 @@ class SourceTaskGateTests(unittest.TestCase):
     def test_stale_decision_cannot_create_commit(self):
         self.change({'context/shared.txt': 'Updated\n'})
         request = self.sync()['source_import']
-        self.decide(request, analysis_task=binding('RSCON-111'))
+        self.decide(request, files={'context/analysis-task.json': binding('RSCON-111', 'context')})
         path = Path(request['task_decisions_file'])
         decision = json.loads(path.read_text())
         decision['source_commit'] = '0' * 40

@@ -10,6 +10,7 @@ import tempfile
 import unicodedata
 import unittest
 from pathlib import Path
+from analysis_task_fixture import task_binding
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,7 +84,7 @@ class CodaWorkspaceTests(unittest.TestCase):
                 "context/project-rules/README.md": "# Правила проекта\n",
                 "context/source-materials/legacy/snapshot/.codex": "historical marker\n",
                 "context/shared.txt": "base\n",
-                **({"context/analysis-task.json": json.dumps({"schema_version": 1, "provider": "sbertrek", "role": "AN", "key": "RSCON-123", "confirmation": "Analyst confirms common fixture changes"})} if with_analysis_task else {}),
+                **({"context/analysis-task.json": json.dumps(task_binding(kind='context'))} if with_analysis_task else {}),
             },
         )
         documents_remote = root / "documents.git"
@@ -1878,7 +1879,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             source_work, source_remote = self.create_seed(
                 root,
                 "changeswork-copy",
-                {"README.md": "# Source\n", "context/shared.txt": "base\n", "context/analysis-task.json": json.dumps({"schema_version": 1, "provider": "sbertrek", "role": "AN", "key": "RSCON-123", "confirmation": "Analyst confirms common fixture changes"})},
+                {"README.md": "# Source\n", "context/shared.txt": "base\n", "context/analysis-task.json": json.dumps(task_binding(kind='context'))},
             )
             documents_remote = root / "documents.git"
             self.assertEqual(run("git", "clone", "--bare", str(source_remote), str(documents_remote)).returncode, 0)
@@ -1983,7 +1984,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             source_work, source_remote = self.create_seed(
                 root,
                 "changeswork-copy",
-                {"README.md": "# Source\n", old_name: "same content\n", "context/analysis-task.json": json.dumps({"schema_version": 1, "provider": "sbertrek", "role": "AN", "key": "RSCON-123", "confirmation": "Analyst confirms common fixture changes"})},
+                {"README.md": "# Source\n", old_name: "same content\n", "context/analysis-task.json": json.dumps(task_binding(kind='context'))},
             )
             documents_remote = root / "documents.git"
             self.assertEqual(run("git", "clone", "--bare", str(source_remote), str(documents_remote)).returncode, 0)
@@ -2062,7 +2063,7 @@ class CodaWorkspaceTests(unittest.TestCase):
                     ".workflow/active-mode.md": "mode: requirements\n",
                     ".vscode/settings.json": "{}\n",
                     "context/shared.txt": "base\n",
-                    "context/analysis-task.json": json.dumps({"schema_version": 1, "provider": "sbertrek", "role": "AN", "key": "RSCON-123", "confirmation": "Analyst confirms common fixture changes"}),
+                    "context/analysis-task.json": json.dumps(task_binding(kind='context')),
                 },
             )
             documents_remote = root / "documents.git"

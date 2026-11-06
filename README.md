@@ -908,3 +908,5 @@ ZIP не является состоянием передачи и запрещ�
 `python3 scripts/harnessctl.py ontology PROJECT_ROOT check` проверяет источники и структуру. `bundle --view executive` собирает небольшой обзор, `bundle --view scenarios --topic approvals` выбирает тему, `bundle --view roadmap --include-future` включает планы. Перед подготовкой презентации также проверяется поступление новых материалов. Старые проекты без ontology продолжают работать; scaffold добавляет пустую структуру без перезаписи документов.
 
 Связь аналитических коммитов с SberTrack, включая импорт source: `core/analysis-task-traceability.md` и `core/repository-exchange.md`. PR наследует задачи из коммитов; ключи в его заголовке необязательны.
+
+Поиск и создание задач коммитов выполняются после config-status по `core/commit-task-resolution.md`, отдельно от read-only протокола сбора исполнения; новый execution-run для них не нужен.

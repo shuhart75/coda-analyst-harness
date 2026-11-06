@@ -9,6 +9,7 @@ import tempfile
 import unicodedata
 import unittest
 from pathlib import Path
+from analysis_task_fixture import task_binding
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +56,7 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
             old_name = "context/source-materials/Маршруты_согласовании\u0306.md"
             new_name = unicodedata.normalize("NFC", old_name)
             (source_work / old_name).write_text("маршрут\n", encoding="utf-8")
-            (source_work / "context/analysis-task.json").write_text(json.dumps({"schema_version": 1, "provider": "sbertrek", "role": "AN", "key": "RSCON-123", "confirmation": "Analyst confirms common fixture changes"}))
+            (source_work / "context/analysis-task.json").write_text(json.dumps(task_binding(kind='context')))
             self.commit_all(source_work, "legacy project with embedded harness")
             source_remote = root / "changeswork-copy.git"
             self.bare_remote(source_work, source_remote)

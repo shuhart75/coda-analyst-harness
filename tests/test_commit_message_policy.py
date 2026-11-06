@@ -15,9 +15,11 @@ from commit_message_policy import (require_valid_commit_message, delivery_messag
 from workspace import install_commit_message_hook
 
 
-def binding(key='RSCON-123'):
-    return dict(schema_version=1, provider='sbertrek', key=key, role='AN',
-                confirmation='Аналитик подтвердил задачу этой поставки')
+from analysis_task_fixture import task_binding
+
+
+def binding(key='RSCON-123', kind='delivery', quarter='2026-Q4'):
+    return task_binding(key, kind, quarter if kind == 'planning' else None)
 
 
 class CommitMessagePolicyTests(unittest.TestCase):
@@ -51,7 +53,7 @@ class CommitMessagePolicyTests(unittest.TestCase):
         require_valid_commit_message('RSCON-123, RSCON-456: Update', ['RSCON-123', 'RSCON-456'])
 
     def test_binding_rejects_wrong_role_provider_and_missing_confirmation(self):
-        for patch in [dict(role='BE'), dict(provider='jira'), dict(confirmation=''), dict(key='rscon-123')]:
+        for patch in [dict(suit='story'), dict(provider='jira'), dict(confirmation=''), dict(key='rscon-123')]:
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 validate_binding({**binding(), **patch})
 
@@ -112,7 +114,7 @@ class CommitMessagePolicyTests(unittest.TestCase):
             'demo': dict(path=root, quarter='2026-Q4')})),
             root + '/analysis-task.json': json.dumps(binding()),
             'planning/task-bindings.json': json.dumps(dict(schema_version=1,
-                quarters={'2026-Q4': binding('RSCON-456')}))}
+                quarters={'2026-Q4': binding('RSCON-456', 'planning')}))}
         for path in ['quarters/2026-Q4/quarter/README.md',
                      'quarters/2026-Q4/gantt/quarter-plan.puml', root + '/planning/estimates.md']:
             self.assertEqual(keys_for_paths([path], files.get), {'RSCON-456'})
@@ -120,7 +122,7 @@ class CommitMessagePolicyTests(unittest.TestCase):
             'quarters/2026-Q4/gantt/actual-progress.puml'], files.get), {'RSCON-123', 'RSCON-456'})
 
     def test_missing_planning_binding_asks_specific_quarter(self):
-        with self.assertRaisesRegex(ValueError, 'Какую задачу SberTrack.*2026-Q4'):
+        with self.assertRaisesRegex(ValueError, r'Разреши задачу.*2026-Q4'):
             keys_for_paths(['planning/2026-Q4/quarter/README.md'], lambda _: None)
         with self.assertRaisesRegex(ValueError, 'К какому кварталу'):
             keys_for_paths(['planning/team.md'], lambda _: None)
@@ -140,7 +142,7 @@ class CommitMessagePolicyTests(unittest.TestCase):
             install_commit_message_hook(project, ROOT / 'scripts/commit_message_policy.py')
             rejected = git('commit', '-m', 'RSCON-456: Plan')
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn('Какую задачу SberTrack', rejected.stderr)
+            self.assertIn('Разреши задачу', rejected.stderr)
             git('add', '--', 'planning/task-bindings.json')
             self.assertNotEqual(git('commit', '-m', 'RSCON-123: Wrong task').returncode, 0)
             committed = git('commit', '-m', 'RSCON-456: Plan')

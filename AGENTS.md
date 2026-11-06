@@ -104,7 +104,7 @@ This repository defines a reusable workflow harness.
 - Before any tracker MCP discovery or read, run `python3 scripts/trackerctl.py config-status` as a standalone command. Do not pipe or filter it: the exit code is part of the guard contract.
 - Exit code `3` with `must_stop: true` from any `trackerctl` command permits exactly one next action: ask the analyst the single returned `next_question`. Emit the exact `response_contract.text` and nothing else: no preface, explanation, examples, suggested answers or summary. Do not call MCP tools, search analytical files for tasks, create a task list, delegate work or present tracker facts until the answer is saved and the gate becomes ready.
 - Commands that save one configuration answer return exit code `0` and another status payload. When that payload still has `must_stop: true`, ask only its `next_question`; do not bypass it with discovery or reading.
-- Tracker fact collection may start only after `begin` returns a `direct-tracker-v1` run and one `next_action`. Tracker work is never delegated; adaptive tools follow current capabilities, while legacy executes the exact returned tool and arguments. Import each full fact response with the returned `step_id`, then follow the next action.
+- Execution tracker fact collection may start only after `begin` returns a `direct-tracker-v1` run and one `next_action`. Tracker work is never delegated; adaptive tools follow current capabilities, while legacy executes the exact returned tool and arguments. Import each full fact response with the returned `step_id`, then follow the next action.
 - Only one unfinished run may exist. Repeating `begin` with the same scope reuses it, including after a failed ingest; submit a corrected full response to the same pending step and continue that run. A different scope remains blocked until the analyst explicitly orders abandoning the current run. Never create a replacement run during the same request, and never add `--analyst-confirmed` to `abandon-run` without that explicit instruction.
 - Never delete `tracker-active-run.json` manually. `begin` removes an orphaned marker itself only when its run directory no longer exists; otherwise preserve the run and follow its machine-returned action.
 - SberTrek uses only `issue.exportJson` with TQL in `query`, `attributes` in the projection and `max_results=50`. Do not substitute text search, per-key details, link traversal, invented pagination or alternative queries.
@@ -352,11 +352,19 @@ record-change, аудитов и отмены прежнего кандидат�
 
 ## Связь коммитов с задачами
 
-- Правило привязки к SberTrack применяется к аналитическому проекту и его передачам в разработку. Отдельный Git-репозиторий обвязки (HARNESS_ROOT) и его worktree исключены: для их коммитов и PR задача не требуется. Каждая поставка обязательно связана с подтверждённой задачей SberTrack на аналитику (роль AN). Следуй `core/analysis-task-traceability.md`: храни связь в `analysis-task.json` выбранной поставки, включай её ключ в заголовок каждого коммита, включая автоматически созданные, merge и squash. Для нескольких поставок укажи все их ключи. Сохраняй смысловое описание изменения. Без подтверждённой связи останови сохранение и публикацию и запроси задачу; не подставляй BE/FE/QA или выдуманный номер. Проверяй сообщение до индексирования и сохраняй managed `commit-msg` hook; обход hook запрещён, сторонний hook bootstrap не перезаписывает. Планирование имеет одну подтверждённую задачу SberTrack на весь квартал, зарегистрированную в `planning/task-bindings.json`; её ключ обязателен в коммитах планирования. Перед коммитом при отсутствии связи поставки или квартального планирования запроси соответствующую задачу у аналитика и дождись ответа. Без связи коммит запрещён; для смешанного изменения нужны все соответствующие ключи.
+Правило задач коммитов: `core/analysis-task-traceability.md` и `core/commit-task-resolution.md`.
+Аналитик выбирает эпик владельца; GigaCode через MCP находит или создаёт `suit="task"`
+с префиксом `[SA][PR]`, `[PLANNING_QUARTER]`, `[BASELINE]` или `[CONTEXT] по виду работы.
+Квартал имеет свой эпик планирования, который запрашивается при начале планирования
+текущего или будущего квартала. Baseline/context поставки относятся к её эпику,
+вне поставок относятся к квартальному. Без разрешённой задачи коммит запрещён.
+Ключи обязательны в коммитах, но не в заголовках PR. Отдельная обвязка исключена.
 
 PR/MR связывается со всеми задачами из его коммитов. Ключи в заголовке и описании PR необязательны; используй смысловой заголовок.
 
 При «синкани репы» следуй `core/repository-exchange.md`: source-импорт также требует
 подтверждённых задач поставок и квартального планирования. Переноси согласованные
-связи из source; при `awaiting-analysis-task` задай `next_question` аналитику на Mac,
-сохрани его ответ для текущего импорта и повтори sync. До ответа не коммить и не push.
+связи из source; при `awaiting-analysis-task` выполни `resolve-commit-task` на Mac,
+разреши задачу через MCP по core/commit-task-resolution.md и повтори sync. До ответа не коммить и не push.
+
+Поиск и создание задач коммитов выполняются после config-status по `core/commit-task-resolution.md`, отдельно от read-only протокола сбора исполнения; новый execution-run для них не нужен.

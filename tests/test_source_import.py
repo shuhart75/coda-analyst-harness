@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests import test_workspace as fixture
+from analysis_task_fixture import task_binding
 
 
 class SourceImportTests(unittest.TestCase):
@@ -32,11 +33,10 @@ class SourceImportTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         request = payload.get("analytics_exchange", {}).get("source_import", {})
         if request.get("status") == "awaiting-analysis-task":
-            self.assertIn("общими изменениями", request["next_question"])
+            self.assertIn("общие изменения", request["resolution_reason"])
             Path(request["task_decisions_file"]).write_text(json.dumps({
                 "source_commit": request["source_commit"], "base_commit": request["base_commit"],
-                "analysis_task": {"schema_version": 1, "provider": "sbertrek", "role": "AN",
-                                  "key": "RSCON-123", "confirmation": "Analyst confirms this test import"},
+                "analysis_task": task_binding(kind="context"),
             }))
             return self.sync(*arguments)
         return payload
