@@ -31,23 +31,18 @@ def require_valid_commit_message(message: str, required_keys=()) -> None:
         raise ValueError('Сообщение коммита отклонено: в заголовке отсутствуют обязательные задачи: ' + ', '.join(sorted(missing)))
 
 
-def validate_binding(value: dict) -> dict:
-    if (not isinstance(value, dict) or value.get('schema_version') != 1
-            or value.get('provider') != 'sbertrek' or value.get('role') != 'AN'
-            or not isinstance(value.get('key'), str)
-            or not TRACKER_IDENTIFIER_RE.fullmatch(value['key'])
-            or not isinstance(value.get('confirmation'), str) or not value['confirmation'].strip()):
-        raise ValueError('Требуется подтверждённая связь поставки с задачей SberTrack на аналитику: analysis-task.json')
-    return value
+def validate_binding(value: dict, expected_kind=None) -> dict:
+    from commit_tasks import validate_task
+    return validate_task(value, expected_kind)
 
 
 def delivery_analysis_task(project: Path, delivery: str) -> dict:
     from project_layout import feature_root
     path = feature_root(project, delivery) / BINDING_FILE
     try:
-        return validate_binding(json.loads(path.read_text(encoding='utf-8')))
+        return validate_binding(json.loads(path.read_text(encoding='utf-8')), 'delivery')
     except (OSError, ValueError) as exc:
-        raise ValueError(f'Какую задачу SberTrack на аналитику связать с поставкой {delivery}? До ответа коммит запрещён ({path}).') from exc
+        raise ValueError(f'Разреши задачу [SA][PR] в эпике поставки {delivery}. До разрешения задачи коммит запрещён ({path}).') from exc
 
 
 def delivery_message(project: Path, deliveries, description: str) -> str:
@@ -65,23 +60,36 @@ def keys_for_paths(paths, read) -> set[str]:
     entries = index['deliveries'] if index else {}
     roots = {entry['path']: entry for entry in entries.values()}
     owners, quarters = set(), set()
+    work_task_keys = set()
     planning_raw = read(PLANNING_BINDINGS)
     planning = json.loads(planning_raw) if planning_raw else {}
     if not isinstance(planning, dict) or (planning and (planning.get('schema_version') != 1
                      or not isinstance(planning.get('quarters'), dict)
-                     or not isinstance(planning.get('shared_paths', {}), dict))):
+                     or not isinstance(planning.get('shared_paths', {}), dict)
+                     or not isinstance(planning.get('epics', {}), dict))):
         raise ValueError('Исправь реестр задач квартального планирования: ' + PLANNING_BINDINGS)
     associations = planning.get('quarters', {})
+    if any(not isinstance(value, dict) for value in [*associations.values(), *planning.get('epics', {}).values()]):
+        raise ValueError('Некорректные связи задач или эпиков квартального планирования')
+    epic_owners = {}
+    for quarter in set(associations) | set(planning.get('epics', {})):
+        epic = planning.get('epics', {}).get(quarter, {}).get('key') or associations.get(quarter, {}).get('epic')
+        if epic:
+            if epic in epic_owners and epic_owners[epic] != quarter:
+                raise ValueError('У каждого квартала должен быть свой эпик планирования')
+            epic_owners[epic] = quarter
     shared = planning.get('shared_paths', {})
     for path in paths:
         parts = Path(path).parts
         if path == PLANNING_BINDINGS:
             quarters.update(associations)
             quarters.update(shared.values())
+            quarters.update(planning.get('epics', {}))
             continue
         matched = next((entry for root, entry in roots.items()
                         if path == root or path.startswith(root + '/')), None)
-        relative = path[len(matched['path']) + 1:] if matched else ''
+        legacy_owner = '/'.join(parts[:2]) if len(parts) >= 3 and parts[0] == 'features' and not index else None
+        relative = path[len(matched['path']) + 1:] if matched else (path[len(legacy_owner) + 1:] if legacy_owner else '')
         legacy_planning = len(parts) >= 4 and parts[0] == 'features' and parts[2] == 'planning'
         quarter_path = (len(parts) >= 3 and parts[0] in {'quarters', 'planning'}
                         and QUARTER_RE.fullmatch(parts[1]) and not matched
@@ -97,8 +105,29 @@ def keys_for_paths(paths, read) -> set[str]:
                 quarter = named[0] if len(set(named)) == 1 else shared.get(path)
             if not isinstance(quarter, str) or not QUARTER_RE.fullmatch(quarter):
                 raise ValueError(f'К какому кварталу относится планирование в {path}? '
-                                 f'До ответа коммит запрещён; сохрани квартал в {PLANNING_BINDINGS}/shared_paths.')
+                                 f'До разрешения задачи коммит запрещён; сохрани квартал в {PLANNING_BINDINGS}/shared_paths.')
             quarters.add(quarter)
+            continue
+        from commit_tasks import work_keys, require_owner_epic
+        work_kind = ('baseline' if path.startswith(('baseline/', 'releases/')) or relative.startswith('baseline/')
+                     else 'context' if path.startswith('context/') or relative.startswith('context/') else None)
+        explicit = work_keys(path, read, work_kind or ('delivery' if matched or legacy_owner else None),
+                             'delivery' if matched or legacy_owner else None)
+        if explicit is not None:
+            work_task_keys.update(explicit)
+            continue
+        if work_kind:
+            owner_root = matched['path'] if matched else legacy_owner
+            default_path = ((owner_root + '/' + work_kind) if owner_root else work_kind) + '/analysis-task.json'
+            raw = read(default_path)
+            if not raw:
+                raise ValueError('Укажи поставку (поставки) или квартал для ' + path +
+                                 '; найди или создай задачу [' + work_kind.upper() + '] в эпике владельца по core/commit-task-resolution.md')
+            binding = validate_binding(json.loads(raw), work_kind)
+            if owner_root and binding['owner']['type'] != 'delivery':
+                raise ValueError('Работа внутри поставки должна использовать эпик поставки, не квартальный')
+            require_owner_epic(binding, read, owner_root)
+            work_task_keys.add(binding['key'])
             continue
         if index:
             for root in roots:
@@ -110,43 +139,56 @@ def keys_for_paths(paths, read) -> set[str]:
             owners.add('/'.join(parts[:6]) + '/' + BINDING_FILE)
         if len(parts) >= 3 and parts[0] == 'requirements-exchange':
             owners.add('/'.join(parts[:2]) + '/manifest.json')
-    keys = set()
+    keys = set(work_task_keys)
     for quarter in sorted(quarters):
         if not isinstance(quarter, str) or not QUARTER_RE.fullmatch(quarter):
             raise ValueError('Некорректный квартал в ' + PLANNING_BINDINGS)
         try:
-            binding = validate_binding(associations.get(quarter))
+            binding = validate_binding(associations.get(quarter), 'planning')
+            if binding['owner']['id'] != quarter:
+                raise ValueError('Задача другого квартала')
+            epic = planning.get('epics', {}).get(quarter)
+            if epic and binding['epic'] != epic.get('key'):
+                raise ValueError('Задача относится к другому эпику квартала')
         except ValueError as exc:
-            raise ValueError(f'Какую задачу SberTrack связать с планированием квартала {quarter}? '
-                             f'Нужна одна задача на весь квартал. До ответа коммит запрещён ({PLANNING_BINDINGS}).') from exc
+            raise ValueError(f'Разреши задачу [PLANNING_QUARTER] в эпике планирования квартала {quarter}. '
+                             f'Нужна одна задача на весь квартал. До разрешения задачи коммит запрещён ({PLANNING_BINDINGS}).') from exc
         keys.add(binding['key'])
+    legacy_packets = False
     for owner in sorted(owners):
         raw = read(owner)
         if raw is None:
-            raise ValueError(f'Какую задачу SberTrack на аналитику связать с поставкой {owner.rsplit("/", 1)[0]}? '
-                             f'До ответа коммит запрещён ({owner}).')
+            raise ValueError(f'Разреши задачу [SA][PR] в эпике поставки {owner.rsplit("/", 1)[0]}? '
+                             f'До разрешения задачи коммит запрещён ({owner}).')
         value = json.loads(raw)
-        if owner.endswith('/manifest.json') and 'analysis_task' not in value:
-            # Immutable legacy packets predate the binding; publisher checks the current delivery.
+        if owner.endswith('/manifest.json') and ('analysis_task' not in value
+                or (isinstance(value.get('analysis_task'), dict) and value['analysis_task'].get('schema_version') == 1)):
+            # Immutable historical packages are never rewritten. The registered
+            # publisher/cleanup checks the current delivery binding before Git.
+            legacy_packets = True
             continue
         binding = value.get('analysis_task') if owner.endswith('/manifest.json') else value
         try:
-            keys.add(validate_binding(binding)['key'])
+            keys.add(validate_binding(binding, 'delivery')['key'])
         except ValueError as exc:
-            raise ValueError(f'Какую задачу SberTrack на аналитику связать с поставкой {owner.rsplit("/", 1)[0]}? '
-                             'Подтверди корректную связь перед коммитом.') from exc
+            raise ValueError(f'Разреши задачу [SA][PR] в эпике поставки {owner.rsplit("/", 1)[0]}? '
+                             'Выполни поиск/создание по core/commit-task-resolution.md перед коммитом.') from exc
     return keys
 
 
 def require_preserved_planning_bindings(current, previous) -> None:
     if previous is None:
         return
-    old = json.loads(previous).get('quarters', {})
-    new = json.loads(current).get('quarters', {}) if current else {}
-    missing = set(old) - set(new)
+    old_data = json.loads(previous)
+    new_data = json.loads(current) if current else {}
+    old = set(old_data.get('quarters', {})) | set(old_data.get('epics', {}))
+    new = set(new_data.get('quarters', {})) | set(new_data.get('epics', {}))
+    missing = old - new
+    removed_epics = set(old_data.get('epics', {})) - set(new_data.get('epics', {}))
+    missing |= removed_epics
     if missing:
         quarter = sorted(missing)[0]
-        raise ValueError(f'Какую задачу SberTrack связать с планированием квартала {quarter}? '
+        raise ValueError(f'Разреши задачу [PLANNING_QUARTER] в эпике планирования квартала {quarter}. '
                          'Нельзя удалить прежнюю связь без замены; до ответа коммит запрещён.')
 
 

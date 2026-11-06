@@ -43,6 +43,7 @@ ALLOWED_CONTENT_ROOTS = frozenset({
     "quarters",
     "backlog",
     "delivery-index.json",
+    "work-task-bindings.json",
     "migration-layout.json",
     "releases",
 })
@@ -879,7 +880,7 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
     for path, value in files.items():
         parts = Path(path).parts
         if (not parts or Path(path).is_absolute() or ".." in parts or
-                not (path == "planning/task-bindings.json" or
+                not (path in {"planning/task-bindings.json", "work-task-bindings.json", "context/analysis-task.json", "baseline/analysis-task.json"} or
                      (parts[0] in {"features", "quarters"} and parts[-1] == "analysis-task.json"))):
             raise ValueError("Решение импорта может содержать только файлы связей задач")
         if path.endswith("analysis-task.json"):
@@ -910,13 +911,13 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
         if binding is None and carried:
             binding = json.loads(carried)
         if binding is None:
-            raise ValueError("Какую задачу SberTrack на аналитику связать с общими изменениями этого импорта source?")
+            raise ValueError("К какой поставке или кварталу относятся общие изменения этого импорта source? После выбора владельца найди или создай задачу нужного вида в его эпике.")
         keys.add(validate_binding(binding)["key"])
     return keys, files
 
 
 def pause_import_for_task(state_path: Path, state: dict, question: str) -> dict:
-    state.update({"status": "awaiting-analysis-task", "next_question": question,
+    state.update({"status": "awaiting-analysis-task", "resolution_reason": question, "next_action": "resolve-commit-task",
                   "message": question, "task_decisions_file": str(Path(state["checkout"]).parent / "task-decisions.json")})
     atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
     return dict(state)
@@ -1133,18 +1134,18 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
             commit_source_import(checkout, task_keys, task_files)
         except ValueError as exc:
             return pause_import_for_task(state_path, state, str(exc))
-    for field in ("next_question", "task_decisions_file", "message"):
+    for field in ("next_question", "resolution_reason", "next_action", "task_decisions_file", "message"):
         state.pop(field, None)
     candidate = git(checkout, "rev-parse", "HEAD").stdout.strip()
     require_clean(checkout, "Изолированный импорт")
     changed = git(checkout, "diff", "--name-only", "--no-renames", "-z", state["base_commit"], candidate)
     if changed.returncode:
         raise ValueError("Не удалось проверить задачи подготовленного импорта")
-    required = keys_for_paths(filter(None, changed.stdout.split("\0")),
-        lambda path: git_output(checkout, "show", candidate + ":" + path)
-        or git_output(checkout, "show", state["base_commit"] + ":" + path))
-    title = git(checkout, "log", "-1", "--format=%s").stdout.strip()
     try:
+        required = keys_for_paths(filter(None, changed.stdout.split("\0")),
+            lambda path: git_output(checkout, "show", candidate + ":" + path)
+            or git_output(checkout, "show", state["base_commit"] + ":" + path))
+        title = git(checkout, "log", "-1", "--format=%s").stdout.strip()
         require_valid_commit_message(title, required)
     except ValueError as exc:
         raise ValueError("Подготовленный импорт не содержит обязательных задач. "
@@ -1978,7 +1979,7 @@ def sync_command(args: argparse.Namespace) -> int:
                 "report_message": source_merge["message"],
                 "next_action": {
                     "awaiting-merge": "create-or-review-import-merge-request",
-                    "awaiting-analysis-task": "ask-analysis-task",
+                    "awaiting-analysis-task": "resolve-commit-task",
                     "deferred": "wait-for-source-revision",
                 }.get(source_merge["status"], "retry-import-push"),
                 "forbidden_claims": ["all-repositories-synchronized"],

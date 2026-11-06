@@ -131,6 +131,11 @@ class LayoutSaveTests(unittest.TestCase):
         report = self.root / 'releases/layout-migration/migration-report.md'
         report.parent.mkdir(parents=True)
         report.write_text('# Report\n')
+        from analysis_task_fixture import task_binding
+        binding = self.root / 'baseline/analysis-task.json'
+        binding.parent.mkdir(parents=True, exist_ok=True)
+        binding.write_text(json.dumps(task_binding(kind='baseline')))
+        self.paths[binding.relative_to(self.root).as_posix()] = hashlib.sha256(binding.read_bytes()).hexdigest()
         self.assertEqual(self.save(paths={**self.paths, report.relative_to(self.root).as_posix():
                                          hashlib.sha256(report.read_bytes()).hexdigest()})['status'], 'committed')
 

@@ -207,6 +207,8 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
         previous = json.loads(previous_result.stdout) if previous_result.returncode == 0 else {}
         affected = {quarter for quarter in set(current.get('quarters', {})) | set(previous.get('quarters', {}))
                     if current.get('quarters', {}).get(quarter) != previous.get('quarters', {}).get(quarter)}
+        affected.update(quarter for quarter in set(current.get('epics', {})) | set(previous.get('epics', {}))
+                        if current.get('epics', {}).get(quarter) != previous.get('epics', {}).get(quarter))
         for path in set(current.get('shared_paths', {})) | set(previous.get('shared_paths', {})):
             old = previous.get('shared_paths', {}).get(path)
             new = current.get('shared_paths', {}).get(path)
