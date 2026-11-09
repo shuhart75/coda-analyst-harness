@@ -65,6 +65,37 @@ history into the candidate before merging new source changes. Both intermediate
 content checks must pass. This preserves a correct merge base for later reversions
 and deletions without changing accepted main or silently dropping new source work.
 
+Старые неизменяемые пары схемы 2 без поля `diff_check_verified` также принимаются:
+проверка пробелов выполняется заново через `git diff --check` по проверенным коммитам.
+Явное значение false, неверная контрольная сумма или отсутствие остальных
+обязательных подтверждений не допускаются. Метаданные старой пары не переписываются.
+
+## Проверка сообщения «заплата применена»
+
+Выполни `python3 scripts/repository-exchange.py verify-return`. Не начинай полный
+`workspace.py sync`, bootstrap, обновление code или откладывание файлов через stash.
+Команда читает актуальные source/main и analytics/main во временное объектное
+хранилище. Локальные объекты используются только для чтения; рабочие файлы, индекс,
+ветки, refs, настройка репозиториев и незавершённый импорт остаются прежними.
+Грязная рабочая копия и активная feature-ветка не мешают этой проверке.
+
+`return_verified=true` подтверждает только текущую source/main как точный возврат
+неизменяемой пары: проверяются роли, контрольные суммы, diff, единственный родитель,
+дерево и принадлежность исходной analytics принятой истории. Равенства деревьев без
+пары недостаточно. Поздний коммит source не считается возвратом прежней пары.
+`accepted_trees_identical` отдельно показывает равенство удалённых принятых деревьев.
+Рабочие копии и code не обновлялись, поэтому `all_repositories_synchronized=false`.
+
+Если analytics/main уже продвинулась, подтверди завершённый возврат и сообщи о более
+новых принятых изменениях. Не создавай следующую заплату и не запускай новый круг
+автоматически. Полный обмен выполняется по команде «синкани репы».
+При отсутствии или повреждении доказательства команда возвращает код 1 и
+`return-not-verified`; не выдавай его за успешную проверку и не удаляй состояние импорта.
+
+Обычный запуск предпочтителен. Если клиент перевёл его в фон, используй штатное
+ожидание завершения или status с интервалом не более 30 секунд. Фиксированный сон
+на несколько минут не является проверкой. Этапы видны в `sync-progress.json`.
+
 ## Pending imports and conflicts
 
 Retry uses the saved clone, candidate and branch. A failed push retains `prepared-not-pushed`; repeat sync to check the remote outcome and send the same candidate. Existing remote import branches are discovered and reused, including after loss of local state. Multiple unfinished imports or incompatible local and remote branch histories block automatic progress. Never overwrite or force-push an open request.
@@ -237,3 +268,6 @@ PR связывается через задачи коммитов, заголо
 изменения читай этот файл выборочно; не печатай весь многотысячный отчёт в чат.
 Старые принятые ветки импорта проверяются локально по коммиту из свежего списка
 удалённых веток. Отдельный fetch нужен только для ещё не принятого коммита.
+
+Для совместимости квартальных проектов и проверки удаления реестра следуй
+`core/quarter-deliveries.md`, разделу о прежних версиях обвязки.
