@@ -805,14 +805,16 @@ def source_import_heads(documents: Path) -> dict[str, str]:
             for commit, reference in (line.split() for line in result.stdout.splitlines())}
 
 
-def verified_roundtrips(root: Path, documents: Path, incoming: str, target: str) -> dict[str, dict]:
-    history = git(documents, "log", "--format=%H %T", incoming)
+def verified_roundtrips(root: Path, documents: Path, incoming: str, target: str, *, current_only=False) -> dict[str, dict]:
+    history = git(documents, "log", *(["-1"] if current_only else []), "--format=%H %T %P", incoming)
     if history.returncode:
         raise ValueError("Не удалось проверить историю возврата обратной заплаты")
     commits_by_tree: dict[str, list[str]] = {}
+    parents_by_commit = {}
     for line in history.stdout.splitlines():
-        commit, tree = line.split()
+        commit, tree, *parents = line.split()
         commits_by_tree.setdefault(tree, []).append(commit)
+        parents_by_commit[commit] = parents
     roles = workspace_roles(root)
     proofs = {}
     for path in sorted((root / "reverse-diffs").glob("reverse-diff-*.json")):
@@ -828,7 +830,8 @@ def verified_roundtrips(root: Path, documents: Path, incoming: str, target: str)
         if (metadata.get("schema_version") != 2
                 or path.stem != f"reverse-diff-{metadata.get('artifact_id')}"
                 or any(metadata.get(field) is not True for field in
-                       ("verified", "tree_verified", "diff_check_verified", "content_policy_verified"))
+                       ("verified", "tree_verified", "content_policy_verified"))
+                or ("diff_check_verified" in metadata and metadata["diff_check_verified"] is not True)
                 or metadata.get("source_repository") != roles.get("source", {}).get("repository")
                 or metadata.get("analytics_repository") != roles.get("analytics", {}).get("repository")
                 or metadata.get("source_branch") != BRANCH or metadata.get("analytics_branch") != BRANCH):
@@ -838,7 +841,9 @@ def verified_roundtrips(root: Path, documents: Path, incoming: str, target: str)
         if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40,64}", value)
                    for value in (base, anchor, tree, metadata.get("source_tree"))):
             continue
-        if tree not in commits_by_tree or tree == metadata["source_tree"]:
+        candidates = [commit for commit in commits_by_tree.get(tree, [])
+                      if parents_by_commit[commit] == [base]]
+        if not candidates or tree == metadata["source_tree"]:
             continue
         if (git(documents, "rev-parse", f"{base}^{{tree}}").stdout.strip() != metadata["source_tree"]
                 or git(documents, "rev-parse", f"{anchor}^{{tree}}").stdout.strip() != tree
@@ -853,10 +858,10 @@ def verified_roundtrips(root: Path, documents: Path, incoming: str, target: str)
         difference = git(documents, "diff", "--binary", "--full-index", "--no-renames", base, anchor, "--", ".")
         if digest != metadata.get("patch_sha256") or difference.returncode or difference.stdout.encode("utf-8") != patch_bytes:
             continue
-        for returned in commits_by_tree[tree]:
-            parents = git(documents, "show", "-s", "--format=%P", returned)
-            if parents.returncode or parents.stdout.strip() != base:
-                continue
+        if "diff_check_verified" not in metadata and git(
+                documents, "diff", "--check", base, anchor, "--", ".").returncode:
+            continue
+        for returned in candidates:
             proofs[returned] = {
                 "source_commit": returned, "analytics_commit": anchor, "tree": tree,
                 "metadata": str(path), "metadata_sha256": hashlib.sha256(metadata_bytes).hexdigest(),
@@ -2074,6 +2079,66 @@ def sync_command(args: argparse.Namespace) -> int:
         handle.close()
 
 
+def verify_return_command(args: argparse.Namespace) -> int:
+    """Verify remote accepted trees without touching either ordinary checkout."""
+    root = root_path(args.root)
+    handle = lock(root)
+    try:
+        source, documents, source_id, analytics_id = role_repositories(root)
+        progress(root, "verify-return-fetch", restart=True)
+        origins = {}
+        for role, repository in (("source", source), ("analytics", documents)):
+            origin = git(repository, "remote", "get-url", "origin")
+            if origin.returncode or not origin.stdout.strip():
+                raise ValueError(f"Не удалось определить origin роли {role}")
+            origins[role] = origin.stdout.strip()
+        with tempfile.TemporaryDirectory(prefix="verify-return-") as temporary:
+            objects = Path(temporary)
+            initialized = git(objects, "init", "--bare", "--quiet")
+            if initialized.returncode:
+                raise ValueError(initialized.stderr.strip())
+            # Reuse local immutable objects for negotiation; only the temporary
+            # store receives fetched objects, refs and FETCH_HEAD.
+            alternates = []
+            for repository in (source, documents):
+                object_path = git(repository, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+                if object_path.returncode or any(c in object_path.stdout.strip() for c in "\r\n"):
+                    raise ValueError("Не удалось определить объектное хранилище для проверки")
+                alternates.append(object_path.stdout.strip())
+            (objects / "objects/info/alternates").write_text("\n".join(alternates) + "\n")
+            for role, origin in origins.items():
+                fetched = git(objects, "-c", "gc.auto=0", "fetch", "--no-tags", origin,
+                              f"refs/heads/{BRANCH}:refs/heads/{role}")
+                if fetched.returncode:
+                    raise ValueError(f"{role}: fetch для проверки возврата: {fetched.stderr.strip()}")
+            incoming = git(objects, "rev-parse", "refs/heads/source").stdout.strip()
+            accepted = git(objects, "rev-parse", "refs/heads/analytics").stdout.strip()
+            progress(root, "verify-return-proof")
+            proof = verified_roundtrips(root, objects, incoming, accepted, current_only=True).get(incoming)
+            identical = (git(objects, "rev-parse", f"{incoming}^{{tree}}").stdout.strip()
+                         == git(objects, "rev-parse", f"{accepted}^{{tree}}").stdout.strip())
+            payload = {
+                "status": "return-verified" if proof else "return-not-verified",
+                "return_verified": bool(proof), "proof": proof,
+                "source_repository": source_id, "analytics_repository": analytics_id,
+                "source_commit": incoming, "accepted_analytics_commit": accepted,
+                "accepted_trees_identical": identical,
+                "all_repositories_synchronized": False,
+                "working_copy_updated": False,
+                "message": ("Возврат заплаты подтверждён по неизменяемой паре и принятой истории."
+                            if proof else "Текущая source/main не подтверждена как возврат сохранённой заплаты."),
+                "next_action": ("none" if proof and identical else "sync-on-request"),
+            }
+            progress(root, payload["status"], status="completed" if proof else "waiting")
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0 if proof else 1
+    except Exception as exc:
+        progress(root, "verify-return-failed", status="failed", error=str(exc))
+        raise
+    finally:
+        handle.close()
+
+
 def require_standalone_analytics_policy(analytics: Path, analytics_commit: str, analytics_id: str) -> None:
     violations = analytics_content_violations(analytics, analytics_commit)
     if violations:
@@ -2482,6 +2547,8 @@ def parser() -> argparse.ArgumentParser:
     sync = commands.add_parser("sync")
     sync.add_argument("--no-push", action="store_true", help="Не отправлять итоговую ветку роли analytics")
     sync.set_defaults(handler=sync_command)
+    verify_return = commands.add_parser("verify-return", help="Проверить возврат заплаты без синхронизации рабочих копий")
+    verify_return.set_defaults(handler=verify_return_command)
     analytics_only = commands.add_parser("sync-analytics-only")
     analytics_only.add_argument("--no-push", action="store_true", help="Не отправлять итоговую ветку роли analytics")
     analytics_only.set_defaults(handler=sync_analytics_only_command)

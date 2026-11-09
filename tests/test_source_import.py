@@ -129,6 +129,101 @@ class SourceImportTests(unittest.TestCase):
                              str(self.workspace), "reverse-diff", env=self.environment)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def verify_return(self, expected_code=0):
+        result = fixture.run("python3", str(fixture.ROOT / "scripts/repository-exchange.py"),
+                             "--root", str(self.workspace), "verify-return", env=self.environment)
+        self.assertEqual(result.returncode, expected_code, result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    def test_verify_return_preserves_dirty_active_work_and_pending_import(self):
+        self.prepare_roundtrip()
+        self.git(self.documents, "switch", "-c", "feature/ongoing")
+        (self.documents / "context/shared.txt").write_text("Staged ongoing work\n")
+        self.git(self.documents, "add", "--", "context/shared.txt")
+        (self.documents / "context/shared.txt").write_text("Unstaged ongoing work\n")
+        (self.documents / "context/untracked.txt").write_text("Not committed\n")
+        pending = self.workspace / ".workspace-state/source-import.json"
+        pending.write_text('{"status":"awaiting-merge","preserve":true}\n')
+        def snapshot():
+            return (self.git(self.documents, "show-ref"), self.git(self.documents, "rev-parse", "HEAD"),
+                    self.git(self.documents, "status", "--porcelain"),
+                    self.git(self.documents, "diff"), self.git(self.documents, "diff", "--cached"),
+                    (self.documents / ".git/index").read_bytes(),
+                    (self.documents / ".git/config").read_bytes(), pending.read_bytes(),
+                    self.git(self.remote, "show-ref"), self.git(self.source, "show-ref"))
+        before = snapshot()
+        result = self.verify_return()
+        self.assertTrue(result["return_verified"])
+        self.assertTrue(result["accepted_trees_identical"])
+        self.assertFalse(result["working_copy_updated"])
+        self.assertFalse(result["all_repositories_synchronized"])
+        self.assertEqual(snapshot(), before)
+
+    def test_verify_return_after_analytics_advanced_does_not_update_checkout(self):
+        metadata = self.prepare_roundtrip()
+        before = self.git(self.documents, "rev-parse", "HEAD")
+        # Advance accepted remote independently from the working checkout.
+        other = self.root / "later-analytics"
+        self.git(self.documents, "clone", str(self.remote), str(other))
+        self.fixture.configure_identity(other)
+        (other / "context/new.txt").write_text("Later accepted work\n")
+        self.git(other, "add", "--", "context/new.txt")
+        self.git(other, "commit", "-m", "RSCON-123: Later work")
+        self.git(other, "push", "origin", "main")
+        result = self.verify_return()
+        self.assertTrue(result["return_verified"])
+        self.assertFalse(result["accepted_trees_identical"])
+        self.assertEqual(result["proof"]["analytics_commit"], metadata["analytics_commit"])
+        self.assertEqual(self.git(self.documents, "rev-parse", "HEAD"), before)
+
+    def test_verify_return_rejects_equal_tree_without_valid_archive(self):
+        metadata = self.prepare_roundtrip()
+        archive = Path(metadata["metadata"])
+        original = archive.read_bytes()
+        archive.unlink()
+        self.assertFalse(self.verify_return(1)["return_verified"])
+        archive.write_bytes(original)
+        Path(metadata["patch"]).write_text("corrupt\n")
+        self.assertFalse(self.verify_return(1)["return_verified"])
+
+    def test_legacy_schema_two_without_diff_check_flag_is_verified_independently(self):
+        metadata = self.prepare_roundtrip()
+        archive = Path(metadata["metadata"])
+        metadata.pop("diff_check_verified")
+        archive.write_text(json.dumps(metadata))
+        self.assertTrue(self.verify_return()["return_verified"])
+        self.assertEqual(self.sync()["analytics_exchange"]["source_merge"]["status"], "roundtrip-verified")
+        metadata["diff_check_verified"] = False
+        archive.write_text(json.dumps(metadata))
+        self.assertFalse(self.verify_return(1)["return_verified"])
+
+    def test_legacy_pair_with_real_whitespace_error_cannot_prove_return(self):
+        import hashlib
+        metadata = self.prepare_roundtrip()
+        metadata.pop("diff_check_verified")
+        (self.documents / "context/shared.txt").write_text("Bad trailing spaces   \n")
+        self.git(self.documents, "add", "--", "context/shared.txt")
+        self.git(self.documents, "commit", "-m", "RSCON-123: Old unchecked content")
+        anchor = self.git(self.documents, "rev-parse", "HEAD")
+        tree = self.git(self.documents, "rev-parse", "HEAD^{tree}")
+        returned = self.git(self.documents, "commit-tree", tree, "-p", metadata["source_commit"],
+                            "-m", "RSCON-123: Legacy return")
+        raw = fixture.run("git", "-C", str(self.documents), "diff", "--binary", "--full-index",
+                          "--no-renames", metadata["source_commit"], anchor, "--", ".",
+                          env=self.environment).stdout.encode()
+        metadata.update(analytics_commit=anchor, analytics_tree=tree, patch_sha256=hashlib.sha256(raw).hexdigest())
+        Path(metadata["patch"]).write_bytes(raw)
+        Path(metadata["metadata"]).write_text(json.dumps(metadata))
+        spec = importlib.util.spec_from_file_location("legacy_exchange", fixture.ROOT / "scripts/repository-exchange.py")
+        exchange = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(exchange)
+        self.assertEqual(exchange.verified_roundtrips(self.workspace, self.documents, returned, anchor), {})
+
+    def test_verify_return_does_not_mistake_later_source_for_current_return(self):
+        self.prepare_roundtrip()
+        self.change_source("Later source work\n")
+        self.assertFalse(self.verify_return(1)["return_verified"])
+
     def test_stalled_legacy_empty_import_is_retired_without_remote_mutation(self) -> None:
         metadata = self.prepare_roundtrip()
         archive = Path(metadata["metadata"])
