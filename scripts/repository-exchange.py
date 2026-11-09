@@ -16,6 +16,8 @@ from pathlib import Path, PurePosixPath
 from commit_message_policy import require_valid_commit_message, keys_for_paths, staged_keys, validate_binding, delivery_analysis_task, git_output
 from collaboration import load_state as load_collaboration_state, merge_request_create_url
 from workspace import install_commit_message_hook
+from git_batch import tree_entries, read_blobs
+from sync_progress import progress
 
 from workspace_entrypoint import (
     embedded_harness_paths as local_embedded_harness_paths,
@@ -289,8 +291,8 @@ def require_source_content_policy(source: Path, commit: str, repository_id: str)
         }, ensure_ascii=False))
 
 
-def deleted_source_paths(analytics: Path, source_commit: str, analytics_commit: str) -> list[str]:
-    merge_base = git(analytics, "merge-base", source_commit, analytics_commit)
+def deleted_source_paths(analytics: Path, source_commit: str, analytics_commit: str, *, ancestry_commit: str | None = None) -> list[str]:
+    merge_base = git(analytics, "merge-base", source_commit, ancestry_commit or analytics_commit)
     if merge_base.returncode != 0 or not merge_base.stdout.strip():
         raise ValueError("Не удалось определить общую историю ролей source и analytics")
     result = subprocess.run(
@@ -312,11 +314,8 @@ def deleted_source_paths(analytics: Path, source_commit: str, analytics_commit: 
         if item
     ]
     base_commit = merge_base.stdout.strip()
-    return [
-        path
-        for path in candidates
-        if git(analytics, "cat-file", "-e", f"{base_commit}:{path}").returncode == 0
-    ]
+    inherited = tree_entries(analytics, base_commit) if candidates else {}
+    return [path for path in candidates if path in inherited]
 
 
 def deletion_approvals_path(root: Path) -> Path:
@@ -358,11 +357,14 @@ def unapproved_source_deletions(
     analytics: Path,
     source_commit: str,
     analytics_commit: str,
+    *, ancestry_commit: str | None = None,
 ) -> list[str]:
     approvals = load_deletion_approvals(root)
     result = []
-    for path in deleted_source_paths(analytics, source_commit, analytics_commit):
-        if approvals.get(path) != source_blob_oid(source, source_commit, path):
+    deleted = deleted_source_paths(analytics, source_commit, analytics_commit, ancestry_commit=ancestry_commit)
+    source_entries = tree_entries(source, source_commit) if deleted else {}
+    for path in deleted:
+        if approvals.get(path) != source_entries[path][1]:
             result.append(path)
     return result
 
@@ -375,6 +377,7 @@ def require_analytics_content_policy(
     analytics_commit: str,
     *,
     allow_legacy_harness: bool = False,
+    ancestry_commit: str | None = None,
 ) -> None:
     violations = analytics_content_violations(
         analytics,
@@ -387,6 +390,7 @@ def require_analytics_content_policy(
         analytics,
         source_commit,
         analytics_commit,
+        ancestry_commit=ancestry_commit,
     )
     if not violations and not deletions:
         return
@@ -763,12 +767,23 @@ def source_import_report(repository: Path, base: str, candidate: str) -> dict:
     if changed.returncode:
         raise ValueError("Не удалось получить состав импорта")
     fields = changed.stdout.rstrip("\0").split("\0") if changed.stdout else []
+    pairs = list(zip(fields[::2], fields[1::2]))
+    inspected = [(status, path) for status, path in pairs
+                 if status != "A" and Path(path).suffix in {".md", ".txt", ".puml"}]
+    before_entries = tree_entries(repository, base) if inspected else {}
+    after_entries = tree_entries(repository, candidate) if any(status != "D" for status, _ in inspected) else {}
+    requested = []
+    for status, path in inspected:
+        requested.append(before_entries[path][1])
+        if status != "D":
+            requested.append(after_entries[path][1])
+    blobs = read_blobs(repository, requested)
     changes = []
     for index in range(0, len(fields), 2):
         status, path = fields[index:index + 2]
-        readable = Path(path).suffix in {".md", ".txt", ".puml"}
-        before = blob_bytes(repository, base, path).decode("utf-8", errors="replace") if readable and status != "A" else ""
-        after = blob_bytes(repository, candidate, path).decode("utf-8", errors="replace") if readable and status != "D" else ""
+        readable = status != "A" and Path(path).suffix in {".md", ".txt", ".puml"}
+        before = blobs[before_entries[path][1]].decode("utf-8", errors="replace") if readable and status != "A" else ""
+        after = blobs[after_entries[path][1]].decode("utf-8", errors="replace") if readable and status != "D" else ""
         requirements_pattern = r"^#{1,6}\s+(REQ-[A-Z0-9-]+)\b"
         scenario_pattern = r"^#{1,6}\s+Сценарий[^\n]*"
         changes.append({
@@ -923,6 +938,16 @@ def pause_import_for_task(state_path: Path, state: dict, question: str) -> dict:
     return dict(state)
 
 
+def preflight_import_tree(root: Path, source: Path, checkout: Path, incoming: str) -> None:
+    progress(root, "check-import-content")
+    tree = git(checkout, "write-tree")
+    if tree.returncode:
+        raise ValueError("Не удалось проверить дерево импорта перед коммитом")
+    require_nfc_paths(checkout, tree.stdout.strip(), "Импорт")
+    require_analytics_content_policy(root, source, checkout, incoming, tree.stdout.strip(),
+                                     ancestry_commit="HEAD")
+
+
 def commit_source_import(checkout: Path, keys: set[str], files: dict) -> None:
     for path, value in files.items():
         destination = checkout / path
@@ -975,17 +1000,23 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     ):
         raise ValueError("Повреждено состояние импорта")
     accepted_receipt = None
+    progress(root, "inspect-import-branches")
     heads = source_import_heads(documents)
     pending = {}
     for branch, commit in heads.items():
         if not re.fullmatch(r"(?:source|codex)/source-import/[0-9a-f]{40,64}", branch):
             raise ValueError("Некорректное имя ветки импорта")
+        if git(documents, "merge-base", "--is-ancestor", commit, target_commit).returncode == 0:
+            continue
         fetched = git(documents, "fetch", "--quiet", "origin", f"refs/heads/{branch}")
         if fetched.returncode or git(documents, "rev-parse", "FETCH_HEAD").stdout.strip() != commit:
             raise ValueError("Ветка импорта изменилась во время чтения; повтори синхронизацию")
         if git(documents, "merge-base", "--is-ancestor", commit, target_commit).returncode != 0:
             pending[branch] = commit
-    proofs = verified_roundtrips(root, documents, source_commit, target_commit)
+    progress(root, "verify-roundtrip-history")
+    proofs = ({} if not state and not pending and
+              git(documents, "merge-base", "--is-ancestor", source_commit, target_commit).returncode == 0
+              else verified_roundtrips(root, documents, source_commit, target_commit))
     if not state or state.get("status") != "deferred":
         candidates = dict(pending)
         if state and state.get("request_commit"):
@@ -1052,6 +1083,7 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     checkout = root / ".workspace-state/source-imports" / incoming / "repository"
     state["checkout"] = str(checkout)
     atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
+    progress(root, "prepare-import-checkout", checkout=str(checkout))
     if not checkout.exists():
         checkout.parent.mkdir(parents=True, exist_ok=True)
         cloned = run("git", "clone", "--quiet", "--single-branch", "--branch", BRANCH, remote, str(checkout))
@@ -1094,6 +1126,7 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     fetched = git(checkout, "fetch", "--quiet", str(source), incoming)
     if fetched.returncode:
         raise ValueError("Исходный коммит незавершённого импорта недоступен")
+    progress(root, "resolve-import-tasks")
     task_keys, task_files = set(), {}
     if active_merge or git(checkout, "merge-base", "--is-ancestor", incoming, "HEAD").returncode != 0:
         try:
@@ -1101,7 +1134,9 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
         except ValueError as exc:
             return pause_import_for_task(state_path, state, str(exc))
     if active_merge:
+        preflight_import_tree(root, source, checkout, incoming)
         try:
+            progress(root, "commit-import-and-hook")
             commit_source_import(checkout, task_keys, task_files)
         except ValueError as exc:
             return pause_import_for_task(state_path, state, str(exc))
@@ -1130,7 +1165,9 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
                 "forbidden_alternatives": ["skip-source-merge", "overwrite-analytics-from-source"],
                 "detail": merged.stderr.strip(),
             }, ensure_ascii=False))
+        preflight_import_tree(root, source, checkout, incoming)
         try:
+            progress(root, "commit-import-and-hook")
             commit_source_import(checkout, task_keys, task_files)
         except ValueError as exc:
             return pause_import_for_task(state_path, state, str(exc))
@@ -1138,6 +1175,7 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
         state.pop(field, None)
     candidate = git(checkout, "rev-parse", "HEAD").stdout.strip()
     require_clean(checkout, "Изолированный импорт")
+    progress(root, "validate-import-commit", candidate_commit=candidate)
     changed = git(checkout, "diff", "--name-only", "--no-renames", "-z", state["base_commit"], candidate)
     if changed.returncode:
         raise ValueError("Не удалось проверить задачи подготовленного импорта")
@@ -1157,6 +1195,7 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     # Passports replace old paths while contracts move byte-for-byte. Treat only
     # exact copies as inherited content; changed/new lines still undergo --check.
     whitespace_arguments = ("diff", "--check", "--find-copies=100%", "--find-copies-harder", state["base_commit"], candidate)
+    progress(root, "check-import-whitespace")
     whitespace_check = git(checkout, *whitespace_arguments)
     if whitespace_check.returncode:
         raise ValueError(json.dumps({
@@ -1169,12 +1208,14 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
             "inspection_command": ["git", "-C", str(checkout), *whitespace_arguments],
             "allowed_next_action": "inspect-reported-whitespace-errors",
         }, ensure_ascii=False))
+    progress(root, "build-import-report")
     report = source_import_report(checkout, state["base_commit"], candidate)
     state.update({"request_commit": candidate, "status": "prepared", "review": report})
     atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
     pushed = pending.get(branch) == candidate
     push_error = None
     if not no_push and not pushed:
+        progress(root, "push-import")
         sent = git(checkout, "push", "origin", f"HEAD:refs/heads/{branch}")
         state["merge_request_create_url"] = merge_request_create_url(sent)
         if sent.returncode:
@@ -1189,8 +1230,17 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
             pushed = True
     state["status"] = "awaiting-merge" if pushed else "prepared-not-pushed"
     atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
+    visible_state = dict(state)
+    if len(report["changed_paths"]) > 100:
+        report_path = checkout.parent / "review.json"
+        encoded = (json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode()
+        atomic_write(report_path, encoded)
+        visible_state["review"] = {**report, "changed_paths": report["changed_paths"][:20],
+                                  "changed_path_count": len(report["changed_paths"]),
+                                  "preview_truncated": True, "full_report": str(report_path),
+                                  "sha256": hashlib.sha256(encoded).hexdigest()}
     return {
-        **state, "state_file": str(state_path), "merge_request_created": False,
+        **visible_state, "state_file": str(state_path), "merge_request_created": False,
         "merge_request_title": "Предложить входящие аналитические изменения",
         "target_commit": target_commit, "source_has_newer_commit": source_commit != incoming,
         "target_changed_since_preparation": target_commit != state["base_commit"],
@@ -1786,18 +1836,12 @@ def verified_reverse_patch(
     if changed.returncode != 0:
         raise ValueError(f"Не удалось получить состав обратной заплаты: {changed.stderr.strip()}")
     changed_paths = [item for item in changed.stdout.split("\0") if item]
-    revisions = git(
-        analytics,
-        "rev-list", "--reverse", "--topo-order", f"{source_commit}..{documents_commit}",
-    )
-    if revisions.returncode != 0:
-        raise ValueError(f"Не удалось получить состав коммитов обратной заплаты: {revisions.stderr.strip()}")
-    included_analytics_commits = []
-    for commit in [item for item in revisions.stdout.splitlines() if item]:
-        subject = git(analytics, "show", "-s", "--format=%s", commit)
-        if subject.returncode != 0:
-            raise ValueError(f"Не удалось прочитать коммит {commit}: {subject.stderr.strip()}")
-        included_analytics_commits.append({"commit": commit, "subject": subject.stdout.strip()})
+    revisions = git(analytics, "log", "--reverse", "--topo-order", "--format=%H%x00%s",
+                    f"{source_commit}..{documents_commit}")
+    if revisions.returncode:
+        raise ValueError("Не удалось получить состав коммитов обратной заплаты")
+    included_analytics_commits = [dict(zip(("commit", "subject"), line.split("\0", 1)))
+                                  for line in revisions.stdout.split("\n") if line]
     included_features = sorted({
         parts[1] if parts[0] == "features" else parts[3]
         for path in changed_paths
@@ -1950,6 +1994,7 @@ def sync_command(args: argparse.Namespace) -> int:
     handle = lock(root)
     try:
         source, documents, source_id, analytics_id = role_repositories(root)
+        progress(root, "fetch-source", restart=True)
         update_source_mirror(source, source_id)
         source_commit = git(source, "rev-parse", f"refs/heads/{BRANCH}").stdout.strip()
         require_nfc_paths(source, source_commit, f"{source_id} (source)")
@@ -1960,6 +2005,7 @@ def sync_command(args: argparse.Namespace) -> int:
         if not unicode_aliases:
             require_clean(documents, f"{analytics_id} (analytics)")
         require_branch(documents, f"{analytics_id} (analytics)")
+        progress(root, "update-analytics-main")
         analytics_origin_update = update_analytics_from_origin(root, documents, analytics_id)
         verify_unicode_aliases(documents, unicode_aliases)
         configure_source_remote(documents, source)
@@ -1971,6 +2017,7 @@ def sync_command(args: argparse.Namespace) -> int:
             }, ensure_ascii=False).encode())
         source_merge = prepare_source_import(root, source, documents, analytics_id, args.no_push)
         if source_merge["status"] not in ("already-contained", "roundtrip-verified"):
+            progress(root, source_merge["status"], status="waiting")
             print(json.dumps({
                 "status": source_merge["status"], "source_analytics_state": "source-import-pending",
                 "source_import": source_merge, "analytics_pushed": False,
@@ -1992,6 +2039,7 @@ def sync_command(args: argparse.Namespace) -> int:
         code_path, code_availability = available_code_repository(root)
         entrypoint = write_local_entrypoint(documents, root, code_path, code_availability)
         require_clean(documents, f"{analytics_id} (analytics)")
+        progress(root, "verify-reverse-patch")
         metadata = verified_reverse_patch(root, source, documents, source_id, analytics_id)
         if not args.no_push:
             require_clean(documents, f"{analytics_id} (analytics)")
@@ -2005,8 +2053,10 @@ def sync_command(args: argparse.Namespace) -> int:
                 source_commit,
                 current_commit,
             )
+            progress(root, "push-analytics")
             push_analytics(documents, analytics_id)
         completion = reverse_diff_completion(metadata)
+        progress(root, completion["status"], status="completed")
         print(json.dumps({
             "status": completion["status"],
             "analytics_pushed": not args.no_push,
@@ -2017,6 +2067,9 @@ def sync_command(args: argparse.Namespace) -> int:
             **completion,
         }, ensure_ascii=False, indent=2))
         return 0
+    except Exception as exc:
+        progress(root, "blocked", status="failed", error=str(exc))
+        raise
     finally:
         handle.close()
 
@@ -2127,12 +2180,14 @@ def sync_analytics_only_command(args: argparse.Namespace) -> int:
     root = root_path(args.root)
     handle = lock(root)
     try:
+        progress(root, "update-analytics-main", restart=True)
         analytics, analytics_id = analytics_repository(root)
         require_no_active_analytics_merge(root, analytics, analytics_id)
         require_clean(analytics, f"{analytics_id} (analytics)")
         require_branch(analytics, f"{analytics_id} (analytics)")
         analytics_origin_update = update_analytics_from_origin(root, analytics, analytics_id)
         analytics_commit = git(analytics, "rev-parse", "HEAD").stdout.strip()
+        progress(root, "check-analytics-content")
         require_nfc_paths(analytics, analytics_commit, f"{analytics_id} (analytics)")
         require_standalone_analytics_policy(analytics, analytics_commit, analytics_id)
         code_path, code_availability = available_code_repository(root)
@@ -2145,8 +2200,10 @@ def sync_analytics_only_command(args: argparse.Namespace) -> int:
                 raise ValueError("Роль analytics изменилась после проверки; отправка запрещена")
             require_clean(analytics, f"{analytics_id} (analytics)")
             require_standalone_analytics_policy(analytics, current_commit, analytics_id)
+            progress(root, "push-analytics")
             push_analytics(analytics, analytics_id)
         completion = reverse_diff_completion(metadata)
+        progress(root, completion["status"], status="completed")
         print(json.dumps({
             "status": completion["status"],
             "sync_mode": "analytics-only",
@@ -2157,6 +2214,9 @@ def sync_analytics_only_command(args: argparse.Namespace) -> int:
             **completion,
         }, ensure_ascii=False, indent=2))
         return 0
+    except Exception as exc:
+        progress(root, "blocked", status="failed", error=str(exc))
+        raise
     finally:
         handle.close()
 

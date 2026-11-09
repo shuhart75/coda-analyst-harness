@@ -645,6 +645,8 @@ def _sync_command(args: argparse.Namespace, collaboration_finish: dict | None = 
             ),
         }, ensure_ascii=False, indent=2))
         return 2
+    from sync_progress import progress
+    progress(root, "update-code", restart=True)
     code_result = update_code(root)
     source_id = load_roles(root)["source"]
     source_path = source_mirror_path(root, source_id) if source_id else None
@@ -832,7 +834,18 @@ def sync_command(args: argparse.Namespace) -> int:
         print(json.dumps(blocked, ensure_ascii=False, indent=2))
         return 2
     with workspace_operation_lock(root):
-        return _sync_command(args, collaboration_finish)
+        from sync_progress import progress
+        progress(root, "start", restart=True)
+        try:
+            result = _sync_command(args, collaboration_finish)
+            path = root / ".workspace-state/sync-progress.json"
+            current = json.loads(path.read_text())
+            if (result and current.get("status") != "failed") or current.get("status") == "running":
+                progress(root, "blocked" if result else "finished", status="failed" if result else "completed")
+            return result
+        except Exception as exc:
+            progress(root, "blocked", status="failed", error=str(exc))
+            raise
 
 
 def inspect_conflict_command(args: argparse.Namespace) -> int:

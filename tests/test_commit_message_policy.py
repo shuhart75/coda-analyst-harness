@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,22 @@ def binding(key='RSCON-123', kind='delivery', quarter='2026-Q4'):
 
 
 class CommitMessagePolicyTests(unittest.TestCase):
+    def test_large_snapshot_reads_bindings_once_and_does_not_cache_between_calls(self):
+        files = {'baseline/analysis-task.json': json.dumps(task_binding(kind='baseline'))}
+        calls = Counter()
+        def read(path):
+            calls[path] += 1
+            return files.get(path)
+        paths = [f'baseline/versions/release-{i}/requirements.md' for i in range(4659)]
+        self.assertEqual(keys_for_paths(paths, read), {'RSCON-123'})
+        self.assertEqual(sum(calls.values()), 4)
+        self.assertEqual(max(calls.values()), 1)
+        files['baseline/analysis-task.json'] = json.dumps(task_binding('RSCON-456', kind='baseline'))
+        self.assertEqual(keys_for_paths(paths, read), {'RSCON-456'})
+        del files['baseline/analysis-task.json']
+        with self.assertRaises(ValueError):
+            keys_for_paths(paths, read)
+
     def test_harness_is_exempt_but_separate_analytics_repository_is_not(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

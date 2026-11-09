@@ -16,6 +16,64 @@ FIELDS = {name: '/' + name for name in ('key', 'summary', 'suit', 'epic', 'statu
 
 
 class TaskResolutionTests(unittest.TestCase):
+    def test_actual_link_list_envelope_proves_epic_without_synthetic_card_fields(self):
+        raw = {'result': [{'type': 'text', 'text': 'Links for RSCON-123 (1 total, page 0, has_next: False)\\n\\n1. RSCON-900 **decomposition** -> RSCON-123'}]}
+        memberships = tasks.link_epics([raw], '/result/0/text')
+        state = self.request()
+        card = self.card(state)
+        del card['epic']
+        fields = {k: v for k, v in FIELDS.items() if k != 'epic'}
+        with self.assertRaises(ValueError):
+            tasks.ingest_search(state, [card], items_pointer='', fields=fields,
+                closed_values=['closed'], complete=True, step=state['step_id'])
+        tasks.ingest_search(state, [card], items_pointer='', fields=fields,
+            closed_values=['closed'], complete=True, step=state['step_id'], memberships=memberships)
+        self.assertEqual(state['binding']['epic'], 'RSCON-900')
+        created = self.request()
+        self.search(created, [])
+        tasks.begin_create(created, 'mcp.create', {'summary': created['spec']['summary'], 'suit': 'task'},
+                           created['step_id'], FIELDS, True)
+        tasks.ingest_created(created, card, item_pointer='', fields=fields,
+                             step=created['step_id'], memberships=memberships)
+        self.assertEqual(created['status'], 'resolved')
+        reversed_links = tasks.link_epics([{'text': 'Links for RSCON-123 (1 total, page 0, has_next: False)\n1. RSCON-123 **decomposition** -> RSCON-900'}], '/text')
+        self.assertEqual(reversed_links['RSCON-123'], set())
+
+    def test_link_list_rejects_incomplete_malformed_and_conflicting_evidence(self):
+        valid = 'Links for RSCON-123 (1 total, page 0, has_next: False)\n1. RSCON-900 **decomposition** -> RSCON-123'
+        for text in (valid.replace('False', 'True'), valid.replace('page 0', 'page 1'),
+                     valid.replace('1 total', '2 total'), valid.replace('1.', '2.'),
+                     valid.replace('-> RSCON-123', '-> RSCON-456')):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                tasks.link_epics([{'text': text}], '/text')
+        with self.assertRaises(ValueError):
+            tasks.link_epics([{'text': valid}, {'text': valid.replace('RSCON-900', 'RSCON-901')}], '/text')
+        state = self.request()
+        with self.assertRaises(ValueError):
+            tasks.ingest_search(state, [self.card(state)], items_pointer='', fields=FIELDS,
+                closed_values=['closed'], complete=True, step=state['step_id'],
+                memberships={'RSCON-123': {'RSCON-901'}})
+
+    def test_cli_archives_card_and_link_evidence_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = self.request()
+            tasks.save_state(root / 'state.json', state)
+            card = self.card(state)
+            del card['epic']
+            (root / 'cards.json').write_text(json.dumps([card], indent=3))
+            (root / 'fields.json').write_text(json.dumps({k: v for k, v in FIELDS.items() if k != 'epic'}))
+            (root / 'links.json').write_text(json.dumps({'text': 'Links for RSCON-123 (1 total, page 0, has_next: False)\n\n1. RSCON-900 **decomposition** -> RSCON-123'}, indent=4))
+            result = subprocess.run([sys.executable, str(ROOT / 'scripts/commit-taskctl.py'), 'search-result',
+                '--state', str(root / 'state.json'), '--step', state['step_id'], '--response', str(root / 'cards.json'),
+                '--fields', str(root / 'fields.json'), '--closed-value', 'closed', '--complete',
+                '--links-response', str(root / 'links.json'), '--links-text-pointer', '/text'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            saved = json.loads(result.stdout)
+            self.assertEqual(saved['status'], 'resolved')
+            self.assertEqual([Path(item['path']).read_bytes() for item in saved['evidence']],
+                             [(root / 'cards.json').read_bytes(), (root / 'links.json').read_bytes()])
+
     def request(self, kind='delivery', owner='demo'):
         return tasks.request('delivery' if kind == 'delivery' else 'quarter', owner,
                              kind, owner, 'RSCON-900', 'Analyst confirms epic')
