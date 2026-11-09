@@ -130,7 +130,46 @@ def request(owner_type, owner_id, kind, title, epic, confirmation):
                 step_id=uuid.uuid4().hex, attempts=[], evidence=[])
 
 
-def ingest_search(state, raw, *, items_pointer, fields, closed_values, complete, step):
+def link_epics(responses, text_pointer):
+    """Read the actual SberTrack link.list text envelope, without inventing epic fields.
+
+    Only a complete first page is accepted. The header binds each response to
+    its queried card; direction is significant (epic -> task).
+    """
+    result = {}
+    for raw in responses:
+        text = pointer(raw, text_pointer)
+        if not isinstance(text, str):
+            raise ValueError('Нужен дословный текст ответа link.list')
+        lines = [line.strip() for line in text.replace('\\n', '\n').splitlines() if line.strip()]
+        header = re.fullmatch(r'Links for ([A-Z][A-Z0-9_]*-[1-9][0-9]*) \((\d+) total, page 0, has_next: False\)', lines[0] if lines else '')
+        if not header or int(header[2]) != len(lines) - 1:
+            raise ValueError('Нужен полный ответ link.list без пропущенных страниц или связей')
+        key, parents = header[1], set()
+        for number, line in enumerate(lines[1:], 1):
+            edge = re.fullmatch(r'(\d+)\. ([A-Z][A-Z0-9_]*-[1-9][0-9]*) \*\*([^*]+)\*\* -> ([A-Z][A-Z0-9_]*-[1-9][0-9]*)', line)
+            if not edge or int(edge[1]) != number or key not in (edge[2], edge[4]):
+                raise ValueError('Неподдерживаемый или противоречивый формат link.list')
+            if edge[3] == 'decomposition' and edge[4] == key:
+                parents.add(edge[2])
+        if len(parents) > 1 or (key in result and result[key] != parents):
+            raise ValueError('Несколько эпиков или противоречивые ответы link.list')
+        result[key] = parents
+    return result
+
+
+def card_epic(item, fields, key, memberships):
+    if 'epic' in fields:
+        epic = pointer(item, fields['epic'])
+        if memberships is not None and key in memberships and memberships[key] != {epic}:
+            raise ValueError('Поле epic противоречит link.list')
+        return epic
+    if memberships is None or key not in memberships:
+        raise ValueError('Нет поля epic: передай полный ответ link.list для этой задачи')
+    return next(iter(memberships[key]), None)
+
+
+def ingest_search(state, raw, *, items_pointer, fields, closed_values, complete, step, memberships=None):
     if state['step_id'] != step or state['status'] not in ('search-required', 'create-outcome-unknown'):
         raise ValueError('Ответ не соответствует ожидаемому поиску')
     items = pointer(raw, items_pointer)
@@ -141,15 +180,18 @@ def ingest_search(state, raw, *, items_pointer, fields, closed_values, complete,
     spec = state['spec']
     candidates = {}
     for item in items:
-        card = {name: pointer(item, fields[name]) for name in ('key', 'summary', 'suit', 'epic', 'status')}
+        card = {name: pointer(item, fields[name]) for name in ('key', 'summary', 'suit', 'status')}
         if not isinstance(card['status'], str) or not card['status']:
             raise ValueError('Состояние найденной задачи неизвестно')
-        if card['epic'] != spec['epic'] or card['suit'] != 'task':
+        if card['suit'] != 'task':
             continue
         if not isinstance(card['summary'], str) or not card['summary'].startswith(PREFIXES[spec['kind']] + ' '):
             continue
         if not isinstance(card['key'], str) or not KEY.fullmatch(card['key']):
             raise ValueError('Некорректный собственный ключ SberTrack')
+        card['epic'] = card_epic(item, fields, card['key'], memberships)
+        if card['epic'] != spec['epic']:
+            continue
         card['closed'] = card['status'] in closed_values
         if card['key'] in candidates and candidates[card['key']] != card:
             raise ValueError('Поиск вернул противоречивые карточки одной задачи')
@@ -207,11 +249,12 @@ def begin_create(state, tool, arguments, step, fields, link_separately=False):
     return state
 
 
-def ingest_created(state, raw, *, item_pointer, fields, step):
+def ingest_created(state, raw, *, item_pointer, fields, step, memberships=None):
     if state['status'] != 'create-outcome-unknown' or state['step_id'] != step:
         raise ValueError('Ответ не соответствует ожидаемому созданию')
     item = pointer(raw, item_pointer)
-    card = {name: pointer(item, fields[name]) for name in ('key', 'summary', 'suit', 'epic')}
+    card = {name: pointer(item, fields[name]) for name in ('key', 'summary', 'suit')}
+    card['epic'] = card_epic(item, fields, card['key'], memberships)
     spec = state['spec']
     if any(card[name] != spec[name] for name in ('summary', 'suit', 'epic')):
         raise ValueError('Созданная задача не подтверждает нужные название, тип и связь с эпиком; выполни проверочное чтение')
@@ -223,8 +266,8 @@ def ingest_created(state, raw, *, item_pointer, fields, step):
 def save_state(path, state, evidence=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if evidence is not None:
-        data = Path(evidence).read_bytes()
+    for source in ([] if evidence is None else evidence if isinstance(evidence, list) else [evidence]):
+        data = Path(source).read_bytes()
         digest = hashlib.sha256(data).hexdigest()
         archive = path.parent / (path.stem + '-responses') / (digest + '.json')
         archive.parent.mkdir(parents=True, exist_ok=True)

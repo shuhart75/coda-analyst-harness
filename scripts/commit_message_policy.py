@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+from functools import cache
 from pathlib import Path
 
 TRACKER_IDENTIFIER_RE = re.compile(r'(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]*-[1-9][0-9]*(?![A-Za-z0-9_])')
@@ -54,6 +55,9 @@ def delivery_message(project: Path, deliveries, description: str) -> str:
 
 def keys_for_paths(paths, read) -> set[str]:
     """Resolve delivery and quarterly planning ownership from one snapshot."""
+    # Scope to this validation only, including missing files. Never reuse reads
+    # across changes to the index, worktree or receiver decisions.
+    read = cache(read)
     paths = list(paths)
     index_text = read('delivery-index.json')
     index = json.loads(index_text) if index_text else None

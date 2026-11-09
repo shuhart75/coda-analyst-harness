@@ -14,6 +14,48 @@ from analysis_task_fixture import task_binding
 
 
 class SourceImportTests(unittest.TestCase):
+    def test_deleted_inherited_path_blocks_before_commit_and_resumes_after_approval(self):
+        self.git(self.documents, 'rm', '--', 'context/shared.txt')
+        self.git(self.documents, 'commit', '-m', 'RSCON-123: Remove inherited file')
+        self.git(self.documents, 'push', 'origin', 'main')
+        before = self.git(self.documents, 'rev-parse', 'HEAD')
+        (self.source / 'context/new.txt').write_text('New source document\n')
+        self.git(self.source, 'add', '--', 'context/new.txt')
+        self.git(self.source, 'commit', '-m', 'RSCON-123: Add source document')
+        self.git(self.source, 'push', 'origin', 'main')
+        result = fixture.run('python3', str(fixture.ROOT / 'scripts/workspace.py'), '--root',
+                             str(self.workspace), 'sync', env=self.environment)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('analytics-content-policy', result.stdout)
+        state = json.loads((self.workspace / '.workspace-state/source-import.json').read_text())
+        checkout = Path(state['checkout'])
+        self.assertEqual(self.git(checkout, 'rev-parse', 'HEAD'), before)
+        self.assertTrue((checkout / '.git/MERGE_HEAD').exists())
+        self.assertEqual(json.loads((self.workspace / '.workspace-state/sync-progress.json').read_text())['status'], 'failed')
+        approved = fixture.run('python3', str(fixture.ROOT / 'scripts/repository-exchange.py'), '--root',
+                               str(self.workspace), 'approve-deletion', '--path', 'context/shared.txt', env=self.environment)
+        self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
+        ready = self.sync()['analytics_exchange']['source_import']
+        self.assertEqual(ready['request_branch'], state['request_branch'])
+        self.assertEqual(ready['status'], 'awaiting-merge')
+        self.assertEqual(self.git(self.documents, 'rev-parse', 'HEAD'), before)
+
+    def test_large_import_returns_compact_review_and_exact_full_report(self):
+        for i in range(120):
+            (self.source / f'context/added-{i}.txt').write_text('Incoming\n')
+        self.git(self.source, 'add', '--', 'context')
+        self.git(self.source, 'commit', '-m', 'RSCON-123: Large source fixture')
+        self.git(self.source, 'push', 'origin', 'main')
+        request = self.sync()['analytics_exchange']['source_import']
+        review = request['review']
+        self.assertTrue(review['preview_truncated'])
+        self.assertEqual(len(review['changed_paths']), 20)
+        self.assertEqual(review['changed_path_count'], 120)
+        import hashlib
+        raw = Path(review['full_report']).read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), review['sha256'])
+        self.assertEqual(len(json.loads(raw)['changed_paths']), 120)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

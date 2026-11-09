@@ -35,6 +35,10 @@ def main():
             command.add_argument('--fields', type=Path, required=True,
                                  help='JSON object mapping normalized names to actual JSON Pointers')
             command.add_argument('--step', required=True)
+            command.add_argument('--links-response', type=Path, action='append', default=[],
+                                 help='Full JSON response(s) of SberTrack link.list')
+            command.add_argument('--links-text-pointer',
+                                 help='JSON Pointer to the verbatim link.list text in each response')
         if name == 'search-result':
             command.add_argument('--complete', action='store_true')
             command.add_argument('--closed-value', action='append', required=True)
@@ -121,12 +125,18 @@ def main():
         if args.command in ('search-result', 'created-result'):
             raw = json.loads(args.response.read_text())
             fields = json.loads(args.fields.read_text())
+            if bool(args.links_response) != bool(args.links_text_pointer):
+                raise ValueError('Передай links-response вместе с links-text-pointer')
+            memberships = (tasks.link_epics([json.loads(path.read_text()) for path in args.links_response],
+                                           args.links_text_pointer) if args.links_response else None)
             if args.command == 'search-result':
                 tasks.ingest_search(state, raw, items_pointer=args.pointer, fields=fields,
-                                    closed_values=args.closed_value, complete=args.complete, step=args.step)
+                                    closed_values=args.closed_value, complete=args.complete, step=args.step,
+                                    memberships=memberships)
             else:
-                tasks.ingest_created(state, raw, item_pointer=args.pointer, fields=fields, step=args.step)
-            evidence = args.response
+                tasks.ingest_created(state, raw, item_pointer=args.pointer, fields=fields, step=args.step,
+                                     memberships=memberships)
+            evidence = [args.response, *args.links_response]
         elif args.command == 'begin-create':
             tasks.begin_create(state, args.tool, json.loads(args.arguments.read_text()), args.step, json.loads(args.fields.read_text()), args.link_separately)
         elif args.command == 'confirm-create':
