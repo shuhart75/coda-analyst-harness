@@ -34,9 +34,11 @@ class CollaborationRecoveryTests(unittest.TestCase):
         self.document = self.analytics / self.relative
         self.document.parent.mkdir(parents=True)
         self.document.write_text("base\n", encoding="utf-8")
-        from analysis_task_fixture import write_binding
+        from analysis_task_fixture import write_binding, write_planning_binding
         write_binding(self.analytics / "features/cohorts")
         self.git(self.analytics, "add", "--", "features/cohorts/analysis-task.json")
+        write_planning_binding(self.analytics, shared={self.relative: "2026-Q3"})
+        self.git(self.analytics, "add", "--", "planning/task-bindings.json")
         self.commit("Initial progress")
         self.git(self.root, "clone", "--bare", str(self.analytics), str(self.remote))
         self.git(self.analytics, "remote", "add", "origin", str(self.remote))

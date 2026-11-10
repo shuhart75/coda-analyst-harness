@@ -84,7 +84,8 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         for feature in (self.project / 'features').iterdir():
             if feature.is_dir():
                 write_binding(feature)
-                for path in (feature / 'planning').glob('*.md'):
+                for path in [*(feature / 'planning').glob('*.md'),
+                             *(feature / 'execution').glob('*')]:
                     shared[path.relative_to(self.project).as_posix()] = '2026-Q3'
         write_planning_binding(self.project, ('2026-Q3', '2026-Q4'), shared=shared)
         self.git(self.project, 'add', '--', 'features', 'planning')
