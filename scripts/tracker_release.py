@@ -45,7 +45,9 @@ def apply_scope_decisions(project: Path, result: dict, decisions: dict | None) -
         role = decision.get("role", issue.get("task_role"))
         if role not in {"AN", "BE", "FE", "QA"}:
             raise ValueError("An unprefixed task requires an explicit supported role decision")
-        if issue.get("task_role") and role != issue["task_role"]:
+        if issue.get("issue_type") == "bug" and role not in {"BE", "FE"}:
+            raise ValueError("A bug requires a confirmed development role")
+        if issue.get("issue_type") != "bug" and issue.get("task_role") and role != issue["task_role"]:
             raise ValueError("A role decision cannot silently override an explicit task prefix")
         issue.update(confirmed_feature=feature, task_role=role)
         if issue in reviewed.get("skipped", []):
@@ -223,9 +225,11 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
     provider = scope["provider"]
     field = provider + "_key"
     targets = [row for row in rows if row["feature"] == feature and row["role"] == "QA"]
-    development = [row for row in rows if row["feature"] == feature and row["role"] in {"FE", "BE"}
-                   and row["kind"] == "real"]
     by_key = {issue.get(field): issue for issue in issues}
+    development = [row for row in rows if row["feature"] == feature and row["role"] in {"FE", "BE"}
+                   and row.get("suit") != "bug"
+                   and by_key.get(row.get(field), {}).get('issue_type') != 'bug'
+                   and row["kind"] == "real"]
     if any(not row.get(field) or row[field] not in by_key for row in development):
         return {"ready": False, "reason": "collect-all-feature-cards-before-partition", "path": path.relative_to(project).as_posix()}
     def is_active(row: dict) -> bool:
@@ -295,17 +299,27 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
             if group["release"] == release and remaining or included and group["release"] not in {None, release}:
                 raise ValueError("Conflicting release membership; analyst must select the sole owning release")
             if included and remaining:
-                amount = Decimal(str(group["estimate"]))
-                portion = (amount * len(included) / len(group["members"])).quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
-                if portion <= 0 or amount - portion <= 0:
-                    raise ValueError("QA allocation precision is insufficient; review the estimate")
                 suffix = hashlib.sha256((provider + ":" + release).encode()).hexdigest()[:10]
-                updated.append({**group, "members": sorted(included), "release": release, "estimate": str(portion)})
+                updated.append({**group, "members": sorted(included), "release": release})
                 updated.append({**group, "task_id": group["task_id"] + "-REST-" + suffix,
-                                "members": sorted(remaining), "release": None, "estimate": str(amount - portion)})
+                                "members": sorted(remaining), "release": None})
             else:
                 updated.append({**group, "release": release if included else group["release"]})
         groups = updated
+    # Allocate from the whole feature, never recursively from an old remainder.
+    # A changed population is reviewed above before any new allocation is offered.
+    # Assign rounding residue deterministically, independently of collection order.
+    allocation_order = sorted(groups, key=lambda group: (group.get("release") is None,
+                              str(group.get("release") or ""), tuple(sorted(group["members"]))))
+    allocated = Decimal(0)
+    for index, group in enumerate(allocation_order):
+        amount = ((total * len(group["members"]) / len(members)).quantize(
+            Decimal("0.000001"), rounding=ROUND_DOWN)
+            if index < len(allocation_order) - 1 else total - allocated)
+        if amount <= 0:
+            raise ValueError("QA allocation precision is insufficient; review the estimate")
+        group["estimate"] = format(amount.normalize(), "f")
+        allocated += amount
     target_by_id = {target["task_id"]: target for target in targets}
     registry = targets[0]["registry"]
     for group in groups:

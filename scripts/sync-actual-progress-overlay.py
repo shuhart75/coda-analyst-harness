@@ -145,6 +145,9 @@ class Task:
     release_label: str = ""
     release_id: str = ""
     production_confirmed: bool = False
+    suit: str = ""
+    depends_on: tuple[str, ...] = ()
+    not_before: str = ""
 
 
 @dataclass
@@ -154,6 +157,7 @@ class ScheduledTask:
     assignee: str
     shifted: bool
     resource_note: str = ""
+    allocations: tuple[tuple[date, float], ...] = ()
 
 
 def usage() -> None:
@@ -610,6 +614,11 @@ def unestimated_actual(row: dict[str, str]) -> bool:
             and bool(parse_date(row.get("Actual Finish", "")) or parse_date(row.get("Completed By", ""))))
 
 
+def unestimated_bug(row: dict[str, str]) -> bool:
+    return (clean_cell(row.get("Suit", "")).lower() == "bug"
+            and clean_cell(row.get("Estimate (дн)", "")) in {"", "-", "—", "unknown"})
+
+
 def date_cell(value: str) -> str:
     value = clean_cell(value)
     return "" if value in {"-", "—"} else value
@@ -622,7 +631,7 @@ def validate_task_row(row: dict[str, str], path: Path) -> None:
     if normalize_role(row["Role"]) not in ROLE_COLORS or row["Kind"].lower() not in {"real", "virtual"}:
         raise ValueError(f"{path}: неизвестный Role или Kind")
     task_id = clean_cell(row.get("Task ID", "")) or f"{row.get('SberTrek', '')}/{row.get('Role', '')}"
-    if not unestimated_actual(row):
+    if not unestimated_actual(row) and not unestimated_bug(row):
         validate_estimate(row.get("Estimate (дн)", ""), path, task_id)
     progress = clean_cell(row["Progress %"])
     if progress != "unknown" and (not re.fullmatch(r"\d+(?:\.\d+)?", progress) or not 0 <= float(progress) <= 100):
@@ -724,7 +733,7 @@ def load_tasks(feature_dir: Path, project_root: Path | None = None) -> dict[str,
                 summary=clean_cell(row.get("Summary", tracker_key)),
                 kind=kind,
                 role=role,
-                estimate=None if unestimated_actual(row) else parse_number(row.get("Estimate (дн)", ""), 1.0),
+                estimate=None if unestimated_actual(row) or unestimated_bug(row) else parse_number(row.get("Estimate (дн)", ""), 1.0),
                 executor=clean_cell(row.get("Executor", "")),
                 planned_start=date_cell(row.get("Planned Start", "")),
                 planned_finish=date_cell(row.get("Planned Finish", "")),
@@ -734,7 +743,14 @@ def load_tasks(feature_dir: Path, project_root: Path | None = None) -> dict[str,
                 progress=progress,
                 related_stories=split_list(row.get("Related Stories", "")),
                 completed_by=completed_by,
+                suit=clean_cell(row.get("Suit", "")).lower(),
+                depends_on=tuple(split_list(row.get("Depends On", ""))),
+                not_before=date_cell(row.get("Not Before", "")),
             )
+            if tasks[task_id].not_before and not parse_date(tasks[task_id].not_before):
+                raise ValueError(f"{path}: {task_id}: неверная дата Not Before")
+            if tasks[task_id].suit == "bug" and normalized_role not in {"BE", "FE"}:
+                raise ValueError(f"{path}: {task_id}: дефект требует подтверждённой роли разработчика")
             if role_for_task(tasks[task_id]) == "QA":
                 validate_estimate(row.get("Estimate (дн)", ""), path, task_id)
     candidates = feature_dir / "execution/task-candidates.md"
@@ -785,7 +801,7 @@ def load_tasks(feature_dir: Path, project_root: Path | None = None) -> dict[str,
                 raise ValueError(f"{groups_path}: QA-задача отсутствует или повторяется")
             if not members or len(set(members)) != len(members) or seen & set(members):
                 raise ValueError(f"{groups_path}: состав QA-групп пуст или пересекается")
-            if any(member not in tasks or role_for_task(tasks[member]) not in {"BE", "FE"} for member in members):
+            if any(member not in tasks or tasks[member].suit == "bug" or role_for_task(tasks[member]) not in {"BE", "FE"} for member in members):
                 raise ValueError(f"{groups_path}: неизвестная BE/FE-задача")
             estimate = Decimal(str(group["estimate"]))
             if not estimate.is_finite() or estimate <= 0 or estimate != Decimal(str(task.estimate)):
@@ -796,7 +812,7 @@ def load_tasks(feature_dir: Path, project_root: Path | None = None) -> dict[str,
             task.qa_members = tuple(members)
             for member_id in [task_id, *members]:
                 tasks[member_id].release_id = group.get("release") or ""
-        expected = {task.task_id for task in tasks.values() if task.kind == "real"
+        expected = {task.task_id for task in tasks.values() if task.kind == "real" and task.suit != "bug"
                     and role_for_task(task) in {"BE", "FE"} and task.status.lower() not in EXCLUDED_STATUSES}
         if seen != expected or qa_ids != {task.task_id for task in tasks.values() if task.kind == "real" and role_for_task(task) == "QA"}:
             raise ValueError(f"{groups_path}: состав QA не покрывает текущее исполнение")
@@ -943,14 +959,11 @@ def earliest_task_start(task: Task, closed_days: set[date], today: date) -> tupl
     shifted = False
 
     if needs_forecast_schedule(task):
-        min_start = next_open_day(today, closed_days)
-        if raw_start is None or raw_start < min_start:
-            raw_start = min_start
-            shifted = True
-        else:
-            open_start = next_open_day(raw_start, closed_days)
-            shifted = shifted or open_start != raw_start
-            raw_start = open_start
+        # Planned Start is a forecast, not a release/readiness constraint.
+        ready = parse_date(task.not_before) or today
+        start = next_open_day(max(today, ready), closed_days)
+        shifted = raw_start != start
+        raw_start = start
 
     return raw_start, shifted
 
@@ -1125,60 +1138,54 @@ def task_schedules(
     ]
     not_started = [(task_id, task, start, shifted) for task_id, task, start, shifted in not_started if start]
 
-    def schedule_phase(roles: set[str]) -> None:
-        phase_items = [
-            item
-            for item in not_started
-            if item[0] not in schedules and role_for_task(item[1]) != "QA"
-            and (role_for_task(item[1]) in roles if roles else True)
-        ]
-        for task_id, task, start, shifted in sorted(
-            phase_items,
-            key=lambda item: (priority(item[0]), item[2] or date.max, ROLE_ORDER.get(role_for_task(item[1]), 90), item[0]),
-        ):
-            schedules[task_id] = schedule_not_started_task(
-                task,
-                start,
-                shifted,
-                occupied,
-                closed_days,
-                team_resources,
-                resource_coefficients,
-            )
+    # Explicit task dependencies replace the blanket BE -> FE delay. Local IDs
+    # resolve within a delivery; a fully qualified key can name another delivery.
+    pending = {item[0]: item for item in not_started if role_for_task(item[1]) != "QA"}
+    dependencies = {}
+    for key, task in tasks.items():
+        refs = []
+        for reference in task.depends_on:
+            local = task_scope(key) + "/" + reference if task_scope(key) else reference
+            target = local if local in scope_tasks else reference
+            if target not in scope_tasks or target == key:
+                raise ValueError(f"{task.task_id}: неизвестная или циклическая зависимость {reference}")
+            refs.append(target)
+        dependencies[key] = refs
+    while pending:
+        ready = []
+        for key, task, start, shifted in pending.values():
+            if any(dep in pending for dep in dependencies[key]):
+                continue
+            for dep in dependencies[key]:
+                predecessor = scope_tasks[dep]
+                finish = parse_date(predecessor.actual_finish or predecessor.completed_by)
+                if finish is None and dep in schedules:
+                    finish = schedules[dep].finish
+                if finish is None or predecessor.status.lower() in EXCLUDED_STATUSES:
+                    raise ValueError(f"{task.task_id}: окончание зависимости {predecessor.task_id} не подтверждено")
+                start = max(start, next_open_day(finish + timedelta(days=1), closed_days))
+            ready.append((key, task, start, shifted))
+        if not ready:
+            raise ValueError("Цикл зависимостей задач: " + ", ".join(sorted(pending)))
+        key, task, start, shifted = min(ready, key=lambda item: (
+            priority(item[0]), item[2], ROLE_ORDER.get(role_for_task(item[1]), 90), item[0]))
+        schedules[key] = schedule_not_started_task(
+            task, start, shifted, occupied, closed_days, team_resources, resource_coefficients)
+        if dependencies[key]:
+            schedules[key].resource_note += "; зависимости: " + ", ".join(dependencies[key])
+        if task.not_before:
+            schedules[key].resource_note += "; не ранее " + task.not_before
+        del pending[key]
 
-    schedule_phase({"AN", "BE"})
-
-    be_starts_by_scope: dict[str, list[date]] = {}
-    for task_id, task in tasks.items():
-        if task_id in schedules and needs_forecast_schedule(task) and role_for_task(task) == "BE":
-            be_starts_by_scope.setdefault(task_scope(task_id), []).append(schedules[task_id].start)
-
-    for task_id, task, start, shifted in sorted(
-        [item for item in not_started if item[0] not in schedules and role_for_task(item[1]) == "FE"],
-        key=lambda item: (priority(item[0]), item[2] or date.max, item[0]),
-    ):
-        be_starts = be_starts_by_scope.get(task_scope(task_id), [])
-        fe_min_start = add_open_day_offset(min(be_starts), FE_AFTER_BE_OPEN_DAYS, closed_days) if be_starts else None
-        earliest = max(start, fe_min_start) if fe_min_start else start
-        schedules[task_id] = schedule_not_started_task(
-            task,
-            earliest,
-            shifted or earliest != start,
-            occupied,
-            closed_days,
-            team_resources,
-            resource_coefficients,
-        )
-
-    # Finish all non-QA forecasts before deriving the final release/feature endpoint.
-    schedule_phase(set())
-
+    # QA effort is fractional capacity, whereas the regression deadline is a
+    # calendar constraint shared by all feature groups of the same release.
+    qa_load: dict[str, dict[date, float]] = {}
     qa_items = [(key, task) for key, task in tasks.items() if forecast_qa(task)]
     for task_id, task in sorted(qa_items, key=lambda item: (
             not bool(explicit_executor(item[1], team_resources)), priority(item[0]), item[0])):
         members = []
         for key, member in scope_tasks.items():
-            if role_for_task(member) == "QA":
+            if role_for_task(member) == "QA" or member.suit == "bug":
                 continue
             if task.release_id:
                 included = member.release_id == task.release_id
@@ -1187,54 +1194,68 @@ def task_schedules(
                             and (not task.qa_members or member.task_id in task.qa_members))
             if included:
                 members.append((key, member))
-        finishes = []
+        finishes, own_finishes = [], []
         for key, member in members:
-            finish = parse_date(member.actual_finish)
+            finish = parse_date(member.actual_finish or member.completed_by)
             if not finish and key in schedules:
                 finish = schedules[key].finish
             if not finish:
                 raise ValueError(f"{task.task_id}: неизвестно окончание {member.task_id}; нельзя определить конец QA")
             finishes.append(finish)
-        if not finishes:
-            raise ValueError(f"{task.task_id}: нет задач с окончанием для расчёта QA")
-        finish = qa_end_after(max(finishes), closed_days)
-        duration = max(QA_REGRESSION_OPEN_DAYS, task_duration(task))
-        start = qa_window_start(finish, duration, closed_days)
+            if key.removesuffix(member.task_id).rstrip("/") == task_scope(task_id) and (
+                    not task.qa_members or member.task_id in task.qa_members):
+                own_finishes.append(finish)
+        if not finishes or task.estimate is None:
+            raise ValueError(f"{task.task_id}: нет состава или оценки для прогноза QA")
+        deadline = qa_end_after(max(finishes), closed_days)
+        remaining = task.estimate * (1 - (task.progress or 0) / 100)
+        start = max(next_open_day(today, closed_days),
+                    qa_window_start(deadline, max(1, math.ceil(remaining)), closed_days))
+        if own_finishes:
+            start = max(start, next_open_day(min(own_finishes), closed_days))
+        if task.not_before:
+            start = max(start, next_open_day(parse_date(task.not_before), closed_days))
         resources, note_source = candidate_resources(task, team_resources)
-        days = set(open_days_between(start, finish, closed_days))
-        available = [resource for resource in resources if not (days & occupied.get(resource, set()))]
-        if not available and explicit_executor(task, team_resources):
-            # An executor is a preference for a forecast, not a reservation in
-            # another scenario. Completed tasks never enter this forecast loop.
-            available = [resource for resource in team_resources.get("QA", [])
-                         if not (days & occupied.get(resource, set()))]
-            if available:
-                note_source = f"forecast fallback from {task.executor}"
-        target_start, target_finish = start, finish
-        if resources and not available:
-            slots = []
-            for candidate in team_resources.get("QA", []) or resources:
-                try:
-                    first, last = find_resource_slot(occupied, candidate, start, duration, closed_days)
-                except ValueError:
-                    continue
-                slots.append((last, first, candidate != explicit_executor(task, team_resources),
-                              len(occupied.get(candidate, set())), candidate))
-            if not slots:
-                raise ValueError(f"{task.task_id}: нет свободного QA-ресурса после {start}")
-            finish, start, _, _, resource = min(slots)
-            note_source = f"forecast capacity from {task.executor or 'QA'}"
-        else:
-            resource = min(available, key=lambda r: (len(occupied.get(r, set())), r)) if available else ""
-        note = f"Прогноз QA: последняя задача {max(finishes)} + 3 рабочих дня; длительность {duration} рабочих дней"
-        if (start, finish) != (target_start, target_finish):
-            note += f"; исходное окно {target_start}..{target_finish} сдвинуто по доступности QA на {start}..{finish}"
+        options = []
+        preferred = explicit_executor(task, team_resources)
+        resources = list(dict.fromkeys([*resources, *team_resources.get("QA", [])]))
+        for resource in resources or [""]:
+            allocation, left = [], remaining
+            current = start
+            for _ in range(36500):
+                capacity = (0 if current in occupied.get(resource, set()) else
+                            max(0, 1 - qa_load.get(resource, {}).get(current, 0)))
+                if is_open_day(current, closed_days) and capacity > 1e-9:
+                    amount = min(left, capacity)
+                    allocation.append((current, amount))
+                    left -= amount
+                    if left <= 1e-9:
+                        break
+                current += timedelta(days=1)
+            else:
+                continue
+            options.append((allocation[-1][0], allocation[0][0], resource, allocation))
+        if not options:
+            raise ValueError(f"{task.task_id}: невозможно разместить остаток QA")
+        finish, start, resource, allocation = min(options, key=lambda option: (option[0], option[1], option[2] != preferred, option[2]))
+        for day, amount in allocation:
+            qa_load.setdefault(resource, {})[day] = qa_load.get(resource, {}).get(day, 0) + amount
+        note = (f"Прогноз QA: остаток {remaining:g} чел.-дн.; "
+                f"регрессионный срок {deadline}; загрузка по долям рабочего дня")
+        if not task.release_id:
+            note += "; релиз не уточнён, факт завершения неизвестен"
+        if task.progress is None:
+            note += "; прогресс неизвестен, резерв по полной оценке"
         if task.actual_start:
             note += f"; фактическое начало в источнике {task.actual_start} сохранено"
+        if finish > deadline:
+            note += "; срок сдвинут из-за доступности QA"
+        if preferred and resource != preferred:
+            note_source = f"forecast fallback from {task.executor}"
         if note_source:
             note += f"; Auto-assigned {resource} ({note_source})"
-        schedules[task_id] = ScheduledTask(start, finish, resource, False, note)
-        reserve_resource(occupied, resource, start, finish, None, closed_days)
+        schedules[task_id] = ScheduledTask(start, finish, resource, finish > deadline,
+                                           note, tuple(allocation))
 
     return schedules
 
@@ -1335,6 +1356,8 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
     assignee = scheduled.assignee
     assignee_part = f" on {{{assignee}}}" if assignee else ""
     label = role_prefixed_summary(task)
+    if task.suit == "bug":
+        label += " · дефект"
     if role_for_task(task) == "QA" and scheduled.resource_note.startswith("Прогноз QA:"):
         label += " (прогноз QA)"
     if task.estimate is None:
@@ -1356,6 +1379,8 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
         lines.append(f"' Shifted not-started task from stale/non-open plan: {task.task_id}")
     if scheduled.resource_note:
         lines.append(f"' {scheduled.resource_note}: {task.task_id}")
+    if scheduled.allocations:
+        lines.append("' QA capacity: " + ", ".join(f"{day}={amount:.6g}" for day, amount in scheduled.allocations))
     return lines
 
 
@@ -1617,7 +1642,13 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
             expected = snapshot.get("actualization_baseline", {}).get(logical_path(project_root, relative_map))
             if expected is not None and baseline_rows(actualization_path) != expected:
                 raise ValueError(f"{actualization_path}: approved actualization baseline was modified")
-        tasks = load_tasks(feature_dir, project_root)
+        all_tasks = load_tasks(feature_dir, project_root)
+        tasks = {key: task for key, task in all_tasks.items()
+                 if estimates_only or task.suit != "bug"}
+        hidden_bug_ids = {key for key, task in all_tasks.items() if task.suit == "bug" and key not in tasks}
+        for task in tasks.values():
+            if task.suit == "bug" and resource_role(explicit_executor(task, team_resources)) not in {"BE", "FE"}:
+                raise ValueError(f"{task.task_id}: дефект требует подтверждённого исполнителя-разработчика")
         for baseline in scope.role_baselines.get(feature_slug, []):
             alias = f"PLAN_{to_alias(feature_slug)}_{baseline.role}"
             if alias in aliases:
@@ -1633,6 +1664,8 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
                 raise ValueError(f"{feature_dir}: неверные исходные даты истории {story.story_id}")
             references = story.replaced_by + story.residual_virtual_tasks + story.additional_tasks
             for reference in references:
+                if reference in hidden_bug_ids:
+                    continue
                 if reference in tasks and any(task.task_id != reference and task.tracker_key == reference for task in tasks.values()):
                     raise ValueError(f"{feature_dir}: неоднозначная ссылка Task ID/SberTrek {reference}")
                 if reference not in tasks and not any(task.tracker_key == reference for task in tasks.values()):
@@ -1673,6 +1706,12 @@ def prepare_outputs(project_root: Path, quarter_id: str, feature_slugs: list[str
     )
 
     outputs: dict[Path, str] = {}
+    diagnostics_name = 'actual-progress-estimates-only-resources.json' if estimates_only else 'actual-progress-resources.json'
+    from schedule_diagnostics import resource_report
+    if feature_slugs:
+        outputs[target_dir.parent.parent / diagnostics_name] = json.dumps(resource_report(
+            scoped_tasks, scoped_schedules, team_resources, closed_days, resource_closed_days,
+            harness_today(), candidate_resources, needs_forecast_schedule), ensure_ascii=False, indent=2) + '\n'
     for feature_slug in feature_slugs:
         feature_dir = layout_feature_root(project_root, feature_map.get(feature_slug, feature_slug))
         target = target_dir / f"FEATURE-{feature_slug}.puml"

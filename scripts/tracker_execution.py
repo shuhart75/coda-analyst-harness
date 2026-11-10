@@ -22,6 +22,8 @@ def feature_qa_estimate(issues: list[dict]) -> dict:
     total = Decimal("0")
     sources, missing, seen = [], [], set()
     for issue in issues:
+        if issue.get("issue_type") == "bug":
+            continue
         identity = issue.get("sbertrek_key")
         if identity in seen:
             continue
@@ -126,6 +128,7 @@ def preview_execution(
                     "table": table_number, "row": row_number,
                     "task_id": row.get("Task ID") or row.get("SberTrek") or "",
                     "role": role, "kind": row.get("Kind", "").casefold(),
+                    "suit": row.get("Suit", "").casefold(),
                     "sbertrek_key": sbertrek,
                     "invalid_key": sber_invalid,
                     "saved_facts": {name: row.get(name, "") for name in
@@ -158,6 +161,7 @@ def preview_execution(
                 "table": None, "row": None, "task_id": f"{identity}/{role}",
                 "summary": issue.get("summary"),
                 "role": role, "kind": "real",
+                "suit": issue.get("issue_type", ""),
                 "sbertrek_key": issue.get("sbertrek_key"), "invalid_key": False,
                 "saved_facts": {}, "uncommitted": False, "registration_required": True,
             }
@@ -219,6 +223,7 @@ def preview_execution(
         entry = {
             "tracker_key": identity, "sbertrek_key": sbertrek_key,
             "summary": issue.get("summary"),
+            "suit": issue.get("issue_type", ""),
             "owners": owners, "targets": matched, "work_item_ids": [item["work_item_id"] for item in roles],
             "internal_id_collisions": local_collisions, "blockers": sorted(set(reasons)),
             "proposed_action": "delete-current-execution" if issue.get("reason") == "confirmed-source-deletion" else "update",
@@ -251,6 +256,11 @@ def preview_execution(
                              "existing_targets": targets,
                              "action": "consolidate" if len(targets) > 1 else "update" if targets else "create",
                              "requires_analyst_review": True})
+        application_issues = [issue for issue in owned if result.get('scope', {}).get('kind') != 'release'
+                              or issue.get(provider_field) in result.get('release_member_keys', [])]
+        if application_issues and all(issue.get('issue_type') == 'bug' for issue in application_issues):
+            qa_proposals[-1].update(action='not-applicable', qa_not_applicable=True)
+            continue
         from tracker_release import qa_groups
         skipped_keys = {issue.get(provider_field) for issue in result.get("skipped", [])}
         qa_member_keys = set(result.get("release_member_keys", [issue.get(provider_field)
@@ -291,6 +301,9 @@ def preview_execution(
                                and not row.get("registration_required")],
         }
         for proposal in qa_proposals:
+            if proposal.get('qa_not_applicable'):
+                application_scope['protected_rows'].extend(proposal['existing_targets'])
+                continue
             partition = proposal.get("partition", {})
             remainder_ids = {group["task_id"] for group in partition.get("groups", [])
                              if group["release"] != scope["ids"][0]}
@@ -310,6 +323,15 @@ def preview_execution(
     if index_sha and application_scope is None:
         application_scope = {'kind': 'deliveries-only', 'delivery_keys': list(selected),
                              'protected_rows': [row for row in rows if row['feature'] not in selected]}
+    for proposal in qa_proposals:
+        if proposal.get('qa_not_applicable'):
+            if application_scope is None:
+                application_scope = {'kind': 'bug-tasks-only', 'protected_rows': []}
+            mutable = {item.get(provider_field) for item in items if item.get('suit') == 'bug'
+                       and item.get('proposed_action') != 'reference-only'}
+            protected = application_scope['protected_rows']
+            protected.extend(row for row in rows if row['feature'] == proposal['feature']
+                             and row.get(provider_field) not in mutable and row not in protected)
     if selection() != candidates or (index_sha and hashlib.sha256(index_path.read_bytes()).hexdigest() != index_sha):
         raise ValueError("Область изменилась во время проверки; повтори execution-preview")
     if repository_state(project) != before or registry_paths(project) != paths or any(

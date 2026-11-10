@@ -157,7 +157,8 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         key, role = task_id.split('/')
         lines = ['2026-08-01T12:00:00+00:00 CREATE by actor']
         if key != 'LAB-112':
-            lines.append('2026-08-02T12:00:00+00:00 assigned_to CREATE -> dev')
+            lines.append('2026-08-02T11:59:00+00:00 assigned_to CREATE -> dev')
+            lines.append('2026-08-02T12:00:00+00:00 status changed created -> development')
         started_only = task_id in getattr(self, 'started_tasks', set())
         if not started_only:
             lines.append('2026-08-03T12:00:00+00:00 assignee changed dev -> qa')
@@ -176,6 +177,12 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
                     {'kind': 'metadata', 'source': segment(lines[0]), 'reason': 'Actor is not an assignee'}]
         for line in lines[1:]:
             start = text.index(line)
+            if 'status changed' in line:
+                segments.append({'kind': 'status', 'source': segment(line),
+                                 'field': span('status', start), 'at': span(line.split()[0], start),
+                                 'before': span('created', start), 'after': span('development', start),
+                                 'operation': {'kind': 'change', 'source': span('changed', start)}})
+                continue
             creation = 'CREATE' in line
             segments.append({'kind': 'assignment', 'source': segment(line),
                              'field': span('assigned_to' if creation else 'assignee', start),
@@ -186,7 +193,7 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         source = self.inputs / f'{key}-history.txt'
         source.write_text(text, encoding='utf-8')
         snapshot = self.write(self.inputs / f'{key}-snapshot.json',
-                              {'key': key, 'assignee': 'dev' if started_only else 'qa', 'status': 'created'})
+                              {'key': key, 'assignee': 'dev' if started_only else 'qa', 'status': 'created' if key == 'LAB-112' else 'development'})
         call = {**self.call('sbertrek'), 'arguments': {'key': key}}
         return {'provider': 'sbertrek', 'key': key, 'role': role, 'response_file': str(source), 'format': 'text',
                 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(), 'call': call,
@@ -224,7 +231,7 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         self.manifest = {
             'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'Synthetic fixture approval',
             'provider': 'sbertrek', 'participants': {'dev': 'BE', 'qa': 'QA'},
-            'status_rules': {'not_started': ['created'], 'qa_completed': [], 'cancelled': ['cancelled']},
+            'status_rules': {'not_started': ['created'], 'development_started': ['development'], 'qa_completed': [], 'cancelled': ['cancelled']},
             'responses': [self.history_entry(task) for task in self.expected['members']],
             'release_scope_decisions': {'schema_version': 1, 'provider': 'sbertrek', 'release': 'REL-1',
                 'analyst_confirmed': True, 'source': self.evidence(self.decision),

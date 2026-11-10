@@ -64,7 +64,7 @@ class TrackerDateProvenanceTests(unittest.TestCase):
         source.update(created='2026-07-01T00:00:00+00:00', updated='2026-08-09T23:00:00+00:00')
         _, _, repeated = self.calculate(source)
         self.assertEqual(repeated, original)
-        self.assertEqual(original['development']['started_at'], events[0]['at'])
+        self.assertIsNone(original['development']['started_at'])
         self.assertEqual(original['development']['finished_at'], events[1]['at'])
 
     def test_undated_transition_cannot_borrow_card_timestamps(self):

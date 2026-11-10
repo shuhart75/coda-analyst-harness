@@ -172,6 +172,7 @@ def path_kind(path: str, scope: dict) -> str | None:
     if len(parts) >= 4 and parts[0] == 'planning' and parts[1] in scope['quarters'] and parts[2] == 'gantt':
         relative = '/'.join(parts[3:])
         if relative in {'actual-progress.puml', 'actual-progress-confluence.puml',
+                        'actual-progress-resources.json', 'actual-progress-estimates-only-resources.json',
                         'actual-progress-estimates-only.puml', 'actual-progress-estimates-only-confluence.puml',
                         'actual-progress-focus.puml', 'actual-progress-focus-confluence.puml'} or re.fullmatch(
             r'includes/actual-progress/FEATURE-[a-z0-9-]+\.puml', relative

@@ -97,6 +97,11 @@ class PersistentLabTests(unittest.TestCase):
             if index < 2:
                 segments.append({'kind': 'context' if index == 0 else 'metadata',
                                  'source': source, 'reason': 'Pagination' if index == 0 else 'Creation actor only'})
+            elif 'status CHANGE' in value:
+                segments.append({'kind': 'status', 'source': source,
+                    'field': reference('status', offset), 'at': reference(value.split()[0], offset),
+                    'before': reference('created', offset), 'after': reference('development', offset),
+                    'operation': {'kind': 'change', 'source': reference('CHANGE', offset)}})
             else:
                 field = 'assigned_to' if 'assigned_to' in value else 'assignee'
                 field_start = text.index(field, offset)
