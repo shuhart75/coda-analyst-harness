@@ -907,19 +907,31 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
             validate_binding(value)
         elif not isinstance(value, dict) or value.get("schema_version") != 1:
             raise ValueError("Некорректный реестр квартальных связей")
-    common = git(checkout, "merge-base", "HEAD", incoming).stdout.strip()
-    if not common:
-        raise ValueError("Импорт не имеет общей истории с documents")
-    changed = git(checkout, "diff", "--name-only", "--no-renames", "-z", common, incoming)
+    # Classify the actual prospective merge, not source history since divergence.
+    # A resumed merge must use its reviewed/staged resolutions.
+    if git(checkout, "rev-parse", "--verify", "MERGE_HEAD").returncode == 0:
+        merged = git(checkout, "write-tree")
+        if merged.returncode:
+            raise ValueError("Сначала разреши конфликты изолированного импорта")
+    else:
+        merged = git(checkout, "merge-tree", "--write-tree", "HEAD", incoming)
+        # Exit 1 still returns a tree, with unresolved paths. The normal merge
+        # workflow below retains conflict reporting and prevents committing it.
+        if merged.returncode not in (0, 1):
+            raise ValueError("Не удалось построить дерево входящего слияния: " + merged.stderr.strip())
+    tree = merged.stdout.splitlines()[0] if merged.stdout else ""
+    if not re.fullmatch(r"[0-9a-f]{40,64}", tree):
+        raise ValueError("Не удалось определить дерево входящего слияния")
+    changed = git(checkout, "diff", "--name-only", "--no-renames", "-z", base, tree)
     if changed.returncode:
         raise ValueError("Не удалось определить материалы импорта")
     paths = [path for path in changed.stdout.split("\0") if path] + list(files)
     def read(path):
         if path in files:
             return json.dumps(files[path], ensure_ascii=False)
-        # Source bindings travel with analytical materials. Target-only bindings
-        # remain available when an older source has not received them yet.
-        for revision in (incoming, "HEAD"):
+        # Bindings come from the same prospective snapshot as the path diff.
+        # Deleted material can retain its previous ownership, as in postflight.
+        for revision in (tree, base):
             result = git(checkout, "show", revision + ":" + path)
             if not result.returncode:
                 return result.stdout
