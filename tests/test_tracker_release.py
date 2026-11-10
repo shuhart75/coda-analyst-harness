@@ -878,7 +878,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         approved = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
                                  '--project-root', str(self.project), '--manifest', str(manifest))
         path.write_text(path.read_text().replace('| QA-OWNER | - | real | QA | done | 8 |',
-                                                '| QA-OWNER | - | real | QA | done | 4.000000 |')
+                                                f"| QA-OWNER | - | real | QA | done | {groups[0]['estimate']} |")
                         + f"| {groups[1]['task_id']} | - | real | QA | unknown | {groups[1]['estimate']} |\n")
         partition_path = self.project / 'features/owner/execution/qa-groups.json'
         self.write(partition_path, document)
@@ -931,7 +931,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('paused', paused['error'])
         self.run_tool(self.state, 'application-state', '--run-id', run['run_id'], '--state', 'pending',
                       '--reason', 'analyst resumed after review', '--analyst-confirmed')
-        path.write_text(path.read_text().replace('4.000000', '8.000000'))
+        path.write_text(path.read_text().replace(
+            f"| QA-OWNER | - | real | QA | done | {groups[0]['estimate']} |",
+            '| QA-OWNER | - | real | QA | done | 8 |'))
         rejected = self.run_tool(self.state, 'qa-application-check', '--review-file', approved['review_file'],
                                  '--project-root', str(self.project), expected=2)
         self.assertEqual(rejected['status'], 'qa-application-mismatch')

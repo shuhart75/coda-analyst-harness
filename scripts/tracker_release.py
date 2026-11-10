@@ -309,8 +309,8 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
     # Allocate from the whole feature, never recursively from an old remainder.
     # A changed population is reviewed above before any new allocation is offered.
     # Assign rounding residue deterministically, independently of collection order.
-    allocation_order = sorted(groups, key=lambda group: (group["release"] is None,
-                              str(group["release"] or ""), tuple(sorted(group["members"]))))
+    allocation_order = sorted(groups, key=lambda group: (group.get("release") is None,
+                              str(group.get("release") or ""), tuple(sorted(group["members"]))))
     allocated = Decimal(0)
     for index, group in enumerate(allocation_order):
         amount = ((total * len(group["members"]) / len(members)).quantize(
