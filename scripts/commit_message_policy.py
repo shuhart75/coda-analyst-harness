@@ -99,7 +99,7 @@ def keys_for_paths(paths, read) -> set[str]:
                         and QUARTER_RE.fullmatch(parts[1]) and not matched
                         and not (len(parts) >= 6 and parts[2] == 'features' and parts[4] == 'deliveries'))
         is_planning = (quarter_path or path.startswith('planning/')
-                       or relative.startswith('planning/') or legacy_planning)
+                       or relative.startswith(('planning/', 'execution/')) or legacy_planning)
         if is_planning:
             named = QUARTER_RE.findall(Path(path).name)
             quarter = (parts[1] if quarter_path else

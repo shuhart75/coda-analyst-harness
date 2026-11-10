@@ -66,6 +66,7 @@ class ExecutionCollaborationTests(unittest.TestCase):
         from analysis_task_fixture import write_binding, write_planning_binding
         write_planning_binding(self.project, ("2026-Q2", "2026-Q3"), shared={
             "planning/team.md": "2026-Q3",
+            self.source: "2026-Q3", self.other: "2026-Q3",
             "features/registry/planning/stories/STORY-REGISTRY-BE.md": "2026-Q3",
             "features/registry/planning/actualization.md": "2026-Q3"})
         write_binding(self.project / 'features/other')

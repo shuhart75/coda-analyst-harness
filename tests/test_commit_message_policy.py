@@ -133,10 +133,24 @@ class CommitMessagePolicyTests(unittest.TestCase):
             'planning/task-bindings.json': json.dumps(dict(schema_version=1,
                 quarters={'2026-Q4': binding('RSCON-456', 'planning')}))}
         for path in ['quarters/2026-Q4/quarter/README.md',
-                     'quarters/2026-Q4/gantt/quarter-plan.puml', root + '/planning/estimates.md']:
+                     'quarters/2026-Q4/gantt/quarter-plan.puml', root + '/planning/estimates.md',
+                     root + '/execution/tasks.md', root + '/execution/qa-groups.json']:
             self.assertEqual(keys_for_paths([path], files.get), {'RSCON-456'})
         self.assertEqual(keys_for_paths([root + '/requirements.md',
             'quarters/2026-Q4/gantt/actual-progress.puml'], files.get), {'RSCON-123', 'RSCON-456'})
+
+    def test_execution_recalculation_does_not_require_delivery_bindings(self):
+        root = 'quarters/2026-Q4/features/demo/deliveries/mvp'
+        files = {'delivery-index.json': json.dumps(dict(schema_version=1, deliveries={
+            'demo': dict(path=root, quarter='2026-Q4')})),
+            'planning/task-bindings.json': json.dumps(dict(schema_version=1,
+                quarters={'2026-Q4': binding('RSCON-8222', 'planning')}))}
+        paths = [root + '/execution/tasks.md', root + '/execution/qa-groups.json',
+                 'quarters/2026-Q4/gantt/actual-progress.puml',
+                 'quarters/2026-Q4/release-plan.md']
+        self.assertEqual(keys_for_paths(paths, files.get), {'RSCON-8222'})
+        with self.assertRaisesRegex(ValueError, 'SA'):
+            keys_for_paths(paths + [root + '/requirements.md'], files.get)
 
     def test_missing_planning_binding_asks_specific_quarter(self):
         with self.assertRaisesRegex(ValueError, r'Разреши задачу.*2026-Q4'):
