@@ -88,7 +88,8 @@ def validate_layout(layout: ActualLayout, gantt: Path, outputs: dict[Path, str],
     expected = {gantt / section["include"] for section in layout.sections
                 if Path(section["include"]).name.startswith("FEATURE-")}
     existing = set((gantt / "includes/actual-progress").glob("FEATURE-*.puml"))
-    if set(outputs) != expected or existing - expected:
+    diagnostics = {gantt / 'actual-progress-resources.json', gantt / 'actual-progress-estimates-only-resources.json'}
+    if set(outputs) - diagnostics != expected or existing - expected:
         raise ValueError("Состав actual-progress не совпадает с подтверждённым описанием диаграммы")
     forecasts = set(layout.includes(gantt)) - expected
     if forecasts != preserved:

@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -22,8 +22,8 @@ class QaRegressionTailTests(unittest.TestCase):
                  'b': self.done('b', '2026-10-23'),
                  'q': task('q', 'QA', 5, '', 'Q1')}
         result = self.schedule(tasks, closed={date(2026, 10, 26)})['q']
-        self.assertEqual(result.finish, date(2026, 10, 29))
-        self.assertEqual(result.start, date(2026, 10, 22))
+        self.assertEqual(result.finish, date(2026, 11, 2))
+        self.assertEqual(result.start, date(2026, 10, 27))
 
     def test_weekend_finish_excludes_completion_day(self):
         self.assertEqual(tool.qa_end_after(date(2026, 10, 25), set()), date(2026, 10, 28))
@@ -33,8 +33,8 @@ class QaRegressionTailTests(unittest.TestCase):
                      actual_start='2026-10-01', progress=50)
         tasks = {'b': self.done('b', '2026-10-23'), 'q': qa}
         result = self.schedule(tasks, today=date(2026, 11, 20))
-        self.assertEqual(result['q'].start, date(2026, 10, 19))
-        self.assertEqual(result['q'].finish, date(2026, 10, 28))
+        self.assertEqual(result['q'].start, date(2026, 11, 20))
+        self.assertEqual(result['q'].finish, date(2026, 11, 25))
         self.assertEqual(qa.actual_start, '2026-10-01')
         self.assertEqual(qa.progress, 50)
         self.assertIn('[TASK_Q] is 50% completed', '\n'.join(tool.render_task(qa, result)))
@@ -58,7 +58,7 @@ class QaRegressionTailTests(unittest.TestCase):
         qa = replace(task('q', 'QA', 3, '', 'Q1'), qa_members=('first',))
         result = self.schedule({'scope/first': self.done('first', '2026-10-20'),
                                 'scope/last': self.done('last', '2026-11-20'), 'scope/q': qa})
-        self.assertEqual(result['scope/q'].finish, date(2026, 10, 23))
+        self.assertEqual(result['scope/q'].finish, date(2026, 10, 29))
 
     def test_release_spans_features_and_ignores_other_release(self):
         qa = replace(task('q', 'QA', 3, '', 'Q1'), release_id='release-a')
@@ -66,35 +66,38 @@ class QaRegressionTailTests(unittest.TestCase):
                                 'two/b': replace(self.done('b', '2026-10-23'), release_id='release-a'),
                                 'three/b': replace(self.done('b', '2026-11-20'), release_id='release-b'),
                                 'one/q': qa})
-        self.assertEqual(result['one/q'].finish, date(2026, 10, 28))
+        self.assertEqual(result['one/q'].finish, date(2026, 10, 29))
 
     def test_missing_completion_is_not_invented(self):
         dev = replace(self.done('b', ''), completed_by='2026-10-23')
-        with self.assertRaisesRegex(ValueError, 'неизвестно окончание'):
-            self.schedule({'b': dev, 'q': task('q', 'QA', 3, '', 'Q1')})
+        result = self.schedule({'b': dev, 'q': task('q', 'QA', 3, '', 'Q1')})
+        self.assertEqual(result['q'].finish, date(2026, 10, 29))
+        self.assertEqual(dev.actual_finish, '')
 
     def test_busy_qa_moves_to_next_available_window(self):
         qa = task('q', 'QA', 3, '', 'Q1')
         unavailable = {'Q1': {date(2026, 10, 28)}, 'Q2': {date(2026, 10, 28)}}
         result = self.schedule({'b': self.done('b', '2026-10-23'), 'q': qa},
                                unavailable=unavailable)['q']
-        self.assertEqual(result.start, date(2026, 10, 29))
-        self.assertEqual(result.finish, date(2026, 11, 2))
-        self.assertIn('сдвинуто по доступности QA', result.resource_note)
+        self.assertEqual(result.start, date(2026, 10, 27))
+        self.assertEqual(result.finish, date(2026, 10, 30))
+        self.assertIn('срок сдвинут', result.resource_note)
         self.assertEqual(qa.executor, 'Q1')
+        self.assertEqual(sum(amount for _, amount in result.allocations), 3)
+        self.assertNotIn(date(2026, 10, 28), [day for day, _ in result.allocations])
 
     def test_fully_unavailable_team_still_blocks(self):
-        with patch.object(tool, 'find_resource_slot', side_effect=ValueError('no slot')):
-            with self.assertRaisesRegex(ValueError, 'нет свободного QA'):
-                self.schedule({'b': self.done('b', '2026-10-23'), 'q': task('q', 'QA', 3, '', 'Q1')},
-                              unavailable={'Q1': {date(2026, 10, 28)}, 'Q2': {date(2026, 10, 28)}})
+        days = {date(2026, 10, 27) + timedelta(days=offset) for offset in range(36500)}
+        with self.assertRaisesRegex(ValueError, 'невозможно разместить остаток QA'):
+            self.schedule({'b': self.done('b', '2026-10-23'), 'q': task('q', 'QA', 3, '', 'Q1')},
+                          unavailable={'Q1': days, 'Q2': days})
 
     def test_forecast_falls_back_to_free_qa_without_changing_source(self):
         qa = task('q', 'QA', 3, '', 'Q1')
         result = self.schedule({'b': self.done('b', '2026-10-23'), 'q': qa},
                                unavailable={'Q1': {date(2026, 10, 28)}})['q']
         self.assertEqual(result.assignee, 'Q2')
-        self.assertEqual(result.finish, date(2026, 10, 28))
+        self.assertEqual(result.finish, date(2026, 10, 29))
         self.assertEqual(qa.executor, 'Q1')
 
     def test_scenarios_allocate_same_work_independently(self):
@@ -108,7 +111,6 @@ class QaRegressionTailTests(unittest.TestCase):
         self.assertEqual(unscaled, self.schedule(tasks, coefficients={'B1': 1}, unavailable=unavailable))
         self.assertEqual(set(scaled), set(unscaled))
         self.assertEqual(tasks['q'].executor, 'Q1')
-
     def test_created_work_uses_coefficient_without_inventing_progress(self):
         dev = replace(task('b', 'BE', 3, '', 'B1'), status='created', progress=None)
         result = self.schedule({'b': dev, 'q': task('q', 'QA', 3, '', 'Q1')}, coefficients={'B1': .5})

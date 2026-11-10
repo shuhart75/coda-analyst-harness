@@ -470,6 +470,12 @@ def review_history(args) -> int:
             part_history, part_limits = decode_history(part_payload, part_entry, observed, snapshot, check_fields=False)
             parts.append((part_history, part_limits, history_field_coverage(part_entry)))
         history, limits = combine_history_parts(parts)
+        source_issue = next((issue for issue in result['issues'] if issue.get(provider + '_key') == entry['key']), {})
+        if source_issue.get('issue_type') == 'bug':
+            assigned = {history.current_assignee}
+            assigned.update(person for event in history.events if event.assignee for person in event.assignee)
+            if not any(participants.get(person) in {'BE', 'FE'} for person in assigned):
+                raise ValueError('Bug requires a confirmed developer assignment in its history or snapshot')
         if (member_keys is None or entry['key'] in member_keys) and 'history-field-coverage-not-proven' in limits:
             incomplete_fields.append(f"{entry['key']}/{entry['role']}")
         if (member_keys is None or entry["key"] in member_keys) and {"history-text-requires-dated-source", "history-event-timestamps-not-returned", "history-text-extraction-unresolved"}.intersection(limits):
@@ -500,6 +506,9 @@ def review_history(args) -> int:
     skipped_keys = {issue.get(provider + "_key") for issue in result.get("skipped", [])}
     for feature in preview["selected_features"]:
         expected, local_missing = set(), []
+        proposal = next(item for item in preview["feature_qa_proposals"] if item["feature"] == feature)
+        selected_bug_keys = {item.get(provider + '_key') for item in preview['items']
+                             if item.get('suit') == 'bug' and item.get('proposed_action') != 'reference-only'}
         expected.update(f"{row[provider + '_key']}/{row['role']}"
                         for row in preview["proposed_registrations"] if row["feature"] == feature)
         for path in registry_paths(project):
@@ -510,6 +519,8 @@ def review_history(args) -> int:
                 if row.get("Role", "").upper() not in {"FE", "BE"}:
                     continue
                 key = row.get("SberTrek", "").split("/")[0].strip()
+                if proposal.get('qa_not_applicable') and key not in selected_bug_keys:
+                    continue
                 if member_keys is not None and key not in member_keys:
                     continue
                 if key in deleted_keys | skipped_keys:
@@ -521,7 +532,10 @@ def review_history(args) -> int:
         selected = tuple(history for (source_provider, key, role), (owner, history) in histories.items()
                          if owner == feature and (member_keys is None or key in member_keys))
         missing_history.extend(sorted(expected - {history.task_key for history in selected}))
-        review = calculate_feature(feature, selected, participants, rules, tuple(sorted(expected)), not local_missing)
+        bug_keys = {issue.get(provider + "_key") for issue in result["issues"] if issue.get("issue_type") == "bug"}
+        qa_excluded = tuple(history.task_key for history in selected if history.task_key.rsplit("/", 1)[0] in bug_keys)
+        review = calculate_feature(feature, selected, participants, rules, tuple(sorted(expected)), not local_missing,
+                                   qa_excluded_keys=qa_excluded)
         review["limitations"].extend(f"unmapped-feature-work:{key}" for key in local_missing)
         proposal = next(item for item in preview["feature_qa_proposals"] if item["feature"] == feature)
         partition = proposal.get("partition")
@@ -573,7 +587,14 @@ def review_history(args) -> int:
                                   manifest.get("reviewed_registries", {}), manifest.get("expected_head"), manifest.get('deliveries'))
     if rechecked != preview:
         raise ValueError("Execution sources changed during review")
+    from defect_metrics import assignment_facts
+    defect_assignments = []
+    bug_keys = {issue.get(provider + "_key") for issue in result["issues"] if issue.get("issue_type") == "bug"}
+    for (source_provider, key, role), (owner, history) in histories.items():
+        if key in bug_keys:
+            defect_assignments.append(assignment_facts(key, history, participants))
     output = {"schema_version": 1, "run_id": args.run_id,
+              "defect_assignments": defect_assignments,
               "status": "history-collection-incomplete" if pending_history else "history-review-ready",
               "reconciled_sha256": completion["reconciled_sha256"], "manifest_sha256": digest_bytes(manifest_raw),
               "head": preview["head"], "registry_sha256": preview["registry_sha256"],

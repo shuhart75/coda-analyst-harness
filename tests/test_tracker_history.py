@@ -212,8 +212,8 @@ class AdaptiveHistoryTests(unittest.TestCase):
         history, limits = decode_history(source, entry, observed, snapshot)
         self.assertEqual(limits, [])
         result = calculate_task(history, {'dev': 'BE'}, StatusRules(not_started=frozenset({'created'})))
-        self.assertEqual(result['development']['started_at'], '2026-08-01T12:00:00+00:00')
-        self.assertEqual(result['development']['state'], 'in-progress')
+        self.assertIsNone(result['development']['started_at'])
+        self.assertEqual(result['development']['state'], 'not-started')
         self.assertEqual(snapshot, original)
         entry['snapshot']['mapping'] = {name: '/output' + value
                                         for name, value in entry['snapshot']['mapping'].items()}

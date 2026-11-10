@@ -267,6 +267,9 @@ def prepare_estimates_only(gantt_dir: Path, overlay, outputs: dict[Path, str]) -
     productivity forecast. Preserved forecasts remain byte-for-byte sources.
     """
     alternate = {**outputs, **sync_actual_progress_overlays(gantt_dir, overlay, estimates_only=True)}
+    report = gantt_dir / 'actual-progress-estimates-only-resources.json'
+    if report in alternate:
+        outputs[report] = alternate[report]
     source = gantt_dir / 'actual-progress.puml'
     expander = load_tool('expand-plantuml-includes')
     content = '\n'.join(expander.expand_file(source, [], alternate)).rstrip() + '\n'

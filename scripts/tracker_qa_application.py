@@ -104,7 +104,10 @@ def check_qa_application(args) -> int:
     if review.get('status') != 'history-review-ready' or review.get('pending_history'):
         raise ValueError('Complete history review before application verification')
     updates = review.get('qa_application', [])
-    if not updates:
+    comparison_rows = review.get('comparison', {}).get('rows', [])
+    only_bugs = bool(comparison_rows) and all(row.get('suit') == 'bug' and row['role'] in {'BE', 'FE'}
+                                              for row in comparison_rows)
+    if not updates and not only_bugs:
         raise ValueError('No explicit QA confirmations in this review')
     required = {(row['feature'], row['task_id']) for row in review.get('comparison', {}).get('rows', []) if row['role'] == 'QA'}
     if required - {(update['feature'], update['task_id']) for update in updates}:

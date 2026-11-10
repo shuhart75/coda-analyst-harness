@@ -83,15 +83,18 @@ class TrackerLifecycleTests(unittest.TestCase):
         self.assertNotIn('AN', result)
         self.assertNotIn('estimate', result)
 
-    def test_assignment_starts_development_even_while_status_remains_created(self):
-        result = self.task(self.history([self.assigned('start', 2, 'analyst', 'developer')], 'developer'))
+    def test_assignment_does_not_start_development_while_created(self):
+        for person in ('developer', 'backend'):
+            result = self.task(self.history([self.assigned('assign', 2, None, person)], person))
+            self.assertEqual(result['development']['state'], 'not-started')
+            self.assertEqual(result['development']['progress_percent'], 0)
+            self.assertIsNone(result['development']['started_at'])
+
+    def test_in_work_starts_without_assignment(self):
+        result = self.task(self.history([self.status('start', 2, 'created', 'development')],
+                                        None, 'development'))
         self.assertEqual(result['development']['state'], 'in-progress')
         self.assertEqual(result['development']['started_at'], moment(2).isoformat())
-        self.assertEqual(result['qa']['state'], 'not-started')
-
-    def test_backend_assignment_uses_confirmed_role(self):
-        history = replace(self.history([self.assigned('start', 2, 'analyst', 'backend')], 'backend'), development_role='BE')
-        self.assertEqual(self.task(history)['development']['started_at'], moment(2).isoformat())
 
     def test_handoff_ends_development_and_starts_qa_without_status_change(self):
         history = self.history([self.assigned('start', 2, 'analyst', 'developer'), self.assigned('qa', 4, 'developer', 'tester')], 'tester')
@@ -111,8 +114,8 @@ class TrackerLifecycleTests(unittest.TestCase):
         self.assertIsNone(result['qa']['finished_at'])
 
     def test_change_between_developers_does_not_restart_development(self):
-        result = self.task(self.history([self.assigned('start', 2, 'analyst', 'developer'),
-            self.assigned('change', 3, 'developer', 'other-developer')], 'other-developer'))
+        result = self.task(self.history([HistoryEvent('start', moment(2), ('analyst', 'developer'), ('created', 'development')),
+            self.assigned('change', 3, 'developer', 'other-developer')], 'other-developer', 'development'))
         self.assertEqual(result['development']['started_at'], moment(2).isoformat())
 
     def test_explicit_status_rules_also_supply_transitions(self):
@@ -222,15 +225,15 @@ class TrackerLifecycleTests(unittest.TestCase):
         self.assertIsNone(result['development']['started_at'])
 
     def test_backend_developer_can_execute_frontend_task_without_changing_role(self):
-        events = [self.assigned('start', 2, 'analyst', 'backend')]
-        started = self.task(self.history(events, 'backend'))
+        events = [HistoryEvent('start', moment(2), ('analyst', 'backend'), ('created', 'development'))]
+        started = self.task(self.history(events, 'backend', 'development'))
         self.assertEqual(started['development_role'], 'FE')
         self.assertEqual(started['development']['state'], 'in-progress')
         self.assertEqual(started['development']['started_at'], moment(2).isoformat())
-        review = self.task(self.history(events + [self.status('review', 3, 'created', 'review')], 'backend', 'review'))
-        self.assertEqual(review['development']['progress_percent'], 90)
+        review = self.task(self.history(events + [self.status('review', 3, 'development', 'review')], 'backend', 'review'))
+        self.assertEqual(review['development']['progress_percent'], 100)
         returned = self.task(self.history(events + [self.assigned('handoff', 4, 'backend', 'tester'),
-                                                   self.assigned('return', 5, 'tester', 'developer')], 'developer'))
+                                                   self.assigned('return', 5, 'tester', 'developer')], 'developer', 'development'))
         self.assertEqual(returned['development']['finished_at'], moment(4).isoformat())
         self.assertEqual(returned['qa']['state'], 'in-progress')
 
@@ -333,30 +336,30 @@ class TrackerLifecycleTests(unittest.TestCase):
         self.assertEqual(result['qa']['started_at'], moment(3).isoformat())
         self.assertIsNone(result['qa']['finished_at'])
 
-    def test_assignment_from_unassigned_starts_development_in_todo(self):
-        result = self.task(self.history([self.assigned('start', 2, None, 'developer')], 'developer'))
-        self.assertEqual(result['development']['started_at'], moment(2).isoformat())
-        self.assertIsNone(result['development']['progress_percent'])
+    def test_status_determines_state_independently_of_assignee(self):
+        for person in (None, 'analyst', 'developer', 'backend'):
+            for status, state, progress in [('created', 'not-started', 0),
+                                             ('development', 'in-progress', None),
+                                             ('review', 'completed', 100)]:
+                with self.subTest(person=person, status=status):
+                    result = self.task(self.history([self.status('change', 2, 'todo', status)], person, status))
+                    self.assertEqual(result['development']['state'], state)
+                    self.assertEqual(result['development']['progress_percent'], progress)
+                    self.assertEqual(result['development']['started_at'],
+                                     moment(2).isoformat() if status == 'development' else None)
 
-    def test_status_on_analyst_does_not_start_development(self):
-        for status in ('created', 'development', 'review'):
-            with self.subTest(status=status):
-                result = self.task(self.history([self.status('change', 2, 'todo', status)], 'analyst', status))
-                self.assertEqual(result['development']['state'], 'not-started')
-                self.assertEqual(result['development']['progress_percent'], 0)
-                self.assertIsNone(result['development']['started_at'])
-
-    def test_snapshot_assignment_proves_state_without_inventing_start(self):
-        for assignee, state, progress in [('developer', 'in-progress', None), ('tester', 'completed', 100)]:
-            result = self.task(self.history(current_assignee=assignee, complete=False))
+    def test_snapshot_status_proves_state_without_inventing_dates(self):
+        for status, state in [('created', 'unknown'), ('development', 'in-progress'), ('review', 'completed')]:
+            result = self.task(self.history(current_assignee='developer', current_status=status, complete=False))
             self.assertEqual(result['development']['state'], state)
-            self.assertEqual(result['development']['progress_percent'], progress)
             self.assertIsNone(result['development']['started_at'])
+            self.assertIsNone(result['development']['finished_at'])
 
-    def test_review_on_developer_is_ninety_until_handoff(self):
+    def test_review_on_developer_is_complete_before_handoff(self):
         events = [self.assigned('start', 2, None, 'developer'), self.status('review', 3, 'created', 'review')]
         result = self.task(self.history(events, 'developer', 'review'))
-        self.assertEqual(result['development']['progress_percent'], 90)
+        self.assertEqual(result['development']['progress_percent'], 100)
+        self.assertEqual(result['development']['finished_at'], moment(3).isoformat())
         handed = self.task(self.history([*events, self.assigned('qa', 4, 'developer', 'tester')], 'tester', 'review'))
         self.assertEqual(handed['development']['progress_percent'], 100)
         returned = self.task(self.history([*events, self.assigned('qa', 4, 'developer', 'tester'),
@@ -366,21 +369,18 @@ class TrackerLifecycleTests(unittest.TestCase):
 
     def test_review_without_assignment_event_does_not_invent_start(self):
         result = self.task(self.history([self.status('review', 3, 'created', 'review')], 'developer', 'review'))
-        self.assertEqual(result['development']['progress_percent'], 90)
+        self.assertEqual(result['development']['progress_percent'], 100)
+        self.assertEqual(result['development']['finished_at'], moment(3).isoformat())
         self.assertIsNone(result['development']['started_at'])
 
-    def test_unassigned_before_first_developer_is_zero(self):
-        result = self.task(self.history(current_assignee=None))
-        self.assertEqual(result['development']['progress_percent'], 0)
-        result = self.task(self.history([self.assigned('start', 2, None, 'developer'),
-            self.assigned('unassign', 3, 'developer', None)], None))
-        self.assertEqual(result['development']['state'], 'in-progress')
-
-    def test_reassignment_does_not_replace_unknown_original_start(self):
-        result = self.task(self.history([self.assigned('unassign', 2, 'developer', None),
-            self.assigned('reassign', 3, None, 'other-developer')], 'other-developer'))
-        self.assertEqual(result['development']['state'], 'in-progress')
-        self.assertIsNone(result['development']['started_at'])
+    def test_assignment_changes_do_not_start_work_in_created(self):
+        for events, person in [([self.assigned('start', 2, None, 'developer'),
+                                 self.assigned('unassign', 3, 'developer', None)], None),
+                               ([self.assigned('unassign', 2, 'developer', None),
+                                 self.assigned('reassign', 3, None, 'other-developer')], 'other-developer')]:
+            result = self.task(self.history(events, person))
+            self.assertEqual(result['development']['state'], 'not-started')
+            self.assertIsNone(result['development']['started_at'])
 
     def test_qa_progress_counts_all_fe_be_tasks_without_role_estimates(self):
         histories = [self.finished(f'ST-{index}') for index in range(1, 7)]

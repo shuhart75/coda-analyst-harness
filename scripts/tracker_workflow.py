@@ -988,6 +988,8 @@ def work_items(issues: list[dict]) -> list[dict]:
             continue
         identity = issue.get("sbertrek_key")
         for role in ROLES:
+            if issue.get("issue_type") == "bug" and role != issue.get("task_role"):
+                continue
             if issue.get("task_role") and role in {"BE", "FE"} and role != issue["task_role"]:
                 continue
             estimate = issue.get("role_estimates", {}).get(role)
@@ -1023,10 +1025,18 @@ def reconcile_data(run: dict) -> dict:
     skipped = []
     if run.get("role_policy") == "prefix-v1":
         skipped = [{**issue, "reason": "outside-supported-roles"} for issue in issues
-                   if role_from_summary(issue.get("summary") or "") is None]
-        issues = [issue for issue in issues if role_from_summary(issue.get("summary") or "") is not None]
+                   if role_from_summary(issue.get("summary") or "") is None and issue.get("issue_type") != "bug"]
+        issues = [issue for issue in issues if role_from_summary(issue.get("summary") or "") is not None or issue.get("issue_type") == "bug"]
         for issue in issues:
             issue["task_role"] = role_from_summary(issue["summary"])
+            if issue.get("issue_type") == "bug":
+                person = issue.get("assignee") or {}
+                participant = run["config"].get("participants", {}).get("sbertrek", {}).get(person.get("id"))
+                if isinstance(participant, dict):
+                    participant = participant.get("role")
+                # Bugs are classified by their confirmed developer, not a title prefix.
+                issue["task_role"] = participant if participant in {"BE", "FE"} else None
+                issue["forecast_view"] = "estimates-only"
     issues.sort(key=lambda item: item["sbertrek_key"])
     for key, evidence in run.get("confirmed_absent", {}).items():
         excluded.append({"sbertrek_key": key, "reason": "confirmed-source-deletion", "evidence": evidence})
@@ -1035,6 +1045,8 @@ def reconcile_data(run: dict) -> dict:
     for issue in issues:
         has_role_estimate = False
         for role, estimate in issue.get("role_estimates", {}).items():
+            if issue.get('issue_type') == 'bug' and role != issue.get('task_role'):
+                continue
             if estimate.get("unit") in {"story-points", "person-days"}:
                 value = float(estimate["value"])
                 role_totals[role] += value
@@ -1055,7 +1067,8 @@ def reconcile_data(run: dict) -> dict:
     counts["work_items"] = len(role_work_items)
     summary = {"story_points_total": overall_total, "role_totals_person_days": role_totals}
     if run.get("estimate_reporting") == "known-values-v1":
-        coverage = {role: sum(role in issue.get("role_estimates", {}) for issue in issues) for role in ROLES}
+        coverage = {role: sum(role in issue.get("role_estimates", {}) and (
+            issue.get('issue_type') != 'bug' or role == issue.get('task_role')) for issue in issues) for role in ROLES}
         summary["estimate_coverage"] = coverage
         summary["role_totals_person_days"] = {role: role_totals[role] if coverage[role] else None for role in ROLES}
         if not any(coverage.values()) and not any(issue.get("estimate") for issue in issues):

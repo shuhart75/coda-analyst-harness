@@ -140,6 +140,7 @@ def prepare_focus(gantt_dir, overlay, outputs, sections, header, closed_days, or
             tasks, state = {}, 'next'
         else:
             tasks = overlay.load_tasks(feature_root(root, scope.features.get(slug, slug)), root)
+            tasks = {key: task for key, task in tasks.items() if task.suit != 'bug'}
             state = classify(tasks)
         entries.append({'feature': slug, 'title': title, 'path': path, 'tasks': tasks, 'state': state})
     selected = select(entries)

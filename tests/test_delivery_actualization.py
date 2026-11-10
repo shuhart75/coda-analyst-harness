@@ -102,7 +102,7 @@ class DeliveryActualizationTests(unittest.TestCase):
         self.decision.write_text('Accept development facts for registry and prevalidation; retain all QA fields and KIB.')
         manifest = {'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'Delivery fixture decision',
                     'quarter': '2026-Q4', 'deliveries': ['registry', 'other'], 'provider': 'sbertrek',
-                    'participants': {'dev': 'BE', 'qa': 'QA'}, 'status_rules': {'not_started': ['created']},
+                    'participants': {'dev': 'BE', 'qa': 'QA'}, 'status_rules': {'not_started': ['created'], 'development_started': ['development']},
                     'responses': [self.history_entry(task) for task in tasks], 'qa_confirmations': [
                         {'feature': key, 'task_id': task, 'kind': 'keep-current', 'fields': {},
                          'analyst_confirmed': True, 'source': self.evidence(self.decision)}
