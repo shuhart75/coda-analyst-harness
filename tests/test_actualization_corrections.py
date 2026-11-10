@@ -222,22 +222,36 @@ class BugHistoryWorkflowTests(unittest.TestCase):
             lines[index] += ' Suit |' if offset == 0 else '---|' if offset == 1 else ' bug |'
         path.write_text('\n'.join(lines) + '\n')
         self.save_sources()
-        run = self.begin()
+        run = self.run_tool(self.state, 'begin', '--scope-kind', 'tasks', '--scope-provider', 'sbertrek',
+                            '--scope-id', 'SBER-1', '--scope-id', 'SBER-8191', '--label', 'Test',
+                            '--scope-source', 'analyst', '--intent', 'update-planning')
         card = self.source_issue('SBER-1', summary='Broken button', roles={'BE': 2})
         del card['fields']['issuetype']
         card['suit'] = 'bug'
-        run = self.ingest(run, {'issues': [card]})
+        architecture_bug = self.source_issue('SBER-8191', summary='Architecture defect')
+        del architecture_bug['fields']['issuetype']
+        architecture_bug['suit'] = 'bug'
+        architecture_bug['fields']['assignee'] = None
+        run = self.ingest(run, {'issues': [card, architecture_bug]})
         self.run_tool(self.state, 'reconcile', '--run-id', run['run_id'])
         manifest = self.manifest()
         proof = self.state / 'bug-decision.md'
-        proof.write_text('Сохранить принятый факт дефекта.')
+        proof.write_text('Сохранить принятый факт дефекта. SBER-8191 не учитывать: архитектурный дефект.')
+        source = {'file': str(proof), 'sha256': hashlib.sha256(proof.read_bytes()).hexdigest(),
+                  'quote': 'Сохранить принятый факт дефекта. SBER-8191 не учитывать: архитектурный дефект.'}
+        manifest['scope_decisions'] = {'schema_version': 1, 'provider': 'sbertrek',
+            'run_id': run['run_id'], 'scope': run['scope'], 'analyst_confirmed': True,
+            'source': source, 'tasks': [{'key': 'SBER-8191',
+                'action': 'exclude-from-execution', 'reason': 'Architecture defect outside execution'}]}
         manifest['development_decision'] = {'kind': 'keep-current', 'analyst_confirmed': True,
             'source': {'file': str(proof), 'sha256': hashlib.sha256(proof.read_bytes()).hexdigest(),
-                       'quote': 'Сохранить принятый факт дефекта.'}}
+                       'quote': 'Сохранить принятый факт дефекта. SBER-8191 не учитывать: архитектурный дефект.'}}
         manifest_path = self.write(self.state / 'bug-manifest.json', manifest)
         review = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
                               '--project-root', str(self.project), '--manifest', str(manifest_path))
         self.assertEqual(review['status'], 'history-review-ready')
+        self.assertEqual(review['skipped'][0]['sbertrek_key'], 'SBER-8191')
+        self.assertEqual(review['skipped'][0]['reason'], 'analyst-excluded-from-execution')
         self.assertEqual(review['qa_application_blockers'], [])
         self.assertEqual([row['role'] for row in review['comparison']['rows']], ['BE'])
         self.assertEqual(review['comparison']['rows'][0]['suit'], 'bug')

@@ -1539,6 +1539,7 @@ def execution_preview_command(args: argparse.Namespace) -> int:
     )
     from tracker_safety import application_write_gate
     payload["analytics_write_gate"] = application_write_gate(Path(args.project_root).resolve(), payload["selected_features"])
+    payload["skipped"] = result.get("skipped", [])
     payload["run_id"] = args.run_id
     payload["reconciled_sha256"] = completion["reconciled_sha256"]
     payload["ownership_decisions"] = {
