@@ -170,6 +170,36 @@ class ReleasePartitionTests(unittest.TestCase):
         path.write_text(path.read_text().replace('| OTHER | SBER-99 | 3 | 4 |', '| OTHER | SBER-99 | 3 |'))
         self.assertEqual(release_owners(self.project, result)['blockers'][0]['reason'], 'ownership-index-unreadable')
 
+    def test_explicit_bug_exclusion_preserves_card_and_is_repeatable(self):
+        answer = self.project / 'exclude.txt'
+        answer.write_text('Do not track the architectural bug.')
+        result = {'scope': self.scope, 'issues': [{'sbertrek_key': 'SBER-8191',
+            'summary': 'Architectural bug', 'issue_type': 'bug', 'task_role': None,
+            'development': {'state': 'unknown'}, 'role_estimates': {}}],
+            'work_items': [], 'excluded': [], 'release_member_keys': ['SBER-8191']}
+        decisions = {'schema_version': 1, 'provider': 'sbertrek', 'release': 'release-1',
+            'analyst_confirmed': True, 'source': {'file': str(answer),
+            'sha256': hashlib.sha256(answer.read_bytes()).hexdigest(), 'quote': answer.read_text()},
+            'tasks': [{'key': 'SBER-8191', 'action': 'exclude-from-execution',
+                       'reason': 'Architecture is outside our execution scope'}]}
+        original = copy.deepcopy(result)
+        reviewed = apply_scope_decisions(self.project, result, decisions)
+        self.assertEqual(result, original)
+        self.assertEqual(reviewed['issues'], [])
+        self.assertEqual(reviewed['excluded'], [])
+        self.assertEqual(reviewed['release_member_keys'], ['SBER-8191'])
+        self.assertEqual(reviewed['skipped'][0]['reason'], 'analyst-excluded-from-execution')
+        self.assertEqual(reviewed, apply_scope_decisions(self.project, reviewed, decisions))
+        self.assertTrue(release_owners(self.project, reviewed)['ownership_ready'])
+        for change in [{'reason': ''}, {'action': 'typo'}, {'feature': 'invented'}, {'role': 'BE'}]:
+            invalid = copy.deepcopy(decisions)
+            invalid['tasks'][0].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                apply_scope_decisions(self.project, result, invalid)
+        decisions['source']['quote'] = 'fabricated approval'
+        with self.assertRaisesRegex(ValueError, 'evidence'):
+            apply_scope_decisions(self.project, result, decisions)
+
     def test_confirmed_scope_and_unprefixed_role_are_separate_from_raw_cards(self):
         result = {'scope': self.scope, 'issues': [{'sbertrek_key': 'SBER-1',
             'summary': 'BE Save | selected simulation\nwith parameters', 'task_role': 'BE',

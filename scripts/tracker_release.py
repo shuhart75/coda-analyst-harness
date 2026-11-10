@@ -35,10 +35,29 @@ def apply_scope_decisions(project: Path, result: dict, decisions: dict | None) -
     known = {issue[field]: issue for issue in [*reviewed["issues"], *reviewed.get("skipped", [])]}
     seen = set()
     for decision in decisions["tasks"]:
-        key, feature = decision["key"], decision["feature"]
+        key = decision["key"]
         if key not in known or key in seen:
             raise ValueError("Scope decision must name one unique collected task")
         seen.add(key)
+        issue = known[key]
+        action = decision.get("action", "include")
+        if action == "exclude-from-execution":
+            reason = decision.get("reason")
+            if issue.get("issue_type") != "bug":
+                raise ValueError("Execution exclusion is supported only for explicitly reviewed bugs")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError("Execution exclusion requires an analyst reason")
+            if "feature" in decision or "role" in decision:
+                raise ValueError("Execution exclusion cannot also assign a feature or role")
+            if issue in reviewed["issues"]:
+                reviewed["issues"].remove(issue)
+                reviewed.setdefault("skipped", []).append(issue)
+            issue.update(reason="analyst-excluded-from-execution",
+                         execution_exclusion={"reason": reason.strip(), "source": copy.deepcopy(source)})
+            continue
+        if action != "include":
+            raise ValueError("Unknown scope decision action")
+        feature = decision["feature"]
         if not valid_slug(feature) or not inside_project(project, layout_feature_root(project, feature)).is_dir():
             raise ValueError("Confirm an existing analytical feature; a missing Gantt lane is not a missing feature")
         issue = known[key]
@@ -49,6 +68,7 @@ def apply_scope_decisions(project: Path, result: dict, decisions: dict | None) -
             raise ValueError("A bug requires a confirmed development role")
         if issue.get("issue_type") != "bug" and issue.get("task_role") and role != issue["task_role"]:
             raise ValueError("A role decision cannot silently override an explicit task prefix")
+        issue.pop("execution_exclusion", None)
         issue.update(confirmed_feature=feature, task_role=role)
         if issue in reviewed.get("skipped", []):
             reviewed["skipped"].remove(issue)

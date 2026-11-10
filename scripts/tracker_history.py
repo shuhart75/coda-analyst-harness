@@ -595,6 +595,7 @@ def review_history(args) -> int:
             defect_assignments.append(assignment_facts(key, history, participants))
     output = {"schema_version": 1, "run_id": args.run_id,
               "defect_assignments": defect_assignments,
+              "skipped": result.get("skipped", []),
               "status": "history-collection-incomplete" if pending_history else "history-review-ready",
               "reconciled_sha256": completion["reconciled_sha256"], "manifest_sha256": digest_bytes(manifest_raw),
               "head": preview["head"], "registry_sha256": preview["registry_sha256"],
