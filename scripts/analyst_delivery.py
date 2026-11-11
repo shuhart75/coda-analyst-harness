@@ -275,6 +275,8 @@ def prepare(api, args, project, feature_root, state, data, descriptor, materials
         shutil.copytree(feature_root / 'sdd', destination / 'sdd')
     if materials is not None:
         shutil.copytree(feature_root / 'materials', destination / 'materials')
+    if descriptor and 'tasks' in descriptor:
+        shutil.copytree(feature_root / 'tasks', destination / 'tasks')
     if input_snapshot(feature_root) != (data, descriptor, materials) or input_snapshot(destination) != (data, descriptor, materials):
         raise ValueError('Файлы изменились во время снимка; повтори команду')
     for previous in entries:

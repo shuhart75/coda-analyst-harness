@@ -1,5 +1,9 @@
 # Run Loop Contract
 
+## Groomed delivery invariant
+
+For explicit grooming, `core/grooming.md` takes precedence over developer-owned Story decomposition below. The analyst records the agreed tasks and person-day estimates before publication; `tasks/` joins the immutable audited input. Developers own technical steps inside those tasks. Ordinary requirements authoring does not automatically start grooming. Legacy inputs remain unchanged.
+
 Workflow modes define which source-of-truth artifacts may be changed. Run kinds define how one bounded unit of work is executed and verified.
 
 ## Shared Loop
@@ -71,9 +75,9 @@ A failed check does not advance the run. Repeated failure reaches the configured
 
 ## Technical Decomposition Invariants
 
-- Analysts transmit one immutable delivery contract with a manifest and, for OpenSpec, derived proposal/spec. Developers own design/tasks and future SberTrek decomposition.
+- Analysts transmit one immutable delivery contract with a manifest and, for OpenSpec, derived proposal/spec. Developers own design/tasks within groomed Stories. Only legacy inputs without grooming leave Story decomposition to the receiver.
 - Developer SDD acknowledges each new revision once with an immutable `returns/receipt.json` containing the exact revision and requirements checksum. No receipt means the revision is new; a receipt from an older revision never carries forward.
-- `returns/tasks.md` appears only after developers have agreed the decomposition. The analytical workflow has no proposal or confirmation state for it.
+- `returns/tasks.md` maps groomed Stories to developer technical steps, or records agreed developer decomposition for legacy inputs. The analyst never writes this return.
 - Each task has one independently implementable technical result and direct links to `REQ-*`.
 - Estimate and SberTrek key are optional developer metadata.
 - Target size is 1-3 days for one executor. Maximum size is 5 days for backend and 10 days for frontend; an explicitly estimated excess requires a reason.

@@ -239,35 +239,53 @@ def materials_descriptor(root: Path) -> dict:
     return {"sha256": _hash(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()), "files": files}
 
 
-def _input_descriptor(files: dict, materials: dict | None = None) -> dict:
+def _input_descriptor(files: dict, materials: dict | None = None, tasks: dict | None = None) -> dict:
     value = files if materials is None else {"sdd": files, "materials": materials}
+    if tasks is not None:
+        value = {"sdd": files, "tasks": tasks, **({"materials": materials} if materials is not None else {})}
     result = {"profile": PROFILE, "sha256": _hash(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()), "files": files}
+    if tasks is not None:
+        result["tasks"] = tasks
     if materials is not None:
         result["materials"] = materials
     return result
 
 
+def _task_descriptor(root, package, requirements_text=None):
+    target = Path(root).parent / "tasks"
+    if package.get("schema_version") == 3:
+        import grooming
+        if requirements_text is not None:
+            return grooming.inspect(target, requirements_text, package)
+        values = _files(target)
+        return {"files": values, "sha256": grooming.fingerprint(values)}
+    if target.exists() or target.is_symlink():
+        _fail("grooming tasks requires package schema_version 3; update sender and receiver")
+    return None
+
+
 def working_hash(root: Path) -> str:
-    """Detect authoring drift even before manifests are refreshed/valid."""
+    """Detect drift in all input files, including a partially edited task package."""
     root = Path(root)
     files = _files(root)
-    material_root = root.parent / "materials"
-    if material_root.exists() or material_root.is_symlink():
-        material_files = _files(material_root)
-        material = {"sha256": _hash(json.dumps(material_files, sort_keys=True, separators=(",", ":")).encode()), "files": material_files}
-        return _input_descriptor(files, material)["sha256"]
-    return _input_descriptor(files)["sha256"]
+    auxiliary = {}
+    for name in ("materials", "tasks"):
+        target = root.parent / name
+        if target.exists() or target.is_symlink():
+            values = _files(target)
+            auxiliary[name] = {"files": values, "sha256": _hash(json.dumps(values, sort_keys=True, separators=(",", ":")).encode())}
+    return _input_descriptor(files, auxiliary.get("materials"), auxiliary.get("tasks"))["sha256"]
 
 
 def inspect(root: Path, requirements_text: str) -> dict:
     root = Path(root)
     files = _files(root)
     package = _json(root / "package.json")
-    if not isinstance(package, dict) or type(package.get("schema_version")) is not int or package.get("schema_version") not in {1, 2} or package.get("profile") != PROFILE:
+    if not isinstance(package, dict) or type(package.get("schema_version")) is not int or package.get("schema_version") not in {1, 2, 3} or package.get("profile") != PROFILE:
         _fail("unsupported package schema/profile")
     material_root = root.parent / "materials"
     materials = None
-    if package["schema_version"] == 2:
+    if package["schema_version"] == 2 or (package["schema_version"] == 3 and (material_root.exists() or material_root.is_symlink())):
         materials = materials_descriptor(material_root)
     elif material_root.exists() or material_root.is_symlink():
         _fail("materials requires package schema_version 2; update sender and receiver")
@@ -372,7 +390,7 @@ def inspect(root: Path, requirements_text: str) -> dict:
     allowed_dirs = {str(p) for name in expected for p in PurePosixPath(name).parents if str(p) != "."}
     if any(p.relative_to(root).as_posix() not in allowed_dirs for p in root.rglob("*") if p.is_dir()):
         _fail("unexpected bundle directory")
-    return _input_descriptor(files, materials)
+    return _input_descriptor(files, materials, _task_descriptor(root, package, requirements_text))
 
 
 def verify_descriptor(root: Path, requirements_text: str, expected: dict, *, allow_decision=False) -> dict:
@@ -417,13 +435,13 @@ def verify_sources(root: Path, descriptor: dict, code_root: Path, *, allowed_rec
         _fail("bundle changed before source verification")
     package = _json(root / "package.json")
     materials = None
-    if package.get("schema_version") == 2:
+    if package.get("schema_version") == 2 or (package.get("schema_version") == 3 and (root.parent / "materials").exists()):
         materials = materials_descriptor(root.parent / "materials")
-    elif package.get("schema_version") != 1:
+    elif package.get("schema_version") not in {1, 3}:
         _fail("unsupported package schema/profile")
     elif (root.parent / "materials").exists() or (root.parent / "materials").is_symlink():
         _fail("materials requires package schema_version 2; update sender and receiver")
-    if descriptor != _input_descriptor(_files(root), materials):
+    if descriptor != _input_descriptor(_files(root), materials, _task_descriptor(root, package)):
         _fail("invalid descriptor digest or materials inventory")
     origin = _git(code_root, "remote", "get-url", "origin").stdout.decode().strip()
     head = _git(code_root, "rev-parse", "HEAD").stdout.decode().strip()
@@ -510,24 +528,27 @@ def copy_snapshot(src: Path, dst: Path, expected: dict, requirements_text: str) 
     _plain(Path(dst))
     if Path(dst).exists():
         _fail("snapshot destination already exists")
-    material_dst = Path(dst).parent / "materials"
-    _plain(material_dst)
-    if material_dst.exists():
-        _fail("materials snapshot destination already exists")
-    created_materials = False
+    destinations = {name: Path(dst).parent / name for name in ("materials", "tasks")}
+    for target in destinations.values():
+        _plain(target)
+        if target.exists():
+            _fail("auxiliary snapshot destination already exists")
+    created = []
     try:
         shutil.copytree(src, dst, symlinks=True)
-        if "materials" in expected:
-            material_dst.mkdir()  # Refuse pre-existing content, including a concurrent creator.
-            created_materials = True
-            shutil.copytree(Path(src).parent / "materials", material_dst, symlinks=True, dirs_exist_ok=True)
+        for name, target in destinations.items():
+            if name in expected:
+                target.mkdir()
+                created.append(target)
+                shutil.copytree(Path(src).parent / name, target, symlinks=True, dirs_exist_ok=True)
         verify_descriptor(dst, requirements_text, expected)
         verify_descriptor(src, requirements_text, expected)
     except Exception:
         if Path(dst).is_dir() and not Path(dst).is_symlink():
             shutil.rmtree(dst)
-        if created_materials and material_dst.is_dir() and not material_dst.is_symlink():
-            shutil.rmtree(material_dst)
+        for target in created:
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
         raise
 
 
@@ -548,7 +569,13 @@ def inspect_transport(root: Path) -> dict:
         names = [name.casefold() for name in values]
         if len(names) != len(set(names)):
             _fail("case collision in transport paths")
-    descriptor = _input_descriptor(files, materials)
+    task_root = root.parent / "tasks"
+    tasks = None
+    if task_root.exists() or task_root.is_symlink():
+        # Explicit delivery decisions do not silently omit or bypass agreed grooming.
+        tasks = _task_descriptor(root, _json(root / "package.json"),
+                                 (root.parent / "requirements.md").read_text(encoding="utf-8"))
+    descriptor = _input_descriptor(files, materials, tasks)
     descriptor["verification"] = DECISION_MODE
     return descriptor
 

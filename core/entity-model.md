@@ -1,5 +1,9 @@
 # Entity Model
 
+## Grooming task
+
+A grooming task is an analyst-confirmed Story scope before delivery under `core/grooming.md`. Its stable id, prefix role, person-day estimate, requirement/scenario mapping and dependencies are bound into the exchange revision. Several tasks per role are allowed; this does not change the one-planning-story-per-role model or approved plans. SberTrack creation and execution actualization remain separate operations.
+
 
 Для проекта с `delivery-index.json` применяй `core/quarter-deliveries.md`:
 legacy-пути `features/<feature>/...` означают корень выбранной поставки,
