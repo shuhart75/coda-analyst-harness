@@ -83,7 +83,7 @@ class TaskResolutionTests(unittest.TestCase):
 
     def search(self, state, cards, complete=True):
         return tasks.ingest_search(state, cards, items_pointer='', fields=FIELDS,
-                                  closed_values=['closed'], complete=complete, step=state['step_id'])
+                                  closed_values=['closed'], complete=complete, step=state['step_id'], thematic=True)
 
     def test_existing_task_reused_without_creation(self):
         state = self.request()
@@ -237,7 +237,7 @@ class TaskResolutionTests(unittest.TestCase):
             response = root / 'raw.json'
             response.write_text('[]')
             state = run('search-result', '--step', state['step_id'], '--response', str(response),
-                        '--fields', str(fields), '--closed-value', 'closed', '--complete')
+                        '--fields', str(fields), '--closed-value', 'closed', '--complete', '--thematic')
             arguments = root / 'args.json'
             arguments.write_text(json.dumps({name: state['spec'][name] for name in ('summary', 'suit', 'epic')}))
             state = run('begin-create', '--step', state['step_id'], '--tool', 'fixture.create',
@@ -245,7 +245,7 @@ class TaskResolutionTests(unittest.TestCase):
             self.assertEqual(run('status')['status'], 'create-outcome-unknown')
             response.write_text(json.dumps([self.card(state)]))
             state = run('search-result', '--step', state['step_id'], '--response', str(response),
-                        '--fields', str(fields), '--closed-value', 'closed', '--complete')
+                        '--fields', str(fields), '--closed-value', 'closed', '--complete', '--thematic')
             self.assertEqual(state['status'], 'resolved')
             self.assertEqual(len(state['attempts']), 1)
             self.assertEqual(len(state['evidence']), 2)
@@ -283,3 +283,74 @@ class TaskResolutionTests(unittest.TestCase):
             state = self.request()
             tasks.save_state(root / 'state.json', state, response)
             self.assertEqual(Path(state['evidence'][0]['path']).read_bytes(), response.read_bytes())
+
+    def test_prefix_rejected_and_unused_request_can_be_corrected(self):
+        for prefix in tasks.PREFIXES.values():
+            with self.assertRaisesRegex(ValueError, 'без служебного префикса'):
+                tasks.request('delivery', 'demo', 'delivery', prefix + ' demo', 'RSCON-900', 'yes')
+        state = self.request()
+        old = deepcopy(state)
+        tasks.revise_request(state, 'Corrected', state['step_id'])
+        self.assertEqual(state['corrections'], [old['spec']])
+        self.assertNotEqual(state['step_id'], old['step_id'])
+        self.assertEqual(state['spec']['owner'], old['spec']['owner'])
+        for field in ('attempts', 'evidence', 'candidates', 'binding'):
+            used = deepcopy(old)
+            used[field] = ['recorded']
+            before = deepcopy(used)
+            with self.assertRaises(ValueError):
+                tasks.revise_request(used, 'New', used['step_id'])
+            self.assertEqual(used, before)
+
+    def test_prefix_only_search_cannot_authorize_delivery_creation(self):
+        state = self.request()
+        tasks.ingest_search(state, [], items_pointer='', fields=FIELDS,
+                            closed_values=[], complete=True, step=state['step_id'])
+        self.assertEqual(state['status'], 'related-search-required')
+        with self.assertRaises(ValueError):
+            tasks.confirm_create(state, 'yes')
+        self.search(state, [self.card(state, summary='Legacy simulation PoC')])
+        self.assertEqual(state['status'], 'analyst-selection-required')
+        self.assertEqual(state['related_candidates'][0]['summary'], 'Legacy simulation PoC')
+        with self.assertRaises(ValueError):
+            tasks.select(state, 'RSCON-123', 'reuse')
+        tasks.confirm_create(state, 'Separate work: different scope confirmed by analyst')
+        self.assertEqual(state['status'], 'create-ready')
+
+    def test_status_metadata_only_required_for_in_scope_prefixed_candidates(self):
+        state = self.request()
+        tasks.ingest_search(state, [self.card(state, epic='RSCON-999')], items_pointer='',
+                            fields=FIELDS, closed_values=[], complete=True, thematic=True, step=state['step_id'])
+        self.assertEqual(state['status'], 'create-ready')
+        state = self.request()
+        with self.assertRaisesRegex(ValueError, 'закрытые состояния'):
+            tasks.ingest_search(state, [self.card(state)], items_pointer='', fields=FIELDS,
+                                closed_values=[], complete=True, step=state['step_id'])
+
+    def test_old_create_ready_state_requires_thematic_search(self):
+        state = self.request()
+        state['status'] = 'create-ready'
+        args = {name: state['spec'][name] for name in ('summary', 'suit', 'epic')}
+        with self.assertRaisesRegex(ValueError, 'тематический поиск'):
+            tasks.begin_create(state, 'fixture.create', args, state['step_id'], FIELDS)
+        self.search(state, [])
+        tasks.begin_create(state, 'fixture.create', args, state['step_id'], FIELDS)
+        self.assertEqual(len(state['attempts']), 1)
+
+    def test_cli_parses_text_envelope_and_archives_original_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = self.request()
+            tasks.save_state(root / 'state.json', state)
+            raw = json.dumps({'content': [{'text': json.dumps([self.card(state)])}]}, indent=4).encode()
+            (root / 'response.json').write_bytes(raw)
+            (root / 'fields.json').write_text(json.dumps(FIELDS))
+            result = subprocess.run([sys.executable, str(ROOT / 'scripts/commit-taskctl.py'), 'search-result',
+                '--state', str(root / 'state.json'), '--step', state['step_id'],
+                '--response', str(root / 'response.json'), '--response-text-pointer', '/content/0/text',
+                '--fields', str(root / 'fields.json'), '--complete', '--closed-value', 'closed'],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            saved = json.loads(result.stdout)
+            self.assertEqual(saved['status'], 'resolved')
+            self.assertEqual(Path(saved['evidence'][0]['path']).read_bytes(), raw)

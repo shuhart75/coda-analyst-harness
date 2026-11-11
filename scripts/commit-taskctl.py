@@ -19,7 +19,7 @@ def main():
     quarter.add_argument('--key')
     quarter.add_argument('--confirmation')
     quarter.add_argument('--as-of', type=date.fromisoformat, default=date.today())
-    for name in ('request', 'search-result', 'begin-create', 'created-result', 'select', 'confirm-create', 'status'):
+    for name in ('request', 'search-result', 'begin-create', 'created-result', 'select', 'confirm-create', 'revise-request', 'status'):
         command = commands.add_parser(name)
         command.add_argument('--state', type=Path, required=True)
         if name == 'request':
@@ -29,9 +29,13 @@ def main():
             command.add_argument('--title', required=True)
             command.add_argument('--epic', required=True)
             command.add_argument('--confirmation', required=True)
+        if name == 'revise-request':
+            command.add_argument('--title', required=True)
+            command.add_argument('--step', required=True)
         if name in ('search-result', 'created-result'):
             command.add_argument('--response', type=Path, required=True)
             command.add_argument('--pointer', default='')
+            command.add_argument('--response-text-pointer', help='JSON Pointer to JSON text inside the original MCP envelope')
             command.add_argument('--fields', type=Path, required=True,
                                  help='JSON object mapping normalized names to actual JSON Pointers')
             command.add_argument('--step', required=True)
@@ -41,7 +45,8 @@ def main():
                                  help='JSON Pointer to the verbatim link.list text in each response')
         if name == 'search-result':
             command.add_argument('--complete', action='store_true')
-            command.add_argument('--closed-value', action='append', required=True)
+            command.add_argument('--closed-value', action='append', default=[])
+            command.add_argument('--thematic', action='store_true', help='Complete thematic search without a prefix filter')
         if name == 'begin-create':
             command.add_argument('--tool', required=True)
             command.add_argument('--link-separately', action='store_true')
@@ -124,6 +129,8 @@ def main():
             state = json.loads(args.state.read_text())
         if args.command in ('search-result', 'created-result'):
             raw = json.loads(args.response.read_text())
+            if args.response_text_pointer is not None:
+                raw = json.loads(tasks.pointer(raw, args.response_text_pointer))
             fields = json.loads(args.fields.read_text())
             if bool(args.links_response) != bool(args.links_text_pointer):
                 raise ValueError('Передай links-response вместе с links-text-pointer')
@@ -132,11 +139,13 @@ def main():
             if args.command == 'search-result':
                 tasks.ingest_search(state, raw, items_pointer=args.pointer, fields=fields,
                                     closed_values=args.closed_value, complete=args.complete, step=args.step,
-                                    memberships=memberships)
+                                    memberships=memberships, thematic=args.thematic)
             else:
                 tasks.ingest_created(state, raw, item_pointer=args.pointer, fields=fields, step=args.step,
                                      memberships=memberships)
             evidence = [args.response, *args.links_response]
+        elif args.command == 'revise-request':
+            tasks.revise_request(state, args.title, args.step)
         elif args.command == 'begin-create':
             tasks.begin_create(state, args.tool, json.loads(args.arguments.read_text()), args.step, json.loads(args.fields.read_text()), args.link_separately)
         elif args.command == 'confirm-create':

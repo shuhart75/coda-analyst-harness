@@ -38,10 +38,36 @@ class ReceiverTaskSyncTests(unittest.TestCase):
         again = self.sync()
         self.assertEqual(first['source_commit'], again['source_commit'])
         self.assertEqual(first['task_requests'], again['task_requests'])
-        # Same existing resolver output format, not a separate binding command.
-        Path(first['task_decisions_file']).write_text(json.dumps({
-            'source_commit': first['source_commit'], 'base_commit': first['base_commit'],
-            'files': {base + '/analysis-task.json': task_binding(owner_id='demo')}}))
+        import commit_tasks as tasks
+        binding = task_binding(owner_id='demo')
+        task_state = self.workspace / '.workspace-state/commit-tasks/demo.json'
+        raw = self.workspace / '.workspace-state/task-response.json'
+        raw.write_text(json.dumps([dict(binding, status='open')]))
+        resolution = tasks.request('delivery', 'demo', 'delivery', 'demo', binding['epic'], 'confirmed')
+        tasks.ingest_search(resolution, json.loads(raw.read_text()), items_pointer='',
+            fields={key: '/' + key for key in ('key', 'summary', 'suit', 'epic', 'status')},
+            closed_values=['closed'], complete=True, step=resolution['step_id'])
+        # Fixture title is the existing title and requires explicit selection.
+        if resolution['status'] == 'analyst-selection-required':
+            tasks.select(resolution, binding['key'], binding['confirmation'])
+        tasks.save_state(task_state, resolution, raw)
+        def bind(source=first['source_commit']):
+            return fixture.run('python3', str(fixture.ROOT / 'scripts/repository-exchange.py'),
+                '--root', str(self.workspace), 'bind-import-task', '--task-state', str(task_state),
+                '--expected-source', source, '--expected-base', first['base_commit'], env=self.environment)
+        self.assertNotEqual(bind('0' * 40).returncode, 0)
+        self.assertFalse(Path(first['task_decisions_file']).exists())
+        result = bind()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        saved = Path(first['task_decisions_file']).read_bytes()
+        self.assertEqual(bind().returncode, 0)
+        self.assertEqual(saved, Path(first['task_decisions_file']).read_bytes())
+        raw_archive = Path(resolution['evidence'][0]['path'])
+        original = raw_archive.read_bytes()
+        raw_archive.write_text('tampered')
+        self.assertNotEqual(bind().returncode, 0)
+        self.assertEqual(saved, Path(first['task_decisions_file']).read_bytes())
+        raw_archive.write_bytes(original)
         third = self.sync()
         self.assertEqual(third['status'], 'awaiting-merge')
         self.assertEqual(third['request_branch'], first['request_branch'])
