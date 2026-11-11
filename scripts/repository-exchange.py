@@ -936,6 +936,8 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
             if not result.returncode:
                 return result.stdout
         return None
+    from receiver_tasks import requests_for_paths
+    state['task_requests'] = requests_for_paths(paths, read)
     keys = keys_for_paths(paths, read)
     if not keys:
         binding = decisions.get("analysis_task")
