@@ -953,9 +953,11 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
 def pause_import_for_task(state_path: Path, state: dict, question: str) -> dict:
     state.update({"status": "awaiting-analysis-task", "resolution_reason": question, "next_action": "resolve-commit-task",
                   "message": question, "task_decisions_file": str(Path(state["checkout"]).parent / "task-decisions.json")})
-    state['bind_task_command'] = ['python3', 'scripts/repository-exchange.py', 'bind-import-task',
-                                  '--task-state', 'STATE', '--expected-source', state['source_commit'],
-                                  '--expected-base', state['base_commit']]
+    state.pop('bind_task_command', None)
+    if state.get('task_requests'):
+        state['bind_task_command'] = ['python3', 'scripts/repository-exchange.py', 'bind-import-task',
+                                      '--task-state', 'STATE', '--expected-source', state['source_commit'],
+                                      '--expected-base', state['base_commit']]
     atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
     return dict(state)
 
