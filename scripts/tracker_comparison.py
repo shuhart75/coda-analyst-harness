@@ -9,7 +9,7 @@ DECISIONS = ("accept-dates", "accept-dates-and-statuses", "keep-current", "custo
 def qa_start_from_current(rows: list[dict], missing_keys: list[str]) -> dict:
     finishes, unresolved = [], list(missing_keys)
     for row in rows:
-        if row['role'] not in {'BE', 'FE'}:
+        if row['role'] not in {'BE', 'FE'} or row.get('suit') == 'bug':
             continue
         facts = row['current']
         status = facts.get('Status', '').strip().casefold()
@@ -43,6 +43,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                 identity = f"{item.get(provider + '_key')}/{target['role']}"
                 calculation = review["tasks"].get(identity)
                 rows.append({"feature": feature, "task_id": target["task_id"], "role": target["role"],
+                             "suit": item.get("suit", ""),
                              "summary": item.get("summary"),
                              "registry": target["registry"], "current": target["saved_facts"],
                              "registration_required": target.get("registration_required", False),
@@ -51,6 +52,8 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                              "history": calculation["development"] if calculation else None,
                              "limitations": calculation["limitations"] if calculation else ["history-not-collected"]})
         proposal = next(item for item in preview["feature_qa_proposals"] if item["feature"] == feature)
+        if proposal.get('qa_not_applicable'):
+            continue
         qa_targets = proposal["existing_targets"] or [{"task_id": "QA (new)", "registry": None, "saved_facts": {}}]
         if "qa_groups" in review:
             existing = {target["task_id"]: target for target in proposal["existing_targets"]}
@@ -102,7 +105,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
         if row.get('summary'):
             title += ": " + cell(row['summary'])
         lines.append(f"| {title} | {previous} | {proposed} | {bounds}; {notes} | {estimates} |")
-    name = "Jira" if provider == "jira" else "SberTrek"
+    name = "SberTrek"
     choices = [f"Принять сроки {name} для всех задач", f"Принять сроки и статусы {name} для всех задач",
                "Оставить текущие сроки и статусы для всех задач", "Свой вариант"]
     fields = [["Actual Start", "Actual Finish"], ["Actual Start", "Actual Finish", "Status", "Progress %"], [], None]

@@ -66,6 +66,8 @@ def pagination_window(payload: dict, mapping: dict, call: dict, count: int) -> t
 
 
 def validate_call(call: dict, provider: str) -> None:
+    if provider != "sbertrek":
+        raise ValueError("Поддерживается только sbertrek")
     if not isinstance(call, dict) or call.get("provider") != provider:
         raise ValueError("Call provider does not match collection scope")
     if not isinstance(call.get("tool"), str) or not call["tool"].strip():
@@ -89,16 +91,8 @@ def validate_call(call: dict, provider: str) -> None:
     check_credentials(call["arguments"])
 
 
-JIRA_MAPPING = {
-    "key": "/key", "assignee": "/assignee/key", "status": "/status/name",
-    "events": "/changelogs", "at": "/created", "changes": "/items",
-    "field": "/field", "from": "/from_id", "to": "/to_id",
-    "assignment_field": "assignee", "status_field": "status",
-}
-
-
 def history_field_coverage(entry: dict) -> set[str]:
-    mapping = entry.get('mapping', JIRA_MAPPING if entry['provider'] == 'jira' else {})
+    mapping = entry.get('mapping', {})
     arguments = entry.get('call', {}).get('arguments', {})
     selected_path = mapping.get('request_fields')
     coverage = {'assignment', 'status'}
@@ -158,10 +152,10 @@ def validate_snapshot_assignment(payload, snapshot_mapping: dict, history_mappin
         raise ValueError('Snapshot assignee mapping does not select the history assignment field: use ' + value_path)
 
 
-def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, check_fields=True) -> tuple[TaskHistory, list[str]]:
+def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, check_fields=True, require_snapshot=True) -> tuple[TaskHistory, list[str]]:
     from tracker_workflow import digest_object
 
-    mapping = entry.get("mapping", JIRA_MAPPING if entry["provider"] == "jira" else None)
+    mapping = entry.get("mapping")
     if not isinstance(mapping, dict):
         raise ValueError("History mapping is required: select events or text and a task key source")
     if "key" in mapping:
@@ -278,6 +272,8 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, c
     if {"history-event-timestamps-not-returned", "history-text-extraction-unresolved"}.intersection(limits):
         normalized = []
     normalized.sort(key=lambda event: event.at)
+    if not require_snapshot:
+        return TaskHistory(key, entry["role"], observed, None, "", tuple(normalized), complete), limits
     snapshot_mapping = entry["snapshot"]["mapping"] if snapshot is not None else mapping
     snapshot_payload = snapshot if snapshot is not None else payload
     if not isinstance(snapshot_mapping, dict):
@@ -410,6 +406,9 @@ def review_history(args) -> int:
         result["scope"] = {**result["scope"], "release_decisions": manifest.get("release_decisions", {})}
         from tracker_release_evidence import review_membership
         result = review_membership(args.run_id, result, manifest.get("release_membership"))
+    elif manifest.get("scope_decisions") is not None:
+        from tracker_release import apply_scope_decisions
+        result = apply_scope_decisions(project, result, manifest["scope_decisions"])
     preview = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
                                 manifest.get("reviewed_registries", {}), manifest.get("expected_head"),
                                 manifest.get('deliveries'))
@@ -426,12 +425,10 @@ def review_history(args) -> int:
     rules = StatusRules(**{name: frozenset(values) for name, values in manifest["status_rules"].items()})
     status_sets(rules)
     provider = manifest["provider"]
-    if provider not in {"jira", "sbertrek"}:
+    if provider not in {"sbertrek"}:
         raise ValueError("Explicit history provider is required")
     if result["scope"].get("tracker_mode") == "single" and provider != result["scope"]["provider"]:
         raise ValueError("History provider must match the selected single tracker")
-    if provider == "jira" and not load_run(args.run_id)["config"]["jira_enabled"]:
-        raise ValueError("Jira is disabled for this run")
     known_roles = load_run(args.run_id)["config"].get("participants", {}).get(provider, {})
     from tracker_history_text import validate_participants
     validate_participants(participants, known_roles)
@@ -473,6 +470,12 @@ def review_history(args) -> int:
             part_history, part_limits = decode_history(part_payload, part_entry, observed, snapshot, check_fields=False)
             parts.append((part_history, part_limits, history_field_coverage(part_entry)))
         history, limits = combine_history_parts(parts)
+        source_issue = next((issue for issue in result['issues'] if issue.get(provider + '_key') == entry['key']), {})
+        if source_issue.get('issue_type') == 'bug':
+            assigned = {history.current_assignee}
+            assigned.update(person for event in history.events if event.assignee for person in event.assignee)
+            if not any(participants.get(person) in {'BE', 'FE'} for person in assigned):
+                raise ValueError('Bug requires a confirmed developer assignment in its history or snapshot')
         if (member_keys is None or entry['key'] in member_keys) and 'history-field-coverage-not-proven' in limits:
             incomplete_fields.append(f"{entry['key']}/{entry['role']}")
         if (member_keys is None or entry["key"] in member_keys) and {"history-text-requires-dated-source", "history-event-timestamps-not-returned", "history-text-extraction-unresolved"}.intersection(limits):
@@ -480,15 +483,32 @@ def review_history(args) -> int:
         history = replace(history, task_key=f"{entry['key']}/{entry['role']}")
         histories[identity] = (targets[0]["feature"], history)
         evidence.append({"key": entry["key"], "role": entry["role"], "sha256": entry["sha256"], "call": entry["call"],
-                         "mapping": entry.get("mapping", JIRA_MAPPING), "status_aliases": entry.get("status_aliases", {}),
+                         "mapping": entry.get("mapping", {}), "status_aliases": entry.get("status_aliases", {}),
                          "sources": sources, "limitations": limits})
         limitations.extend(f"{entry['key']}:{limit}" for limit in limits)
+    # A changed QA meaning requires an explicit exception, not a generic mapping approval.
+    completion_codes = {'ready_for_uat', 'Готов к ПСИ', 'Готов к ИФТ', 'ИФТ', 'ПСИ'}
+    observed_codes = set(rules.development_completed)
+    for _, history in histories.values():
+        observed_codes.add(history.current_status)
+        observed_codes.update(value for event in history.events if event.status for value in event.status)
+    omitted = (completion_codes & observed_codes) - set(rules.qa_completed)
+    if omitted:
+        override = manifest.get('qa_completion_override', {})
+        if (override.get('analyst_confirmed') is not True
+                or not all(isinstance(override.get(key), str) and override[key].strip()
+                           for key in ('reason', 'source', 'quote'))):
+            raise ValueError('QA completion semantics changed for ' + ', '.join(sorted(omitted))
+                             + '; use the established QA completion meaning or record an explicit qa_completion_override with reason, source and analyst quote')
     reviews, missing_history, qa_blockers = [], [], []
     deleted_keys = {issue.get(provider + "_key") for issue in result["excluded"]
                     if issue.get("reason") == "confirmed-source-deletion"}
     skipped_keys = {issue.get(provider + "_key") for issue in result.get("skipped", [])}
     for feature in preview["selected_features"]:
         expected, local_missing = set(), []
+        proposal = next(item for item in preview["feature_qa_proposals"] if item["feature"] == feature)
+        selected_bug_keys = {item.get(provider + '_key') for item in preview['items']
+                             if item.get('suit') == 'bug' and item.get('proposed_action') != 'reference-only'}
         expected.update(f"{row[provider + '_key']}/{row['role']}"
                         for row in preview["proposed_registrations"] if row["feature"] == feature)
         for path in registry_paths(project):
@@ -498,7 +518,9 @@ def review_history(args) -> int:
             for row in (row for table in tables for row in table):
                 if row.get("Role", "").upper() not in {"FE", "BE"}:
                     continue
-                key = row.get("Jira" if provider == "jira" else "SberTrek", "").split("/")[0].strip()
+                key = row.get("SberTrek", "").split("/")[0].strip()
+                if proposal.get('qa_not_applicable') and key not in selected_bug_keys:
+                    continue
                 if member_keys is not None and key not in member_keys:
                     continue
                 if key in deleted_keys | skipped_keys:
@@ -510,7 +532,10 @@ def review_history(args) -> int:
         selected = tuple(history for (source_provider, key, role), (owner, history) in histories.items()
                          if owner == feature and (member_keys is None or key in member_keys))
         missing_history.extend(sorted(expected - {history.task_key for history in selected}))
-        review = calculate_feature(feature, selected, participants, rules, tuple(sorted(expected)), not local_missing)
+        bug_keys = {issue.get(provider + "_key") for issue in result["issues"] if issue.get("issue_type") == "bug"}
+        qa_excluded = tuple(history.task_key for history in selected if history.task_key.rsplit("/", 1)[0] in bug_keys)
+        review = calculate_feature(feature, selected, participants, rules, tuple(sorted(expected)), not local_missing,
+                                   qa_excluded_keys=qa_excluded)
         review["limitations"].extend(f"unmapped-feature-work:{key}" for key in local_missing)
         proposal = next(item for item in preview["feature_qa_proposals"] if item["feature"] == feature)
         partition = proposal.get("partition")
@@ -562,12 +587,21 @@ def review_history(args) -> int:
                                   manifest.get("reviewed_registries", {}), manifest.get("expected_head"), manifest.get('deliveries'))
     if rechecked != preview:
         raise ValueError("Execution sources changed during review")
+    from defect_metrics import assignment_facts
+    defect_assignments = []
+    bug_keys = {issue.get(provider + "_key") for issue in result["issues"] if issue.get("issue_type") == "bug"}
+    for (source_provider, key, role), (owner, history) in histories.items():
+        if key in bug_keys:
+            defect_assignments.append(assignment_facts(key, history, participants))
     output = {"schema_version": 1, "run_id": args.run_id,
+              "defect_assignments": defect_assignments,
+              "skipped": result.get("skipped", []),
               "status": "history-collection-incomplete" if pending_history else "history-review-ready",
               "reconciled_sha256": completion["reconciled_sha256"], "manifest_sha256": digest_bytes(manifest_raw),
               "head": preview["head"], "registry_sha256": preview["registry_sha256"],
               "features": reviews, "evidence": evidence, "limitations": limitations,
               "status_rules": manifest["status_rules"],
+              "qa_completion_override": manifest.get("qa_completion_override"),
               "feature_qa_proposals": preview["feature_qa_proposals"],
               "proposed_registrations": preview["proposed_registrations"],
               "qa_application_blockers": qa_blockers,
@@ -594,7 +628,10 @@ def review_history(args) -> int:
                               "provider": provider, "application_requires_analyst_command": True}}
     destination = run_root(args.run_id) / "history" / (digest_object(output) + ".json")
     save_json(destination, output)
-    payload = {**output, "review_file": str(destination)}
+    save_json(run_root(args.run_id) / "history-current.json", {"file": str(destination)})
+    from tracker_safety import application_write_gate
+    payload = {**output, "review_file": str(destination),
+               "analytics_write_gate": application_write_gate(project, preview['selected_features'])}
     if not pending_history:
         payload['after_registry_application'] = {
             'type': 'qa-application-check', 'required': True,

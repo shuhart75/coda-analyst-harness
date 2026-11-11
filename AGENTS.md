@@ -13,7 +13,7 @@ This repository defines a reusable workflow harness.
 
 ## Quarter deliveries and baseline
 
-- Read `core/quarter-deliveries.md` before working in a project with `delivery-index.json`. It takes precedence over legacy path examples below. Use `scripts/project_layout.py` to resolve the selected delivery and quarter; keep human-readable feature passports under core/feature-passports.md; never substitute the summary for a delivery contract.
+- Read `core/quarter-deliveries.md` before working in a project with `delivery-index.json`, `migration-layout.json` or quarter delivery directories. It takes precedence over legacy path examples below. Use `scripts/project_layout.py` to resolve the selected delivery and quarter; keep human-readable feature passports under core/feature-passports.md; never substitute the summary for a delivery contract.
 - A long-lived feature spans quarters; each new delivery belongs to exactly one quarter. Preserve legacy operational aliases, approved plan bytes, exchange identities and historical facts. Carryover requires an explicit residual-scope decision; migration never marks old work completed.
 - After every task actualization, check complete closed releases not yet reflected in baseline. Show the candidate and obtain explicit analyst deployment confirmation before promotion in `release-finalization`. Keep deferred candidates visible and record processed releases. Closed tasks alone never prove deployment.
 - Preserve baseline domain as the human-readable skeleton, with lifecycles, processes and diagrams, plus requirements, UI, API, data and decisions. Check every section for each release and save an immutable release-bound version.
@@ -36,6 +36,13 @@ This repository defines a reusable workflow harness.
 - A pending recovery may only be resumed with the same feature and commit. Do not delete its runtime state or adopt a different branch. Then review the preserved changes in their owning mode, update and submit the branch, wait for human merge (no squash/rebase), finish, and retry synchronization. Recovery does not approve content or publish a delivery revision.
 
 ## Mandatory tracker stop gate
+
+- До первой правки execution-источников (включая qa-groups.json и остаточную QA)
+  проверь `analytics_write_gate` и выполни возвращённые `application-preflight`:
+  `core/tracker-release.md`. Сбор истории остаётся доступен при запрете записи.
+  Перед первой правкой кандидата/baseline установи `release-finalization`,
+  подготовь активную рабочую ветку и выполни `baselinectl.py --project PROJECT_ROOT
+  preflight`. Отказ нельзя откладывать до save: `modes/release-finalization.md`.
 
 - Цель задаёт текущий запрос аналитика, не completed_work и не имя папки ответов.
   После потери контекста и готового config-status используй trackerctl.py resume
@@ -83,24 +90,27 @@ This repository defines a reusable workflow harness.
   состояний и сроков, включая новые задачи в created/todo. Просьба показать оценки
   по ролям в чате не разрешает менять колонки канонического реестра.
 
-- Перед актуализацией выбери с аналитиком задачи, эпики или их объединение по `core/tracker-adaptive.md`. Эпики необязательны; покажи сохранённые номера для подтверждения/исправления либо запроси их. `identity-lookup` разрешает чтение только связи ключей второго трекера, не reconciliation фактов. До любой записи аналитики, включая новые строки и ассоциации, обязателен `application-preflight`; main и чужая активная фича запрещены. Не переписывай ответы истории ради устранения разрывов; сохраняй ограничения и решения отдельно. Отсутствие QA-подтверждений не разрешает обход `qa-application-check`.
+- Перед актуализацией выбери с аналитиком задачи, эпики или их объединение по `core/tracker-adaptive.md`. Эпики необязательны; покажи сохранённые номера для подтверждения/исправления либо запроси их. До любой записи аналитики, включая новые строки и ассоциации, обязателен `application-preflight`; main и чужая активная фича запрещены. Не переписывай ответы истории ради устранения разрывов; сохраняй ограничения и решения отдельно. Отсутствие QA-подтверждений не разрешает обход `qa-application-check`.
 
-- Для новых адаптивных сеансов приоритет имеет `core/tracker-adaptive.md`: только выбранный трекер; второй исключительно по явной команде сравнения с `--compare-trackers`. Старые требования pairing ниже не требуют второго провайдера в однотрекерном режиме. Предложения дат требуют `history-review`; подтверждения аналитика выше истории, текущий статус не задаёт даты. На фичу одна QA-работа с суммой QA-оценок уникальных карточек. Подтверждённо удалённые задачи удаляются из текущего исполнения после просмотра diff; неполученная карточка сама по себе не доказывает удаления.
+- Единственный трекер — SberTrack (`sbertrek`). Следуй `core/tracker-adaptive.md`.
+  Не спрашивай выбор провайдера. Используй собственные ключи SberTrek;
+  внешнее поле `issue_key` игнорируется. История обязательна до статусов и дат,
+  подтверждения аналитика выше истории. Не создавай новый run вместо упавшего.
+  Подтверждённо удалённые задачи удаляются из текущего исполнения после просмотра diff;
+  неполученная карточка сама по себе не доказывает удаления.
 
-- New sessions use `begin --adaptive` and `core/tracker-adaptive.md`. In this mode the main agent selects read-only MCP tools and arguments from their current capabilities, records actual calls, and follows `collect-tracker-data`, then `collect-history` and `history-review` after ownership checks. The exact-tool/query and no-history restrictions below apply only to legacy runs. Configuration stop gates, confirmed scope, pairing, conflict resolution and analyst approval before application remain mandatory. Never replace or rewrite an existing run to adopt the new mode.
+- New sessions use `begin --adaptive` and `core/tracker-adaptive.md`. In this mode the main agent selects read-only MCP tools and arguments from their current capabilities, records actual calls, and follows `collect-tracker-data`, then `collect-history` and `history-review` after ownership checks. The exact-tool/query and no-history restrictions below apply only to legacy runs. Configuration stop gates, confirmed scope and analyst approval before application remain mandatory. Never replace or rewrite an existing run to adopt the new mode.
 
 - Before any tracker MCP discovery or read, run `python3 scripts/trackerctl.py config-status` as a standalone command. Do not pipe or filter it: the exit code is part of the guard contract.
 - Exit code `3` with `must_stop: true` from any `trackerctl` command permits exactly one next action: ask the analyst the single returned `next_question`. Emit the exact `response_contract.text` and nothing else: no preface, explanation, examples, suggested answers or summary. Do not call MCP tools, search analytical files for tasks, create a task list, delegate work or present tracker facts until the answer is saved and the gate becomes ready.
 - Commands that save one configuration answer return exit code `0` and another status payload. When that payload still has `must_stop: true`, ask only its `next_question`; do not bypass it with discovery or reading.
-- Tracker fact collection may start only after `begin` returns a `direct-tracker-v1` run and one `next_action`. Adaptive `identity-lookup` is a separate scope-resolution exception after the ready config gate: read only the returned key-link selection, never cross-provider facts. Tracker work is never delegated; adaptive tools follow current capabilities, while legacy executes the exact returned tool and arguments. Import each full fact response with the returned `step_id`, then follow the next action.
+- Execution tracker fact collection may start only after `begin` returns a `direct-tracker-v1` run and one `next_action`. Tracker work is never delegated; adaptive tools follow current capabilities, while legacy executes the exact returned tool and arguments. Import each full fact response with the returned `step_id`, then follow the next action.
 - Only one unfinished run may exist. Repeating `begin` with the same scope reuses it, including after a failed ingest; submit a corrected full response to the same pending step and continue that run. A different scope remains blocked until the analyst explicitly orders abandoning the current run. Never create a replacement run during the same request, and never add `--analyst-confirmed` to `abandon-run` without that explicit instruction.
 - Never delete `tracker-active-run.json` manually. `begin` removes an orphaned marker itself only when its run directory no longer exists; otherwise preserve the run and follow its machine-returned action.
-- SberTrek uses only `issue.exportJson` with TQL in `query`, `attributes` in the projection and `max_results=50`. Jira uses only `jira_search` with the returned JQL, explicit fields and `limit=50`. Do not substitute text search, per-key details, link traversal, invented pagination or alternative queries.
+- SberTrek uses only `issue.exportJson` with TQL in `query`, `attributes` in the projection and `max_results=50`. Do not substitute text search, per-key details, link traversal, invented pagination or alternative queries.
 - Prefer the full file created by MCP. A full inline JSON response may be captured verbatim outside the run. Never summarize, reconstruct or copy raw responses into the run. Identical import is a no-op; a different response for a completed step, malformed JSON or a stale `step_id` is fatal.
-- For a Jira epic, read `"Epic Link" = "KEY"`, discover zero or one SberTrek Epic by its `issue_key`, then execute the returned `linkedUnitsOf` query. Jira task scopes reverse-search SberTrek by each task key. SberTrek source scopes query Jira only for populated `issue_key`. Never filter by status or type.
-- Pair only by `SberTrek.issue_key == Jira.key`. Jira fills SberTrek gaps. Different populated assignees, general estimates or `AN / BE / FE / QA` estimates stop reconciliation on one task and require the analyst to choose SberTrek, Jira or a custom per-field variant. A provider choice may explicitly apply to following conflicts in the current run only. A confirmed nonexistent Jira counterpart excludes only the linked SberTrek task; a SberTrek task without `issue_key` remains.
-- Exactly 50 cards and Jira metadata proving a larger result remain visible limitations. History is outside this protocol; facts that require it remain `unknown` with `history-not-collected`.
-- `reconcile` either returns one `resolve-conflict` question or saves the result and returns `next_action.type=result-status`; it never authorizes a user-facing summary. Emit the conflict `response_contract.text` verbatim and wait for the analyst before recording a choice. Only when `result-status` returns `status: tracker-read-reconciled`, `workflow_complete: true` and `final_response_allowed: true`, emit its checksum-validated `response_contract.text` verbatim with nothing added or reformatted.
+- Exactly 50 cards remain visible limitations. History is outside this protocol; facts that require it remain `unknown` with `history-not-collected`.
+- `reconcile` saves the normalized SberTrek result and returns the verified result with its next action; `result-status` and `run-status` repeat the same effective completion flags without writing. `collection_complete: true` and `report_allowed: true` authorize its checksum-validated verbatim report. For update-planning, `final_response_allowed: false` and `response_contract.must_continue: true` require a progress message followed by `next_action`; never end the turn at collection or skip history for created/todo tasks. Read-only permits a final report. Inspect `collection_diagnostics`: missing estimate fields do not prove empty estimates.
 
 ## First launch and workspace ownership
 
@@ -119,6 +129,8 @@ This repository defines a reusable workflow harness.
 
 ## Repository exchange commands
 
+- Долгий sync запускай один раз в фоне и ожидай завершения штатным механизмом. При необходимости опрашивай status процесса не реже раза в 30 секунд; фиксированные `sleep 180/240/300` запрещены. Этап и время смотри в `.workspace-state/sync-progress.json`, а не в старом статусе продолжения импорта. После таймаута проверь завершение процесса до повторного запуска. Большой отчёт читай через `review.full_report`, краткий вывод не является полным перечнем изменений. См. `core/repository-exchange.md`.
+- `заплата применена`, `проверь возврат заплаты`, `провалидируй возврат обратной заплаты`: выполни `python3 scripts/repository-exchange.py verify-return` по `core/repository-exchange.md`. Это проверка удалённых коммитов без bootstrap, code pull, stash и полного sync. Начинай обычным запуском; при уходе в фон проверяй завершение не реже раза в 30 секунд. Поздние изменения analytics не требуют повторного синка в рамках одной проверки.
 - `синкани репы`, `синхронизируй репозитории`, `обнови репы`, `обнови репозитории`, `обнови documents из changeswork-copy`: run `python3 scripts/workspace.py bootstrap`, then `python3 scripts/workspace.py sync`. If collaboration migration is not configured and `analytics/main` contains local work, migrate it into a feature branch first; never commit it directly in `main`. The command performs the protected `code` pull and guarded analytics-origin update. Incoming `source` is merged only in an isolated clone and pushed only as a separate review branch of documents, never directly into `analytics/main`. Show the import report, including removed paths, requirements, scenarios and protected artifacts. The human creates and accepts its PR/MR; repeat sync to reuse the pending import and prove acceptance before continuing reverse-patch creation. Pending import is not synchronization and blocks reverse-diff. Without `source`, verification is unavailable but analytics updates continue; without `code`, all code access is skipped.
 - Full repository exchange runs only from `analytics/main`. If the checked-out feature branch has collaboration status `awaiting-merge`, `workspace.py sync` first runs the guarded `collaboration.py finish`. When `origin/main` contains the submitted commit, finish switches to and updates `main`, closes the local feature session, and the same sync command continues. If containment is not proven, or the feature work has another status, sync stops before updating `code` or `source`; it is never a synonym for updating that branch.
 - Report `source` and `analytics` as identical only when the newly fetched source tree already equals the analytics tree. A non-empty verified patch means `source_analytics_state=reverse-diff-pending` even after `analytics` was pushed; do not present this as complete synchronization.
@@ -224,6 +236,8 @@ Requirement templates live in `templates/requirements/`. Use them as the active 
 
 ## Developer handoff
 
+- Analyst-side return review must independently inspect available code under core/code-inspection.md and follow the self-service review procedure in core/developer-handoff.md. Preserve developer returns; keep our evidence, scenario assessments and analyst decisions separately. A return on another branch and later target-branch changes are normal. Ask development only for evidence unavailable locally, never for cosmetic report corrections; analyst decisions govern behavior and residual scope.
+
 - Read core/sdd-input.md for OpenSpec input preparation. The requirements mode may write derived sdd/ before accepted-main audit, in the owning feature branch. Record SDD-only changes with record-change too. Audit and confirmation bind the entire bundle; any change invalidates them. Registered code read access is required to verify the source even for analytics fallback. Receiver --apply belongs only to the developer workspace.
 
 - The analyst with product-owner authority approves the current delivery scope; developer SDD owns technical decomposition and must not silently reduce that scope.
@@ -280,18 +294,16 @@ Context summaries, checkpoints and research files are internal harness operation
 
 ## Task tracker reading
 
-- `прочитай задачи из трекеров`, `проверь задачи в трекерах`, `сверь SberTrek и Jira`, `покажи текущее состояние по трекерам` and close equivalents mean the read-only workflow in `core/tracker-reading.md`.
+- `прочитай задачи из трекеров`, `проверь задачи в трекерах`, `покажи текущее состояние по трекерам` and close equivalents mean the read-only workflow in `core/tracker-reading.md`.
 - `актуализируй задачи`, `актуализируй Гант` and close equivalents use the same collection workflow with intent `update-planning`; no plan change is allowed before successful reconciliation returns `planning_application_allowed: true`.
 - For actualization, emit the verified tracker report as a separate verbatim message, then continue through `planning_update.next_action` and `core/tracker-actualization.md` to execution review, confirmed updates and `--actual-only` verification. Read-only requests have no such continuation. MCP availability is installation-specific, never inferred from the operating system.
 - Before editing execution registries, run `execution-preview` for that same run and confirmed feature/quarter. It scans all root and legacy registries for exact external-key ownership, including outside the selection. Resolve every blocker; never infer owners from key ranges, invent slices, or remove duplicates by repeated generation. Dirty registry approval requires the analyst to review the exact version, then `--reviewed-registry PATH SHA256 --expected-head COMMIT --analyst-confirmed`; it never bypasses ownership or role conflicts.
 - The analyst-specified provider is always read first. The main agent performs all tracker MCP calls itself and follows only the current machine-returned `next_action`; tracker calls are never delegated.
-- Merge paired assignee, general estimate and each `AN / BE / FE / QA` estimate independently. Jira fills a missing SberTrek field. When both providers contain different values, stop on one task and ask the exact machine-returned question; record SberTrek, Jira or the analyst's custom per-field variant. Apply a provider priority to following conflicts only when the analyst explicitly selected that option, and only inside the current run. Equal normalized assignee names with different provider IDs are not conflicts; ignore Jira's trailing `[B]` service marker when comparing names. Linked-epic keys, provider status dictionaries and service dates do not require analyst resolution. Normalize `SP`, story points and person-days to `story-points` using the agreed `1 SP = 1 person-day`; never convert other units silently. If no role estimate is populated but a general estimate exists, assign it to `AN`, `BE` or `FE` only from one unambiguous task prefix. Never guess when the prefix is missing or contains several roles, and never add a general estimate again when at least one role estimate exists. The overall estimate is the sum of role work items plus only unresolved general estimates; never count a general estimate again after role decomposition.
+- Normalize `SP`, story points and person-days to `story-points` using `1 SP = 1 person-day`. Use only SberTrek estimates. Infer AN/BE/FE from one unambiguous prefix only when no role estimate exists; never count a general estimate again after role decomposition.
 - Treat epic and release as independent grouping dimensions. Never infer that an epic equals an analytical feature without an explicit mapping.
 - Current completed and excluded statuses remain authoritative. This protocol does not read history, so any lifecycle fact requiring an assignment handoff remains `unknown` and is disclosed as `history-not-collected`.
-- Reduce every request to an explicitly provided or confirmed scope: one epic or task keys in Jira or SberTrek. Never infer the provider from `PROJECT-123`. For a SberTrek epic use only `unit IN linkedUnitsOf("unit = 'KEY'", "Состоит из")`; for SberTrek task keys use only `unit = "KEY" or ...`; for Jira task keys use only `key IN ("KEY", ...)`. For a Jira epic use one direct `jira_search` with exact JQL `"Epic Link" = "KEY"`, every preferred field and `limit=50`; never call `jira_get_issue`, inspect `issuelinks` or replace it with an intermediate `key IN (...)`. A zero-member epic is proven only by structurally importing the real empty Jira search page. Its reverse SberTrek path is separate: find zero or one SberTrek Epic by the Jira epic's own `issue_key`, then read that SberTrek epic through the standard `linkedUnitsOf` query. Never search SberTrek separately by every Jira member key for an epic scope; that per-task `issue_key` search is allowed only for an explicit Jira task scope. Do not filter Jira members by issue type or status: completed issues are required evidence. Never use a global unfinished-task inventory, title/description search or semantic discovery as a substitute.
-- Run the exact linear protocol `config-status -> begin -> (next_action MCPP call -> ingest)* -> reconcile -> result-status`. One user request owns one run. Never create another run, choose another query or use a subagent while it is unfinished.
-- Pair only through the value returned by SberTrek in `Объект Jira`: `SberTrek.Объект Jira == Jira.key`. Never pair by equality of own keys, titles, descriptions, assignees, epics, releases, semantic similarity or manual mappings.
-- Pass each full MCP JSON to `ingest` with the returned `step_id`; never reconstruct cards from previews. Only `ingest-error` may process a Jira counterpart error that explicitly names nonexistent requested keys. It derives the reduced retry and excludes the linked SberTrek issue; an SberTrek issue without `issue_key` remains.
+- Run the linear collection protocol `config-status -> begin -> (next_action MCP call -> ingest)* -> reconcile`, then follow its next action. Use `result-status` to reread the verified result. One user request owns one run. Never create another run, choose another query or use a subagent while it is unfinished.
+- Pass each full MCP JSON to `ingest` with its returned `step_id`; never reconstruct cards or edit raw responses. A missing card does not prove deletion.
 - A failed ingest remains active and retryable. Correct the full response and retry the same `step_id`; do not abandon the run, start another run or present tracker facts manually. Missing `created_at` or `updated_at` is a visible limitation, not a collection failure.
 - The tracker report exposes every populated role estimate as a source work item `<tracker-key>/<role>`. Application first maps it to confirmed execution work: AN and QA belong to the feature, and an FE card's QA estimate must not duplicate existing QA. Preserve internal IDs and independent QA facts; never create per-card AN work merely because development is still assigned to an analyst. A base tracker-key reference in actualization expands to its mapped role work items.
 - Follow `core/tracker-lifecycle.md` for agreed assignment/status history semantics. Developer-to-QA handoff closes development; QA-to-developer return continues QA without reopening development. Feature QA closes when every confirmed QA member is complete or the analyst explicitly confirms completion. The pure calculation module is not a verified SberTrek history adapter and does not authorize collecting history or changing saved runs.
@@ -319,6 +331,55 @@ Context summaries, checkpoints and research files are internal harness operation
 - Run `python3 scripts/validate-requirements-profile.py "$PROJECT_ROOT"` for changed root documents that use the profile marker.
 - Run `python3 scripts/validate-requirements-wording.py "$PROJECT_ROOT"` for changed compact requirements. A successful script result never replaces the isolated-reader review from `core/requirements-wording.md`.
 
-## Задача AN при синхронизации
+## Передача по явному решению аналитика
 
-При receiver-tasks-required продолжай по core/receiver-tasks.md: проверь полномочия и доступные средства SberTrack, найди задачу по request_id либо зарегистрируй единственную попытку создания, сохрани реальную связь через receiver_tasks.py и повтори sync. Неизвестный исход создания требует сверки, а не повторного вызова. Source/main, обычный documents/main и исторические коммиты не меняются; человеческое принятие импорта остаётся обязательным.
+Если аналитик явно просит передать текущий пакет без аудита и сверки с кодом,
+приоритет имеет `core/analyst-decision-delivery.md`: одна команда
+`requirements-exchange.py send-by-decision`, без предварительных main gate,
+record-change, аудитов и отмены прежнего кандидата. Разрешение повторно не
+запрашивать. Обычный маршрут остаётся для передачи без такого решения.
+
+## Заказчики и трудозатраты
+
+Следуй `core/customer-accounting.md`: у каждой поставки явно указан заказчик в
+`planning/customers.json` и паспорте. Неизвестные связи не угадывай. Разделяй оценки
+и фактические человеко-дни; для отчёта по заказчикам сохраняй проверяемую выборку,
+основание периода и покрытие. Не приписывай разработку владельцу карточки QA/AN.
+
+## Product knowledge and future directions
+
+- For product overviews, presentations and ontology updates, follow `core/ontology.md`; read the project ontology index and a bounded topic bundle before opening primary sources.
+- Maintain future directions under `planning/roadmap/` by `core/roadmap.md`. A prototype decision is not a release, approved budget or committed date. Keep deferred/cancelled/replaced plans and decision history explicit.
+- After requirements, prototype or release changes, review affected ontology cards and sources. Never refresh hashes in place of substantive review or promote baseline through a summary update.
+
+## Связь коммитов с задачами
+
+Правило задач коммитов: `core/analysis-task-traceability.md` и `core/commit-task-resolution.md`.
+Аналитик выбирает эпик владельца; GigaCode через MCP находит или создаёт `suit="task"`
+с префиксом `[SA][PR]`, `[PLANNING_QUARTER]`, `[BASELINE]` или `[CONTEXT] по виду работы.
+Квартал имеет свой эпик планирования, который запрашивается при начале планирования
+текущего или будущего квартала. Baseline/context поставки относятся к её эпику,
+вне поставок относятся к квартальному. Без разрешённой задачи коммит запрещён.
+Ключи обязательны в коммитах, но не в заголовках PR. Отдельная обвязка исключена.
+
+PR/MR связывается со всеми задачами из его коммитов. Ключи в заголовке и описании PR необязательны; используй смысловой заголовок.
+
+При «синкани репы» следуй `core/repository-exchange.md`: source-импорт также требует
+подтверждённых задач поставок и квартального планирования. Переноси согласованные
+связи из source; при `awaiting-analysis-task` выполни `resolve-commit-task` на Mac,
+разреши задачу через MCP по core/commit-task-resolution.md и повтори sync. До ответа не коммить и не push.
+
+Поиск и создание задач коммитов выполняются после config-status по `core/commit-task-resolution.md`, отдельно от read-only протокола сбора исполнения; новый execution-run для них не нужен.
+
+## Дефекты и уточнённые правила актуализации
+
+Исключение из отбора по префиксам: `suit="bug"` с подтверждённым назначением
+разработчику учитывается по `core/defect-tracking.md`, только в estimates-only.
+Состояние разработки определяется по `core/tracker-lifecycle.md`: назначение
+не начинает работу, «В работе» начинает, ревью завершает разработку на 100%.
+Разбиение QA считается от полного состава фичи по `core/tracker-release.md`,
+а дробная загрузка и зависимости прогноза по `core/tooling-policy.md`.
+
+## Запрос задачи при синхронизации
+
+При `awaiting-analysis-task` учитывай `task_requests` по `core/receiver-tasks.md` и продолжай штатный `resolve-commit-task` по `core/commit-task-resolution.md`. Запрос из source сохраняет поручение и идентичность работы, но не заменяет подтверждённый эпик и проверенную связь задачи схемы 2.

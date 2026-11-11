@@ -10,7 +10,7 @@ import re
 import subprocess
 
 from tracker_scope import inside_project, select_features
-from tracker_registry import read_registry
+from tracker_registry import read_registry, require_new_registry_format
 
 
 REGISTRY = re.compile(r"features/[^/]+/(?:slices/[^/]+/)?execution/tasks\.md")
@@ -22,11 +22,13 @@ def feature_qa_estimate(issues: list[dict]) -> dict:
     total = Decimal("0")
     sources, missing, seen = [], [], set()
     for issue in issues:
-        identity = (issue.get("jira_key"), issue.get("sbertrek_key"))
+        if issue.get("issue_type") == "bug":
+            continue
+        identity = issue.get("sbertrek_key")
         if identity in seen:
             continue
         seen.add(identity)
-        key = issue.get("jira_key") or issue.get("sbertrek_key")
+        key = issue.get("sbertrek_key")
         estimate = issue.get("role_estimates", {}).get("QA")
         if estimate is None:
             missing.append(key)
@@ -106,6 +108,11 @@ def preview_execution(
             raise ValueError(f"Реестр недоступен: {relative}")
         sources[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         try:
+            require_new_registry_format(project, path)
+        except ValueError as error:
+            blockers.append({"reason": "invalid-new-registry-format", "registry": relative, "message": str(error)})
+            continue
+        try:
             tables, note = read_registry(path, identity_only=delivery_key(project, path) not in selected)
         except ValueError:
             blockers.append({"reason": "unreadable-registry", "registry": relative})
@@ -115,15 +122,15 @@ def preview_execution(
         for table_number, table in enumerate(tables, start=1):
             for row_number, row in enumerate(table, start=1):
                 role = overlay.normalize_role(row.get("Role", ""))
-                jira, jira_invalid = read_key(row.get("Jira", ""), role)
                 sbertrek, sber_invalid = read_key(row.get("SberTrek", ""), role)
                 reference = {
                     "feature": delivery_key(project, path), "registry": relative,
                     "table": table_number, "row": row_number,
-                    "task_id": row.get("Task ID") or row.get("Jira") or "",
+                    "task_id": row.get("Task ID") or row.get("SberTrek") or "",
                     "role": role, "kind": row.get("Kind", "").casefold(),
-                    "jira_key": jira, "sbertrek_key": sbertrek,
-                    "invalid_key": jira_invalid or sber_invalid,
+                    "suit": row.get("Suit", "").casefold(),
+                    "sbertrek_key": sbertrek,
+                    "invalid_key": sber_invalid,
                     "saved_facts": {name: row.get(name, "") for name in
                                     ("Actual Start", "Actual Finish", "Completed By", "Status", "Progress %", "Estimate", "Estimate (дн)", "Details", "Notes")},
                     "registry_fields": dict(row),
@@ -140,20 +147,21 @@ def preview_execution(
             raise ValueError(f"Подтверждённая версия реестра не совпадает: {relative}")
 
     proposed_rows = []
-    if result.get("scope", {}).get("kind") == "release":
+    if any(issue.get("confirmed_feature") for issue in result["issues"]):
         for issue in result["issues"]:
             owner, role = issue.get("confirmed_feature"), issue.get("task_role")
             if not owner or role not in {"BE", "FE"}:
                 continue
-            if any(issue.get(field) and row.get(field) == issue[field]
-                   for row in rows for field in ("jira_key", "sbertrek_key")):
+            if any(issue.get("sbertrek_key") and row.get("sbertrek_key") == issue["sbertrek_key"]
+                   for row in rows):
                 continue
-            identity = issue.get("jira_key") or issue.get("sbertrek_key")
+            identity = issue.get("sbertrek_key")
             reference = {
                 "feature": owner, "registry": (layout_feature_root(project, owner) / "execution/tasks.md").relative_to(project).as_posix(),
                 "table": None, "row": None, "task_id": f"{identity}/{role}",
                 "summary": issue.get("summary"),
-                "role": role, "kind": "real", "jira_key": issue.get("jira_key"),
+                "role": role, "kind": "real",
+                "suit": issue.get("issue_type", ""),
                 "sbertrek_key": issue.get("sbertrek_key"), "invalid_key": False,
                 "saved_facts": {}, "uncommitted": False, "registration_required": True,
             }
@@ -162,19 +170,19 @@ def preview_execution(
 
     if index_sha and deliveries is None and not feature and result.get('scope', {}).get('kind') != 'release':
         owners = {row['feature'] for row in rows for issue in [*result['issues'], *result['excluded']]
-                  if any(issue.get(field) and row.get(field) == issue[field] for field in ('jira_key', 'sbertrek_key'))}
+                  if issue.get('sbertrek_key') and row.get('sbertrek_key') == issue['sbertrek_key']}
         selected = {key: value for key, value in selected.items() if key in owners}
 
     items = []
     for issue in [*result["issues"], *result["excluded"]]:
-        jira_key, sbertrek_key = issue.get("jira_key"), issue.get("sbertrek_key")
-        identity = jira_key or sbertrek_key
+        sbertrek_key = issue.get("sbertrek_key")
+        identity = sbertrek_key
         matched = [
             row for row in rows
-            if (jira_key and row["jira_key"] == jira_key) or (sbertrek_key and row["sbertrek_key"] == sbertrek_key)
+            if (sbertrek_key and row["sbertrek_key"] == sbertrek_key)
         ]
         roles = [item for item in result["work_items"]
-                 if item.get("jira_key") == jira_key and item.get("sbertrek_key") == sbertrek_key]
+                 if item.get("sbertrek_key") == sbertrek_key]
         reasons = []
         owners = sorted({row["feature"] for row in matched})
         if not matched:
@@ -197,12 +205,6 @@ def preview_execution(
             row["role"] in {"FE", "BE"} and row["role"] != issue["task_role"] for row in matched
         ):
             reasons.append("registry-role-conflicts-with-task-prefix")
-        if any(
-            (jira_key and row["jira_key"] and row["jira_key"] != jira_key)
-            or (sbertrek_key and row["sbertrek_key"] and row["sbertrek_key"] != sbertrek_key)
-            for row in matched
-        ):
-            reasons.append("registry-pair-conflicts-with-reconciliation")
         for role in sorted({row["role"] for row in matched}):
             if sum(row["role"] == role for row in matched) > 1:
                 reasons.append(f"duplicate-registry-role:{role}")
@@ -213,16 +215,15 @@ def preview_execution(
                 continue
             if not any(row["role"] == item["role"] for row in matched):
                 reasons.append(f"new-role-needs-confirmation:{item['role']}")
-        identities = {item["work_item_id"] for item in roles} | {key for key in (jira_key, sbertrek_key) if key}
+        identities = {item["work_item_id"] for item in roles} | {key for key in (sbertrek_key,) if key}
         identities.update(row["task_id"] for row in matched if row.get("registration_required"))
         local_collisions = [row for row in rows if row not in matched and row["task_id"] in identities]
         if local_collisions:
             reasons.append("unconfirmed-internal-id-collision")
-        if issue.get("reason") == "jira-counterpart-absent":
-            reasons.append("excluded-counterpart-needs-disposition")
         entry = {
-            "tracker_key": identity, "jira_key": jira_key, "sbertrek_key": sbertrek_key,
+            "tracker_key": identity, "sbertrek_key": sbertrek_key,
             "summary": issue.get("summary"),
+            "suit": issue.get("issue_type", ""),
             "owners": owners, "targets": matched, "work_item_ids": [item["work_item_id"] for item in roles],
             "internal_id_collisions": local_collisions, "blockers": sorted(set(reasons)),
             "proposed_action": "delete-current-execution" if issue.get("reason") == "confirmed-source-deletion" else "update",
@@ -255,6 +256,11 @@ def preview_execution(
                              "existing_targets": targets,
                              "action": "consolidate" if len(targets) > 1 else "update" if targets else "create",
                              "requires_analyst_review": True})
+        application_issues = [issue for issue in owned if result.get('scope', {}).get('kind') != 'release'
+                              or issue.get(provider_field) in result.get('release_member_keys', [])]
+        if application_issues and all(issue.get('issue_type') == 'bug' for issue in application_issues):
+            qa_proposals[-1].update(action='not-applicable', qa_not_applicable=True)
+            continue
         from tracker_release import qa_groups
         skipped_keys = {issue.get(provider_field) for issue in result.get("skipped", [])}
         qa_member_keys = set(result.get("release_member_keys", [issue.get(provider_field)
@@ -295,6 +301,9 @@ def preview_execution(
                                and not row.get("registration_required")],
         }
         for proposal in qa_proposals:
+            if proposal.get('qa_not_applicable'):
+                application_scope['protected_rows'].extend(proposal['existing_targets'])
+                continue
             partition = proposal.get("partition", {})
             remainder_ids = {group["task_id"] for group in partition.get("groups", [])
                              if group["release"] != scope["ids"][0]}
@@ -314,6 +323,15 @@ def preview_execution(
     if index_sha and application_scope is None:
         application_scope = {'kind': 'deliveries-only', 'delivery_keys': list(selected),
                              'protected_rows': [row for row in rows if row['feature'] not in selected]}
+    for proposal in qa_proposals:
+        if proposal.get('qa_not_applicable'):
+            if application_scope is None:
+                application_scope = {'kind': 'bug-tasks-only', 'protected_rows': []}
+            mutable = {item.get(provider_field) for item in items if item.get('suit') == 'bug'
+                       and item.get('proposed_action') != 'reference-only'}
+            protected = application_scope['protected_rows']
+            protected.extend(row for row in rows if row['feature'] == proposal['feature']
+                             and row.get(provider_field) not in mutable and row not in protected)
     if selection() != candidates or (index_sha and hashlib.sha256(index_path.read_bytes()).hexdigest() != index_sha):
         raise ValueError("Область изменилась во время проверки; повтори execution-preview")
     if repository_state(project) != before or registry_paths(project) != paths or any(

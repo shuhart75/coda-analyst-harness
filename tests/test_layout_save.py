@@ -29,18 +29,22 @@ class LayoutSaveTests(unittest.TestCase):
         p = self.root / 'features/demo/requirements.md'
         p.parent.mkdir(parents=True)
         p.write_text('Original business requirements\n')
+        from analysis_task_fixture import write_binding
+        write_binding(p.parent)
         self.handoff_source = 'features/demo/handoffs/initial-delivery/AGENTS.md'
         handoff = self.root / self.handoff_source
         handoff.parent.mkdir(parents=True)
         handoff.write_text('Immutable historical receiver contract\n')
-        self.git('add', '--', 'features/demo/requirements.md', self.handoff_source)
+        self.git('add', '--', 'features/demo/requirements.md', 'features/demo/analysis-task.json', self.handoff_source)
         self.git('commit', '-qm', 'Initial content')
         self.head = self.git('rev-parse', 'HEAD')
         self.git('switch', '-qc', 'codex/layout')
         proposal = layoutctl.plan(self.root, {'demo': {'quarter': '2026-Q4'}})
         layoutctl.apply(self.root, proposal, True)
+        from analysis_task_fixture import write_planning_binding
+        write_planning_binding(self.root, ("2026-Q4",))
         install_commit_message_hook(self.root, ROOT / 'scripts/commit_message_policy.py')
-        self.paths = {'features/demo/requirements.md': None, self.handoff_source: None}
+        self.paths = {'features/demo/requirements.md': None, 'features/demo/analysis-task.json': None, self.handoff_source: None}
         for p in self.root.rglob('*'):
             if p.is_file() and '.git' not in p.parts:
                 self.paths[p.relative_to(self.root).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
@@ -49,7 +53,7 @@ class LayoutSaveTests(unittest.TestCase):
         return subprocess.check_output(['git', '-C', str(self.root), *args], text=True, stderr=subprocess.DEVNULL).strip()
 
     def save(self, **kwargs):
-        return layoutctl.save(self.root, kwargs.get('head', self.head), kwargs.get('paths', self.paths), kwargs.get('message', 'Migrate quarterly delivery layout'), kwargs.get('push', False))
+        return layoutctl.save(self.root, kwargs.get('head', self.head), kwargs.get('paths', self.paths), kwargs.get('message', 'RSCON-123: Migrate quarterly delivery layout'), kwargs.get('push', False))
 
     def test_save_commits_exact_reviewed_paths_leaves_unrelated_work(self):
         (self.root / 'unrelated.txt').write_text('Do not commit\n')
@@ -59,6 +63,15 @@ class LayoutSaveTests(unittest.TestCase):
         self.assertNotIn('unrelated.txt', self.git('ls-files').splitlines())
         self.assertEqual(self.git('branch', '--show-current'), 'codex/layout')
         self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
+
+    def test_reviewed_ontology_is_preserved_by_layout_save(self):
+        target = self.root / 'ontology/overview.md'
+        target.parent.mkdir()
+        target.write_text('Reviewed product knowledge\n')
+        self.paths['ontology/overview.md'] = hashlib.sha256(target.read_bytes()).hexdigest()
+        result = self.save()
+        self.assertEqual(result['status'], 'committed')
+        self.assertEqual(self.git('show', 'HEAD:ontology/overview.md'), 'Reviewed product knowledge')
 
     def test_changed_reviewed_bytes_do_not_stage(self):
         (self.root / 'delivery-index.json').write_text('{}')
@@ -118,6 +131,11 @@ class LayoutSaveTests(unittest.TestCase):
         report = self.root / 'releases/layout-migration/migration-report.md'
         report.parent.mkdir(parents=True)
         report.write_text('# Report\n')
+        from analysis_task_fixture import task_binding
+        binding = self.root / 'baseline/analysis-task.json'
+        binding.parent.mkdir(parents=True, exist_ok=True)
+        binding.write_text(json.dumps(task_binding(kind='baseline')))
+        self.paths[binding.relative_to(self.root).as_posix()] = hashlib.sha256(binding.read_bytes()).hexdigest()
         self.assertEqual(self.save(paths={**self.paths, report.relative_to(self.root).as_posix():
                                          hashlib.sha256(report.read_bytes()).hexdigest()})['status'], 'committed')
 

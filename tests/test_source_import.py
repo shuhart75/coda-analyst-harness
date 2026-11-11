@@ -10,9 +10,52 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests import test_workspace as fixture
+from analysis_task_fixture import task_binding
 
 
 class SourceImportTests(unittest.TestCase):
+    def test_deleted_inherited_path_blocks_before_commit_and_resumes_after_approval(self):
+        self.git(self.documents, 'rm', '--', 'context/shared.txt')
+        self.git(self.documents, 'commit', '-m', 'RSCON-123: Remove inherited file')
+        self.git(self.documents, 'push', 'origin', 'main')
+        before = self.git(self.documents, 'rev-parse', 'HEAD')
+        (self.source / 'context/new.txt').write_text('New source document\n')
+        self.git(self.source, 'add', '--', 'context/new.txt')
+        self.git(self.source, 'commit', '-m', 'RSCON-123: Add source document')
+        self.git(self.source, 'push', 'origin', 'main')
+        result = fixture.run('python3', str(fixture.ROOT / 'scripts/workspace.py'), '--root',
+                             str(self.workspace), 'sync', env=self.environment)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn('analytics-content-policy', result.stdout)
+        state = json.loads((self.workspace / '.workspace-state/source-import.json').read_text())
+        checkout = Path(state['checkout'])
+        self.assertEqual(self.git(checkout, 'rev-parse', 'HEAD'), before)
+        self.assertTrue((checkout / '.git/MERGE_HEAD').exists())
+        self.assertEqual(json.loads((self.workspace / '.workspace-state/sync-progress.json').read_text())['status'], 'failed')
+        approved = fixture.run('python3', str(fixture.ROOT / 'scripts/repository-exchange.py'), '--root',
+                               str(self.workspace), 'approve-deletion', '--path', 'context/shared.txt', env=self.environment)
+        self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
+        ready = self.sync()['analytics_exchange']['source_import']
+        self.assertEqual(ready['request_branch'], state['request_branch'])
+        self.assertEqual(ready['status'], 'awaiting-merge')
+        self.assertEqual(self.git(self.documents, 'rev-parse', 'HEAD'), before)
+
+    def test_large_import_returns_compact_review_and_exact_full_report(self):
+        for i in range(120):
+            (self.source / f'context/added-{i}.txt').write_text('Incoming\n')
+        self.git(self.source, 'add', '--', 'context')
+        self.git(self.source, 'commit', '-m', 'RSCON-123: Large source fixture')
+        self.git(self.source, 'push', 'origin', 'main')
+        request = self.sync()['analytics_exchange']['source_import']
+        review = request['review']
+        self.assertTrue(review['preview_truncated'])
+        self.assertEqual(len(review['changed_paths']), 20)
+        self.assertEqual(review['changed_path_count'], 120)
+        import hashlib
+        raw = Path(review['full_report']).read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), review['sha256'])
+        self.assertEqual(len(json.loads(raw)['changed_paths']), 120)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -29,30 +72,39 @@ class SourceImportTests(unittest.TestCase):
     def sync(self, *arguments: str) -> dict:
         result = fixture.run("python3", str(fixture.ROOT / "scripts/workspace.py"), "--root", str(self.workspace), "sync", *arguments, env=self.environment)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return json.loads(result.stdout)
+        payload = json.loads(result.stdout)
+        request = payload.get("analytics_exchange", {}).get("source_import", {})
+        if request.get("status") == "awaiting-analysis-task":
+            self.assertIn("общие изменения", request["resolution_reason"])
+            Path(request["task_decisions_file"]).write_text(json.dumps({
+                "source_commit": request["source_commit"], "base_commit": request["base_commit"],
+                "analysis_task": task_binding(kind="context"),
+            }))
+            return self.sync(*arguments)
+        return payload
 
     def change_source(self, content: str) -> None:
         (self.source / "context/shared.txt").write_text(content, encoding="utf-8")
         self.git(self.source, "add", "--", "context/shared.txt")
-        self.git(self.source, "commit", "-m", "Change source content")
+        self.git(self.source, "commit", "-m", "RSCON-123: Change source content")
         self.git(self.source, "push", "origin", "main")
 
     def accept(self, branch: str) -> None:
         receiver = self.root / "receiver"
         self.assertEqual(fixture.run("git", "clone", "--quiet", str(self.remote), str(receiver)).returncode, 0)
         self.fixture.configure_identity(receiver)
-        self.git(receiver, "merge", "--no-ff", f"origin/{branch}", "-m", "Accept incoming changes")
+        self.git(receiver, "merge", "--no-ff", f"origin/{branch}", "-m", "RSCON-123: Accept incoming changes")
         self.git(receiver, "push", "origin", "main")
 
     def prepare_roundtrip(self) -> dict:
         (self.documents / "context/shared.txt").write_text("Returned content\n")
         self.git(self.documents, "add", "--", "context/shared.txt")
-        self.git(self.documents, "commit", "-m", "Accept analytical content")
+        self.git(self.documents, "commit", "-m", "RSCON-123: Accept analytical content")
         self.git(self.documents, "push", "origin", "main")
         metadata = self.sync()["analytics_exchange"]["reverse_diff"]
         self.git(self.source, "apply", metadata["patch"])
         self.git(self.source, "add", "--", "context/shared.txt")
-        self.git(self.source, "commit", "-m", "Apply returned analytical patch")
+        self.git(self.source, "commit", "-m", "RSCON-123: Apply returned analytical patch")
         self.git(self.source, "push", "origin", "main")
         return metadata
 
@@ -76,6 +128,101 @@ class SourceImportTests(unittest.TestCase):
         result = fixture.run("python3", str(fixture.ROOT / "scripts/repository-exchange.py"), "--root",
                              str(self.workspace), "reverse-diff", env=self.environment)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def verify_return(self, expected_code=0):
+        result = fixture.run("python3", str(fixture.ROOT / "scripts/repository-exchange.py"),
+                             "--root", str(self.workspace), "verify-return", env=self.environment)
+        self.assertEqual(result.returncode, expected_code, result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    def test_verify_return_preserves_dirty_active_work_and_pending_import(self):
+        self.prepare_roundtrip()
+        self.git(self.documents, "switch", "-c", "feature/ongoing")
+        (self.documents / "context/shared.txt").write_text("Staged ongoing work\n")
+        self.git(self.documents, "add", "--", "context/shared.txt")
+        (self.documents / "context/shared.txt").write_text("Unstaged ongoing work\n")
+        (self.documents / "context/untracked.txt").write_text("Not committed\n")
+        pending = self.workspace / ".workspace-state/source-import.json"
+        pending.write_text('{"status":"awaiting-merge","preserve":true}\n')
+        def snapshot():
+            return (self.git(self.documents, "show-ref"), self.git(self.documents, "rev-parse", "HEAD"),
+                    self.git(self.documents, "status", "--porcelain"),
+                    self.git(self.documents, "diff"), self.git(self.documents, "diff", "--cached"),
+                    (self.documents / ".git/index").read_bytes(),
+                    (self.documents / ".git/config").read_bytes(), pending.read_bytes(),
+                    self.git(self.remote, "show-ref"), self.git(self.source, "show-ref"))
+        before = snapshot()
+        result = self.verify_return()
+        self.assertTrue(result["return_verified"])
+        self.assertTrue(result["accepted_trees_identical"])
+        self.assertFalse(result["working_copy_updated"])
+        self.assertFalse(result["all_repositories_synchronized"])
+        self.assertEqual(snapshot(), before)
+
+    def test_verify_return_after_analytics_advanced_does_not_update_checkout(self):
+        metadata = self.prepare_roundtrip()
+        before = self.git(self.documents, "rev-parse", "HEAD")
+        # Advance accepted remote independently from the working checkout.
+        other = self.root / "later-analytics"
+        self.git(self.documents, "clone", str(self.remote), str(other))
+        self.fixture.configure_identity(other)
+        (other / "context/new.txt").write_text("Later accepted work\n")
+        self.git(other, "add", "--", "context/new.txt")
+        self.git(other, "commit", "-m", "RSCON-123: Later work")
+        self.git(other, "push", "origin", "main")
+        result = self.verify_return()
+        self.assertTrue(result["return_verified"])
+        self.assertFalse(result["accepted_trees_identical"])
+        self.assertEqual(result["proof"]["analytics_commit"], metadata["analytics_commit"])
+        self.assertEqual(self.git(self.documents, "rev-parse", "HEAD"), before)
+
+    def test_verify_return_rejects_equal_tree_without_valid_archive(self):
+        metadata = self.prepare_roundtrip()
+        archive = Path(metadata["metadata"])
+        original = archive.read_bytes()
+        archive.unlink()
+        self.assertFalse(self.verify_return(1)["return_verified"])
+        archive.write_bytes(original)
+        Path(metadata["patch"]).write_text("corrupt\n")
+        self.assertFalse(self.verify_return(1)["return_verified"])
+
+    def test_legacy_schema_two_without_diff_check_flag_is_verified_independently(self):
+        metadata = self.prepare_roundtrip()
+        archive = Path(metadata["metadata"])
+        metadata.pop("diff_check_verified")
+        archive.write_text(json.dumps(metadata))
+        self.assertTrue(self.verify_return()["return_verified"])
+        self.assertEqual(self.sync()["analytics_exchange"]["source_merge"]["status"], "roundtrip-verified")
+        metadata["diff_check_verified"] = False
+        archive.write_text(json.dumps(metadata))
+        self.assertFalse(self.verify_return(1)["return_verified"])
+
+    def test_legacy_pair_with_real_whitespace_error_cannot_prove_return(self):
+        import hashlib
+        metadata = self.prepare_roundtrip()
+        metadata.pop("diff_check_verified")
+        (self.documents / "context/shared.txt").write_text("Bad trailing spaces   \n")
+        self.git(self.documents, "add", "--", "context/shared.txt")
+        self.git(self.documents, "commit", "-m", "RSCON-123: Old unchecked content")
+        anchor = self.git(self.documents, "rev-parse", "HEAD")
+        tree = self.git(self.documents, "rev-parse", "HEAD^{tree}")
+        returned = self.git(self.documents, "commit-tree", tree, "-p", metadata["source_commit"],
+                            "-m", "RSCON-123: Legacy return")
+        raw = fixture.run("git", "-C", str(self.documents), "diff", "--binary", "--full-index",
+                          "--no-renames", metadata["source_commit"], anchor, "--", ".",
+                          env=self.environment).stdout.encode()
+        metadata.update(analytics_commit=anchor, analytics_tree=tree, patch_sha256=hashlib.sha256(raw).hexdigest())
+        Path(metadata["patch"]).write_bytes(raw)
+        Path(metadata["metadata"]).write_text(json.dumps(metadata))
+        spec = importlib.util.spec_from_file_location("legacy_exchange", fixture.ROOT / "scripts/repository-exchange.py")
+        exchange = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(exchange)
+        self.assertEqual(exchange.verified_roundtrips(self.workspace, self.documents, returned, anchor), {})
+
+    def test_verify_return_does_not_mistake_later_source_for_current_return(self):
+        self.prepare_roundtrip()
+        self.change_source("Later source work\n")
+        self.assertFalse(self.verify_return(1)["return_verified"])
 
     def test_stalled_legacy_empty_import_is_retired_without_remote_mutation(self) -> None:
         metadata = self.prepare_roundtrip()
@@ -109,7 +256,7 @@ class SourceImportTests(unittest.TestCase):
         self.assertTrue(self.sync()["all_repositories_synchronized"])
         (self.documents / "context/other.txt").write_text("Later accepted analytics\n")
         self.git(self.documents, "add", "--", "context/other.txt")
-        self.git(self.documents, "commit", "-m", "Accept further analytics")
+        self.git(self.documents, "commit", "-m", "RSCON-123: Accept further analytics")
         self.git(self.documents, "push", "origin", "main")
         result = self.sync()
         self.assertEqual(result["source_analytics_state"], "reverse-diff-pending")
@@ -170,7 +317,7 @@ class SourceImportTests(unittest.TestCase):
         self.fixture.configure_identity(checkout)
         (checkout / "context/unreviewed.txt").write_text("Unreviewed change\n")
         self.git(checkout, "add", "--", "context/unreviewed.txt")
-        self.git(checkout, "commit", "-m", "Propose extra change")
+        self.git(checkout, "commit", "-m", "RSCON-123: Propose extra change")
         self.git(checkout, "push", "origin", request["request_branch"])
         archive.write_bytes(archive_bytes)
         self.assertEqual(self.sync()["status"], "source-import-pending")
@@ -182,16 +329,16 @@ class SourceImportTests(unittest.TestCase):
         self.assertTrue(self.sync()["all_repositories_synchronized"])
         (self.documents / "context/extra.txt").write_text("Second roundtrip\n")
         self.git(self.documents, "add", "--", "context/extra.txt")
-        self.git(self.documents, "commit", "-m", "Accept second roundtrip content")
+        self.git(self.documents, "commit", "-m", "RSCON-123: Accept second roundtrip content")
         self.git(self.documents, "push", "origin", "main")
         metadata = self.sync()["analytics_exchange"]["reverse_diff"]
         self.git(self.source, "apply", metadata["patch"])
         self.git(self.source, "add", "--", "context/extra.txt")
-        self.git(self.source, "commit", "-m", "Apply next returned patch")
+        self.git(self.source, "commit", "-m", "RSCON-123: Apply next returned patch")
         self.git(self.source, "push", "origin", "main")
         self.assertTrue(self.sync()["all_repositories_synchronized"])
         self.git(self.source, "rm", "--", "context/extra.txt")
-        self.git(self.source, "commit", "-m", "Remove returned document")
+        self.git(self.source, "commit", "-m", "RSCON-123: Remove returned document")
         self.git(self.source, "push", "origin", "main")
         request = self.sync()["analytics_exchange"]["source_import"]
         self.assertIn("context/extra.txt", request["review"]["deleted_paths"])
@@ -228,7 +375,7 @@ class SourceImportTests(unittest.TestCase):
         self.assertFalse((self.workspace / ".workspace-state/source-import.json").exists())
         self.assertTrue(Path(accepted["analytics_exchange"]["source_merge"]["acceptance_receipt"]).is_file())
         self.git(self.source, "rm", "--", "context/shared.txt")
-        self.git(self.source, "commit", "-m", "Remove source document")
+        self.git(self.source, "commit", "-m", "RSCON-123: Remove source document")
         self.git(self.source, "push", "origin", "main")
         deletion = self.sync()["analytics_exchange"]["source_import"]
         self.assertIn("context/shared.txt", deletion["review"]["deleted_paths"])
@@ -307,7 +454,7 @@ class SourceImportTests(unittest.TestCase):
         self.fixture.configure_identity(receiver)
         (receiver / "context/other.txt").write_text("Accepted elsewhere\n")
         self.git(receiver, "add", "--", "context/other.txt")
-        self.git(receiver, "commit", "-m", "Update target content")
+        self.git(receiver, "commit", "-m", "RSCON-123: Update target content")
         self.git(receiver, "push", "origin", "main")
         second = self.sync()["analytics_exchange"]["source_import"]
         self.assertEqual(second["request_commit"], first["request_commit"])
@@ -316,7 +463,7 @@ class SourceImportTests(unittest.TestCase):
     def test_local_main_history_cannot_bypass_review(self) -> None:
         (self.documents / "context/shared.txt").write_text("Local only\n")
         self.git(self.documents, "add", "--", "context/shared.txt")
-        self.git(self.documents, "commit", "-m", "Local analytical change")
+        self.git(self.documents, "commit", "-m", "RSCON-123: Local analytical change")
         initial = self.git(self.remote, "rev-parse", "main")
         result = fixture.run("python3", str(fixture.ROOT / "scripts/workspace.py"), "--root", str(self.workspace), "sync", env=self.environment)
         self.assertNotEqual(result.returncode, 0)
@@ -345,7 +492,7 @@ class SourceImportTests(unittest.TestCase):
     def test_conflict_is_resolved_only_in_isolated_candidate(self) -> None:
         (self.documents / "context/shared.txt").write_text("Accepted documents\n")
         self.git(self.documents, "add", "--", "context/shared.txt")
-        self.git(self.documents, "commit", "-m", "Accept analytical text")
+        self.git(self.documents, "commit", "-m", "RSCON-123: Accept analytical text")
         self.git(self.documents, "push", "origin", "main")
         initial = self.git(self.documents, "rev-parse", "HEAD")
         self.change_source("Incoming conflict\n")
@@ -358,7 +505,7 @@ class SourceImportTests(unittest.TestCase):
         self.assertEqual(self.git(self.documents, "rev-parse", "HEAD"), initial)
         (checkout / "context/shared.txt").write_text("Reviewed resolution\n")
         self.git(checkout, "add", "--", "context/shared.txt")
-        self.git(checkout, "-c", "user.name=Reviewer", "-c", "user.email=reviewer@example.test", "commit", "-m", "Resolve incoming conflict")
+        self.git(checkout, "-c", "user.name=Reviewer", "-c", "user.email=reviewer@example.test", "commit", "-m", "RSCON-123: Resolve incoming conflict")
         request = self.sync()["analytics_exchange"]["source_import"]
         self.assertEqual(request["status"], "awaiting-merge")
         self.assertEqual(self.git(self.remote, "rev-parse", "main"), initial)
@@ -408,7 +555,9 @@ class SourceImportTests(unittest.TestCase):
         path = self.source / old
         path.parent.mkdir(parents=True)
         path.write_text(original)
-        self.git(self.source, 'add', '--', old)
+        from analysis_task_fixture import write_binding
+        write_binding(path.parent)
+        self.git(self.source, 'add', '--', old, str(path.parent / 'analysis-task.json'))
         self.git(self.source, 'commit', '-m', 'Record historical contract')
         self.git(self.source, 'push', 'origin', 'main')
         self.git(self.documents, 'fetch', str(self.source), 'main')
@@ -419,7 +568,8 @@ class SourceImportTests(unittest.TestCase):
         moved.parent.mkdir(parents=True)
         moved.write_text(original + extra)
         path.write_text('# Human-readable passport\n')
-        self.git(self.source, 'add', '--', old, target)
+        write_binding(moved.parent)
+        self.git(self.source, 'add', '--', old, target, str(moved.parent / 'analysis-task.json'))
         self.git(self.source, 'commit', '-m', 'Move contract and add passport')
         self.git(self.source, 'push', 'origin', 'main')
         return target, original, accepted

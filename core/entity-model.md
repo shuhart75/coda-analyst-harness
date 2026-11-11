@@ -137,7 +137,7 @@ It records existing behavior, implemented behavior, differences, remaining work,
 
 Analyst-side actual execution tracking artifact with fields such as:
 - internal Task ID, unique across loaded registries and rendered aliases
-- optional confirmed Jira key, never a fabricated key for local work
+- optional confirmed SberTrek key, never a fabricated key for local work
 - summary
 - kind: `real` or `virtual`
 - role: `AN`, `BE`, `FE`, or `QA`

@@ -25,7 +25,7 @@ class ActualProgressRoleWorkItemsTests(unittest.TestCase):
         execution.mkdir(parents=True)
         (execution / "tasks.md").write_text(
             "\n".join([
-                "| Jira | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories | Details |",
+                "| SberTrek | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories | Details |",
                 "|---|---|---|---|---:|---|---|---|---|---|---|---:|---|---|",
                 *rows,
                 "",
@@ -69,9 +69,9 @@ class ActualProgressRoleWorkItemsTests(unittest.TestCase):
             self.assertIn("TASK_RSCON_100_AN", content)
             self.assertIn("TASK_RSCON_100_FE", content)
             self.assertIn("TASK_RSCON_100_QA", content)
-            self.assertIn("[FE Списковая форма legacy]", content)
+            self.assertIn("[RSCON-100 · FE Списковая форма legacy · релиз не уточнён]", content)
             self.assertNotIn("[[FE]", content)
-            self.assertIn("[QA Shared delivery]", content)
+            self.assertIn("[RSCON-100 · QA Shared delivery · релиз не уточнён (прогноз QA)]", content)
 
     def test_duplicate_tracker_role_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -81,6 +81,88 @@ class ActualProgressRoleWorkItemsTests(unittest.TestCase):
             ])
             with self.assertRaisesRegex(ValueError, "Duplicate execution work item: RSCON-100/FE"):
                 OVERLAY.load_tasks(feature)
+
+
+def task(task_id: str, role: str, estimate: int, start: str, executor: str) -> object:
+    return OVERLAY.Task(
+        task_id=task_id,
+        tracker_key=task_role_suffix(task_id)[0],
+        summary=task_id,
+        kind="real",
+        role=role,
+        estimate=estimate,
+        executor=executor,
+        planned_start=start,
+        planned_finish="",
+        actual_start="",
+        actual_finish="",
+        status="planned",
+        progress=0,
+        related_stories=["STORY-ONE"],
+    )
+
+
+def task_role_suffix(task_id: str) -> tuple[str, str]:
+    return tuple(task_id.rsplit("/", 1)) if "/" in task_id else (task_id, "")
+
+
+class QaFeatureSchedulingTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.resources = {"AN": ["A1"], "BE": ["B1"], "FE": ["F1"], "QA": ["Q1"]}
+
+    def test_qa_effort_ends_at_regression_deadline(self) -> None:
+        tasks = {
+            "ITEM/FE": task("ITEM/FE", "FE", 5, "2026-09-21", "F1"),
+            "ITEM/QA": task("ITEM/QA", "QA", 2, "", "Q1"),
+        }
+
+        schedules = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 4), self.resources)
+
+        self.assertEqual(date(2026, 9, 14), schedules["ITEM/QA"].start)
+        self.assertEqual(date(2026, 9, 15), schedules["ITEM/QA"].finish)
+
+    def test_short_qa_does_not_reserve_regression_wait_as_work(self) -> None:
+        tasks = {
+            "ITEM/FE": task("ITEM/FE", "FE", 2, "2026-09-21", "F1"),
+            "ITEM/QA": task("ITEM/QA", "QA", 2, "", "Q1"),
+        }
+
+        schedules = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 4), self.resources)
+
+        self.assertEqual(date(2026, 9, 9), schedules["ITEM/QA"].start)
+        self.assertEqual(date(2026, 9, 10), schedules["ITEM/QA"].finish)
+
+    def test_qa_is_rendered_last(self) -> None:
+        tasks = {
+            "ITEM/FE": task("ITEM/FE", "FE", 5, "2026-09-21", "F1"),
+            "OTHER/FE": task("OTHER/FE", "FE", 7, "2026-09-21", "F1"),
+            "ITEM/QA": task("ITEM/QA", "QA", 2, "", "Q1"),
+        }
+        schedules = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 4), self.resources)
+        feature_dir = Path(self.id())
+
+        original_story_loader = OVERLAY.load_story_map
+        try:
+            OVERLAY.load_story_map = lambda _: [
+                OVERLAY.StoryMap("STORY-ONE", "Story", "2026-09-21", 5, "materialized", "explicit", list(tasks), [], [])
+            ]
+            rendered = OVERLAY.render_feature(feature_dir, "feature", set(), tasks, schedules)
+        finally:
+            OVERLAY.load_story_map = original_story_loader
+
+        assert rendered
+        self.assertLess(rendered.index("TASK_ITEM_FE"), rendered.index("TASK_ITEM_QA"))
+        self.assertLess(rendered.index("TASK_OTHER_FE"), rendered.index("TASK_ITEM_QA"))
+
+    def test_feature_scope_does_not_invent_be_dependency(self) -> None:
+        tasks = {
+            "feature/BACKEND-ONE": task("BACKEND-ONE", "BE", 5, "2026-09-07", "B1"),
+            "feature/FRONTEND-ONE": task("FRONTEND-ONE", "FE", 2, "2026-09-07", "F1"),
+        }
+
+        schedules = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 4), self.resources)
+
+        self.assertEqual(date(2026, 9, 4), schedules["feature/FRONTEND-ONE"].start)
 
 
 if __name__ == "__main__":

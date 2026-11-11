@@ -210,12 +210,67 @@ def _metadata(text):
         _fail("metadata requires created: YYYY-MM-DD")
 
 
+def materials_descriptor(root: Path) -> dict:
+    """Exact, local-only materials inventory, including the transport checksum file."""
+    root = Path(root)
+    files = _files(root)
+    if "SHA256SUMS" not in files:
+        _fail("materials requires SHA256SUMS")
+    listed = {}
+    for line in (root / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+        if "  " not in line:
+            _fail("invalid materials SHA256SUMS line")
+        digest, name = line.split("  ", 1)
+        _digest(digest)
+        _path(name)
+        if any(ord(c) < 32 for c in name) or name == "SHA256SUMS" or name in listed:
+            _fail("invalid or duplicate materials inventory path")
+        listed[name] = digest
+    expected = {name: digest for name, digest in files.items() if name != "SHA256SUMS"}
+    if not expected or listed != expected:
+        _fail("materials SHA256SUMS inventory/content mismatch")
+    # Empty directories are not hashed; reject them rather than silently accepting them.
+    allowed_dirs = {str(p) for name in files for p in PurePosixPath(name).parents if str(p) != "."}
+    if any(p.relative_to(root).as_posix() not in allowed_dirs for p in root.rglob("*") if p.is_dir()):
+        _fail("unexpected materials directory")
+    folded = [name.casefold() for name in files]
+    if len(folded) != len(set(folded)):
+        _fail("case collision in materials paths")
+    return {"sha256": _hash(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()), "files": files}
+
+
+def _input_descriptor(files: dict, materials: dict | None = None) -> dict:
+    value = files if materials is None else {"sdd": files, "materials": materials}
+    result = {"profile": PROFILE, "sha256": _hash(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()), "files": files}
+    if materials is not None:
+        result["materials"] = materials
+    return result
+
+
+def working_hash(root: Path) -> str:
+    """Detect authoring drift even before manifests are refreshed/valid."""
+    root = Path(root)
+    files = _files(root)
+    material_root = root.parent / "materials"
+    if material_root.exists() or material_root.is_symlink():
+        material_files = _files(material_root)
+        material = {"sha256": _hash(json.dumps(material_files, sort_keys=True, separators=(",", ":")).encode()), "files": material_files}
+        return _input_descriptor(files, material)["sha256"]
+    return _input_descriptor(files)["sha256"]
+
+
 def inspect(root: Path, requirements_text: str) -> dict:
     root = Path(root)
     files = _files(root)
     package = _json(root / "package.json")
-    if not isinstance(package, dict) or type(package.get("schema_version")) is not int or package.get("schema_version") != 1 or package.get("profile") != PROFILE:
+    if not isinstance(package, dict) or type(package.get("schema_version")) is not int or package.get("schema_version") not in {1, 2} or package.get("profile") != PROFILE:
         _fail("unsupported package schema/profile")
+    material_root = root.parent / "materials"
+    materials = None
+    if package["schema_version"] == 2:
+        materials = materials_descriptor(material_root)
+    elif material_root.exists() or material_root.is_symlink():
+        _fail("materials requires package schema_version 2; update sender and receiver")
     if package.get("requirements_sha256") != _hash(requirements_text.encode("utf-8")):
         _fail("requirements checksum mismatch")
     req_ids = set(REQS.findall(requirements_text))
@@ -317,11 +372,16 @@ def inspect(root: Path, requirements_text: str) -> dict:
     allowed_dirs = {str(p) for name in expected for p in PurePosixPath(name).parents if str(p) != "."}
     if any(p.relative_to(root).as_posix() not in allowed_dirs for p in root.rglob("*") if p.is_dir()):
         _fail("unexpected bundle directory")
-    return {"profile": PROFILE, "sha256": _hash(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()), "files": files}
+    return _input_descriptor(files, materials)
 
 
-def verify_descriptor(root: Path, requirements_text: str, expected: dict) -> dict:
-    actual = inspect(root, requirements_text)
+def verify_descriptor(root: Path, requirements_text: str, expected: dict, *, allow_decision=False) -> dict:
+    if expected.get("verification") == "analyst-decision-v1":
+        if not allow_decision:
+            _fail("analyst decision requires an explicit bound delivery decision")
+        actual = inspect_transport(root)
+    else:
+        actual = inspect(root, requirements_text)
     if actual != expected:
         _fail("bundle descriptor mismatch")
     return actual
@@ -355,9 +415,16 @@ def verify_sources(root: Path, descriptor: dict, code_root: Path, *, allowed_rec
     root, code_root = Path(root), Path(code_root)
     if descriptor.get("profile") != PROFILE or descriptor.get("files") != _files(root):
         _fail("bundle changed before source verification")
-    if descriptor.get("sha256") != _hash(json.dumps(descriptor["files"], sort_keys=True, separators=(",", ":")).encode()):
-        _fail("invalid descriptor digest")
     package = _json(root / "package.json")
+    materials = None
+    if package.get("schema_version") == 2:
+        materials = materials_descriptor(root.parent / "materials")
+    elif package.get("schema_version") != 1:
+        _fail("unsupported package schema/profile")
+    elif (root.parent / "materials").exists() or (root.parent / "materials").is_symlink():
+        _fail("materials requires package schema_version 2; update sender and receiver")
+    if descriptor != _input_descriptor(_files(root), materials):
+        _fail("invalid descriptor digest or materials inventory")
     origin = _git(code_root, "remote", "get-url", "origin").stdout.decode().strip()
     head = _git(code_root, "rev-parse", "HEAD").stdout.decode().strip()
     permitted = {_path(path) for path in allowed_receiver_paths}
@@ -443,11 +510,61 @@ def copy_snapshot(src: Path, dst: Path, expected: dict, requirements_text: str) 
     _plain(Path(dst))
     if Path(dst).exists():
         _fail("snapshot destination already exists")
+    material_dst = Path(dst).parent / "materials"
+    _plain(material_dst)
+    if material_dst.exists():
+        _fail("materials snapshot destination already exists")
+    created_materials = False
     try:
         shutil.copytree(src, dst, symlinks=True)
+        if "materials" in expected:
+            material_dst.mkdir()  # Refuse pre-existing content, including a concurrent creator.
+            created_materials = True
+            shutil.copytree(Path(src).parent / "materials", material_dst, symlinks=True, dirs_exist_ok=True)
         verify_descriptor(dst, requirements_text, expected)
         verify_descriptor(src, requirements_text, expected)
     except Exception:
         if Path(dst).is_dir() and not Path(dst).is_symlink():
             shutil.rmtree(dst)
+        if created_materials and material_dst.is_dir() and not material_dst.is_symlink():
+            shutil.rmtree(material_dst)
         raise
+
+
+DECISION_MODE = "analyst-decision-v1"
+DECISION_SKIPPED = ["main-gate", "audit", "language", "traceability", "source-pins", "materials-checksum-list"]
+
+
+def inspect_transport(root: Path) -> dict:
+    """Inventory actual bytes, without interpreting requirements, pins or checklists."""
+    root = Path(root)
+    files = _files(root)
+    materials = None
+    material_root = root.parent / "materials"
+    if material_root.exists() or material_root.is_symlink():
+        values = _files(material_root)
+        materials = {"files": values, "sha256": _hash(json.dumps(values, sort_keys=True, separators=(",", ":")).encode())}
+    for values in (files, materials["files"] if materials else {}):
+        names = [name.casefold() for name in values]
+        if len(names) != len(set(names)):
+            _fail("case collision in transport paths")
+    descriptor = _input_descriptor(files, materials)
+    descriptor["verification"] = DECISION_MODE
+    return descriptor
+
+
+def decision_basis(entry: dict) -> dict | None:
+    """A decision is bound to this exact input; never label skipped audits successful."""
+    decision = entry.get("delivery_decision")
+    if decision is None:
+        return None
+    if (not isinstance(decision, dict) or decision.get("schema_version") != 1
+            or decision.get("mode") != DECISION_MODE
+            or decision.get("analyst_confirmed") is not True
+            or any(not isinstance(decision.get(k), str) or not decision[k].strip()
+                   for k in ("analyst", "reason", "decided_at"))
+            or decision.get("checks") != {k: "not-performed" for k in DECISION_SKIPPED}
+            or decision.get("requirements_sha256") != entry.get("sha256")
+            or decision.get("sdd_sha256") != (entry.get("sdd_input") or {}).get("sha256")):
+        _fail("invalid analyst decision binding")
+    return decision

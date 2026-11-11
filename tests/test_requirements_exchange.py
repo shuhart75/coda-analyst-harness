@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
 SCRIPT = ROOT / "scripts" / "requirements-exchange.py"
 STATE_SCRIPT = ROOT / "scripts" / "requirementsctl.py"
 
@@ -62,6 +63,9 @@ def requirements(rule: str = "Система должна показать ре�
 
 
 def register_stage(project: Path, feature: str = "demo") -> None:
+    from analysis_task_fixture import write_binding
+    from project_layout import feature_root
+    write_binding(feature_root(project, feature))
     result = run(
         sys.executable, str(STATE_SCRIPT), "start-stage", str(project), feature,
         "--stage-id", "stage-1", "--title", "Первый результат",
@@ -290,6 +294,15 @@ class RequirementsExchangeTests(unittest.TestCase):
             self.assertEqual(result["destination_role"], "analytics")
             self.assertFalse((code / "requirements-exchange").exists())
 
+    def test_missing_analysis_task_blocks_before_creating_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project, feature = self.prepare_project(Path(temporary))
+            (feature / "analysis-task.json").unlink()
+            result = run(sys.executable, str(SCRIPT), "prepare", str(project), "demo", "--analyst", "ivan")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("analysis-task.json", result.stdout)
+            self.assertFalse((project / "requirements-exchange").exists())
+
     def test_existing_writable_code_exchange_is_used(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -436,7 +449,7 @@ class RequirementsExchangeTests(unittest.TestCase):
                     "path": "revisions/<NNN>/returns/tasks.md",
                     "meaning": "Уже согласованная разработчиками разбивка по задачам",
                     "estimate": "optional",
-                    "jira_key": "optional",
+                    "sbertrek_key": "optional",
                 },
                 "task_results": {
                     "path": "revisions/<NNN>/returns/tasks/<task-id>.md",

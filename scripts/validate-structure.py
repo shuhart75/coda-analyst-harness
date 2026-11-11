@@ -39,7 +39,15 @@ def main() -> int:
         print("Embedded harness paths are forbidden in the content repository:")
         for item in embedded:
             print(f"- {item}")
-    if missing or embedded:
+    customer_error = None
+    if (root / 'planning/customers.json').exists():
+        from customer_accounting import validate_registry
+        try:
+            validate_registry(root)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            customer_error = str(exc)
+            print('Customer accounting invalid: ' + customer_error)
+    if missing or embedded or customer_error:
         return 1
     print("Content structure OK")
     return 0

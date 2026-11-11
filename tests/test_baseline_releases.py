@@ -19,6 +19,8 @@ class BaselineReleaseTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.project = Path(self.temporary.name)
         subprocess.run(["git", "init", "-b", "feature/baseline", str(self.project)], check=True, capture_output=True)
+        from write_context_fixture import configure_write_context
+        self.state = configure_write_context(self, self.project, "feature/baseline")
         self.current = self.project / "baseline" / "current"
         self.candidate = self.project / "releases" / "release-one" / "baseline-candidate"
         for root, content in ((self.current, "before"), (self.candidate, "after")):
@@ -253,9 +255,9 @@ class BaselineRunObservationTests(unittest.TestCase):
         self.run_id = "reviewed-release-run"
         self.run_root = self.project / "run-evidence"
         self.run_root.mkdir()
-        self.result = {"scope": {"kind": "release", "intent": "update-planning", "provider": "jira", "ids": ["release-one"]},
-                       "issues": [{"jira_key": "BE-ONE", "development": {"state": "completed"}}],
-                       "skipped": [{"jira_key": "DOC-ONE"}], "excluded": [{"jira_key": "REMOVED-ONE"}]}
+        self.result = {"scope": {"kind": "release", "intent": "update-planning", "provider": "sbertrek", "ids": ["release-one"]},
+                       "issues": [{"sbertrek_key": "BE-ONE", "development": {"state": "completed"}}],
+                       "skipped": [{"sbertrek_key": "DOC-ONE"}], "excluded": [{"sbertrek_key": "REMOVED-ONE"}]}
         self.completion = {"reconciled_sha256": "verified-result-hash"}
         self.history = {"run_id": self.run_id, "reconciled_sha256": self.completion["reconciled_sha256"],
                         "status": "history-review-ready", "project_root": str(self.project),

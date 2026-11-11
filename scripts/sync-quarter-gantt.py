@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from project_layout import feature_root as layout_feature_root, delivery_title
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import argparse
 import importlib.util
@@ -202,6 +202,40 @@ def header_lines(
     return lines
 
 
+AVAILABILITY_TITLE = "Отпуска и недоступность команды"
+
+
+def availability_lines(gantt_dir: Path, overlay) -> list[str]:
+    """Display personal closed days without assigning work or rescheduling tasks."""
+    start = parse_quarter_start(gantt_dir)
+    finish = date(start.year + 1, 1, 1) if start.month == 10 else date(start.year, start.month + 3, 1)
+    closed = overlay.load_resource_closed_days(project_root(gantt_dir))
+    roster = {resource for resources in overlay.load_team_resources(project_root(gantt_dir)).values()
+              for resource in resources}
+    lines: list[str] = []
+    for resource in sorted(roster):
+        if not re.fullmatch(r"[ABFQ][1-9][0-9]*", resource):
+            continue
+        days = sorted(day for day in closed.get(resource, set()) if start <= day < finish)
+        spans: list[tuple[date, date]] = []
+        for day in days:
+            if spans and day == spans[-1][1] + timedelta(days=1):
+                spans[-1] = (spans[-1][0], day)
+            else:
+                spans.append((day, day))
+        for first, last in spans:
+            alias = f"CALENDAR_OFF_{resource}_{first:%Y%m%d}"
+            lines.extend([
+                f"[Недоступность {resource}] as [{alias}] starts {first:%Y/%m/%d}",
+                f"[{alias}] ends {last:%Y/%m/%d}",
+                f"[{alias}] is colored in LightYellow/Orange",
+            ])
+    if not lines:
+        return []
+    return [f"-- {AVAILABILITY_TITLE} --",
+            "' Calendar information only; no resource assignment or work estimate.", *lines, ""]
+
+
 def load_tool(name: str):
     spec = importlib.util.spec_from_file_location(name.replace("-", "_"), Path(__file__).with_name(name + ".py"))
     module = importlib.util.module_from_spec(spec)
@@ -210,10 +244,11 @@ def load_tool(name: str):
     return module
 
 
-def sync_actual_progress_overlays(gantt_dir: Path, overlay) -> dict[Path, str]:
+def sync_actual_progress_overlays(gantt_dir: Path, overlay, *, estimates_only: bool = False) -> dict[Path, str]:
     layout = load_layout(gantt_dir)
     if layout:
-        return overlay.prepare_outputs(project_root(gantt_dir), gantt_dir.parent.name, layout.execution_features)
+        return overlay.prepare_outputs(project_root(gantt_dir), gantt_dir.parent.name, layout.execution_features,
+                                       estimates_only=estimates_only)
     feature_slugs = sorted(
         {
             feature_slug(path)
@@ -221,7 +256,38 @@ def sync_actual_progress_overlays(gantt_dir: Path, overlay) -> dict[Path, str]:
             for path in (gantt_dir / "includes" / view).glob("FEATURE-*.puml")
         }
     )
-    return overlay.prepare_outputs(project_root(gantt_dir), gantt_dir.parent.name, feature_slugs or None)
+    return overlay.prepare_outputs(project_root(gantt_dir), gantt_dir.parent.name, feature_slugs or None,
+                                   estimates_only=estimates_only)
+
+
+def prepare_estimates_only(gantt_dir: Path, overlay, outputs: dict[Path, str]) -> None:
+    """Expand the same full view using independently scheduled unit coefficients.
+
+    Keep alternate overlays in memory: canonical includes must retain their
+    productivity forecast. Preserved forecasts remain byte-for-byte sources.
+    """
+    alternate = {**outputs, **sync_actual_progress_overlays(gantt_dir, overlay, estimates_only=True)}
+    report = gantt_dir / 'actual-progress-estimates-only-resources.json'
+    if report in alternate:
+        outputs[report] = alternate[report]
+    source = gantt_dir / 'actual-progress.puml'
+    expander = load_tool('expand-plantuml-includes')
+    content = '\n'.join(expander.expand_file(source, [], alternate)).rstrip() + '\n'
+    content = re.sub(r'^title .*$',
+                     f'title Реальный прогресс: прогноз по оценкам задач - {gantt_dir.parent.name}',
+                     content, count=1, flags=re.MULTILINE)
+    content = content.replace('end legend',
+        'Прогноз задач рассчитан без поправки на производительность (коэффициент 1).\n'
+        'Календарь, зависимости и загрузка учитываются. Сохранённые прогнозные блоки не пересчитаны.\n'
+        'end legend')
+    from gantt_releases import milestone_overrides, rename_milestones
+    overrides = milestone_overrides(gantt_dir)
+    if overrides:
+        content = rename_milestones(content, overrides, set())
+    target = gantt_dir / 'actual-progress-estimates-only.puml'
+    outputs[target] = content
+    outputs[gantt_dir / 'actual-progress-estimates-only-confluence.puml'] = (
+        '\n'.join(expander.expand_file(target, [], outputs)).rstrip() + '\n')
 
 
 def sync_confluence_export(gantt_dir: Path, contents: dict[Path, str]) -> None:
@@ -254,6 +320,7 @@ def main() -> int:
     if scope.role_baselines and not args.actual_only:
         raise ValueError("Ролевой PLAN требует --actual-only; исходные планы нельзя перегенерировать")
 
+    focus_sections = []
     for slug, title in VIEWS:
         if args.actual_only and slug != "actual-progress":
             continue
@@ -306,6 +373,8 @@ def main() -> int:
                     lines.append(f"' Decision source: {decision['source']}")
                 elif slug == "actual-progress" and excluded_slug in scope.preserved:
                     title += " (PLAN)"
+                if slug == "actual-progress":
+                    focus_sections.append((feature_slug(path), title, path))
                 lines.append(f"-- {title} --")
                 lines.append(f'!include {path.relative_to(gantt_dir).as_posix()}')
                 lines.append("")
@@ -327,16 +396,35 @@ def main() -> int:
                     lines.append(f'!include {path.relative_to(gantt_dir).as_posix()}')
                     lines.append("")
 
+        if slug == "actual-progress":
+            lines.extend(availability_lines(gantt_dir, overlay))
+        if slug == "actual-progress":
+            from gantt_releases import MARKER_LEGEND
+            lines.extend(["legend", MARKER_LEGEND, "end legend"])
         lines.append("@endgantt")
         target = gantt_dir / f"{slug}.puml"
         outputs[target] = "\n".join(lines).rstrip() + "\n"
 
+    prepare_estimates_only(gantt_dir, overlay, outputs)
+    from gantt_releases import milestone_overrides, rename_milestones
+    overrides = milestone_overrides(gantt_dir)
+    if overrides:
+        source = gantt_dir / 'actual-progress.puml'
+        expander = load_tool('expand-plantuml-includes')
+        expanded = "\n".join(expander.expand_file(source, [], outputs)).rstrip() + "\n"
+        seen = set()
+        # Derive renamed actual view; shared preambles and approved plans are immutable.
+        outputs[source] = rename_milestones(expanded, overrides, seen)
+        if seen != set(overrides):
+            raise ValueError('Release milestone aliases absent from actual-progress: ' + ', '.join(sorted(set(overrides) - seen)))
     sync_confluence_export(gantt_dir, outputs)
     if layout:
         exported = outputs[gantt_dir / "actual-progress-confluence.puml"]
         expected_titles = [section['title'] if gantt_dir / section['include'] in set(scope.includes.values())
                            else delivery_title(project_root(gantt_dir), scope.features.get(section['feature'], section['feature']), section['title'])
                            for section in layout.sections]
+        if availability_lines(gantt_dir, overlay):
+            expected_titles.append(AVAILABILITY_TITLE)
         if re.findall(r"^-- (.+?) --\s*$", exported, re.MULTILINE) != expected_titles:
             raise ValueError("Итоговый состав разделов отличается от подтверждённого описания")
         if load_layout(gantt_dir) != layout:
@@ -365,6 +453,8 @@ def main() -> int:
             raise ValueError("Повторяющиеся идентификаторы PlantUML в ролевом PLAN и Ганте")
         if load_forecast_scope(project_root(gantt_dir), gantt_dir.parent.name) != scope:
             raise ValueError("Ролевой PLAN изменился во время генерации")
+    from focused_gantt import prepare_focus
+    prepare_focus(gantt_dir, overlay, outputs, focus_sections, header_lines, closed_days, order)
     overlay.publish_outputs(outputs)
     for path in outputs:
         print(f"Wrote {path}", flush=True)

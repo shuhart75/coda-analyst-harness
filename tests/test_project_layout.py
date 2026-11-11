@@ -71,6 +71,29 @@ class ProjectLayoutTests(unittest.TestCase):
                 self.assertEqual(destination.read_bytes(), content)
         self.assertEqual(layoutctl.validate(self.project)["deliveries"], 3)
 
+    def test_missing_registry_never_switches_migrated_project_to_legacy(self):
+        layoutctl.apply(self.project, self.plan(), True)
+        (self.project / layout.REGISTRY).unlink()
+        for resolve in (lambda: layout.feature_root(self.project, "kib-mvp"),
+                        lambda: layout.quarter_root(self.project, "2026-Q4"),
+                        lambda: layout.feature_roots(self.project)):
+            with self.assertRaisesRegex(ValueError, "delivery-index-missing"):
+                resolve()
+        # An old journal is not an alternative current registry. Even without
+        # that journal the physical delivery tree must not become legacy.
+        (self.project / "migration-layout.json").unlink()
+        with self.assertRaisesRegex(ValueError, "delivery-index-missing"):
+            layout.feature_root(self.project, "kib-mvp")
+        self.assertFalse((self.project / layout.REGISTRY).exists())
+
+    def test_quarter_registry_needs_no_new_task_bindings_or_migration(self):
+        layoutctl.apply(self.project, self.plan(), True)
+        before = (self.project / layout.REGISTRY).read_bytes()
+        self.assertEqual(layoutctl.validate(self.project)["deliveries"], 3)
+        self.assertEqual(layout.feature_root(self.project, "kib-mvp"),
+                         self.project / "quarters/2026-Q3/features/kib/deliveries/mvp")
+        self.assertEqual((self.project / layout.REGISTRY).read_bytes(), before)
+
     def test_quarter_readme_is_not_destroyed_by_navigation(self):
         relative = "planning/2026-Q4/README.md"
         original = b"Quarter decisions and analyst approvals\n"

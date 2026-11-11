@@ -1,6 +1,6 @@
 ---
 description: Совместная работа над функциональностью АС КОДА
-argument-hint: <начать|сохранить|обновить|submit|finish> [feature]
+argument-hint: <создать|начать|сохранить|обновить|submit|finish> [feature]
 ---
 
 Прочитай `GIGACODE.md`, `core/collaboration.md` и каталог
@@ -21,3 +21,8 @@ FORECAST остаются защищёнными; QA и Confluence провер�
 При наличии `delivery-index.json` сначала разреши квартал и поставку по
 `core/quarter-deliveries.md`. Не выводи путь из одного имени фичи, если у неё
 несколько поставок; сохрани прежние идентификаторы обмена.
+
+Для подтверждённой новой фичи и первой поставки с кварталом используй
+`collaboration.py create --feature ... --delivery ... --key ... --quarter ... --title ... --analyst-confirmed`.
+При creation-pending повтори тот же create; параметры бери из состояния.
+Это не обход intake, проверок и утверждения требований.

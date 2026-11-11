@@ -27,7 +27,7 @@ def load_tool(name: str):
 OVERLAY = load_tool("sync-actual-progress-overlay")
 EXPANDER = load_tool("expand-plantuml-includes")
 BASELINE = load_tool("actualization_baseline")
-HEADER = "| Task ID | Jira | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories |"
+HEADER = "| Task ID | SberTrek | Summary | Kind | Role | Estimate (дн) | Executor | Planned Start | Planned Finish | Actual Start | Actual Finish | Status | Progress % | Related Stories |"
 SEPARATOR = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
 
@@ -77,6 +77,29 @@ class ActualProgressSourcesTests(unittest.TestCase):
         else:
             self.assertNotEqual(result.returncode, 0)
         return result
+
+    def test_markers_render_without_changing_schedule_and_export(self):
+        import hashlib
+        self.quarter()
+        before = self.target.read_text()
+        proof = {'confirmed': True, 'source': 'accepted-review.json',
+                 'evidence': 'Task QA completed', 'date': '2026-09-08'}
+        markers = {'schema_version': 1,
+                   'sources': {'execution/tasks.md': hashlib.sha256(self.registry.read_bytes()).hexdigest()},
+                   'tasks': [{'task_id': 'ITEM-100/FE', 'qa': proof}]}
+        path = self.feature / 'execution/task-markers.json'
+        path.write_text(json.dumps(markers))
+        self.quarter()
+        self.assertEqual(self.target.read_text().replace(' · QA ✓', ''), before)
+        export = self.gantt / 'actual-progress-confluence.puml'
+        self.assertIn('QA ✓', export.read_text())
+        self.assertIn('Нет отметки — нет подтверждения', export.read_text())
+        source = self.gantt / 'actual-progress.puml'
+        self.assertEqual(export.read_text(), "\n".join(EXPANDER.expand_file(source, [])).rstrip() + "\n")
+        self.registry.write_text(self.registry.read_text() + '\n')
+        snapshot = self.snapshot()
+        self.quarter(success=False)
+        self.assertEqual(snapshot, self.snapshot())
 
     def test_root_registry_supports_local_real_qa_without_tracker_key(self) -> None:
         tasks = OVERLAY.load_tasks(self.feature)
@@ -131,6 +154,30 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIn('belongs to 2026-Q3, not 2026-Q4', failure.stderr)
         self.assertEqual(self.snapshot(), before)
 
+    def test_release_names_change_only_actual_view_and_preserve_dates_and_preamble(self):
+        preamble = self.gantt / 'preamble/actual-progress.puml'
+        preamble.parent.mkdir()
+        original = '[Old release] as [RELEASE] happens at 2026/09/20\n'
+        preamble.write_text(original)
+        config = {'schema_version': 1, 'releases': [
+            {'alias': 'RELEASE', 'release': 'REL-20', 'date': '2026-09-20',
+             'state': 'deployed', 'environment': 'ПРОМ', 'analyst_confirmed': True, 'evidence': 'analyst'}]}
+        path = self.gantt / 'releases.json'
+        path.write_text(json.dumps(config))
+        plan = (self.gantt / 'quarter-plan.puml').read_bytes()
+        self.quarter()
+        text = (self.gantt / 'actual-progress.puml').read_text()
+        self.assertIn('[Релиз REL-20 · ПРОМ · факт] as [RELEASE] happens at 2026/09/20', text)
+        self.assertEqual(preamble.read_text(), original)
+        self.assertEqual((self.gantt / 'quarter-plan.puml').read_bytes(), plan)
+        expanded = '\n'.join(EXPANDER.expand_file(self.gantt / 'actual-progress.puml', [])).rstrip() + '\n'
+        self.assertEqual((self.gantt / 'actual-progress-confluence.puml').read_text(), expanded)
+        before = (self.gantt / 'actual-progress.puml').read_bytes()
+        config['releases'][0]['date'] = '2026-09-21'
+        path.write_text(json.dumps(config))
+        self.quarter(success=False)
+        self.assertEqual((self.gantt / 'actual-progress.puml').read_bytes(), before)
+
     def test_release_qa_groups_generate_and_reject_overlapping_members(self) -> None:
         self.write_tasks([
             "| FIRST | ITEM-100 | FE First | real | FE | 2 | B2 | 2026-09-01 | 2026-09-02 | 2026-09-01 | 2026-09-02 | done | 100 | STORY-COHORT |",
@@ -139,7 +186,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
             "| QA-REST | | QA Remainder | real | QA | 1 | Q2 | 2026-09-08 | 2026-09-09 | 2026-09-08 | | in-progress | unknown | STORY-COHORT |",
         ])
         self.map.write_text(self.map.read_text().replace('ITEM-100/FE, QA-COHORT', 'FIRST, SECOND, QA-COHORT, QA-REST'))
-        config = {'schema_version': 1, 'provider': 'jira', 'total_estimate': '2', 'groups': [
+        config = {'schema_version': 1, 'provider': 'sbertrek', 'total_estimate': '2', 'groups': [
             {'task_id': 'QA-COHORT', 'members': ['FIRST'], 'release': 'one', 'estimate': '1'},
             {'task_id': 'QA-REST', 'members': ['SECOND'], 'release': None, 'estimate': '1'}]}
         path = self.feature / 'execution/qa-groups.json'
@@ -149,6 +196,9 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertEqual((self.gantt / 'quarter-plan.puml').read_bytes(), before)
         self.assertIn('TASK_QA_REST', self.target.read_text())
         self.assertIn('TASK_QA_COHORT', self.target.read_text())
+        self.assertIn('FE First · one', self.target.read_text())
+        self.assertIn('QA Release · one', self.target.read_text())
+        self.assertIn('FE Second · релиз не уточнён', self.target.read_text())
         self.assertEqual(OVERLAY.load_tasks(self.feature)['QA-REST'].qa_members, ('SECOND',))
         config['groups'][1]['members'] = ['FIRST']
         path.write_text(json.dumps(config))
@@ -178,7 +228,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         legacy = self.feature / "slices/demo/execution/tasks.md"
         legacy.parent.mkdir(parents=True)
         legacy.write_text(
-            "| Jira | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
+            "| SberTrek | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
             "|---|---|---|---|---|---|---|---|\n"
             "| ITEM-200 | FE extra | real | FE | 2 | 2026-09-07 | in_progress | unknown |\n",
             encoding="utf-8",
@@ -186,9 +236,15 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIsNone(OVERLAY.load_tasks(self.feature)["ITEM-200/FE"].progress)
 
     def test_unknown_progress_does_not_allow_invalid_completed_by(self) -> None:
-        self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |").replace(
-            "| Related Stories |", "| Completed By | Related Stories |",
-        ).replace("| in-review | unknown |", "| done | unknown | 2026-09-09 |"), encoding="utf-8")
+        headers, rows = OVERLAY.parse_table_blocks(self.registry)[0]
+        headers.insert(headers.index("Related Stories"), "Completed By")
+        for row in rows:
+            row["Completed By"] = ""
+            if row["Role"] == "FE":
+                row.update({"Status": "done", "Progress %": "unknown", "Completed By": "2026-09-09"})
+        self.registry.write_text("| " + " | ".join(headers) + " |\n|" + "---|" * len(headers) + "\n" +
+                                 "".join("| " + " | ".join(row[h] for h in headers) + " |\n" for row in rows),
+                                 encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "Completed By"):
             OVERLAY.load_tasks(self.feature)
 
@@ -313,7 +369,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         legacy = self.feature / "slices/legacy/execution/tasks.md"
         legacy.parent.mkdir(parents=True)
         legacy.write_text(
-            "| Jira | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
+            "| SberTrek | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
             "|---|---|---|---|---|---|---|---|\n"
             "| ITEM-200 | Additional | real | BE | 2 | 2026-09-01 | planned | 0 |\n",
             encoding="utf-8",
@@ -566,7 +622,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "LOCAL-QA.*уточни оценку у аналитика"):
                     OVERLAY.load_tasks(self.feature)
 
-    def test_legacy_role_qualified_jira_keeps_one_role_suffix(self) -> None:
+    def test_legacy_role_qualified_tracker_key_keeps_one_role_suffix(self) -> None:
         self.write_tasks([
             "| | ITEM-100/FE | FE List | real | FE | 5 | F1 | 2026-09-01 | 2026-09-04 | 2026-09-01 | | in-review | 75 | STORY-COHORT |",
             "| QA-COHORT | ITEM-100/QA | QA Check | real | QA | 2 | Q2 | 2026-09-03 | 2026-09-09 | 2026-09-03 | | in-progress | 30 | STORY-COHORT |",
@@ -590,7 +646,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertIn("TASK_ITEM_100_QA]", self.target.read_text())
         self.assertNotIn("TASK_ITEM_100_QA_QA]", self.target.read_text())
 
-    def test_legacy_jira_role_conflict_blocks_without_writes(self) -> None:
+    def test_legacy_tracker_role_conflict_blocks_without_writes(self) -> None:
         self.registry.write_text(self.registry.read_text().replace(
             "| | ITEM-100 |", "| | ITEM-100/BE |",
         ), encoding="utf-8")
@@ -654,7 +710,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         legacy = self.feature / "slices/legacy/execution/tasks.md"
         legacy.parent.mkdir(parents=True)
         legacy.write_text(
-            "| Jira | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
+            "| SberTrek | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n"
             "|---|---|---|---|---|---|---|---|\n"
             "| ITEM-200 | QA Additional | real | QA | | 2026-09-01 | planned | 0 |\n",
             encoding="utf-8",
@@ -662,7 +718,7 @@ class ActualProgressSourcesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "уточни оценку у аналитика"):
             OVERLAY.load_tasks(self.feature)
 
-    def test_qa_label_omits_source_number_but_keeps_traceability(self) -> None:
+    def test_qa_label_prefixes_source_number_once(self) -> None:
         original = self.registry.read_text()
         for summary in ("[FE] List", "ITEM-100 FE List", "QA ITEM-100/QA FE List", "QA List"):
             with self.subTest(summary=summary):
@@ -673,9 +729,9 @@ class ActualProgressSourcesTests(unittest.TestCase):
                 self.assertEqual(tasks["ITEM-100/QA"].tracker_key, "ITEM-100")
                 self.assertEqual(tasks["ITEM-100/QA"].estimate, 2)
                 self.assertEqual(tasks["ITEM-100/FE"].estimate, 5)
-                self.assertEqual(OVERLAY.role_prefixed_summary(tasks["ITEM-100/QA"]), "QA List")
+                self.assertEqual(OVERLAY.role_prefixed_summary(tasks["ITEM-100/QA"]), "ITEM-100 · QA List · релиз не уточнён")
                 schedules = OVERLAY.task_schedules(tasks, set(), OVERLAY.harness_today(), OVERLAY.DEFAULT_TEAM_RESOURCES)
-                self.assertTrue(OVERLAY.render_task(tasks["ITEM-100/QA"], schedules)[0].startswith("[QA List] as [TASK_ITEM_100_QA]"))
+                self.assertTrue(OVERLAY.render_task(tasks["ITEM-100/QA"], schedules)[0].startswith("[ITEM-100 · QA List · релиз не уточнён (прогноз QA)] as [TASK_ITEM_100_QA]"))
 
     def test_absent_baseline_does_not_waive_missing_task_dates(self) -> None:
         self.absent_baseline()

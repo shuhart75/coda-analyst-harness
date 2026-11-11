@@ -84,7 +84,14 @@ def development_updates(comparison: dict, decision: dict | None) -> list[dict]:
                 expected['Status'] = history['state']
                 progress = history.get('progress_percent')
                 expected['Progress %'] = 'unknown' if progress is None else str(progress)
+                if history['state'] == 'not-started':
+                    # Assignment-based dates from an older calculation are not facts
+                    # of development under the status-based contract. The comparison
+                    # and analyst decision still gate application of this correction.
+                    expected.update({'Actual Start': '', 'Actual Finish': '', 'Completed By': ''})
         expected.update(overrides.get((row['feature'], row['task_id']), {}))
+        if row.get('suit') == 'bug':
+            expected['Suit'] = 'bug'
         updates.append({'feature': row['feature'], 'task_id': row['task_id'], 'role': row['role'],
                         'registry': row['registry'], 'expected_registry_fields': expected})
     return updates
@@ -124,7 +131,7 @@ def check_development(project: Path, review: dict) -> list[dict]:
             raise ValueError('Development registry is outside project')
         tables, _ = read_registry(path)
         matches = [row for table in tables for row in table
-                   if (row.get('Task ID') or row.get('Jira') or '') == update['task_id']
+                   if (row.get('Task ID') or row.get('SberTrek') or '') == update['task_id']
                    and row.get('Role') == update['role']]
         if update.get('action') == 'delete-current-execution':
             if matches:

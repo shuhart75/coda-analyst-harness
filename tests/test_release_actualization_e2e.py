@@ -19,7 +19,7 @@ import test_trackerctl
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).parent / 'fixtures/release-actualization/expected.json'
-FIELDS = ('Task ID', 'SberTrek', 'Jira', 'Summary', 'Kind', 'Role', 'Estimate (дн)',
+FIELDS = ('Task ID', 'SberTrek', 'Summary', 'Kind', 'Role', 'Estimate (дн)',
           'Executor', 'Planned Start', 'Planned Finish', 'Actual Start', 'Actual Finish',
           'Status', 'Progress %', 'Related Stories')
 NETWORK_GUARD = '''import sys
@@ -79,16 +79,24 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         self.inputs.mkdir()
         self.rows = {}
         self.prepare_sources()
+        from analysis_task_fixture import write_binding, write_planning_binding
+        shared = {'planning/team.md': '2026-Q3'}
+        for feature in (self.project / 'features').iterdir():
+            if feature.is_dir():
+                write_binding(feature)
+                for path in [*(feature / 'planning').glob('*.md'),
+                             *(feature / 'execution').glob('*')]:
+                    shared[path.relative_to(self.project).as_posix()] = '2026-Q3'
+        write_planning_binding(self.project, ('2026-Q3', '2026-Q4'), shared=shared)
         self.git(self.project, 'add', '--', 'features', 'planning')
-        self.git(self.project, 'commit', '-m', 'Prepare offline release scenario')
+        self.git(self.project, 'commit', '-m', 'RSCON-123: Prepare offline release scenario')
         self.initial_head = self.git(self.project, 'rev-parse', 'HEAD')
         self.initial_main = self.git(self.remote, 'rev-parse', 'main')
         self.write(self.state / 'tracker-config.json', {
             'schema_version': 4, 'primary_provider': 'sbertrek', 'setup_complete': True,
-            'jira_enabled': False, 'projects': {'sbertrek': ['LAB'], 'jira': []},
-            'development_issue_types': ['story', 'task'], 'participants': {'sbertrek': {}, 'jira': {}},
-            'status_rules': {'sbertrek': {'completed': ['done'], 'excluded': ['cancelled']},
-                             'jira': {'completed': [], 'excluded': []}}})
+            'projects': {'sbertrek': ['LAB']},
+            'development_issue_types': ['story', 'task'], 'participants': {'sbertrek': {}},
+            'status_rules': {'sbertrek': {'completed': ['done'], 'excluded': ['cancelled']}}})
 
     def collab(self, *args):
         return self.collaboration(self.workspace, self.environment, *args)
@@ -101,7 +109,7 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
 
     def row(self, task_id, *, estimate='2', status='unknown', progress='unknown'):
         role = task_id.split('/')[-1] if '/' in task_id else 'QA'
-        return dict(zip(FIELDS, (task_id, task_id.split('/')[0] if '/' in task_id else '-', '-',
+        return dict(zip(FIELDS, (task_id, task_id.split('/')[0] if '/' in task_id else '-',
                                 'Synthetic ' + task_id, 'real', role, estimate,
                                 {'BE': 'B1', 'FE': 'F1', 'QA': 'Q1'}[role],
                                 '2026-09-01', '2026-09-02', '-', '-', status, progress, 'STORY-REGISTRY')))
@@ -150,7 +158,8 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         key, role = task_id.split('/')
         lines = ['2026-08-01T12:00:00+00:00 CREATE by actor']
         if key != 'LAB-112':
-            lines.append('2026-08-02T12:00:00+00:00 assigned_to CREATE -> dev')
+            lines.append('2026-08-02T11:59:00+00:00 assigned_to CREATE -> dev')
+            lines.append('2026-08-02T12:00:00+00:00 status changed created -> development')
         started_only = task_id in getattr(self, 'started_tasks', set())
         if not started_only:
             lines.append('2026-08-03T12:00:00+00:00 assignee changed dev -> qa')
@@ -169,6 +178,12 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
                     {'kind': 'metadata', 'source': segment(lines[0]), 'reason': 'Actor is not an assignee'}]
         for line in lines[1:]:
             start = text.index(line)
+            if 'status changed' in line:
+                segments.append({'kind': 'status', 'source': segment(line),
+                                 'field': span('status', start), 'at': span(line.split()[0], start),
+                                 'before': span('created', start), 'after': span('development', start),
+                                 'operation': {'kind': 'change', 'source': span('changed', start)}})
+                continue
             creation = 'CREATE' in line
             segments.append({'kind': 'assignment', 'source': segment(line),
                              'field': span('assigned_to' if creation else 'assignee', start),
@@ -179,7 +194,7 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         source = self.inputs / f'{key}-history.txt'
         source.write_text(text, encoding='utf-8')
         snapshot = self.write(self.inputs / f'{key}-snapshot.json',
-                              {'key': key, 'assignee': 'dev' if started_only else 'qa', 'status': 'created'})
+                              {'key': key, 'assignee': 'dev' if started_only else 'qa', 'status': 'created' if key == 'LAB-112' else 'development'})
         call = {**self.call('sbertrek'), 'arguments': {'key': key}}
         return {'provider': 'sbertrek', 'key': key, 'role': role, 'response_file': str(source), 'format': 'text',
                 'sha256': hashlib.sha256(source.read_bytes()).hexdigest(), 'call': call,
@@ -217,7 +232,7 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         self.manifest = {
             'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'Synthetic fixture approval',
             'provider': 'sbertrek', 'participants': {'dev': 'BE', 'qa': 'QA'},
-            'status_rules': {'not_started': ['created'], 'qa_completed': [], 'cancelled': ['cancelled']},
+            'status_rules': {'not_started': ['created'], 'development_started': ['development'], 'qa_completed': [], 'cancelled': ['cancelled']},
             'responses': [self.history_entry(task) for task in self.expected['members']],
             'release_scope_decisions': {'schema_version': 1, 'provider': 'sbertrek', 'release': 'REL-1',
                 'analyst_confirmed': True, 'source': self.evidence(self.decision),
@@ -320,6 +335,28 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
         failed_generation = self.generate(expected=1)
         self.assertIn('QA', failed_generation.stdout + failed_generation.stderr)
         self.assertEqual(self.snapshot(self.gantt), old_outputs)
+        # Read-only history remains available on main; writing the partition is gated.
+        active_branch = self.git(self.project, 'branch', '--show-current')
+        original_main = self.git(self.project, 'rev-parse', 'main')
+        self.git(self.project, 'update-ref', 'refs/heads/main', self.initial_head)
+        self.git(self.project, 'switch', 'main')
+        main_before = self.snapshot(self.project)
+        blocked_main = self.review('on-main')
+        self.assertFalse(blocked_main['analytics_write_gate']['ready'])
+        self.assertIn('qa-partition-edit', blocked_main['analytics_write_gate']['required_before'])
+        self.run_tool(self.state, 'application-preflight', '--project-root', str(self.project),
+                      '--feature', 'registry', expected=2)
+        self.assertEqual(self.snapshot(self.project), main_before)
+        self.git(self.project, 'switch', active_branch)
+        self.git(self.project, 'update-ref', 'refs/heads/main', original_main)
+        (self.state / 'active-mode.md').write_text('mode: requirements\n')
+        wrong_mode = self.review('wrong-mode')
+        self.assertFalse(wrong_mode['analytics_write_gate']['ready'])
+        self.run_tool(self.state, 'application-preflight', '--project-root', str(self.project),
+                      '--feature', 'registry', expected=2)
+        self.assertEqual(self.snapshot(self.project), source_before)
+        (self.state / 'active-mode.md').write_text('mode: execution-update\n')
+        self.assertTrue(self.review('ready-to-partition')['analytics_write_gate']['ready'])
         preflight = self.run_tool(self.state, 'application-preflight', '--project-root', str(self.project), '--feature', 'registry')
         self.assertEqual(preflight['status'], 'tracker-application-preflight-ready')
         self.run_tool(self.state, 'application-preflight', '--project-root', str(self.project),

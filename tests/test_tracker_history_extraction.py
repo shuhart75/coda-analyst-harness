@@ -67,7 +67,7 @@ class TextExtractionTests(unittest.TestCase):
                          [('analyst', None), (None, 'dev'), ('dev', 'qa')])
         calculation = calculate_task(history, {'analyst': 'AN', 'dev': 'BE', 'qa': 'QA'},
                                      StatusRules(not_started=frozenset({'created'})))
-        self.assertEqual(calculation['development']['started_at'], '2026-08-02T12:00:00+00:00')
+        self.assertIsNone(calculation['development']['started_at'])
         self.assertEqual(calculation['development']['finished_at'], '2026-08-03T12:00:00+00:00')
 
     def test_tampering_omission_overlap_and_cross_event_quotes_rejected(self):

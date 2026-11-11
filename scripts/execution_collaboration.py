@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from project_layout import feature_root as layout_feature_root, quarter_root, logical_path, layout, delivery_selection
+from project_layout import feature_root as layout_feature_root, quarter_root, logical_path, layout, delivery_selection, delivery_key
 
 from contextlib import redirect_stdout
 from importlib import import_module
@@ -77,7 +77,18 @@ def set_scope(args, api) -> int:
     if not args.analyst_confirmed or not args.reason.strip():
         raise ValueError('Execution scope requires the analyst decision and its reason')
     features, quarters = sorted(set(args.feature)), sorted(set(args.quarter))
-    if work['feature'] not in features:
+    index = layout(analytics)
+    if index:
+        # Store delivery keys, but accept an unambiguous historical feature alias.
+        features = sorted({delivery_key(analytics, layout_feature_root(analytics, key)) for key in features})
+        owner = work['feature']
+        if owner in index['deliveries']:
+            owner_matches = [key for key in features if key == owner]
+        else:
+            owner_matches = [key for key in features if index['deliveries'][key]['feature_id'] == owner]
+        if len(owner_matches) != 1:
+            raise ValueError('Execution scope must include exactly one delivery of the active owning feature')
+    elif work['feature'] not in features:
         raise ValueError('Execution scope must include the active owning feature')
     for feature in features:
         if not api.SLUG_PATTERN.fullmatch(feature):
@@ -99,9 +110,12 @@ def set_scope(args, api) -> int:
             completion, _ = verified_result(run_id)
             if not completion['planning_application_allowed']:
                 raise ValueError('Tracker run must allow application before scope registration')
+    previous_runs = set(work.get('execution_scope', {}).get('run_ids', []))
+    if not previous_runs <= set(run_ids):
+        raise ValueError('Keep every registered tracker run when extending execution scope')
     scope = {'features': features, 'quarters': quarters, 'run_ids': run_ids,
              'reason': args.reason, 'confirmed_at': api.utc_now()}
-    if layout(analytics):
+    if index:
         bindings = list(delivery_selection(analytics, features).values())
         if any(binding['quarter'] not in quarters for binding in bindings):
             raise ValueError('Execution scope must include the registered quarter of every selected delivery')
@@ -109,6 +123,11 @@ def set_scope(args, api) -> int:
     if getattr(args, 'include_planning', False):
         check_draft_planning(analytics, scope, api)
         scope['include_planning'] = True
+    if getattr(args, 'include_creation', False):
+        from execution_creation import creation_paths
+        _, additions = creation_paths(analytics, scope, api, registering=True)
+        scope['include_creation'] = True
+        scope['creation_deliveries'] = additions
     work['execution_scope'] = scope
     api.write_state(root, state)
     print(json.dumps({'status': 'execution-scope-registered', 'branch': work['branch'],
@@ -118,12 +137,18 @@ def set_scope(args, api) -> int:
 
 
 def path_kind(path: str, scope: dict) -> str | None:
+    if path == 'planning/customers.json':
+        return 'customer-accounting'
+    if re.fullmatch(r'planning/\d{4}-Q[1-4]/reports/[a-z0-9-]+\.(?:md|json)', path) and path.split('/')[1] in scope['quarters']:
+        return 'execution-analysis'
+    if path == 'planning/task-bindings.json':
+        return 'planning-task-binding'
     if path == 'planning/team.md':
         return 'shared-execution-source'
     parts = path.split('/')
     if len(parts) >= 3 and parts[0] == 'features' and parts[1] in scope['features']:
         relative = '/'.join(parts[2:])
-        if relative in {'planning/actualization.md', 'execution-context.md'} or re.fullmatch(
+        if relative in {'planning/actualization.md', 'execution-context.md', 'analysis-task.json'} or re.fullmatch(
             r'(?:slices/[a-z0-9-]+/)?execution/(?:[a-zA-Z0-9_./-]+)\.(?:md|json)', relative
         ):
             return 'execution-source'
@@ -138,18 +163,22 @@ def path_kind(path: str, scope: dict) -> str | None:
             and parts[0] == 'planning' and parts[1] in scope['quarters']):
         relative = '/'.join(parts[2:])
         if (relative in {'plan-state.md', 'retrospective.md', 'gantt/README.md', 'gantt/order.txt',
-                         'gantt/closed-days.txt', 'gantt/quarter-plan.puml', 'gantt/commander-plan.puml'}
+                         'gantt/closed-days.txt', 'gantt/quarter-plan.puml', 'gantt/commander-plan.puml',
+                         'gantt/quarter-plan-confluence.puml', 'gantt/commander-plan-confluence.puml'}
                 or re.fullmatch(r'quarter/[a-zA-Z0-9-]+\.md', relative)
                 or re.fullmatch(r'gantt/preamble/(?:common|quarter-plan|commander-plan)\.puml', relative)
                 or re.fullmatch(r'gantt/includes/(?:quarter-plan|commander-plan)/FEATURE-[a-z0-9-]+\.puml', relative)):
             return 'draft-quarter-planning'
     if len(parts) >= 4 and parts[0] == 'planning' and parts[1] in scope['quarters'] and parts[2] == 'gantt':
         relative = '/'.join(parts[3:])
-        if relative in {'actual-progress.puml', 'actual-progress-confluence.puml'} or re.fullmatch(
+        if relative in {'actual-progress.puml', 'actual-progress-confluence.puml',
+                        'actual-progress-resources.json', 'actual-progress-estimates-only-resources.json',
+                        'actual-progress-estimates-only.puml', 'actual-progress-estimates-only-confluence.puml',
+                        'actual-progress-focus.puml', 'actual-progress-focus-confluence.puml'} or re.fullmatch(
             r'includes/actual-progress/FEATURE-[a-z0-9-]+\.puml', relative
         ):
             return 'generated-quarter-view'
-        if relative in {'actual-progress-features.json', 'actual-progress-layout.json', 'preamble/actual-progress.puml'}:
+        if relative in {'actual-progress-features.json', 'actual-progress-layout.json', 'releases.json', 'preamble/actual-progress.puml'}:
             return 'execution-view-source'
         if re.fullmatch(r'[a-z0-9-]*decision[a-z0-9-]*\.md', relative):
             return 'execution-view-decision'
@@ -172,13 +201,33 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
     scope = work.get('execution_scope')
     if not scope:
         raise ValueError('Register the confirmed feature/quarter set with set-execution-scope first')
+    if 'planning/task-bindings.json' in paths:
+        registry_path = analytics / 'planning/task-bindings.json'
+        current = json.loads(registry_path.read_text()) if registry_path.is_file() else {}
+        previous_result = api.git(analytics, 'show', 'HEAD:planning/task-bindings.json')
+        previous = json.loads(previous_result.stdout) if previous_result.returncode == 0 else {}
+        affected = {quarter for quarter in set(current.get('quarters', {})) | set(previous.get('quarters', {}))
+                    if current.get('quarters', {}).get(quarter) != previous.get('quarters', {}).get(quarter)}
+        affected.update(quarter for quarter in set(current.get('epics', {})) | set(previous.get('epics', {}))
+                        if current.get('epics', {}).get(quarter) != previous.get('epics', {}).get(quarter))
+        for path in set(current.get('shared_paths', {})) | set(previous.get('shared_paths', {})):
+            old = previous.get('shared_paths', {}).get(path)
+            new = current.get('shared_paths', {}).get(path)
+            if old != new:
+                affected.update(value for value in (old, new) if value is not None)
+        if not affected <= set(scope['quarters']):
+            raise ValueError('Planning task binding is outside confirmed execution scope')
     if scope.get('include_planning') is True:
         check_draft_planning(analytics, scope, api)
+    creation = {}
+    if scope.get('include_creation') is True:
+        from execution_creation import creation_paths
+        creation, _ = creation_paths(analytics, scope, api)
     classified = []
     for path in sorted(paths):
         api.exact_path(path)
         target = analytics / path
-        kind = passport_path_kind(analytics, path, scope) or path_kind(logical_path(analytics, path), scope)
+        kind = creation.get(path) or passport_path_kind(analytics, path, scope) or path_kind(logical_path(analytics, path), scope)
         if not kind or target.resolve() != target:
             raise ValueError(f'Path outside confirmed execution scope or linked: {path}')
         if re.fullmatch(r'features/[a-z0-9-]+/planning/estimates-\d{4}-Q[1-4]\.md', logical_path(analytics, path)):
@@ -187,6 +236,14 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
                 current = api.git(analytics, 'hash-object', '--no-filters', '--', path)
                 if not target.is_file() or current.returncode != 0 or current.stdout.strip() != previous.stdout.strip():
                     raise ValueError(f'Historical estimate archive is immutable: {path}')
+        if re.fullmatch(r'features/[^/]+/(?:slices/[^/]+/)?execution/tasks\.md', logical_path(analytics, path)) and target.is_file():
+            from tracker_registry import require_new_registry_format
+            require_new_registry_format(analytics, target)
+        if kind == 'customer-accounting':
+            from customer_accounting import read_json, check_registry_scope
+            previous = api.git(analytics, 'show', 'HEAD:planning/customers.json')
+            before = json.loads(previous.stdout) if previous.returncode == 0 else {}
+            check_registry_scope(analytics, before, read_json(target), scope)
         classified.append({'path': path, 'kind': kind})
     reviewed_runs = set()
     if scope.get('run_ids') or review_files:
@@ -214,13 +271,25 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
     expander = import_module('expand-plantuml-includes')
     for quarter in scope['quarters']:
         gantt = quarter_root(analytics, quarter) / 'gantt'
-        source, export = gantt / 'actual-progress.puml', gantt / 'actual-progress-confluence.puml'
-        dependencies = []
-        expanded = '\n'.join(expander.expand_file(source, [], dependencies=dependencies)).rstrip() + '\n'
-        if any(not path.is_relative_to(analytics) for path in dependencies) or export.resolve() != export:
-            raise ValueError('Gantt dependency is outside analytics or export is linked')
-        if export.read_text() != expanded:
-            raise ValueError(f'Confluence export differs from actual-progress: {quarter}; regenerate --actual-only')
+        views = ['actual-progress']
+        if any((gantt / name).exists() for name in ('actual-progress-estimates-only.puml', 'actual-progress-estimates-only-confluence.puml')):
+            views.append('actual-progress-estimates-only')
+        if any((gantt / name).exists() for name in ('actual-progress-focus.puml', 'actual-progress-focus-confluence.puml')):
+            views.append('actual-progress-focus')
+        if scope.get('include_planning') is True:
+            views += ['quarter-plan', 'commander-plan']
+        for view in views:
+            source, export = gantt / (view + '.puml'), gantt / (view + '-confluence.puml')
+            if view != 'actual-progress' and not source.exists() and not export.exists():
+                continue
+            if not source.is_file() or not export.is_file():
+                raise ValueError(f'Missing source or Confluence export: {quarter}/{view}')
+            dependencies = []
+            expanded = '\n'.join(expander.expand_file(source, [], dependencies=dependencies)).rstrip() + '\n'
+            if any(not path.is_relative_to(analytics) for path in dependencies) or export.resolve() != export:
+                raise ValueError('Gantt dependency is outside analytics or export is linked')
+            if export.read_text() != expanded:
+                raise ValueError(f'Confluence export differs from {view}: {quarter}; expand the selected source')
         verified_quarters.append(quarter)
     baseline_candidates = __import__('baseline_releases').scan(analytics)
     return {'paths': classified, 'confluence_verified': verified_quarters,
@@ -235,13 +304,15 @@ def save_preview(args, api) -> int:
     work = api.require_active_work(root, analytics, api.load_state(root))
     paths = api.changed_paths(analytics)
     checks = check_save(root, analytics, work, paths, args.review_file, api)
+    keys = api.working_keys(analytics, paths)
     command = ['python3', str(Path(api.__file__).resolve()), '--root', str(root), 'save',
-               '--message', '<semantic-message>']
+               '--message', ', '.join(sorted(keys)) + ': <semantic-message>']
     for path in sorted(paths):
         command.extend(['--path', path])
     for filename in args.review_file:
         command.extend(['--review-file', filename])
     print(json.dumps({'status': 'execution-save-preview', 'branch': work['branch'],
                       'head': api.head(analytics), **checks, 'save_command': command,
+                      'required_task_keys': sorted(keys),
                       'writes_performed': False, 'content_approved': False}, ensure_ascii=False, indent=2))
     return 0

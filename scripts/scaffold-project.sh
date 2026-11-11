@@ -115,6 +115,11 @@ for directory in \
   fi
 done
 
+mkdir -p "$TARGET/ontology/reviews" "$TARGET/planning/roadmap"
+copy_if_missing "$ROOT_DIR/templates/ontology/README.md" "$TARGET/ontology/README.md"
+copy_if_missing "$ROOT_DIR/templates/ontology/catalog.json" "$TARGET/ontology/catalog.json"
+copy_if_missing "$ROOT_DIR/templates/planning/roadmap-index.template.json" "$TARGET/planning/roadmap/index.json"
+
 for forbidden in .workflow .vscode AGENTS.md; do
   if [[ -e "$TARGET/$forbidden" ]]; then
     if [[ "$forbidden" == "AGENTS.md" ]] && grep -q "analyst-harness-local-entrypoint:v1" "$TARGET/$forbidden"; then

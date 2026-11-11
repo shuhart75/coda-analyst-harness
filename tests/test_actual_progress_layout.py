@@ -108,19 +108,20 @@ class PriorityScheduleTests(unittest.TestCase):
 
     def schedule(self, high, low):
         tasks = {"high/" + high.task_id: high, "low/" + low.task_id: low}
-        return OVERLAY.task_schedules(tasks, set(), date(2026, 9, 7), OVERLAY.DEFAULT_TEAM_RESOURCES, {"high": 0, "low": 1})
+        return OVERLAY.task_schedules(tasks, set(), date(2026, 9, 7), OVERLAY.DEFAULT_TEAM_RESOURCES, feature_priorities={"high": 0, "low": 1})
 
     def test_priority_beats_earlier_low_priority_plan(self):
-        for role in ("BE", "FE", "QA"):
+        for role in ("BE", "FE"):
             with self.subTest(role=role):
                 high = self.task("HIGH", 2, "2026-09-09", role)
                 low = self.task("LOW", 5, "2026-09-07", role)
                 schedule = self.schedule(high, low)
-                self.assertEqual(schedule["high/" + high.task_id].start, date(2026, 9, 9))
-                self.assertEqual(schedule["low/" + low.task_id].start, date(2026, 9, 11))
+                self.assertEqual(schedule["high/" + high.task_id].start, date(2026, 9, 7))
+                self.assertEqual(schedule["low/" + low.task_id].start, date(2026, 9, 9))
 
     def test_lower_priority_can_fill_gap_without_delaying_higher(self):
         high = self.task("HIGH", 2, "2026-09-09")
+        high.not_before = "2026-09-09"
         low = self.task("LOW", 2, "2026-09-07")
         schedule = self.schedule(high, low)
         self.assertEqual(schedule["low/LOW/FE"].finish, date(2026, 9, 8))

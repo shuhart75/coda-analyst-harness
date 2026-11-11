@@ -44,7 +44,7 @@ def install_commit_message_hook(repository: Path, policy_script: Path) -> Path:
     if configured.returncode == 0 and configured.stdout.strip() and HOOK_MARKER not in existing:
         raise ValueError(
             "Настроен несовместимый core.hooksPath; bootstrap остановлен, потому что "
-            "запрет идентификаторов трекеров в сообщениях коммитов нельзя гарантировать"
+            "проверку задач на аналитику в сообщениях коммитов нельзя гарантировать"
         )
     if existing and HOOK_MARKER not in existing:
         raise ValueError(
@@ -55,7 +55,7 @@ def install_commit_message_hook(repository: Path, policy_script: Path) -> Path:
     content = (
         "#!/bin/sh\n"
         f"# {HOOK_MARKER}\n"
-        f"exec python3 {shlex.quote(str(policy_script.resolve()))} \"$1\"\n"
+        f"exec python3 {shlex.quote(str(policy_script.resolve()))} \"$1\" --repository .\n"
     )
     temporary = hook.with_name(f".{hook.name}.analyst-harness.tmp")
     temporary.write_text(content, encoding="utf-8")
@@ -70,7 +70,7 @@ DEFAULT_ROLES = {
     "source": "changeswork-copy",
 }
 ROLE_CONFIG_NAME = "repository-roles.json"
-PROJECT_PATHS = ("baseline", "context", "features", "planning", "quarters", "backlog", "releases", "delivery-index.json", "migration-layout.json")
+PROJECT_PATHS = ("baseline", "context", "ontology", "features", "planning", "quarters", "backlog", "releases", "delivery-index.json", "migration-layout.json")
 CODE_PUSH_DISABLED = "DISABLED_BY_CODA_ANALYST_HARNESS"
 WORKSPACE_STATE_NAME = "workspace.json"
 
@@ -645,6 +645,8 @@ def _sync_command(args: argparse.Namespace, collaboration_finish: dict | None = 
             ),
         }, ensure_ascii=False, indent=2))
         return 2
+    from sync_progress import progress
+    progress(root, "update-code", restart=True)
     code_result = update_code(root)
     source_id = load_roles(root)["source"]
     source_path = source_mirror_path(root, source_id) if source_id else None
@@ -832,7 +834,18 @@ def sync_command(args: argparse.Namespace) -> int:
         print(json.dumps(blocked, ensure_ascii=False, indent=2))
         return 2
     with workspace_operation_lock(root):
-        return _sync_command(args, collaboration_finish)
+        from sync_progress import progress
+        progress(root, "start", restart=True)
+        try:
+            result = _sync_command(args, collaboration_finish)
+            path = root / ".workspace-state/sync-progress.json"
+            current = json.loads(path.read_text())
+            if (result and current.get("status") != "failed") or current.get("status") == "running":
+                progress(root, "blocked" if result else "finished", status="failed" if result else "completed")
+            return result
+        except Exception as exc:
+            progress(root, "blocked", status="failed", error=str(exc))
+            raise
 
 
 def inspect_conflict_command(args: argparse.Namespace) -> int:

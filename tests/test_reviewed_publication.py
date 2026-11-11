@@ -208,6 +208,25 @@ done
             spec.loader.exec_module(module)
         return module
 
+    def test_command_callbacks_work_without_sys_modules_registration(self) -> None:
+        module = self.load_module()
+        self.assertNotIn(module.__name__, sys.modules)
+        commands = [
+            ("send-by-decision", module.analyst_delivery,
+             ["--reason", "Решение аналитика", "--analyst-confirmed"]),
+            ("cancel-publication", module.cancellation,
+             ["--revision", "1", "--expected-commit", "a" * 40,
+              "--reason", "Отменить кандидата", "--analyst-confirmed"]),
+        ]
+        for name, helper, options in commands:
+            with self.subTest(command=name), patch.object(helper, "command", return_value=0) as command:
+                args = module.parser().parse_args([name, str(self.project), "demo", *options])
+                self.assertEqual(args.handler(args), 0)
+                api, passed_args = command.call_args.args
+                self.assertIs(api.git, module.git)
+                self.assertIs(passed_args, args)
+        self.assertNotIn(module.__name__, sys.modules)
+
     def test_lost_push_response_reuses_published_request(self) -> None:
         self.fixture.authorize(self.project)
         module = self.load_module()

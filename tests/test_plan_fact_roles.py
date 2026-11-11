@@ -74,13 +74,15 @@ class PlanFactRoleTests(unittest.TestCase):
         tasks["UNKNOWN"].kind = "candidate"
         self.assertEqual(OVERLAY.story_progress(story("FE"), tasks), 100)
 
-    def test_qa_uses_earliest_fe_in_feature_not_card_with_qa_estimate(self):
+    def test_qa_uses_latest_finish_in_feature_not_card_with_qa_estimate(self):
         tasks = {"feature/LONG/FE": task("LONG/FE", "FE", 10, "2026-09-07", executor="F1"),
                  "feature/SHORT/FE": task("SHORT/FE", "FE", 3, "2026-09-07", executor="F2"),
                  "feature/LONG/QA": task("LONG/QA", "QA", 2, "", executor="Q1"),
                  "other/FE": task("FE", "FE", 1, "2026-09-01", 100, "F2")}
         schedules = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 7), OVERLAY.DEFAULT_TEAM_RESOURCES)
-        self.assertEqual(schedules["feature/LONG/QA"].start, date(2026, 9, 8))
+        self.assertEqual(schedules["feature/LONG/QA"].start, date(2026, 9, 22))
+        self.assertEqual(schedules["feature/LONG/QA"].finish, date(2026, 9, 23))
+        self.assertEqual(sum(amount for _, amount in schedules["feature/LONG/QA"].allocations), 2)
 
     def test_multiple_local_qa_tasks_respect_capacity_and_actual_dates(self):
         tasks = {"FE": task("FE", "FE", 3, "2026-09-07", executor="F1"),
@@ -88,15 +90,18 @@ class PlanFactRoleTests(unittest.TestCase):
                  "QA2": task("QA2", "QA", 2, "", executor="Q1"),
                  "QA3": task("QA3", "QA", 1, "2026-09-01", 100, "Q1")}
         schedules = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 7), OVERLAY.DEFAULT_TEAM_RESOURCES)
-        self.assertEqual(schedules["QA1"].start, date(2026, 9, 8))
-        self.assertGreater(schedules["QA2"].start, schedules["QA1"].finish)
+        self.assertEqual(schedules["QA1"].start, date(2026, 9, 11))
+        self.assertEqual(schedules["QA2"].finish, schedules["QA1"].finish)
         self.assertEqual(schedules["QA3"].start, date(2026, 9, 1))
+        self.assertNotEqual(schedules["QA1"].assignee, schedules["QA2"].assignee)
+        self.assertEqual(tasks["QA2"].executor, "Q1")
 
-    def test_be_only_qa_can_start_after_first_be_finishes(self):
+    def test_be_only_qa_reserves_effort_at_regression_deadline(self):
         tasks = {"BE": task("BE", "BE", 2, "2026-09-07", executor="B1"),
                  "QA": task("QA", "QA", 1, "", executor="Q1")}
         schedules = OVERLAY.task_schedules(tasks, set(), date(2026, 9, 7), OVERLAY.DEFAULT_TEAM_RESOURCES)
-        self.assertEqual(schedules["QA"].start, date(2026, 9, 9))
+        self.assertEqual(schedules["QA"].start, date(2026, 9, 11))
+        self.assertEqual(schedules["QA"].allocations, ((date(2026, 9, 11), 1),))
 
     def test_follow_up_links_reuse_baselines_and_accept_shared_qa(self):
         with tempfile.TemporaryDirectory() as directory:

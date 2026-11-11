@@ -10,6 +10,7 @@ import tempfile
 import unicodedata
 import unittest
 from pathlib import Path
+from analysis_task_fixture import task_binding
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +31,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(cloned.returncode, 0, cloned.stdout + cloned.stderr)
             self.configure_identity(reviewer)
             merged = run("git", "-C", str(reviewer), "merge", "--no-ff", f"origin/{branch}",
-                         "-m", "Accept reviewed analytical changes")
+                         "-m", "RSCON-123: Accept reviewed analytical changes")
             self.assertEqual(merged.returncode, 0, merged.stdout + merged.stderr)
             accepted = run("git", "-C", str(reviewer), "push", "origin", "main")
             self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
@@ -68,12 +69,12 @@ class CodaWorkspaceTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
         self.assertEqual(run("git", "-C", str(work), "add", ".").returncode, 0)
-        self.assertEqual(run("git", "-C", str(work), "commit", "-m", "initial").returncode, 0)
+        self.assertEqual(run("git", "-C", str(work), "commit", "-m", "RSCON-123: initial").returncode, 0)
         self.assertEqual(run("git", "clone", "--bare", str(work), str(remote)).returncode, 0)
         self.assertEqual(run("git", "-C", str(work), "remote", "add", "origin", str(remote)).returncode, 0)
         return work, remote
 
-    def prepare_workspace(self, root: Path) -> tuple[Path, Path, Path, dict[str, str]]:
+    def prepare_workspace(self, root: Path, with_analysis_task: bool = True) -> tuple[Path, Path, Path, dict[str, str]]:
         source_work, source_remote = self.create_seed(
             root,
             "changeswork-copy",
@@ -83,6 +84,7 @@ class CodaWorkspaceTests(unittest.TestCase):
                 "context/project-rules/README.md": "# Правила проекта\n",
                 "context/source-materials/legacy/snapshot/.codex": "historical marker\n",
                 "context/shared.txt": "base\n",
+                **({"context/analysis-task.json": json.dumps(task_binding(kind='context'))} if with_analysis_task else {}),
             },
         )
         documents_remote = root / "documents.git"
@@ -174,7 +176,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertIn("analyst-harness-commit-message-policy:v1", hook_path.read_text(encoding="utf-8"))
             blocked_commit = run(
                 "git", "-C", str(documents), "commit", "--allow-empty",
-                "-m", "Обновить RSCON-123",
+                "-m", "Обновить аналитические материалы",
             )
             self.assertNotEqual(blocked_commit.returncode, 0)
             self.assertIn("Сообщение коммита отклонено", blocked_commit.stderr)
@@ -228,12 +230,12 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
             (documents / "context/documents-only.txt").write_text("analyst result\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", ".").returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "documents change").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: documents change").returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
 
             (source_work / "context/source-only.txt").write_text("upstream result\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(source_work), "add", ".").returncode, 0)
-            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "source change").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "RSCON-123: source change").returncode, 0)
             self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
             source_head = run("git", "-C", str(source_work), "rev-parse", "HEAD").stdout.strip()
 
@@ -369,7 +371,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.configure_identity(upstream)
             (upstream / "backend/app.py").write_text("VALUE = 2\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(upstream), "add", ".").returncode, 0)
-            self.assertEqual(run("git", "-C", str(upstream), "commit", "-m", "code update").returncode, 0)
+            self.assertEqual(run("git", "-C", str(upstream), "commit", "-m", "RSCON-123: code update").returncode, 0)
             self.assertEqual(run("git", "-C", str(upstream), "push", "origin", "main").returncode, 0)
 
             synchronized = run(
@@ -415,7 +417,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             relative = "context/analytics-without-source.md"
             (documents / relative).write_text("локальное изменение\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", relative).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "analytics without source").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: analytics without source").returncode, 0)
             self.accept_review_branch(documents, "feature/analytics-without-source")
             remote_work = root / "documents-without-source-remote"
             self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
@@ -423,7 +425,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             remote_relative = "context/remote-without-source.md"
             (remote_work / remote_relative).write_text("удалённое изменение\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(remote_work), "add", "--", remote_relative).returncode, 0)
-            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote without source").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "RSCON-123: remote without source").returncode, 0)
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
 
             bootstrap = run(
@@ -532,12 +534,12 @@ class CodaWorkspaceTests(unittest.TestCase):
             analytics_relative = "context/analytics-without-code.md"
             (documents / analytics_relative).write_text("аналитическое изменение\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", analytics_relative).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "analytics without code").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: analytics without code").returncode, 0)
             self.accept_review_branch(documents, "feature/analytics-without-code")
             source_relative = "context/source-without-code.md"
             (source_work / source_relative).write_text("изменение источника\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(source_work), "add", "--", source_relative).returncode, 0)
-            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "source without code").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "RSCON-123: source without code").returncode, 0)
             self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
 
             bootstrap = run(
@@ -608,7 +610,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             relative = "context/analytics-only-workspace.md"
             (documents / relative).write_text("изменение без дополнительных ролей\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", relative).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "analytics only workspace").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: analytics only workspace").returncode, 0)
             self.accept_review_branch(documents, "feature/analytics-only-workspace")
 
             bootstrap = run(
@@ -800,7 +802,7 @@ class CodaWorkspaceTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content, encoding="utf-8")
                 self.assertEqual(run("git", "-C", str(author), "add", "--", relative).returncode, 0)
-            self.assertEqual(run("git", "-C", str(author), "commit", "-m", "polluted analytics").returncode, 0)
+            self.assertEqual(run("git", "-C", str(author), "commit", "-m", "RSCON-123: polluted analytics").returncode, 0)
             self.assertEqual(run("git", "-C", str(author), "push", "origin", "main").returncode, 0)
 
             result = run(
@@ -846,7 +848,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             workspace, _, _, environment = self.prepare_workspace(root)
             documents = workspace / "documents"
             self.assertEqual(run("git", "-C", str(documents), "rm", "context/shared.txt").returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "delete source material").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: delete source material").returncode, 0)
 
             blocked = run(
                 sys.executable,
@@ -898,10 +900,12 @@ class CodaWorkspaceTests(unittest.TestCase):
             relative = "features/example/requirements.md"
             target = documents / relative
             target.parent.mkdir(parents=True)
+            from analysis_task_fixture import write_binding
+            write_binding(target.parent)
             target.write_text("# Требования\n\n| Поле | Значение |\n|---|---| \n", encoding="utf-8")
-            self.assertEqual(run("git", "-C", str(documents), "add", "--", relative).returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", relative, "features/example/analysis-task.json").returncode, 0)
             self.assertEqual(
-                run("git", "-C", str(documents), "commit", "-m", "add invalid requirements").returncode,
+                run("git", "-C", str(documents), "commit", "-m", "RSCON-123: add invalid requirements").returncode,
                 0,
             )
             self.accept_review_branch(documents, "feature/whitespace-check")
@@ -938,7 +942,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             invalid.parent.mkdir(parents=True)
             invalid.write_text("<project/>\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(source_work), "add", "--", ".idea/modules.xml").returncode, 0)
-            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "invalid source path").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "RSCON-123: invalid source path").returncode, 0)
             self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
 
             result = run(
@@ -962,12 +966,12 @@ class CodaWorkspaceTests(unittest.TestCase):
             documents = workspace / "documents"
             (documents / "context/shared.txt").write_text("documents version\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "context/shared.txt").returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "documents conflict").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: documents conflict").returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
 
             (source_work / "context/shared.txt").write_text("source version\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(source_work), "add", "context/shared.txt").returncode, 0)
-            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "source conflict").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "RSCON-123: source conflict").returncode, 0)
             self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
 
             result = run(
@@ -1025,7 +1029,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.configure_identity(import_checkout)
             (import_checkout / "context/shared.txt").write_text("reviewed combined version\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(import_checkout), "add", "--", "context/shared.txt").returncode, 0)
-            resolved = run("git", "-C", str(import_checkout), "commit", "-m", "Resolve reviewed source conflict")
+            resolved = run("git", "-C", str(import_checkout), "commit", "-m", "RSCON-123: Resolve reviewed source conflict")
             self.assertEqual(resolved.returncode, 0, resolved.stdout + resolved.stderr)
             prepared = run(sys.executable, str(ROOT / "scripts/repository-exchange.py"), "--root",
                            str(workspace), "sync", "--no-push", env=environment)
@@ -1074,7 +1078,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             local_path = "context/local-analytics.md"
             (documents / local_path).write_text("локальная работа\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", local_path).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "local analytics").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: local analytics").returncode, 0)
             local_head = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
 
             remote_work = root / "documents-remote-work"
@@ -1083,7 +1087,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             remote_path = "context/remote-analytics.md"
             (remote_work / remote_path).write_text("удалённая работа\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(remote_work), "add", "--", remote_path).returncode, 0)
-            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote analytics").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "RSCON-123: remote analytics").returncode, 0)
             remote_head = run("git", "-C", str(remote_work), "rev-parse", "HEAD").stdout.strip()
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
 
@@ -1145,7 +1149,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             shared = "context/shared.txt"
             (documents / shared).write_text("локальная версия\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", shared).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "local conflict").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: local conflict").returncode, 0)
             local_head = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
 
             remote_work = root / "documents-conflict-work"
@@ -1153,7 +1157,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.configure_identity(remote_work)
             (remote_work / shared).write_text("удалённая версия\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(remote_work), "add", "--", shared).returncode, 0)
-            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote conflict").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "RSCON-123: remote conflict").returncode, 0)
             remote_head = run("git", "-C", str(remote_work), "rev-parse", "HEAD").stdout.strip()
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
 
@@ -1258,7 +1262,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(run("git", "-C", str(documents), "merge", "origin/main").returncode, 1)
             self.assertEqual(run("git", "-C", str(documents), "checkout", "--theirs", "--", shared).returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "add", "--", shared).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "wrong conflict choice").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: wrong conflict choice").returncode, 0)
             self.assertEqual((documents / shared).read_text(encoding="utf-8"), "удалённая версия\n")
 
             restored = run(
@@ -1338,7 +1342,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             (remote_work / path).parent.mkdir(parents=True)
             (remote_work / path).write_text("# Требования\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(remote_work), "add", "--", path).returncode, 0)
-            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote requirement").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "RSCON-123: remote requirement").returncode, 0)
             remote_head = run("git", "-C", str(remote_work), "rev-parse", "HEAD").stdout.strip()
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
 
@@ -1371,9 +1375,11 @@ class CodaWorkspaceTests(unittest.TestCase):
             feature = "registry"
             requirements = f"features/{feature}/requirements.md"
             (documents / requirements).parent.mkdir(parents=True)
+            from analysis_task_fixture import write_binding
+            write_binding((documents / requirements).parent)
             (documents / requirements).write_text("# Требования\n\nИсходная версия.\n", encoding="utf-8")
-            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "add registry feature").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements, f"features/{feature}/analysis-task.json").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: add registry feature").returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
             main_before = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
 
@@ -1479,7 +1485,7 @@ class CodaWorkspaceTests(unittest.TestCase):
                 str(workspace),
                 "save",
                 "--message",
-                "incomplete save",
+                "RSCON-123: incomplete save",
                 "--path",
                 requirements,
                 env=environment,
@@ -1495,7 +1501,7 @@ class CodaWorkspaceTests(unittest.TestCase):
                 str(workspace),
                 "save",
                 "--message",
-                "docs: update registry requirements",
+                "RSCON-123: docs: update registry requirements",
                 "--path",
                 requirements,
                 env=environment,
@@ -1513,7 +1519,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             colleague_path = "context/colleague.md"
             (remote_work / colleague_path).write_text("изменение коллеги\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(remote_work), "add", "--", colleague_path).returncode, 0)
-            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "colleague update").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "RSCON-123: colleague update").returncode, 0)
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
 
             updated = run(
@@ -1566,7 +1572,7 @@ class CodaWorkspaceTests(unittest.TestCase):
 
             self.assertEqual(run("git", "-C", str(remote_work), "fetch", "origin", branch).returncode, 0)
             self.assertEqual(
-                run("git", "-C", str(remote_work), "merge", "--no-ff", f"origin/{branch}", "-m", "accept registry").returncode,
+                run("git", "-C", str(remote_work), "merge", "--no-ff", f"origin/{branch}", "-m", "RSCON-123: accept registry").returncode,
                 0,
             )
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
@@ -1603,7 +1609,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             stale_guard_path = "context/after-delivery-check.md"
             (remote_work / stale_guard_path).write_text("новое изменение main\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(remote_work), "add", "--", stale_guard_path).returncode, 0)
-            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "advance main").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "RSCON-123: advance main").returncode, 0)
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
             stale_handoff = run(
                 sys.executable,
@@ -1654,9 +1660,11 @@ class CodaWorkspaceTests(unittest.TestCase):
             feature = "registry"
             requirements = f"features/{feature}/requirements.md"
             (documents / requirements).parent.mkdir(parents=True)
+            from analysis_task_fixture import write_binding
+            write_binding((documents / requirements).parent)
             (documents / requirements).write_text("# Требования\n", encoding="utf-8")
-            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "add feature").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements, f"features/{feature}/analysis-task.json").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: add feature").returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
             (documents / requirements).write_text("# Требования\n\nНесохранённая работа.\n", encoding="utf-8")
             local_head = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
@@ -1707,9 +1715,11 @@ class CodaWorkspaceTests(unittest.TestCase):
             feature = "registry"
             requirements = f"features/{feature}/requirements.md"
             (documents / requirements).parent.mkdir(parents=True)
+            from analysis_task_fixture import write_binding
+            write_binding((documents / requirements).parent)
             (documents / requirements).write_text("# Требования\n", encoding="utf-8")
-            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "local feature").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements, f"features/{feature}/analysis-task.json").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: local feature").returncode, 0)
             local_head = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
 
             remote_work = root / "documents-migration-remote"
@@ -1718,7 +1728,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             remote_path = "context/remote-during-migration.md"
             (remote_work / remote_path).write_text("изменение коллеги\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(remote_work), "add", "--", remote_path).returncode, 0)
-            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote migration update").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "RSCON-123: remote migration update").returncode, 0)
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
 
             migrated = run(
@@ -1763,14 +1773,14 @@ class CodaWorkspaceTests(unittest.TestCase):
             shared = "context/shared.txt"
             (documents / shared).write_text("локальная версия\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents), "add", "--", shared).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "local conflict").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: local conflict").returncode, 0)
 
             remote_work = root / "documents-active-merge"
             self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
             self.configure_identity(remote_work)
             (remote_work / shared).write_text("удалённая версия\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(remote_work), "add", "--", shared).returncode, 0)
-            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote conflict").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "RSCON-123: remote conflict").returncode, 0)
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "fetch", "origin", "main").returncode, 0)
             self.assertNotEqual(run("git", "-C", str(documents), "merge", "origin/main").returncode, 0)
@@ -1803,9 +1813,11 @@ class CodaWorkspaceTests(unittest.TestCase):
             feature = "registry"
             requirements = f"features/{feature}/requirements.md"
             (documents / requirements).parent.mkdir(parents=True)
+            from analysis_task_fixture import write_binding
+            write_binding((documents / requirements).parent)
             (documents / requirements).write_text("# Требования\n\nОбщая версия.\n", encoding="utf-8")
-            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements).returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "add feature").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "add", "--", requirements, f"features/{feature}/analysis-task.json").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents), "commit", "-m", "RSCON-123: add feature").returncode, 0)
             self.assertEqual(run("git", "-C", str(documents), "push", "origin", "main").returncode, 0)
             migrate = run(
                 sys.executable, str(ROOT / "scripts/collaboration.py"), "--root", str(workspace),
@@ -1820,7 +1832,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             (documents / requirements).write_text("# Требования\n\nЛокальная версия.\n", encoding="utf-8")
             save = run(
                 sys.executable, str(ROOT / "scripts/collaboration.py"), "--root", str(workspace),
-                "save", "--message", "local requirements", "--path", requirements, env=environment,
+                "save", "--message", "RSCON-123: local requirements", "--path", requirements, env=environment,
             )
             self.assertEqual(save.returncode, 0, save.stdout + save.stderr)
             local_head = run("git", "-C", str(documents), "rev-parse", "HEAD").stdout.strip()
@@ -1829,8 +1841,8 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(run("git", "clone", str(documents_remote), str(remote_work)).returncode, 0)
             self.configure_identity(remote_work)
             (remote_work / requirements).write_text("# Требования\n\nВерсия коллеги.\n", encoding="utf-8")
-            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", requirements).returncode, 0)
-            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "remote requirements").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "add", "--", requirements, f"features/{feature}/analysis-task.json").returncode, 0)
+            self.assertEqual(run("git", "-C", str(remote_work), "commit", "-m", "RSCON-123: remote requirements").returncode, 0)
             self.assertEqual(run("git", "-C", str(remote_work), "push", "origin", "main").returncode, 0)
 
             update = run(
@@ -1867,7 +1879,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             source_work, source_remote = self.create_seed(
                 root,
                 "changeswork-copy",
-                {"README.md": "# Source\n", "context/shared.txt": "base\n"},
+                {"README.md": "# Source\n", "context/shared.txt": "base\n", "context/analysis-task.json": json.dumps(task_binding(kind='context'))},
             )
             documents_remote = root / "documents.git"
             self.assertEqual(run("git", "clone", "--bare", str(source_remote), str(documents_remote)).returncode, 0)
@@ -1918,7 +1930,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             decomposed = "Маршруты_согласовании\u0306.md"
             (source_work / decomposed).write_text("source\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(source_work), "add", ".").returncode, 0)
-            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "non nfc").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "RSCON-123: non nfc").returncode, 0)
             self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
 
             result = run(
@@ -1972,13 +1984,13 @@ class CodaWorkspaceTests(unittest.TestCase):
             source_work, source_remote = self.create_seed(
                 root,
                 "changeswork-copy",
-                {"README.md": "# Source\n", old_name: "same content\n"},
+                {"README.md": "# Source\n", old_name: "same content\n", "context/analysis-task.json": json.dumps(task_binding(kind='context'))},
             )
             documents_remote = root / "documents.git"
             self.assertEqual(run("git", "clone", "--bare", str(source_remote), str(documents_remote)).returncode, 0)
             (source_work / old_name).rename(source_work / new_name)
             self.assertEqual(run("git", "-C", str(source_work), "add", "-A").returncode, 0)
-            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "normalize path").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "RSCON-123: normalize path").returncode, 0)
             self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
             _, coda_remote = self.create_seed(root, "coda", {"backend/app.py": "VALUE = 1\n"})
             workspace = root / "workspace"
@@ -2026,7 +2038,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.assertEqual(run("git", "-C", str(analytics), "status", "--porcelain=v1").stdout, "")
 
             self.assertEqual(run("git", "-C", str(analytics), "rm", "--", new_name).returncode, 0)
-            self.assertEqual(run("git", "-C", str(analytics), "commit", "-m", "accidental normalized deletion").returncode, 0)
+            self.assertEqual(run("git", "-C", str(analytics), "commit", "-m", "RSCON-123: accidental normalized deletion").returncode, 0)
             blocked = run(
                 sys.executable,
                 str(ROOT / "scripts/repository-exchange.py"),
@@ -2051,6 +2063,7 @@ class CodaWorkspaceTests(unittest.TestCase):
                     ".workflow/active-mode.md": "mode: requirements\n",
                     ".vscode/settings.json": "{}\n",
                     "context/shared.txt": "base\n",
+                    "context/analysis-task.json": json.dumps(task_binding(kind='context')),
                 },
             )
             documents_remote = root / "documents.git"
@@ -2062,7 +2075,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             (documents_work / "features/registry/requirements.md").write_text("# Новые требования\n", encoding="utf-8")
             (documents_work / ".workflow/active-mode.md").write_text("mode: execution-update\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(documents_work), "add", ".").returncode, 0)
-            self.assertEqual(run("git", "-C", str(documents_work), "commit", "-m", "documents requirements").returncode, 0)
+            self.assertEqual(run("git", "-C", str(documents_work), "commit", "-m", "RSCON-123: documents requirements").returncode, 0)
             self.assertEqual(run("git", "-C", str(documents_work), "push", "origin", "main").returncode, 0)
 
             for relative in ("AGENTS.md", ".workflow/active-mode.md", ".vscode/settings.json"):
@@ -2070,9 +2083,11 @@ class CodaWorkspaceTests(unittest.TestCase):
             (source_work / ".workflow").rmdir()
             (source_work / ".vscode").rmdir()
             (source_work / "planning").mkdir()
+            from analysis_task_fixture import write_planning_binding
+            write_planning_binding(source_work, shared={"planning/team.md": "2026-Q3"})
             (source_work / "planning/team.md").write_text("# Команда\n", encoding="utf-8")
             self.assertEqual(run("git", "-C", str(source_work), "add", "-A").returncode, 0)
-            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "remove embedded harness").returncode, 0)
+            self.assertEqual(run("git", "-C", str(source_work), "commit", "-m", "RSCON-123: remove embedded harness").returncode, 0)
             self.assertEqual(run("git", "-C", str(source_work), "push", "origin", "main").returncode, 0)
 
             _, coda_remote = self.create_seed(root, "coda", {"backend/app.py": "VALUE = 1\n"})
@@ -2127,7 +2142,7 @@ class CodaWorkspaceTests(unittest.TestCase):
             self.configure_identity(import_checkout)
             self.assertTrue((import_checkout / ".git/MERGE_HEAD").is_file())
             self.assertEqual(run("git", "-C", str(import_checkout), "rm", "--", ".workflow/active-mode.md").returncode, 0)
-            resolved = run("git", "-C", str(import_checkout), "commit", "-m", "Remove legacy active mode in reviewed import")
+            resolved = run("git", "-C", str(import_checkout), "commit", "-m", "RSCON-123: Remove legacy active mode in reviewed import")
             self.assertEqual(resolved.returncode, 0, resolved.stdout + resolved.stderr)
             sync = run(
                 sys.executable,

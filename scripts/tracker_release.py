@@ -18,9 +18,13 @@ def apply_scope_decisions(project: Path, result: dict, decisions: dict | None) -
     if decisions is None:
         return result
     scope = result["scope"]
+    if scope["kind"] == "release":
+        matching_scope = decisions.get("release") == scope["ids"][0]
+    else:
+        matching_scope = decisions.get("run_id") == result.get("run_id") and decisions.get("scope") == scope
     if (decisions.get("schema_version") != 1 or decisions.get("analyst_confirmed") is not True
-            or decisions.get("provider") != scope["provider"] or decisions.get("release") != scope["ids"][0]):
-        raise ValueError("Confirmed release scope decisions must match the selected provider and release")
+            or decisions.get("provider") != scope["provider"] or not matching_scope):
+        raise ValueError("Confirmed scope decisions must match the selected provider and release or exact run scope")
     source = decisions["source"]
     raw = Path(source["file"]).read_bytes()
     if (hashlib.sha256(raw).hexdigest() != source["sha256"] or not source.get("quote", "").strip()
@@ -31,18 +35,40 @@ def apply_scope_decisions(project: Path, result: dict, decisions: dict | None) -
     known = {issue[field]: issue for issue in [*reviewed["issues"], *reviewed.get("skipped", [])]}
     seen = set()
     for decision in decisions["tasks"]:
-        key, feature = decision["key"], decision["feature"]
+        key = decision["key"]
         if key not in known or key in seen:
             raise ValueError("Scope decision must name one unique collected task")
         seen.add(key)
+        issue = known[key]
+        action = decision.get("action", "include")
+        if action == "exclude-from-execution":
+            reason = decision.get("reason")
+            if issue.get("issue_type") != "bug":
+                raise ValueError("Execution exclusion is supported only for explicitly reviewed bugs")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError("Execution exclusion requires an analyst reason")
+            if "feature" in decision or "role" in decision:
+                raise ValueError("Execution exclusion cannot also assign a feature or role")
+            if issue in reviewed["issues"]:
+                reviewed["issues"].remove(issue)
+                reviewed.setdefault("skipped", []).append(issue)
+            issue.update(reason="analyst-excluded-from-execution",
+                         execution_exclusion={"reason": reason.strip(), "source": copy.deepcopy(source)})
+            continue
+        if action != "include":
+            raise ValueError("Unknown scope decision action")
+        feature = decision["feature"]
         if not valid_slug(feature) or not inside_project(project, layout_feature_root(project, feature)).is_dir():
             raise ValueError("Confirm an existing analytical feature; a missing Gantt lane is not a missing feature")
         issue = known[key]
         role = decision.get("role", issue.get("task_role"))
         if role not in {"AN", "BE", "FE", "QA"}:
             raise ValueError("An unprefixed task requires an explicit supported role decision")
-        if issue.get("task_role") and role != issue["task_role"]:
+        if issue.get("issue_type") == "bug" and role not in {"BE", "FE"}:
+            raise ValueError("A bug requires a confirmed development role")
+        if issue.get("issue_type") != "bug" and issue.get("task_role") and role != issue["task_role"]:
             raise ValueError("A role decision cannot silently override an explicit task prefix")
+        issue.pop("execution_exclusion", None)
         issue.update(confirmed_feature=feature, task_role=role)
         if issue in reviewed.get("skipped", []):
             reviewed["skipped"].remove(issue)
@@ -61,7 +87,7 @@ def release_owners(project: Path, result: dict) -> dict:
     from tracker_registry import read_registry
 
     provider = result["scope"]["provider"]
-    column = "Jira" if provider == "jira" else "SberTrek"
+    column = "SberTrek"
     owners, epics, blockers = {}, {}, []
     for path in registry_paths(project):
         feature = delivery_key(project, path)
@@ -72,7 +98,7 @@ def release_owners(project: Path, result: dict) -> dict:
                              "message": str(error)})
             continue
         for row in (row for table in tables for row in table):
-            for key_column in ("Jira", "SberTrek"):
+            for key_column in ("SberTrek",):
                 key = row.get(key_column, "").split("/")[0].strip()
                 if key and key not in {"-", "—"}:
                     owners.setdefault((key_column, key), set()).add(feature)
@@ -86,8 +112,7 @@ def release_owners(project: Path, result: dict) -> dict:
     proposals = []
     for issue in result["issues"]:
         key = issue.get(provider + "_key")
-        exact = owners.get((column, key), set()) | owners.get(
-            ("SberTrek" if provider == "jira" else "Jira", issue.get("sbertrek_key" if provider == "jira" else "jira_key")), set())
+        exact = owners.get((column, key), set())
         epic = (issue.get("epic") or {}).get("key")
         confirmed = issue.get("confirmed_feature")
         candidates = {confirmed} if confirmed else exact or epics.get(epic, set())
@@ -96,7 +121,7 @@ def release_owners(project: Path, result: dict) -> dict:
             blockers.append({"reason": "confirmed-owner-conflicts-with-registry", "key": key,
                              "confirmed_feature": confirmed, "registry_features": sorted(exact)})
         proposals.append({"key": key, "summary": issue.get("summary"),
-                          "jira_key": issue.get("jira_key"), "sbertrek_key": issue.get("sbertrek_key"),
+                          "sbertrek_key": issue.get("sbertrek_key"),
                           "epic": issue.get("epic"),
                           "features": sorted(candidates),
                           "role": issue.get("task_role"),
@@ -108,12 +133,12 @@ def release_owners(project: Path, result: dict) -> dict:
 
     basis_labels = {"analyst-confirmed": "подтверждено аналитиком", "registry": "связь в реестре",
                     "associated-epic": "привязанный эпик", "analyst-required": "нужно решение аналитика"}
-    table = ["| SberTrek | Jira | Название стори / задачи | Роль | Эпик | Фича | Основание |",
-             "|---|---|---|---|---|---|---|"]
+    table = ["| SberTrek | Название стори / задачи | Роль | Эпик | Фича | Основание |",
+             "|---|---|---|---|---|---|"]
     for proposal in proposals:
         epic = proposal.get("epic") or {}
         table.append("| " + " | ".join(cell(value) for value in (
-            proposal["sbertrek_key"], proposal["jira_key"], proposal["summary"], proposal["role"],
+            proposal["sbertrek_key"], proposal["summary"], proposal["role"],
             " ".join(str(epic.get(field) or "") for field in ("key", "name")).strip(),
             ", ".join(proposal["features"]), basis_labels[proposal["basis"]])) + " |")
     return {"items": proposals, "ownership_table": "\n".join(table),
@@ -167,13 +192,15 @@ def release_preview_command(args) -> int:
                                      "same_run": True, "then": "history-review"}
         else:
             output["next_action"] = {"type": "resolve-execution-ownership", "same_run": True}
+    from tracker_safety import application_write_gate
+    output["analytics_write_gate"] = application_write_gate(project, ownership["selected_features"])
     print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0
 
 
 def supplement_result(run_id: str, project: Path, result: dict, responses: list[dict]) -> dict:
     from tracker_workflow import (load_run, response_file, digest_bytes, full_issue_records,
-                                  compact_issue, append_cards, reconcile_data, jql_keys, tql_units)
+                                  compact_issue, append_cards, reconcile_data, tql_units)
     from tracker_history import validate_call, pin_history_response
     from tracker_execution import preview_execution
 
@@ -189,7 +216,7 @@ def supplement_result(run_id: str, project: Path, result: dict, responses: list[
             raise ValueError("Supplement must read only registered affected-feature remainder keys")
         call = entry["call"]
         validate_call(call, provider)
-        if call.get("selection") != (jql_keys(keys) if provider == "jira" else tql_units(keys)):
+        if call.get("selection") != tql_units(keys):
             raise ValueError("Supplement call selection differs from the exact remainder keys")
         path, raw, payload = response_file(entry["response_file"], run_id)
         if digest_bytes(raw) != entry["sha256"]:
@@ -218,9 +245,11 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
     provider = scope["provider"]
     field = provider + "_key"
     targets = [row for row in rows if row["feature"] == feature and row["role"] == "QA"]
-    development = [row for row in rows if row["feature"] == feature and row["role"] in {"FE", "BE"}
-                   and row["kind"] == "real"]
     by_key = {issue.get(field): issue for issue in issues}
+    development = [row for row in rows if row["feature"] == feature and row["role"] in {"FE", "BE"}
+                   and row.get("suit") != "bug"
+                   and by_key.get(row.get(field), {}).get('issue_type') != 'bug'
+                   and row["kind"] == "real"]
     if any(not row.get(field) or row[field] not in by_key for row in development):
         return {"ready": False, "reason": "collect-all-feature-cards-before-partition", "path": path.relative_to(project).as_posix()}
     def is_active(row: dict) -> bool:
@@ -290,17 +319,27 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
             if group["release"] == release and remaining or included and group["release"] not in {None, release}:
                 raise ValueError("Conflicting release membership; analyst must select the sole owning release")
             if included and remaining:
-                amount = Decimal(str(group["estimate"]))
-                portion = (amount * len(included) / len(group["members"])).quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
-                if portion <= 0 or amount - portion <= 0:
-                    raise ValueError("QA allocation precision is insufficient; review the estimate")
                 suffix = hashlib.sha256((provider + ":" + release).encode()).hexdigest()[:10]
-                updated.append({**group, "members": sorted(included), "release": release, "estimate": str(portion)})
+                updated.append({**group, "members": sorted(included), "release": release})
                 updated.append({**group, "task_id": group["task_id"] + "-REST-" + suffix,
-                                "members": sorted(remaining), "release": None, "estimate": str(amount - portion)})
+                                "members": sorted(remaining), "release": None})
             else:
                 updated.append({**group, "release": release if included else group["release"]})
         groups = updated
+    # Allocate from the whole feature, never recursively from an old remainder.
+    # A changed population is reviewed above before any new allocation is offered.
+    # Assign rounding residue deterministically, independently of collection order.
+    allocation_order = sorted(groups, key=lambda group: (group.get("release") is None,
+                              str(group.get("release") or ""), tuple(sorted(group["members"]))))
+    allocated = Decimal(0)
+    for index, group in enumerate(allocation_order):
+        amount = ((total * len(group["members"]) / len(members)).quantize(
+            Decimal("0.000001"), rounding=ROUND_DOWN)
+            if index < len(allocation_order) - 1 else total - allocated)
+        if amount <= 0:
+            raise ValueError("QA allocation precision is insufficient; review the estimate")
+        group["estimate"] = format(amount.normalize(), "f")
+        allocated += amount
     target_by_id = {target["task_id"]: target for target in targets}
     registry = targets[0]["registry"]
     for group in groups:

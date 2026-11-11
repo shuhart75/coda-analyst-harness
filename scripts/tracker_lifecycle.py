@@ -148,10 +148,10 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
             first_qa_assignment = moment
         qa_return = old_role == "QA" and new_role in DEVELOPERS
         assigned_developer = role(effective_assignee) in DEVELOPERS
-        start_development = not developer_seen and new_role in DEVELOPERS and old_role != "QA"
+        start_development = new_status in codes["development_started"]
         developer_seen = developer_seen or assigned_developer or old_role in DEVELOPERS
         finish_development = handoff or (
-            new_status in codes["development_completed"] | codes["qa_started"]
+            new_status in codes["development_completed"] | codes["development_review"] | codes["qa_started"]
             and new_status not in codes["qa_completed"]
         )
         start_qa = new_role == "QA" or new_status in codes["qa_started"]
@@ -206,7 +206,7 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
         qa_completed = True
         development_closed = True
         development_bound = development_bound or observed
-    elif current_status in codes["development_completed"] | codes["qa_started"]:
+    elif current_status in codes["development_completed"] | codes["development_review"] | codes["qa_started"]:
         development_closed = True
         development_bound = development_bound or observed
     if current_status in codes["qa_started"]:
@@ -224,12 +224,14 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
         return value.isoformat() if value else None
 
     cancelled = current_status in codes["cancelled"]
-    not_started = exact and not developer_seen and current_role in {None, "AN"}
-    development_state = "completed" if development_closed else "in-progress" if development_start or developer_seen else "not-started" if not_started else "unknown"
+    not_started = exact and current_status in codes["not_started"] and development_start is None
+    development_state = ("completed" if development_closed else "in-progress"
+                         if development_start or current_status in codes["development_started"]
+                         else "not-started" if not_started else "unknown")
     before_qa = codes["not_started"] | codes["development_started"] | codes["development_completed"] | codes["development_review"]
     qa_not_started = (not_started and current_status in before_qa) or (exact and current_status in before_qa and current_role in {"AN", "BE", "FE"})
     qa_state = "completed" if qa_completed else "in-progress" if qa_active else "not-started" if qa_not_started else "unknown"
-    progress = 100 if development_closed else 0 if development_state == "not-started" else 90 if current_role in DEVELOPERS and current_status in codes["development_review"] else None
+    progress = 100 if development_closed else 0 if development_state == "not-started" else None
     if cancelled:
         development_state = qa_state = "cancelled"
         progress = None
@@ -260,6 +262,7 @@ def calculate_feature(
     feature: str, histories: tuple[TaskHistory, ...], participants: Mapping[str, str],
     rules: StatusRules, feature_task_keys: tuple[str, ...], scope_confirmed: bool,
     analyst_completion: AnalystCompletion | None = None,
+    qa_excluded_keys: tuple[str, ...] = (),
 ) -> dict:
     if not feature or type(scope_confirmed) is not bool:
         raise ValueError("A feature and explicit scope confirmation are required")
@@ -279,7 +282,7 @@ def calculate_feature(
         limitations.add("qa-scope-empty")
     limitations.update(f"qa-task-history-missing:{key}" for key in missing)
     limitations.update(f"feature-task-outside-confirmed-scope:{key}" for key in unlisted)
-    qa_task_keys = [key for key, task in tasks.items() if task["qa"]["state"] != "cancelled"]
+    qa_task_keys = [key for key, task in tasks.items() if task["qa"]["state"] != "cancelled" and key not in qa_excluded_keys]
     excluded = [key for key, task in tasks.items() if task["qa"]["state"] == "cancelled"]
     members = [tasks[key]["qa"] for key in qa_task_keys]
     complete_scope = scope_confirmed and bool(members) and not missing and not unlisted

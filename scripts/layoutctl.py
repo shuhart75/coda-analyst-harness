@@ -204,7 +204,7 @@ def save(project, expected_head, paths, message, push=False):
     """Save one reviewed, pending layout migration; never impersonate a feature session."""
     import os
     import shlex
-    from commit_message_policy import HOOK_MARKER, require_valid_commit_message
+    from commit_message_policy import HOOK_MARKER, require_valid_commit_message, working_keys
 
     project = project.resolve()
     branch = git(project, "branch", "--show-current")
@@ -228,6 +228,7 @@ def save(project, expected_head, paths, message, push=False):
     if journal.get("schema_version") != 1 or journal.get("head") != expected_head:
         raise ValueError("Migration journal does not belong to the reviewed HEAD")
     validate(project)
+    require_valid_commit_message(message, working_keys(project, paths))
     current_deliveries = layout(project)["deliveries"]
     if any(current_deliveries.get(key, {}).get("path") != item["path"] for key, item in journal.get("deliveries", {}).items()):
         raise ValueError("Migration journal paths differ from the validated delivery index")
@@ -236,7 +237,7 @@ def save(project, expected_head, paths, message, push=False):
         raise ValueError("Migration already saved; use ordinary branch push to retry publication")
     if not isinstance(paths, dict) or not paths or not {"migration-layout.json", REGISTRY}.issubset(paths):
         raise ValueError("Exact reviewed paths including journal and delivery index are required")
-    allowed = {"README.md", "LICENSE", "assets", "baseline", "context", "features", "planning", "quarters", "backlog", "releases", REGISTRY, "migration-layout.json"}
+    allowed = {"README.md", "LICENSE", "assets", "baseline", "context", "ontology", "features", "planning", "quarters", "backlog", "releases", "work-task-bindings.json", REGISTRY, "migration-layout.json"}
     forbidden = {".git", ".workflow", ".workspace-state", ".codex", ".gigacode", ".gigaide", ".idea", ".vscode", "__pycache__", "AGENTS.md", "GIGACODE.md"}
     # Historical receiver instructions are immutable handoff inputs, not local settings.
     archived_instructions = set()

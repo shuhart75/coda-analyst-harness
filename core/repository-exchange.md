@@ -65,6 +65,37 @@ history into the candidate before merging new source changes. Both intermediate
 content checks must pass. This preserves a correct merge base for later reversions
 and deletions without changing accepted main or silently dropping new source work.
 
+Старые неизменяемые пары схемы 2 без поля `diff_check_verified` также принимаются:
+проверка пробелов выполняется заново через `git diff --check` по проверенным коммитам.
+Явное значение false, неверная контрольная сумма или отсутствие остальных
+обязательных подтверждений не допускаются. Метаданные старой пары не переписываются.
+
+## Проверка сообщения «заплата применена»
+
+Выполни `python3 scripts/repository-exchange.py verify-return`. Не начинай полный
+`workspace.py sync`, bootstrap, обновление code или откладывание файлов через stash.
+Команда читает актуальные source/main и analytics/main во временное объектное
+хранилище. Локальные объекты используются только для чтения; рабочие файлы, индекс,
+ветки, refs, настройка репозиториев и незавершённый импорт остаются прежними.
+Грязная рабочая копия и активная feature-ветка не мешают этой проверке.
+
+`return_verified=true` подтверждает только текущую source/main как точный возврат
+неизменяемой пары: проверяются роли, контрольные суммы, diff, единственный родитель,
+дерево и принадлежность исходной analytics принятой истории. Равенства деревьев без
+пары недостаточно. Поздний коммит source не считается возвратом прежней пары.
+`accepted_trees_identical` отдельно показывает равенство удалённых принятых деревьев.
+Рабочие копии и code не обновлялись, поэтому `all_repositories_synchronized=false`.
+
+Если analytics/main уже продвинулась, подтверди завершённый возврат и сообщи о более
+новых принятых изменениях. Не создавай следующую заплату и не запускай новый круг
+автоматически. Полный обмен выполняется по команде «синкани репы».
+При отсутствии или повреждении доказательства команда возвращает код 1 и
+`return-not-verified`; не выдавай его за успешную проверку и не удаляй состояние импорта.
+
+Обычный запуск предпочтителен. Если клиент перевёл его в фон, используй штатное
+ожидание завершения или status с интервалом не более 30 секунд. Фиксированный сон
+на несколько минут не является проверкой. Этапы видны в `sync-progress.json`.
+
 ## Pending imports and conflicts
 
 Retry uses the saved clone, candidate and branch. A failed push retains `prepared-not-pushed`; repeat sync to check the remote outcome and send the same candidate. Existing remote import branches are discovered and reused, including after loss of local state. Multiple unfinished imports or incompatible local and remote branch histories block automatic progress. Never overwrite or force-push an open request.
@@ -175,4 +206,76 @@ candidate commits, isolated checkout, complete Git diagnostic and a read-only
 inspection command. The candidate remains local and neither documents/main nor
 the remote target branch changes on failure. Retry preserves the same import.
 
-Before pushing a source-import candidate, resolve analysis-task-request.json through core/receiver-tasks.md. receiver-tasks-required is unfinished synchronization; preserve the isolated import and resume it after binding real tasks. Do not create a second request or publish an unresolved candidate.
+## Product ontology
+
+`ontology/` is analytical content alongside `baseline/`, `context/` and `planning/`.
+Source imports, reverse patches and layout migrations preserve its reviewed files.
+Local tool settings remain forbidden inside ontology; adding the content root does
+not relax path, deletion, source import review or publication checks. Roadmap data
+lives under `planning/roadmap/`; runtime bundles remain outside tracked content.
+
+## Задачи SberTrack при импорте source
+
+До первого коммита импорта, включая связывание истории возврата, проверь связи
+схемы 2 по `core/analysis-task-traceability.md`. Они передаются вместе с source.
+Область проверки задаёт разница между base_commit импорта и будущим деревом
+слияния, а при возобновлении слияния используется подготовленный индекс.
+Читай связи задач из того же дерева с учётом явных решений принимающей стороны.
+Не используй весь диапазон от общего предка до source: уже принятые материалы,
+вернувшиеся через обратную заплату без изменения содержимого, новых связей
+не требуют. Итоговая проверка base_commit..candidate остаётся обязательной.
+Отсутствие связи возвращает `awaiting-analysis-task`, `resolve-commit-task` и
+`resolution_reason`. Выполни `core/commit-task-resolution.md`: если эпик известен,
+найди или создай задачу через MCP; если неизвестен владелец или эпик, спроси аналитика.
+Не подставляй общую задачу AN и не проси номер задачи вместо штатного поиска.
+
+Результат сохраняется в `task_decisions_file` как объект с точными `source_commit`,
+`base_commit` из sync и `files`: путь metadata относительно аналитического проекта
+сопоставляется полному JSON-содержимому. Разрешены `analysis-task.json` поставки,
+`planning/task-bindings.json`, `baseline/analysis-task.json`, `context/analysis-task.json`
+и `work-task-bindings.json`. Для нескольких владельцев сохраняй все bindings.
+Существующие связи кварталов и других владельцев не удаляй. Для общего изменения явно укажи владельца, вид работы и соответствие путей
+в `work-task-bindings.json`; один произвольный ключ не заменяет связи владельцев.
+
+Повтори sync: он продолжает ту же ветку и включает metadata в итоговый коммит.
+Обычный documents и bare source не меняются. После слияния metadata попадает в
+обратную заплату. Конфликты разрешаются только в изолированном checkout.
+Повторная отправка использует тот же коммит. Старый подготовленный коммит без
+обязательных связей блокирует публикацию без автоматического переписывания истории.
+PR связывается через задачи коммитов, заголовок остаётся смысловым. Source-import
+по-прежнему принимается только merge, не squash/rebase.
+
+## Производительность и наблюдение за синхронизацией
+
+Запускай sync один раз. Для долгого запуска используй фоновую операцию и штатное
+ожидание её завершения. Если такого ожидания нет, проверяй status-файл процесса
+с интервалом не более 30 секунд. Не используй фиксированные `sleep 180/240/300`.
+Таймаут клиента не доказывает остановку процесса: перед повторным запуском проверь
+его status. Не запускай второй sync, пока первый работает.
+
+Текущий этап и накопленное время этапов доступны в
+`.workspace-state/sync-progress.json`: обновление code/source, чтение веток,
+проверка задач, коммит с hook, проверка содержимого и пробелов, отчёт, отправка,
+проверка обратной заплаты. `source-import.json` хранит продолжение операции, а не
+живой прогресс. Не объясняй ожидание старым `awaiting-analysis-task`, если процесс
+уже выполняет другой этап. Файл прогресса после аварийного завершения может остаться
+в `running`; окончание подтверждает status процесса и результат команды.
+
+Проверка задач читает каждый файл привязок, включая отсутствующие, один раз на
+снимок. Между проверками кеш не сохраняется: изменения индекса, решений и привязок
+проверяются заново. Hook остаётся обязательным. Содержимое импорта и подтверждения
+удалений проверяются до коммита, затем итоговый коммит проходит проверки публикации.
+Подтверждения удаления по-прежнему привязаны к конкретному source blob.
+
+Отчёт не читает содержимое добавленных файлов для поиска удалённых требований.
+Изменённые и удалённые тексты читаются пакетно через Git; все пути остаются в отчёте.
+Для большого импорта ответ содержит первые 20 путей, общее количество и ссылку
+`review.full_report` с SHA-256 на полный `review.json`. Для проверки конкретного
+изменения читай этот файл выборочно; не печатай весь многотысячный отчёт в чат.
+Старые принятые ветки импорта проверяются локально по коммиту из свежего списка
+удалённых веток. Отдельный fetch нужен только для ещё не принятого коммита.
+
+Для совместимости квартальных проектов и проверки удаления реестра следуй
+`core/quarter-deliveries.md`, разделу о прежних версиях обвязки.
+
+Структурированные `analysis-task-request.json` из затронутых поставок возвращаются в `task_requests` при `awaiting-analysis-task`. Следуй `core/receiver-tasks.md`; используется тот же `resolve-commit-task`, файл решений и защищённый повтор sync. Запрос не заменяет проверенную связь схемы 2.

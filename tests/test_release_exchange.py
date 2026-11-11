@@ -55,6 +55,8 @@ class ReleaseExchangeTests(unittest.TestCase):
         self.git(self.project, "remote", "add", "origin", str(self.remote))
         self.git(self.project, "push", "origin", "HEAD:main")
         self.git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        from write_context_fixture import configure_write_context
+        configure_write_context(self, self.project, "feature/release-exchange")
         observation = {"release_id": "release-one", "membership_complete": True,
                        "membership_evidence": "Full reviewed membership",
                        "tasks": [{"id": "task-one", "closed": True, "evidence": "Confirmed closure"}]}

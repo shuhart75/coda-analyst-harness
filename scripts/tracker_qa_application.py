@@ -104,25 +104,27 @@ def check_qa_application(args) -> int:
     if review.get('status') != 'history-review-ready' or review.get('pending_history'):
         raise ValueError('Complete history review before application verification')
     updates = review.get('qa_application', [])
-    if not updates:
+    comparison_rows = review.get('comparison', {}).get('rows', [])
+    only_bugs = bool(comparison_rows) and all(row.get('suit') == 'bug' and row['role'] in {'BE', 'FE'}
+                                              for row in comparison_rows)
+    if not updates and not only_bugs:
         raise ValueError('No explicit QA confirmations in this review')
     required = {(row['feature'], row['task_id']) for row in review.get('comparison', {}).get('rows', []) if row['role'] == 'QA'}
     if required - {(update['feature'], update['task_id']) for update in updates}:
         raise ValueError('Every feature QA requires a reviewed application or keep-current decision')
     errors = []
-    for protected in (review.get('application_scope') or {}).get('protected_rows', []):
-        registry = (project / protected['registry']).resolve()
+    from tracker_registry import check_protected_rows, require_new_registry_format
+    protected_rows = (review.get('application_scope') or {}).get('protected_rows', [])
+    registries = {row['registry'] for row in protected_rows}
+    registries.update(row['registry'] for row in review.get('comparison', {}).get('rows', []) if row.get('registry'))
+    registries.update(update['registry'] for update in updates)
+    for relative in sorted(registries):
+        registry = (project / relative).resolve()
         if not registry.is_relative_to(project):
-            raise ValueError('Protected registry is outside project')
-        tables, _ = read_registry(registry)
-        matches = [row for table in tables for row in table
-                   if (row.get('Task ID') or row.get('Jira') or '') == protected['task_id']]
-        allowed = set(protected.get('allowed_fields', []))
-        if len(matches) != 1 or {key: value for key, value in matches[0].items() if key not in allowed} != {
-            key: value for key, value in protected['registry_fields'].items() if key not in allowed
-        }:
-            errors.append({'task_id': protected['task_id'], 'registry': protected['registry'],
-                           'reason': 'Task outside release changed or was removed'})
+            raise ValueError('Registry is outside project')
+        if registry.is_file():
+            require_new_registry_format(project, registry)
+    errors.extend(check_protected_rows(project, protected_rows))
     for proposal in review.get('feature_qa_proposals', []):
         partition = proposal.get('partition')
         if partition and partition.get('ready'):
@@ -137,12 +139,12 @@ def check_qa_application(args) -> int:
             raise ValueError('Registry is outside project')
         tables, _ = read_registry(registry)
         matches = [row for table in tables for row in table if row.get('Role', '').upper() == 'QA'
-                   and (row.get('Task ID') or row.get('Jira') or '') == update['task_id']]
+                   and (row.get('Task ID') or row.get('SberTrek') or '') == update['task_id']]
         if len(matches) != 1:
             errors.append({'task_id': update['task_id'], 'reason': 'QA row missing or ambiguous'})
             continue
         if update.get('local_registration_required') and any(
-            matches[0].get(field, '').strip() not in {'', '-', '—'} for field in ('Jira', 'SberTrek')
+            matches[0].get(field, '').strip() not in {'', '-', '—'} for field in ('SberTrek',)
         ):
             errors.append({'task_id': update['task_id'], 'reason': 'New QA group must not copy tracker identities'})
         for field, value in update['expected_registry_fields'].items():

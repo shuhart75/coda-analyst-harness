@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from commit_message_policy import require_valid_commit_message
+from commit_message_policy import require_valid_commit_message, delivery_analysis_task, delivery_message, working_keys
 
 
 BRANCH = "main"
@@ -470,6 +470,8 @@ def require_active_work(root: Path, analytics: Path, state: dict) -> dict:
     work = state.get("active_work")
     if not isinstance(work, dict):
         raise ValueError("Активная работа над функциональностью не зарегистрирована")
+    if work.get("status") == "creation-pending":
+        raise ValueError("Сначала повтори create с теми же параметрами")
     if work.get("status") == "recovery-pending":
         raise ValueError("Сначала заверши recover-main с теми же параметрами")
     if work.get("status") == "worktree-recovery-pending":
@@ -505,7 +507,11 @@ def save_command(args: argparse.Namespace) -> int:
             "requested_paths": sorted(requested),
             "message": "Перечисли все и только изменённые пути относительно PROJECT_ROOT, без префикса documents/. Для актуализации используй save-preview; производный Гант сохраняется целиком.",
         }, ensure_ascii=False))
-    require_valid_commit_message(args.message)
+    deliveries = work.get("execution_scope", {}).get("features") or [work["feature"]]
+    required_keys = working_keys(analytics, requested)
+    if not required_keys:
+        required_keys = {delivery_analysis_task(analytics, key)["key"] for key in deliveries}
+    require_valid_commit_message(args.message, required_keys)
     from execution_collaboration import check_save, execution_mode
     if execution_mode(root) or work.get('execution_scope'):
         check_save(root, analytics, work, actual, args.review_file, sys.modules[__name__])
@@ -573,10 +579,17 @@ def submit_command(args: argparse.Namespace) -> int:
     state = load_state(root)
     work = require_active_work(root, analytics, state)
     require_clean(analytics)
+    deliveries = work.get("execution_scope", {}).get("features") or [work["feature"]]
     remote = fetch_main(analytics)
     local = head(analytics)
     if not is_ancestor(analytics, remote, local):
         raise ValueError("Рабочая ветка отстаёт от origin/main; сначала обнови рабочую ветку")
+    changed = git(analytics, "diff", "--name-only", "--no-renames", "-z", remote, local)
+    if changed.returncode:
+        raise ValueError("Не удалось проверить задачи для PR")
+    keys = working_keys(analytics, filter(None, changed.stdout.split("\0")))
+    review_title = "Обновить аналитические материалы"
+
     pushed = git(analytics, "push", "--set-upstream", "origin", f"HEAD:{work['branch']}")
     if pushed.returncode != 0:
         raise ValueError(f"Не удалось отправить рабочую ветку: {pushed.stderr.strip()}")
@@ -597,6 +610,7 @@ def submit_command(args: argparse.Namespace) -> int:
         ),
         "merge_request_created": False,
         "merge_request_create_url": create_url,
+        "merge_request_title": review_title,
         "next_action": (
             "Открыть форму создания запроса на слияние, создать запрос и принять его; "
             "после этого сообщить LLM: запрос на слияние принят."
@@ -613,6 +627,8 @@ def finish_command(args: argparse.Namespace) -> int:
     work = state.get("active_work")
     if not isinstance(work, dict):
         raise ValueError("Активная работа над функциональностью не зарегистрирована")
+    if work.get("status") == "creation-pending":
+        raise ValueError("Сначала повтори create с теми же параметрами")
     if work.get("status") == "recovery-pending":
         raise ValueError("Сначала заверши recover-main с теми же параметрами")
     if work.get("status") == "worktree-recovery-pending":
@@ -717,6 +733,8 @@ def status_command(args: argparse.Namespace) -> int:
             relation = branch_relation(analytics, head(analytics), remote.stdout.strip())
             if relation in {"ahead", "diverged"}:
                 next_action = "проверить локальные коммиты и подтвердить функциональность для recover-main"
+    if configured and (state.get("active_work") or {}).get("status") == "creation-pending":
+        next_action = "повторить create с теми же параметрами"
     if configured and (state.get("active_work") or {}).get("status") == "recovery-pending":
         next_action = "повторить recover-main с теми же параметрами"
     if configured and (state.get("active_work") or {}).get("status") == "worktree-recovery-pending":
@@ -755,6 +773,15 @@ def parser() -> argparse.ArgumentParser:
     worktree.add_argument("--expected-file", nargs=2, action="append", required=True, metavar=("PATH", "SHA256"))
     worktree.add_argument("--analyst-confirmed", action="store_true", required=True)
     worktree.set_defaults(handler=recover_worktree_command)
+    from collaboration_create import create
+    new = commands.add_parser("create", help="Создать новую фичу и первую квартальную поставку")
+    new.add_argument("--feature", required=True)
+    new.add_argument("--delivery", required=True)
+    new.add_argument("--key", required=True)
+    new.add_argument("--quarter", required=True)
+    new.add_argument("--title", required=True)
+    new.add_argument("--analyst-confirmed", action="store_true", required=True)
+    new.set_defaults(handler=lambda args: create(args, sys.modules[__name__]))
     start = commands.add_parser("start")
     start.add_argument("--feature", "--delivery", dest='feature', required=True)
     start.set_defaults(handler=start_command)
@@ -765,6 +792,8 @@ def parser() -> argparse.ArgumentParser:
     scope.add_argument('--run-id', action='append', default=[])
     scope.add_argument('--include-planning', action='store_true',
                        help='Explicitly include scoped draft planning artifacts in the same execution save')
+    scope.add_argument('--include-creation', action='store_true',
+                       help='Include only newly confirmed delivery and feature scaffolding')
     scope.add_argument('--reason', required=True)
     scope.add_argument('--analyst-confirmed', action='store_true', required=True)
     scope.set_defaults(handler=lambda args: set_scope(args, sys.modules[__name__]))

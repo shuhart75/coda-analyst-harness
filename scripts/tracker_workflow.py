@@ -15,68 +15,46 @@ from typing import Any
 
 
 PROTOCOL = "direct-tracker-v1"
-SCHEMA_VERSION = 1
-CONFIG_SCHEMA_VERSION = 4
+SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION = 5
 STOP_EXIT = 3
 MAX_RESULTS = 50
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
-PROVIDERS = ("sbertrek", "jira")
+PROVIDERS = ("sbertrek",)
 SCOPE_KINDS = ("epic", "tasks", "combined", "release")
 RESPONSE_SOURCES = ("mcp-file", "inline-json-capture")
 ROLES = ("AN", "BE", "FE", "QA")
-RESOLUTION_CHOICES = ("sbertrek", "jira", "custom")
-ACTIONABLE_CONFLICT_FIELDS = {"assignee", "estimate"}
 ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9_]*-[1-9][0-9]*$")
 RUN_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{8}$")
 MISSING_SENTINELS = {"not-returned", "not returned", "unknown", "none", "null", "-", "—"}
 UNASSIGNED_SENTINELS = {"unassigned", "not assigned", "не назначен", "не назначено"}
 ISSUE_COLLECTION_KEYS = ("issues", "items", "results", "values", "units", "data")
-ISSUE_KEY_ALIASES = ("key", "issueKey", "issue_key", "unitKey", "unit_key")
+ISSUE_KEY_ALIASES = ("key", "unitKey", "unit_key")
 SUMMARY_ALIASES = ("summary", "name", "title")
 TYPE_ALIASES = ("issue_type", "issueType", "issuetype", "type", "suit")
 STATUS_ALIASES = ("status", "state")
 CREATED_ALIASES = ("created_at", "createdAt", "created", "creationDate", "creation_date")
 UPDATED_ALIASES = ("updated_at", "updatedAt", "updated", "updateDate", "update_date")
 ASSIGNEE_ALIASES = ("assignee", "assigned_to", "assignedTo")
-ESTIMATE_ALIASES = ("estimate", "story_points", "storyPoints", "story_point", "customfield_10016")
+ESTIMATE_ALIASES = ("estimate", "story_points", "storyPoints", "story_point")
 EPIC_ALIASES = ("epic", "epic_key", "epicKey", "parent")
-RELEASE_ALIASES = ("releases", "release", "fixVersions", "fix_versions", "fixversion")
+RELEASE_ALIASES = ("releases", "release", "fix_versions", "fixversion")
 SBER_ATTRIBUTE_CODES = {
     "assignee": ("assigned_to", "assignee"),
     "estimate": ("story_points", "story_point", "estimate"),
-    "jira_key": ("issue_key",),
     "epic": ("epic", "epic_key", "parent"),
     "releases": ("release", "releases", "fix_versions", "fixversion"),
 }
-JIRA_ESTIMATE_FIELDS = {
-    "customfield_15014": {"name": "Оценка разработки (Back-End)", "role": "BE", "unit": "person-days"},
-    "customfield_15015": {"name": "Оценка разработки (Front-End)", "role": "FE", "unit": "person-days"},
-    "customfield_15016": {"name": "Оценка дизайна", "role": None, "unit": "person-days"},
-    "customfield_15053": {"name": "Нагрузочное тестирование (наиболее вероятная)", "role": None, "unit": "person-days"},
-    "customfield_15062": {"name": "Оценка анализа (чел.д)", "role": "AN", "unit": "person-days"},
-    "customfield_15063": {"name": "Оценка разработки", "role": None, "unit": "person-days", "general": True},
-    "customfield_15064": {"name": "Оценка тестирования", "role": "QA", "unit": "person-days"},
-    "customfield_15065": {"name": "Оценка отчетности", "role": None, "unit": "person-days"},
-    "customfield_15066": {"name": "Оценка проектирования", "role": None, "unit": "person-days"},
-    "customfield_20408": {"name": "Оценка (в спринтах)", "role": None, "unit": "sprints"},
-    "customfield_14937": {"name": "Оценка", "role": None, "unit": "person-days", "general": True},
-    "customfield_12307": {"name": "Разработка, ч/д", "role": None, "unit": "person-days", "general": True},
-}
-JIRA_GENERAL_ESTIMATE_PRIORITY = ("customfield_14937", "customfield_12307", "customfield_15063")
-JIRA_FIELDS = (
-    "key", "summary", "status", "issuetype", "priority", "assignee", "created", "updated",
-    "fixVersions", *JIRA_ESTIMATE_FIELDS.keys(),
-)
-SBER_FIELDS = ("key", "summary", "suit", "status", "priority", "attributes", "epic", "created_at", "updated_at")
-MERGED_FIELDS = ("summary", "issue_type", "status", "assignee", "estimate", "epic", "releases", "created_at", "updated_at")
+SBER_ROLE_FIELDS = {"estimation_for_analyze": "AN", "estimation_for_dev_front": "FE",
+                    "estimation_for_dev_back": "BE", "estimation_qa": "QA"}
+SOURCE_FIELDS = ("summary", "issue_type", "status", "assignee", "estimate", "epic", "releases", "created_at", "updated_at")
 DEFAULT_CONFIG = {
     "schema_version": CONFIG_SCHEMA_VERSION,
     "primary_provider": "sbertrek",
     "setup_complete": False,
-    "jira_enabled": None,
-    "projects": {"sbertrek": [], "jira": []},
+    "projects": {"sbertrek": []},
     "development_issue_types": [],
-    "participants": {"sbertrek": {}, "jira": {}},
+    "participants": {"sbertrek": {}},
     "status_rules": {provider: {"completed": None, "excluded": None} for provider in PROVIDERS},
 }
 
@@ -153,8 +131,6 @@ def validate_config(config: Any) -> dict:
         raise ValueError("Неподдерживаемая схема tracker-config.json")
     if config.get("primary_provider") != "sbertrek":
         raise ValueError("Основным трекером должен оставаться sbertrek")
-    if config.get("jira_enabled") not in {True, False, None}:
-        raise ValueError("jira_enabled должен быть true, false или null")
     if not isinstance(config.get("setup_complete"), bool):
         raise ValueError("setup_complete должен быть логическим значением")
     for provider in PROVIDERS:
@@ -174,32 +150,29 @@ def validate_config(config: Any) -> dict:
 
 
 def migrate_config(config: Any) -> tuple[dict, bool]:
-    if not isinstance(config, dict):
+    if not isinstance(config, dict) or config.get("schema_version") not in {1, 2, 3, 4, CONFIG_SCHEMA_VERSION}:
         return config, False
     if config.get("schema_version") == CONFIG_SCHEMA_VERSION:
-        migrated = dict(config)
-        changed = "issue_pairs" in migrated
-        migrated.pop("issue_pairs", None)
-        return migrated, changed
-    if config.get("schema_version") not in {1, 2, 3}:
         return config, False
-    projects = config.get("projects") if isinstance(config.get("projects"), dict) else {"sbertrek": [], "jira": []}
-    migrated = {
-        **DEFAULT_CONFIG,
-        "jira_enabled": config.get("jira_enabled") if config.get("jira_enabled") in {True, False} else bool(projects.get("jira")) or None,
-        "projects": {provider: list(projects.get(provider, [])) for provider in PROVIDERS},
-        "development_issue_types": list(config.get("development_issue_types", [])),
-        "participants": config.get("participants", {"sbertrek": {}, "jira": {}}) if config.get("schema_version") == 3 else {"sbertrek": {}, "jira": {}},
-        "status_rules": config.get("status_rules", DEFAULT_CONFIG["status_rules"]) if config.get("schema_version") == 3 else DEFAULT_CONFIG["status_rules"],
-        "setup_complete": bool(config.get("setup_complete")) if config.get("schema_version") == 3 else False,
-    }
+    # Keep the selected provider's settings; obsolete provider data stays in the backup.
+    migrated = copy.deepcopy(DEFAULT_CONFIG)
+    for field in ("projects", "participants", "status_rules"):
+        if "sbertrek" in config.get(field, {}):
+            migrated[field]["sbertrek"] = copy.deepcopy(config[field]["sbertrek"])
+    for field in ("development_issue_types", "setup_complete"):
+        if field in config:
+            migrated[field] = copy.deepcopy(config[field])
     return migrated, True
 
 
 def load_config() -> dict:
-    config, changed = migrate_config(load_json(config_path()))
+    original = load_json(config_path())
+    config, changed = migrate_config(original)
     config = validate_config(config)
     if changed:
+        backup = config_path().with_name("tracker-config.pre-sber-only." + digest_object(original)[:16] + ".json")
+        if not backup.exists():
+            save_json(backup, original)
         save_json(config_path(), config)
     return config
 
@@ -208,15 +181,9 @@ def config_gaps(config: dict, include_confirmation: bool = True) -> list[str]:
     gaps: list[str] = []
     if not config["projects"]["sbertrek"]:
         gaps.append("projects.sbertrek")
-    if config["jira_enabled"] is None:
-        gaps.append("jira_enabled")
-    elif config["jira_enabled"] and not config["projects"]["jira"]:
-        gaps.append("projects.jira")
     if not config["development_issue_types"]:
         gaps.append("development_issue_types")
     for provider in PROVIDERS:
-        if provider == "jira" and not config["jira_enabled"]:
-            continue
         for kind in ("completed", "excluded"):
             if config["status_rules"][provider][kind] is None:
                 gaps.append(f"status_rules.{provider}.{kind}")
@@ -237,14 +204,10 @@ def stop_payload(question: str, **extra: Any) -> dict:
 def config_status_payload(config: dict) -> dict:
     questions = {
         "projects.sbertrek": "Какие проекты SberTrek входят в область чтения?",
-        "jira_enabled": "Jira доступна для дополнительного чтения на этой рабочей области?",
-        "projects.jira": "Какие проекты Jira соответствуют выбранным проектам SberTrek?",
         "development_issue_types": "Какие типы объектов трекера являются единицами разработки?",
         "status_rules.sbertrek.completed": "Какие статусы SberTrek однозначно означают завершение разработки?",
         "status_rules.sbertrek.excluded": "Какие статусы SberTrek исключают задачу из выполнения?",
-        "status_rules.jira.completed": "Какие статусы Jira однозначно означают завершение разработки?",
-        "status_rules.jira.excluded": "Какие статусы Jira исключают задачу из выполнения?",
-        "setup_complete": "Подтверждаете сохранённую базовую настройку трекеров?",
+        "setup_complete": "Подтверждаете сохранённую базовую настройку SberTrek?",
     }
     gaps = config_gaps(config)
     if gaps:
@@ -264,6 +227,9 @@ def active_run_id() -> str | None:
         path.unlink()
         return None
     if (run_root(run_id) / "completion-status.json").is_file():
+        run = load_run(run_id)
+        if run['scope'].get('include_history') and not result_status_payload(run_id)['workflow_complete']:
+            return run_id
         path.unlink()
         return None
     return run_id
@@ -278,6 +244,11 @@ def load_run(run_id: str) -> dict:
     payload = load_json(run_path(run_id))
     if not isinstance(payload, dict) or payload.get("protocol") != PROTOCOL or payload.get("run_id") != run_id:
         raise ValueError("Tracker-run создан другим протоколом или повреждён")
+    if payload.get("scope", {}).get("provider") != "sbertrek" or any(
+        step.get("provider") != "sbertrek" or "counterpart" in step.get("stage", "") or "discovery" in step.get("stage", "")
+        for step in payload.get("steps", [])
+    ) or payload.get("scope", {}).get("tracker_mode") == "compare":
+        raise ValueError("Исторический многотрекерный run сохранён; продолжение не поддерживается. Требуется явное решение об архивировании текущего сеанса.")
     return payload
 
 
@@ -287,18 +258,6 @@ def tql_epic(key: str) -> str:
 
 def tql_units(keys: list[str]) -> str:
     return " or ".join(f'unit = "{key}"' for key in keys)
-
-
-def tql_jira_keys(keys: list[str]) -> str:
-    return " or ".join(f'issue_key = "{key}"' for key in keys)
-
-
-def jql_keys(keys: list[str]) -> str:
-    return "key IN (" + ", ".join(f'"{key}"' for key in keys) + ")"
-
-
-def jql_epic(key: str) -> str:
-    return f'"Epic Link" = "{key}"'
 
 
 def make_step(provider: str, stage: str, query: str, *, requested_keys: list[str] | None = None, epic_key: str | None = None) -> dict:
@@ -313,15 +272,15 @@ def primary_step(scope: dict) -> dict:
     provider, kind, ids = scope["provider"], scope["kind"], scope["ids"]
     if kind == "release":
         value = json.dumps(ids[0], ensure_ascii=False)
-        query = f"fixVersion = {value}" if provider == "jira" else f"release-members:{value}"
+        query = f"release-members:{value}"
         return make_step(provider, f"{provider}-source-release", query)
     if kind == "combined" or (kind == "epic" and len(ids) > 1):
         epics = scope.get("epic_ids", []) if kind == "combined" else ids
-        clauses = [(jql_epic(key) if provider == "jira" else tql_epic(key)) for key in epics]
+        clauses = [tql_epic(key) for key in epics]
         if kind == "combined":
-            clauses.append(jql_keys(ids) if provider == "jira" else tql_units(ids))
+            clauses.append(tql_units(ids))
         return make_step(provider, f"{provider}-source-{kind}", " or ".join(f"({clause})" for clause in clauses))
-    query = (jql_epic(ids[0]) if kind == "epic" else jql_keys(ids)) if provider == "jira" else (tql_epic(ids[0]) if kind == "epic" else tql_units(ids))
+    query = tql_epic(ids[0]) if kind == "epic" else tql_units(ids)
     return make_step(provider, f"{provider}-source-{kind}", query, requested_keys=ids if kind == "tasks" else [], epic_key=ids[0] if kind == "epic" else None)
 
 
@@ -338,10 +297,6 @@ def card_keys(run: dict, provider: str) -> set[str]:
     return {item["key"] for item in run["cards"][provider]}
 
 
-def sber_jira_keys(run: dict) -> list[str]:
-    return sorted({item["jira_key"] for item in run["cards"]["sbertrek"] if item.get("jira_key_state") == "value"})
-
-
 def missing_source_keys(run: dict) -> list[str]:
     scope = run["scope"]
     if scope.get("tracker_mode") != "single" or scope["kind"] not in {"tasks", "combined"}:
@@ -350,71 +305,16 @@ def missing_source_keys(run: dict) -> list[str]:
 
 
 def advance(run: dict) -> None:
-    if pending_step(run) or run["status"] != "tracker-read-collecting":
-        return
-    scope = run["scope"]
-    if scope.get("tracker_mode") == "single":
+    if not pending_step(run) and run["status"] == "tracker-read-collecting":
         run["status"] = "tracker-read-ready"
-        return
-    stages = {step["stage"] for step in run["steps"] if step["state"] == "complete"}
-    if scope["provider"] == "sbertrek":
-        if "jira-counterparts" not in stages:
-            keys = sber_jira_keys(run)
-            if keys and run["config"]["jira_enabled"]:
-                add_step(run, make_step("jira", "jira-counterparts", jql_keys(keys), requested_keys=keys))
-                return
-        run["status"] = "tracker-read-ready"
-        return
-    if scope["kind"] == "tasks":
-        if "sbertrek-counterparts" not in stages:
-            keys = sorted(card_keys(run, "jira"))
-            if keys:
-                add_step(run, make_step("sbertrek", "sbertrek-counterparts", tql_jira_keys(keys), requested_keys=keys))
-                return
-        run["status"] = "tracker-read-ready"
-        return
-    if "sbertrek-epic-discovery" not in stages:
-        epic = scope["ids"][0]
-        add_step(run, make_step("sbertrek", "sbertrek-epic-discovery", tql_jira_keys([epic]), requested_keys=[epic]))
-        return
-    discovery = next(step for step in run["steps"] if step["stage"] == "sbertrek-epic-discovery")
-    counterpart = discovery.get("counterpart_epic")
-    if counterpart and "sbertrek-epic-members" not in stages:
-        add_step(run, make_step("sbertrek", "sbertrek-epic-members", tql_epic(counterpart), epic_key=counterpart))
-        return
-    if counterpart and "sbertrek-epic-members" in stages and "jira-extra-counterparts" not in stages:
-        missing = sorted(set(sber_jira_keys(run)) - card_keys(run, "jira"))
-        if missing:
-            add_step(run, make_step("jira", "jira-extra-counterparts", jql_keys(missing), requested_keys=missing))
-            return
-    run["status"] = "tracker-read-ready"
 
 
 def next_action(run: dict) -> dict:
+    if run["status"] == "tracker-read-abandoned":
+        return {"type": "stop", "command": None}
     step = pending_step(run)
     ctl = str(Path(__file__).with_name("trackerctl.py"))
     if not step:
-        if run["status"] == "tracker-read-needs-resolution":
-            conflict = first_unresolved_conflict(reconcile_data(run))
-            if conflict is None:
-                return {"type": "reconcile", "command": [sys.executable, ctl, "reconcile", "--run-id", run["run_id"]]}
-            task_key = conflict["sbertrek_key"]
-            base = [sys.executable, ctl, "resolve-conflict", "--run-id", run["run_id"], "--task-key", task_key]
-            return {
-                "type": "resolve-conflict", "task": conflict,
-                "next_question": conflict_question(conflict),
-                "custom_file_contract": {
-                    "format": "json-object", "required_fields": [item["field"] for item in conflict["conflicts"]],
-                    "allowed_field_values": ["sbertrek", "jira", "explicit-normalized-value"],
-                },
-                "commands": {
-                    "sbertrek": [*base, "--choice", "sbertrek"],
-                    "sbertrek_for_following": [*base, "--choice", "sbertrek", "--apply-to-following"],
-                    "jira": [*base, "--choice", "jira"],
-                    "jira_for_following": [*base, "--choice", "jira", "--apply-to-following"],
-                    "custom": [*base, "--choice", "custom", "--custom-file", "<resolution-json-path>"],
-                },
-            }
         if run["status"] == "tracker-read-ready":
             missing = missing_source_keys(run)
             if missing:
@@ -426,18 +326,20 @@ def next_action(run: dict) -> dict:
         if run["status"] == "tracker-read-reconciled":
             return {"type": "result-status", "command": [sys.executable, ctl, "result-status", "--run-id", run["run_id"]]}
         return {"type": "stop", "command": None}
-    if step["provider"] == "jira":
-        tool, arguments = "jira_search", {"jql": step["query"], "fields": ",".join(JIRA_FIELDS), "limit": MAX_RESULTS}
-    else:
-        tool, arguments = "issue.exportJson", {"query": step["query"], "fields": list(SBER_FIELDS), "max_results": MAX_RESULTS}
+    tool, arguments = "issue.exportJson", {"query": step["query"], "attributes": ["assigned_to", "story_points", "estimation_for_dev", *SBER_ROLE_FIELDS], "max_results": MAX_RESULTS}
     if run.get("collection_mode") == "adaptive":
         return {
             "type": "collect-tracker-data", "provider": step["provider"],
             "step_id": step["step_id"], "stage": step["stage"],
             "selection": {"query_semantics": step["query"], "requested_keys": step["requested_keys"], "epic_key": step["epic_key"]},
             "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
+            "export_hint": {"tool": "issue.exportJson", "projection_argument": "attributes",
+                            "attributes": ["assigned_to", "story_points", "estimation_for_dev", *SBER_ROLE_FIELDS],
+                            "verify_against_current_capabilities": True,
+                            "note": "В проверенной установке fields возвращал только базовые поля; attributes возвращает оценки."},
             "requirements": ["read-only", "exact-scope", "all-statuses", "full-response", "report-pagination",
-                             "request-all-role-estimates", "missing-field-is-not-zero", "preserve-raw-response",
+                             "request-all-role-estimates", "request-attributes-or-equivalent-estimate-fields",
+                             "verify-returned-projection", "missing-field-is-not-zero", "preserve-raw-response",
                              "task-role-from-prefix-not-assignee", "skip-outside-supported-roles",
                              "history-before-status-or-date-application"],
             **({"release_membership": {"accepted_evidence": ["card-fields", "selected-query", "links"],
@@ -451,27 +353,24 @@ def next_action(run: dict) -> dict:
         "type": "mcp-query", "provider": step["provider"], "stage": step["stage"],
         "step_id": step["step_id"], "tool": tool, "arguments": arguments,
         "ingest_command": [sys.executable, ctl, "ingest", "--run-id", run["run_id"], "--step-id", step["step_id"], "--response-file", "<full-json-path>", "--response-source", "<mcp-file|inline-json-capture>"],
-        "error_command": [sys.executable, ctl, "ingest-error", "--run-id", run["run_id"], "--step-id", step["step_id"], "--error-file", "<full-error-path>"] if step["stage"] in {"jira-counterparts", "jira-extra-counterparts"} else None,
     }
 
 
 def status_payload(run: dict) -> dict:
+    if run["status"] == "tracker-read-reconciled":
+        payload = result_status_payload(run["run_id"])
+        payload.update(must_stop=False, allowed_next_action=(payload["next_action"] or {"type": "report"})["type"])
+        return payload
     action = next_action(run)
     payload = {
         "protocol": PROTOCOL, "run_id": run["run_id"], "status": run["status"], "scope": run['scope'],
-        "workflow_complete": run["status"] == "tracker-read-reconciled",
+        "workflow_complete": False, "collection_complete": False,
         "final_response_allowed": False,
-        "must_stop": action["type"] == "resolve-conflict",
+        "must_stop": False,
         "allowed_next_action": action["type"], "next_action": action,
         "limitations": sorted(set(run["limitations"])),
         "paths": {"scope": str(run_root(run["run_id"]) / "scope.json"), "run_status": str(run_root(run["run_id"]) / "run-status.json"), "providers": str(run_root(run["run_id"]) / "providers")},
     }
-    if action["type"] == "resolve-conflict":
-        payload["next_question"] = action["next_question"]
-        payload["response_contract"] = {
-            "type": "ask-one", "text": action["next_question"],
-            "additional_commentary_allowed": False,
-        }
     return payload
 
 
@@ -569,39 +468,6 @@ def full_issue_records(payload: Any) -> tuple[list[dict], str]:
     if len(keys) != len(set(keys)):
         raise ValueError("Полный JSON-ответ MCP содержит повторяющиеся ключи задач")
     return records, path
-
-
-def jira_metadata(payload: Any) -> dict | None:
-    found: set[tuple[int, int, int]] = set()
-
-    def walk(value: Any, depth: int = 0) -> None:
-        if depth > 20:
-            return
-        if isinstance(value, str):
-            decoded = decoded_json_string(value)
-            if decoded is not None:
-                walk(decoded, depth + 1)
-            return
-        if isinstance(value, list):
-            for item in value:
-                walk(item, depth + 1)
-            return
-        if not isinstance(value, dict):
-            return
-        folded = {str(key).casefold(): item for key, item in value.items()}
-        values = (folded.get("total"), folded.get("start_at", folded.get("startat")), folded.get("max_results", folded.get("maxresults")))
-        if all(isinstance(item, int) and not isinstance(item, bool) for item in values):
-            found.add(values)
-        for item in value.values():
-            walk(item, depth + 1)
-
-    walk(payload)
-    if len(found) > 1:
-        raise ValueError("Jira JSON-ответ содержит неоднозначные metadata пагинации")
-    if not found:
-        return None
-    total, start_at, max_results = next(iter(found))
-    return {"total": total, "start_at": start_at, "max_results": max_results}
 
 
 def record_fields(record: dict) -> dict:
@@ -738,6 +604,8 @@ def role_from_summary(summary: str) -> str | None:
 
 
 def sber_estimate_definition(code: str, name: str) -> dict | None:
+    if code.casefold() in SBER_ROLE_FIELDS:
+        return {"name": name, "role": SBER_ROLE_FIELDS[code.casefold()], "unit": "person-days"}
     combined = " ".join(re.sub(r"[^0-9a-zа-яё]+", " ", f"{code} {name}".casefold()).split())
     if code.casefold() in {item.casefold() for item in SBER_ATTRIBUTE_CODES["estimate"]}:
         return {"name": name, "role": None, "unit": "story-points", "general": True}
@@ -760,19 +628,21 @@ def source_estimates(record: dict, provider: str, summary: str) -> tuple[dict | 
     role_states = {role: "not-returned" for role in ROLES}
     role_values: dict[str, dict] = {}
     general_candidates: list[dict] = []
-    if provider == "jira":
-        definitions = [
-            (field_id, definition, alias_value(fields, (field_id,))[0], alias_value(fields, (field_id,))[1])
-            for field_id, definition in JIRA_ESTIMATE_FIELDS.items()
-        ]
-    else:
-        records, present = attribute_records(record)
-        role_states = {role: "absent" if present else "not-returned" for role in ROLES}
-        definitions = []
-        for attribute in records:
-            definition = sber_estimate_definition(attribute["code"], attribute["name"])
+    records, present = attribute_records(record)
+    role_states = {role: "absent" if present else "not-returned" for role in ROLES}
+    definitions = []
+    for attribute in records:
+        definition = sber_estimate_definition(attribute["code"], attribute["name"])
+        if definition:
+            definitions.append((attribute["code"], definition, True, attribute["value"]))
+    # Some exports flatten custom attributes into the card or its fields object.
+    # Keep attribute values authoritative when the same code occurs twice.
+    attribute_codes = {item[0].casefold() for item in definitions}
+    for code, value in fields.items():
+        if code.casefold() in SBER_ROLE_FIELDS and code.casefold() not in attribute_codes:
+            definition = sber_estimate_definition(code, code)
             if definition:
-                definitions.append((attribute["code"], definition, True, attribute["value"]))
+                definitions.append((code, definition, True, value))
     for field_id, definition, found, raw in definitions:
         role = definition.get("role")
         if role and found:
@@ -791,15 +661,12 @@ def source_estimates(record: dict, provider: str, summary: str) -> tuple[dict | 
     general = normalized_estimate(raw_general) if legacy_state == "value" else None
     general_state = "value" if general else "not-returned"
     if general is None and general_candidates:
-        if provider == "jira":
-            priority = {field: index for index, field in enumerate(JIRA_GENERAL_ESTIMATE_PRIORITY)}
-            general_candidates.sort(key=lambda item: priority.get(item["field_id"], len(priority)))
         candidate = general_candidates[0]
         general = {"value": candidate["value"], "unit": candidate["unit"]}
         general_state = "value"
     elif general is None:
-        present = any(alias_value(fields, (field,))[0] for field, definition in JIRA_ESTIMATE_FIELDS.items() if definition.get("general")) if provider == "jira" else attribute_records(record)[1]
-        general_state = "absent" if present else "not-returned"
+        present = attribute_records(record)[1]
+        general_state = "absent" if present or alias_value(fields, ESTIMATE_ALIASES)[0] else "not-returned"
     if not role_values and general is not None:
         role = role_from_summary(summary)
         if role in {"AN", "BE", "FE"}:
@@ -853,6 +720,8 @@ def optional_text(record: dict, aliases: tuple[str, ...]) -> tuple[str | None, s
 
 
 def compact_issue(record: dict, provider: str, *, forced_epic: str | None = None) -> dict:
+    if provider != "sbertrek":
+        raise ValueError("Поддерживается только sbertrek")
     key = record_issue_key(record)
     if not key:
         raise ValueError("JSON-объект карточки не содержит ключ задачи")
@@ -871,16 +740,10 @@ def compact_issue(record: dict, provider: str, *, forced_epic: str | None = None
         epic, epic_state = {"key": forced_epic, "name": forced_epic}, "value"
     releases_raw, releases_state = optional_value(record, RELEASE_ALIASES, attributes, SBER_ATTRIBUTE_CODES["releases"])
     releases = normalized_releases(releases_raw) if releases_state == "value" else []
-    if provider == "sbertrek":
-        jira_raw, jira_state = optional_value(record, ("issue_key",), attributes, SBER_ATTRIBUTE_CODES["jira_key"])
-        jira_text = object_text(jira_raw, ("key", "code", "value", "name")) if jira_state == "value" else None
-        jira_key = normalize_key(jira_text, "Объект Jira") if jira_text else None
-    else:
-        jira_key, jira_state = None, "absent"
     created_at, created_state = optional_text(record, CREATED_ALIASES)
     updated_at, updated_state = optional_text(record, UPDATED_ALIASES)
     return {
-        "key": key, "jira_key": jira_key, "jira_key_state": jira_state,
+        "key": key,
         "summary": summary, "issue_type": required_text(record, TYPE_ALIASES, "issue_type", key),
         "status": required_text(record, STATUS_ALIASES, "status", key),
         "assignee": assignee, "estimate": estimate, "role_estimates": role_values,
@@ -892,7 +755,7 @@ def compact_issue(record: dict, provider: str, *, forced_epic: str | None = None
         },
         "created_at": created_at,
         "updated_at": updated_at,
-        "attributes_returned": attributes_present if provider == "sbertrek" else None,
+        "attributes_returned": attributes_present,
     }
 
 
@@ -932,18 +795,12 @@ def fail_run(run: dict, reason: str) -> None:
 
 
 def validate_records_for_step(step: dict, cards: list[dict]) -> None:
-    if step["stage"].endswith("source-tasks") or step["stage"].startswith(("jira-missing-", "sbertrek-missing-")):
+    if step["provider"] != "sbertrek":
+        raise ValueError("Поддерживается только sbertrek")
+    if step["stage"].endswith("source-tasks") or step["stage"].startswith("sbertrek-missing-"):
         unexpected = sorted({item["key"] for item in cards} - set(step["requested_keys"]))
         if unexpected:
             raise ValueError(f"Ответ содержит задачи вне исходной области: {', '.join(unexpected)}")
-    if step["stage"] in {"jira-counterparts", "jira-extra-counterparts"}:
-        unexpected = sorted({item["key"] for item in cards} - set(step["requested_keys"]))
-        if unexpected:
-            raise ValueError(f"Jira вернула незапрошенные ключи: {', '.join(unexpected)}")
-    if step["stage"] == "sbertrek-counterparts":
-        invalid = [item["key"] for item in cards if item.get("jira_key_state") != "value" or item.get("jira_key") not in step["requested_keys"]]
-        if invalid:
-            raise ValueError(f"SberTrek counterpart-ответ не подтверждает issue_key: {', '.join(invalid)}")
 
 
 def append_cards(run: dict, provider: str, cards: list[dict]) -> None:
@@ -987,52 +844,36 @@ def ingest_command(args: argparse.Namespace) -> int:
                 raise ValueError("Call must preserve the returned selection semantics")
             step["call"] = call
         records, record_path = full_issue_records(payload)
-        if step["stage"] == "sbertrek-epic-discovery":
-            if len(records) > 1:
-                raise ValueError("Для Jira-эпика найдено больше одного SberTrek-эпика")
-            counterpart = None
-            if records:
-                record = records[0]
-                counterpart = record_issue_key(record)
-                attributes, _ = attribute_entries(record)
-                raw_link, state = optional_value(record, ("issue_key",), attributes, SBER_ATTRIBUTE_CODES["jira_key"])
-                linked = object_text(raw_link, ("key", "code", "value", "name")) if state == "value" else None
-                if not counterpart or not linked or normalize_key(linked) != step["requested_keys"][0]:
-                    raise ValueError("Найденный SberTrek-эпик не подтверждает issue_key исходного Jira-эпика")
-                found_type, raw_type = alias_value(record_fields(record), TYPE_ALIASES)
-                if found_type and object_text(raw_type) and object_text(raw_type).casefold() != "epic":
-                    raise ValueError("SberTrek counterpart исходного Jira-эпика не является эпиком")
-            step["counterpart_epic"] = counterpart
-            if counterpart is None:
-                working["limitations"].append(f"sbertrek-counterpart-epic-not-found:{step['requested_keys'][0]}")
-            cards: list[dict] = []
-        else:
-            cards = [compact_issue(record, step["provider"], forced_epic=step.get("epic_key")) for record in records]
-            if step["stage"].endswith("source-release"):
-                from tracker_release_evidence import validate_membership
-                validate_membership(working, step, cards)
-            evidence = f"{step['step_id']}:{response_sha}"
-            for card in cards:
-                card["evidence"] = evidence
-            validate_records_for_step(step, cards)
-            append_cards(working, step["provider"], cards)
-            for card in cards:
-                for field in ("created_at", "updated_at"):
-                    if card["field_observations"][field] != "value":
-                        working["limitations"].append(f"{step['provider']}-{field.replace('_', '-')}-not-returned:{card['key']}")
-            returned = {item["key"] for item in cards}
-            if step["requested_keys"] and step["provider"] == "jira":
-                missing = sorted(set(step["requested_keys"]) - returned - set(working["absent_jira_keys"]))
-                working["limitations"].extend(f"jira-key-not-returned:{key}" for key in missing)
-            if step["requested_keys"] and step["stage"].endswith("source-tasks") and step["provider"] == "sbertrek":
-                missing = sorted(set(step["requested_keys"]) - returned)
-                working["limitations"].extend(f"sbertrek-key-not-returned:{key}" for key in missing)
+        cards = [compact_issue(record, step["provider"], forced_epic=step.get("epic_key")) for record in records]
+        if working.get("collection_mode") == "adaptive" and working["scope"]["intent"] == "update-planning":
+            tool = step["call"]["tool"].casefold().replace("_", ".")
+            missing_estimates = collection_diagnostics({"cards": {"sbertrek": cards}})["estimate_fields_not_returned"]
+            if "exportjson" in tool and missing_estimates:
+                raise ValueError(
+                    "estimate-projection-not-returned: " + ", ".join(missing_estimates)
+                    + ". Экспорт не содержит полей оценок. Проверь текущую схему MCP и запроси "
+                    "attributes либо эквивалентные поля; повтори полный ответ на тот же pending step. "
+                    "Явный null допустим, неполученное поле не доказывает отсутствия оценки."
+                )
+        if step["stage"].endswith("source-release"):
+            from tracker_release_evidence import validate_membership
+            validate_membership(working, step, cards)
+        evidence = f"{step['step_id']}:{response_sha}"
+        for card in cards:
+            card["evidence"] = evidence
+        validate_records_for_step(step, cards)
+        append_cards(working, step["provider"], cards)
+        for card in cards:
+            for field in ("created_at", "updated_at"):
+                if card["field_observations"][field] != "value":
+                    working["limitations"].append(f"{step['provider']}-{field.replace('_', '-')}-not-returned:{card['key']}")
+        returned = {item["key"] for item in cards}
+        if step["requested_keys"] and step["stage"].endswith("source-tasks") and step["provider"] == "sbertrek":
+            missing = sorted(set(step["requested_keys"]) - returned)
+            working["limitations"].extend(f"sbertrek-key-not-returned:{key}" for key in missing)
         step.update({"state": "complete", "response_source": args.response_source, "response_path": str(path), "response_sha256": response_sha, "response_bytes": len(raw), "record_path": record_path, "returned_count": len(records), "completed_at": now()})
         if len(records) == MAX_RESULTS:
             working["limitations"].append(f"{step['provider']}-result-limit-reached:{MAX_RESULTS}")
-        metadata = jira_metadata(payload) if step["provider"] == "jira" else None
-        if metadata and metadata["total"] > metadata["start_at"] + len(records):
-            working["limitations"].append(f"jira-result-incomplete:{len(records)}-of-{metadata['total']}")
         working["status"] = "tracker-read-collecting"
         working["failure"] = None
         advance(working)
@@ -1044,56 +885,6 @@ def ingest_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def all_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        return "\n".join(all_text(item) for item in value.values())
-    if isinstance(value, list):
-        return "\n".join(all_text(item) for item in value)
-    return str(value)
-
-
-def ingest_error_command(args: argparse.Namespace) -> int:
-    run = load_run(args.run_id)
-    working = copy.deepcopy(run)
-    step = next((item for item in working["steps"] if item["step_id"] == args.step_id), None)
-    if not step or step is not pending_step(working):
-        raise ValueError("Ошибка относится не к текущему next_action")
-    try:
-        _, raw, _ = response_file(args.error_file, args.run_id, require_json=False)
-        response_sha = digest_bytes(raw)
-        if any(item["sha256"] == response_sha for item in step["attempt_errors"]):
-            print(json.dumps({**status_payload(run), "ingest": "idempotent-no-op"}, ensure_ascii=False, indent=2))
-            return 0
-        try:
-            text = all_text(json.loads(raw.decode("utf-8")))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            text = raw.decode("utf-8", errors="replace")
-        if step["stage"] not in {"jira-counterparts", "jira-extra-counterparts"}:
-            raise ValueError("Ошибка исходного запроса не допускает автоматического продолжения")
-        absent = unique_keys(re.findall(r"issue with key ['\"]([A-Z][A-Z0-9_]*-[1-9][0-9]*)['\"] does not exist", text, flags=re.I))
-        if not absent or not set(absent).issubset(set(step["requested_keys"])):
-            raise ValueError("Jira-ошибка не подтверждает отсутствие запрошенных counterpart-ключей")
-        step["attempt_errors"].append({"sha256": response_sha, "bytes": len(raw), "absent_keys": absent, "at": now()})
-        working["absent_jira_keys"] = sorted(set(working["absent_jira_keys"]) | set(absent))
-        remaining = sorted(set(step["requested_keys"]) - set(absent))
-        if remaining:
-            step["query"] = jql_keys(remaining)
-            step["requested_keys"] = remaining
-        else:
-            step["state"] = "complete"
-            step["returned_count"] = 0
-            step["completed_at"] = now()
-        working["status"] = "tracker-read-collecting"
-        working["failure"] = None
-        advance(working)
-        save_run(working)
-    except Exception as error:
-        fail_run(run, str(error))
-        raise
-    print(json.dumps(status_payload(working), ensure_ascii=False, indent=2))
-    return 0
 
 
 def retry_missing_command(args: argparse.Namespace) -> int:
@@ -1102,7 +893,7 @@ def retry_missing_command(args: argparse.Namespace) -> int:
     if run["status"] != "tracker-read-ready" or not missing:
         raise ValueError("Нет неполученных ключей завершённого чтения")
     provider = run["scope"]["provider"]
-    query = jql_keys(missing) if provider == "jira" else tql_units(missing)
+    query = tql_units(missing)
     add_step(run, make_step(provider, f"{provider}-missing-{len(run['steps'])}", query, requested_keys=missing))
     run["status"] = "tracker-read-collecting"
     save_run(run)
@@ -1142,7 +933,7 @@ def confirm_absence_command(args: argparse.Namespace) -> int:
     if step:
         remaining = [item for item in step["requested_keys"] if item not in run["confirmed_absent"]]
         step["requested_keys"] = remaining
-        step["query"] = jql_keys(remaining) if scope["provider"] == "jira" else tql_units(remaining)
+        step["query"] = tql_units(remaining)
         if not remaining:
             step.update(state="complete", returned_count=0, completed_at=now())
     run["status"] = "tracker-read-collecting"
@@ -1163,113 +954,8 @@ def canonical_estimate(value: Any) -> Any:
     return result
 
 
-def comparable_person(value: Any) -> Any:
-    if not isinstance(value, dict):
-        return value
-    name = " ".join(str(value.get("name") or "").casefold().split())
-    name = re.sub(r"\s*\[b\]\s*$", "", name).strip()
-    return ("name", name) if name else ("id", str(value.get("id") or "").casefold())
-
-
-def merged_value(field: str, sber: dict | None, jira: dict | None) -> tuple[Any, str | None, dict | None]:
-    svalue = sber.get(field) if sber else None
-    jvalue = jira.get(field) if jira else None
-    if field == "estimate":
-        svalue, jvalue = canonical_estimate(svalue), canonical_estimate(jvalue)
-    chosen, source = (svalue, "sbertrek") if svalue not in (None, "", [], {}) else (jvalue, "jira")
-    if field == "assignee":
-        equal = comparable_person(svalue) == comparable_person(jvalue)
-    else:
-        equal = svalue == jvalue or (field == "issue_type" and isinstance(svalue, str) and isinstance(jvalue, str) and svalue.casefold() == jvalue.casefold())
-    conflict = None
-    if field in ACTIONABLE_CONFLICT_FIELDS and svalue not in (None, "", [], {}) and jvalue not in (None, "", [], {}) and not equal:
-        conflict = {"field": field, "sbertrek": svalue, "jira": jvalue, "resolution": "unresolved"}
-    return chosen, source if chosen not in (None, "", [], {}) else None, conflict
-
-
-def merged_roles(sber: dict | None, jira: dict | None) -> tuple[dict, dict, list[dict]]:
-    values, sources, conflicts = {}, {}, []
-    for role in ROLES:
-        svalue = canonical_estimate((sber or {}).get("role_estimates", {}).get(role))
-        jvalue = canonical_estimate((jira or {}).get("role_estimates", {}).get(role))
-        chosen, source = (svalue, "sbertrek") if svalue not in (None, {}, "") else (jvalue, "jira")
-        if chosen not in (None, {}, ""):
-            values[role] = {**chosen, "source": source}
-        sources[role] = source if chosen not in (None, {}, "") else None
-        if svalue not in (None, {}, "") and jvalue not in (None, {}, "") and {key: svalue.get(key) for key in ("value", "unit")} != {key: jvalue.get(key) for key in ("value", "unit")}:
-            conflicts.append({"field": f"role_estimates.{role}", "sbertrek": svalue, "jira": jvalue, "resolution": "unresolved"})
-    return values, sources, conflicts
-
-
-def resolution_for(run: dict, task_key: str, field: str, conflict: dict) -> tuple[Any, str | None, str]:
-    resolution = run.get("conflict_resolutions", {}).get(task_key)
-    choice = resolution.get("choice") if isinstance(resolution, dict) else None
-    if choice is None:
-        choice = run.get("following_conflict_choice")
-    if choice in PROVIDERS:
-        return conflict[choice], choice, choice
-    if choice != "custom" or not isinstance(resolution, dict):
-        return conflict["sbertrek"], "sbertrek", "unresolved"
-    custom = resolution.get("values", {}).get(field)
-    if custom in PROVIDERS:
-        return conflict[custom], custom, f"custom:{custom}"
-    return custom, "custom", "custom"
-
-
-def display_conflict_value(field: str, value: Any) -> str:
-    if field == "assignee" and isinstance(value, dict):
-        return str(value.get("name") or value.get("id") or "-")
-    if isinstance(value, dict) and isinstance(value.get("value"), (int, float)):
-        return f"{value['value']} {value.get('unit') or ''}".strip()
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
-
-
-def conflict_field_label(field: str) -> str:
-    if field == "assignee":
-        return "исполнитель"
-    if field == "estimate":
-        return "общая оценка"
-    if field.startswith("role_estimates."):
-        return f"оценка {field.split('.', 1)[1]}"
-    return field
-
-
-def first_unresolved_conflict(result: dict) -> dict | None:
-    grouped: dict[str, dict] = {}
-    for item in result["discrepancies"]:
-        if item.get("resolution") != "unresolved":
-            continue
-        key = item["sbertrek_key"]
-        grouped.setdefault(key, {
-            "sbertrek_key": key, "jira_key": item.get("jira_key"), "conflicts": [],
-        })["conflicts"].append({
-            field: item[field] for field in ("field", "sbertrek", "jira")
-        })
-    return next(iter(grouped.values()), None)
-
-
-def conflict_question(task: dict) -> str:
-    lines = [
-        f"В задаче SberTrek {task['sbertrek_key']} / Jira {task.get('jira_key') or '-'} обнаружены разные заполненные значения:",
-    ]
-    for item in task["conflicts"]:
-        lines.append(
-            f"- {conflict_field_label(item['field'])}: SberTrek = {display_conflict_value(item['field'], item['sbertrek'])}; "
-            f"Jira = {display_conflict_value(item['field'], item['jira'])}."
-        )
-    lines.extend([
-        "Выберите один вариант:",
-        "1. Приоритет SberTrek для этой задачи.",
-        "2. Приоритет SberTrek для этой и всех последующих конфликтующих задач текущего run.",
-        "3. Приоритет Jira для этой задачи.",
-        "4. Приоритет Jira для этой и всех последующих конфликтующих задач текущего run.",
-        "5. Свой вариант по перечисленным полям.",
-    ])
-    return "\n".join(lines)
-
-
-def development_state(sber: dict | None, jira: dict | None, config: dict) -> dict:
-    item, provider = (sber, "sbertrek") if sber else (jira, "jira")
+def development_state(item: dict, config: dict) -> dict:
+    provider = "sbertrek"
     status = str((item or {}).get("status") or "")
     completed = {str(value).casefold() for value in config["status_rules"][provider]["completed"]}
     excluded = {str(value).casefold() for value in config["status_rules"][provider]["excluded"]}
@@ -1300,8 +986,10 @@ def work_items(issues: list[dict]) -> list[dict]:
     for issue in issues:
         if issue["development"]["state"] == "excluded":
             continue
-        identity = issue.get("jira_key") or issue.get("sbertrek_key")
+        identity = issue.get("sbertrek_key")
         for role in ROLES:
+            if issue.get("issue_type") == "bug" and role != issue.get("task_role"):
+                continue
             if issue.get("task_role") and role in {"BE", "FE"} and role != issue["task_role"]:
                 continue
             estimate = issue.get("role_estimates", {}).get(role)
@@ -1309,7 +997,7 @@ def work_items(issues: list[dict]) -> list[dict]:
                 continue
             result.append({
                 "work_item_id": f"{identity}/{role}", "tracker_key": identity,
-                "sbertrek_key": issue.get("sbertrek_key"), "jira_key": issue.get("jira_key"),
+                "sbertrek_key": issue.get("sbertrek_key"),
                 "role": role, "summary": prefixed_summary(role, issue["summary"]),
                 "estimate": estimate, "assignee": issue.get("assignee"),
                 "status": issue.get("status"), "development": issue["development"],
@@ -1319,80 +1007,46 @@ def work_items(issues: list[dict]) -> list[dict]:
 
 def reconcile_data(run: dict) -> dict:
     sber_items = run["cards"]["sbertrek"]
-    jira_items = run["cards"]["jira"]
-    jira_by_key = {item["key"]: item for item in jira_items}
-    paired_jira: set[str] = set()
-    issues, discrepancies, excluded = [], [], []
-    for sber in sber_items:
-        jira_key = sber.get("jira_key") if sber.get("jira_key_state") == "value" else None
-        if jira_key in run["absent_jira_keys"]:
-            excluded.append({"sbertrek_key": sber["key"], "jira_key": jira_key, "reason": "jira-counterpart-absent"})
-            continue
-        jira = jira_by_key.get(jira_key)
-        if jira:
-            paired_jira.add(jira["key"])
-        merged, sources, local = {}, {}, []
-        for field in MERGED_FIELDS:
-            merged[field], sources[field], conflict = merged_value(field, sber, jira)
-            if conflict:
-                value, source, resolution = resolution_for(run, sber["key"], field, conflict)
-                conflict["resolution"] = resolution
-                if resolution != "unresolved":
-                    merged[field], sources[field] = value, source
-                local.append(conflict)
-        roles, role_sources, role_conflicts = merged_roles(sber, jira)
-        for conflict in role_conflicts:
-            role = conflict["field"].split(".", 1)[1]
-            value, source, resolution = resolution_for(run, sber["key"], conflict["field"], conflict)
-            conflict["resolution"] = resolution
-            if resolution != "unresolved":
-                if value in (None, "", {}):
-                    roles.pop(role, None)
-                    role_sources[role] = None
-                else:
-                    roles[role] = {**value, "source": source}
-                    role_sources[role] = source
-        local.extend(role_conflicts)
-        for conflict in local:
-            discrepancies.append({"type": "field-conflict", "sbertrek_key": sber["key"], "jira_key": jira_key, **conflict})
+    issues, excluded = [], []
+    for card in sber_items:
+        values = {field: canonical_estimate(card.get(field)) if field == "estimate" else card.get(field)
+                  for field in SOURCE_FIELDS}
+        roles = {role: {**canonical_estimate(value), "source": "sbertrek"}
+                 for role, value in card.get("role_estimates", {}).items() if value is not None}
         issues.append({
-            "sbertrek_key": sber["key"], "jira_key": jira_key, **merged,
-            "sources": sources, "role_estimates": roles, "role_estimate_sources": role_sources,
-            "estimate_fields": [{**field, "provider": provider} for provider, item in (("sbertrek", sber), ("jira", jira)) for field in (item or {}).get("estimate_fields", [])],
-            "development": development_state(sber, jira, run["config"]),
+            "sbertrek_key": card["key"], **values,
+            "sources": {field: "sbertrek" if value not in (None, "", [], {}) else None
+                        for field, value in values.items()},
+            "role_estimates": roles,
+            "role_estimate_sources": {role: "sbertrek" if role in roles else None for role in ROLES},
+            "estimate_fields": [{**field, "provider": "sbertrek"} for field in card.get("estimate_fields", [])],
+            "development": development_state(card, run["config"]),
         })
-    for jira in jira_items:
-        if jira["key"] in paired_jira:
-            continue
-        roles, role_sources, _ = merged_roles(None, jira)
-        issue = {"sbertrek_key": None, "jira_key": jira["key"], **{field: jira.get(field) for field in MERGED_FIELDS}}
-        issue.update({
-            "sources": {field: "jira" if jira.get(field) not in (None, "", [], {}) else None for field in MERGED_FIELDS},
-            "role_estimates": roles, "role_estimate_sources": role_sources,
-            "estimate_fields": [{**field, "provider": "jira"} for field in jira.get("estimate_fields", [])],
-            "development": development_state(None, jira, run["config"]),
-        })
-        issues.append(issue)
     skipped = []
     if run.get("role_policy") == "prefix-v1":
         skipped = [{**issue, "reason": "outside-supported-roles"} for issue in issues
-                   if role_from_summary(issue.get("summary") or "") is None]
-        issues = [issue for issue in issues if role_from_summary(issue.get("summary") or "") is not None]
+                   if role_from_summary(issue.get("summary") or "") is None and issue.get("issue_type") != "bug"]
+        issues = [issue for issue in issues if role_from_summary(issue.get("summary") or "") is not None or issue.get("issue_type") == "bug"]
         for issue in issues:
             issue["task_role"] = role_from_summary(issue["summary"])
-        skipped_keys = {(issue.get("sbertrek_key"), issue.get("jira_key")) for issue in skipped}
-        discrepancies = [item for item in discrepancies
-                         if (item.get("sbertrek_key"), item.get("jira_key")) not in skipped_keys]
-    issues.sort(key=lambda item: (item.get("sbertrek_key") or "", item.get("jira_key") or ""))
+            if issue.get("issue_type") == "bug":
+                person = issue.get("assignee") or {}
+                participant = run["config"].get("participants", {}).get("sbertrek", {}).get(person.get("id"))
+                if isinstance(participant, dict):
+                    participant = participant.get("role")
+                # Bugs are classified by their confirmed developer, not a title prefix.
+                issue["task_role"] = participant if participant in {"BE", "FE"} else None
+                issue["forecast_view"] = "estimates-only"
+    issues.sort(key=lambda item: item["sbertrek_key"])
     for key, evidence in run.get("confirmed_absent", {}).items():
-        excluded.append({"jira_key": key if evidence["provider"] == "jira" else None,
-                         "sbertrek_key": key if evidence["provider"] == "sbertrek" else None,
-                         "reason": "confirmed-source-deletion", "evidence": evidence})
+        excluded.append({"sbertrek_key": key, "reason": "confirmed-source-deletion", "evidence": evidence})
     role_totals = {role: 0.0 for role in ROLES}
     overall_total = 0.0
     for issue in issues:
         has_role_estimate = False
         for role, estimate in issue.get("role_estimates", {}).items():
+            if issue.get('issue_type') == 'bug' and role != issue.get('task_role'):
+                continue
             if estimate.get("unit") in {"story-points", "person-days"}:
                 value = float(estimate["value"])
                 role_totals[role] += value
@@ -1402,18 +1056,19 @@ def reconcile_data(run: dict) -> dict:
         if not has_role_estimate and isinstance(estimate, dict) and estimate.get("unit") == "story-points":
             overall_total += float(estimate["value"])
     limitations = sorted(set(run["limitations"] + ["history-not-collected"] + [
-        f"general-estimate-role-unresolved:{item.get('jira_key') or item.get('sbertrek_key')}"
+        f"general-estimate-role-unresolved:{item.get('sbertrek_key')}"
         for item in issues if item.get("estimate") and not item.get("role_estimates")
     ]))
     counts = {
-        "sbertrek": len(sber_items), "jira": len(jira_items), "matched": len(paired_jira),
-        "issues": len(issues), "excluded": len(excluded), "discrepancies": len(discrepancies),
+        "sbertrek": len(sber_items),
+        "issues": len(issues), "excluded": len(excluded),
     }
     role_work_items = work_items(issues)
     counts["work_items"] = len(role_work_items)
     summary = {"story_points_total": overall_total, "role_totals_person_days": role_totals}
     if run.get("estimate_reporting") == "known-values-v1":
-        coverage = {role: sum(role in issue.get("role_estimates", {}) for issue in issues) for role in ROLES}
+        coverage = {role: sum(role in issue.get("role_estimates", {}) and (
+            issue.get('issue_type') != 'bug' or role == issue.get('task_role')) for issue in issues) for role in ROLES}
         summary["estimate_coverage"] = coverage
         summary["role_totals_person_days"] = {role: role_totals[role] if coverage[role] else None for role in ROLES}
         if not any(coverage.values()) and not any(issue.get("estimate") for issue in issues):
@@ -1421,7 +1076,7 @@ def reconcile_data(run: dict) -> dict:
     return {
         "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": run["run_id"],
         "scope": run["scope"], "issues": issues, "work_items": role_work_items,
-        "excluded": excluded, "discrepancies": discrepancies, "counts": counts,
+        "excluded": excluded, "counts": counts,
         **({"skipped": skipped} if run.get("role_policy") == "prefix-v1" else {}),
         "summary": summary,
         "limitations": limitations,
@@ -1430,20 +1085,20 @@ def reconcile_data(run: dict) -> dict:
 
 def render_report(result: dict) -> str:
     lines = [
-        "# Сверка задач трекеров", "", f"Run ID: `{result['run_id']}`", "",
-        f"- SberTrek: {result['counts']['sbertrek']}", f"- Jira: {result['counts']['jira']}",
-        f"- Склеено пар: {result['counts']['matched']}", f"- Итоговых задач: {result['counts']['issues']}",
-        f"- Исключено: {result['counts']['excluded']}", f"- Расхождений: {result['counts']['discrepancies']}",
+        "# Проверка задач SberTrek", "", f"Run ID: `{result['run_id']}`", "",
+        f"- SberTrek: {result['counts']['sbertrek']}",
+        f"- Итоговых задач: {result['counts']['issues']}",
+        f"- Исключено: {result['counts']['excluded']}",
         f"- Общая оценка: {result['summary']['story_points_total'] if result['summary']['story_points_total'] is not None else 'неизвестна'} story-points", "",
-        "| SberTrek | Jira | Название | Статус | Исполнитель | AN | BE | FE | QA |",
-        "|---|---|---|---|---|---:|---:|---:|---:|",
+        "| SberTrek | Название | Статус | Исполнитель | AN | BE | FE | QA |",
+        "|---|---|---|---|---:|---:|---:|---:|",
     ]
     for item in result["issues"]:
         assignee = (item.get("assignee") or {}).get("name") or "—"
         values = [str(item.get("role_estimates", {}).get(role, {}).get("value", "—")) for role in ROLES]
-        lines.append(f"| {item.get('sbertrek_key') or '—'} | {item.get('jira_key') or '—'} | {item['summary']} | {item['status']} | {assignee} | {' | '.join(values)} |")
+        lines.append(f"| {item.get('sbertrek_key') or '—'} | {item['summary']} | {item['status']} | {assignee} | {' | '.join(values)} |")
     for item in result.get("skipped", []):
-        lines.append(f"Пропущено вне AN/BE/FE/QA: {item.get('jira_key') or item.get('sbertrek_key')} — {item.get('summary')}")
+        lines.append(f"Пропущено вне AN/BE/FE/QA: {item.get('sbertrek_key')} — {item.get('summary')}")
     lines.extend(["", f"## Ролевые задачи ({result['counts']['work_items']})", ""])
     for item in result["work_items"]:
         assignee = (item.get("assignee") or {}).get("name") or "—"
@@ -1466,13 +1121,12 @@ def official_text(result: dict) -> str:
                          f"Ролевые оценки: {rendered} человекодней. Пустые оценки не равны нулю; полнота оценки не подтверждена.")
     lines = [
         f"Сверка завершена. Run ID: {result['run_id']}",
-        f"SberTrek: {counts['sbertrek']}; Jira: {counts['jira']}; склеено: {counts['matched']}; исходных задач: {counts['issues']}; ролевых задач: {counts['work_items']}; исключено: {counts['excluded']}; расхождений: {counts['discrepancies']}.",
+        f"SberTrek: {counts['sbertrek']}; исходных задач: {counts['issues']}; ролевых задач: {counts['work_items']}; исключено: {counts['excluded']}.",
         estimate_line,
         "Задачи:",
     ]
     for item in result["issues"]:
         sbertrek_key = item.get("sbertrek_key") or "-"
-        jira_key = item.get("jira_key") or "-"
         summary = " ".join(str(item.get("summary") or "-").split())
         status = " ".join(str(item.get("status") or "-").split())
         assignee = " ".join(str((item.get("assignee") or {}).get("name") or "-").split())
@@ -1481,11 +1135,11 @@ def official_text(result: dict) -> str:
             for role in ROLES
         )
         lines.append(
-            f"- SberTrek {sbertrek_key}; Jira {jira_key}; {summary}; "
+            f"- SberTrek {sbertrek_key}; {summary}; "
             f"статус: {status}; исполнитель: {assignee}; оценки: {estimates}."
         )
     for item in result.get("skipped", []):
-        lines.append(f"Пропущено вне AN/BE/FE/QA: {item.get('jira_key') or item.get('sbertrek_key')} — {item.get('summary')}")
+        lines.append(f"Пропущено вне AN/BE/FE/QA: {item.get('sbertrek_key')} — {item.get('summary')}")
     lines.append("Ролевые задачи:")
     for item in result["work_items"]:
         assignee = " ".join(str((item.get("assignee") or {}).get("name") or "-").split())
@@ -1497,36 +1151,12 @@ def official_text(result: dict) -> str:
         lines.append("Исключены:")
         for item in result["excluded"]:
             lines.append(
-                f"- SberTrek {item.get('sbertrek_key') or '-'}; Jira {item.get('jira_key') or '-'}; "
+                f"- SberTrek {item.get('sbertrek_key') or '-'}; "
                 f"причина: {item['reason']}."
             )
     if result["limitations"]:
         lines.append("Ограничения: " + ", ".join(result["limitations"]) + ".")
     return "\n".join(lines)
-
-
-def validated_custom_resolution(task: dict, path_value: str) -> dict:
-    payload = load_json(Path(path_value).expanduser().resolve())
-    if not isinstance(payload, dict):
-        raise ValueError("Пользовательский вариант должен быть JSON-объектом")
-    expected = {item["field"] for item in task["conflicts"]}
-    if set(payload) != expected:
-        raise ValueError("Пользовательский вариант должен задавать ровно все поля текущего конфликта")
-    result = {}
-    for field, value in payload.items():
-        if value in PROVIDERS:
-            result[field] = value
-            continue
-        if field == "assignee":
-            person = normalized_person(value)
-            if person is None:
-                raise ValueError("Пользовательский исполнитель должен содержать имя или идентификатор")
-            result[field] = person
-            continue
-        if not isinstance(value, dict) or not isinstance(value.get("value"), (int, float)) or not isinstance(value.get("unit"), str):
-            raise ValueError(f"Пользовательская оценка {field} должна содержать числовые value и строковый unit")
-        result[field] = canonical_estimate(value)
-    return result
 
 
 def init_config_command(args: argparse.Namespace) -> int:
@@ -1561,8 +1191,6 @@ def scope_preview_command(args: argparse.Namespace) -> int:
                 payload = status_payload(existing)
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
                 return STOP_EXIT if payload.get("must_stop") else 0
-    if args.provider == "jira" and not config["jira_enabled"]:
-        raise ValueError("Jira отключена в tracker-config.json")
     from tracker_scope import preview_scope
 
     payload = preview_scope(Path(args.project_root), args.provider, args.quarter, args.feature, args.delivery)
@@ -1574,8 +1202,6 @@ def update_config_command(args: argparse.Namespace) -> int:
     config = load_config()
     if args.command == "set-projects":
         config["projects"][args.provider] = sorted(set(args.projects))
-    elif args.command == "set-jira-mode":
-        config["jira_enabled"] = args.mode == "enabled"
     elif args.command == "set-issue-types":
         config["development_issue_types"] = sorted(set(args.issue_types))
     elif args.command == "set-statuses":
@@ -1608,35 +1234,34 @@ def begin_command(args: argparse.Namespace) -> int:
     if args.scope_kind == 'release' and args.intent is None:
         raise ValueError('Release begin requires explicit --intent: update-planning for actualization, read-only for inspection')
     args.intent = args.intent or 'read-only'
-    if args.scope_provider == "jira" and not config["jira_enabled"]:
-        raise ValueError("Jira отключена в tracker-config.json")
     if args.scope_kind == "release":
-        if not args.adaptive or args.compare_trackers or len(args.scope_id) != 1:
+        if not args.adaptive or len(args.scope_id) != 1:
             raise ValueError("release requires one release and a single-provider adaptive run")
         ids = args.scope_id
         if not ids[0].strip() or ids[0] != ids[0].strip() or any(ord(char) < 32 for char in ids[0]):
             raise ValueError("Release identity must be a nonempty single-line name or ID")
     else:
         ids = unique_keys(args.scope_id)
-    if args.scope_kind == "epic" and len(ids) != 1 and (not args.adaptive or args.compare_trackers):
+    if args.scope_kind == "epic" and len(ids) != 1 and not args.adaptive:
         raise ValueError("Для epic требуется ровно один scope-id")
     scope = {"kind": args.scope_kind, "provider": args.scope_provider, "ids": ids, "label": args.label, "source": args.scope_source, "intent": args.intent}
     if args.scope_kind == "combined":
-        if not args.adaptive or args.compare_trackers or not args.epic_id:
+        if not args.adaptive or not args.epic_id:
             raise ValueError("combined требует однотрекерный adaptive run и --epic-id")
         scope["epic_ids"] = unique_keys(args.epic_id)
     elif args.epic_id:
         raise ValueError("--epic-id используется только с combined")
-    if args.compare_trackers and not args.adaptive:
-        raise ValueError("--compare-trackers требует --adaptive")
-    if args.adaptive:
-        scope["tracker_mode"] = "compare" if args.compare_trackers else "single"
+    if getattr(args, 'include_history', False):
+        if not args.adaptive:
+            raise ValueError('--include-history requires adaptive mode')
+        scope['include_history'] = True
+    scope["tracker_mode"] = "single"
     active = active_run_id()
     if active:
         existing = load_run(active)
-        identity_fields = ("kind", "provider", "ids", "intent", "epic_ids")
+        identity_fields = ("kind", "provider", "ids", "intent", "epic_ids", "include_history")
         if all(existing["scope"].get(field) == scope.get(field) for field in identity_fields):
-            if existing["scope"].get("tracker_mode", "compare") != scope.get("tracker_mode", "compare"):
+            if existing["scope"].get("tracker_mode", "single") != "single":
                 raise ValueError("Режим существующего run отличается; не заменяй его без явного abandon-run")
             payload = status_payload(existing)
             print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -1647,8 +1272,7 @@ def begin_command(args: argparse.Namespace) -> int:
         "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": run_id,
         "created_at": now(), "status": "tracker-read-collecting", "scope": scope,
         "config": config, "steps": [primary_step(scope)], "cards": {provider: [] for provider in PROVIDERS},
-        "absent_jira_keys": [], "limitations": [], "failure": None,
-        "conflict_resolutions": {}, "following_conflict_choice": None,
+        "limitations": [], "failure": None,
         "collection_mode": "adaptive" if args.adaptive else "legacy",
         **({"role_policy": "prefix-v1", "estimate_reporting": "known-values-v1"} if args.adaptive else {}),
     }
@@ -1701,59 +1325,31 @@ def reconcile_command(args: argparse.Namespace) -> int:
         print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
         return 2
     result = reconcile_data(run)
-    if first_unresolved_conflict(result):
-        run["status"] = "tracker-read-needs-resolution"
-        save_run(run)
-        print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
-        return STOP_EXIT
     root = run_root(args.run_id)
     save_json(root / "reconciled.json", result)
     (root / "report.md").write_text(render_report(result), encoding="utf-8")
     completion = {
         "protocol": PROTOCOL, "schema_version": SCHEMA_VERSION, "run_id": args.run_id,
-        "status": "tracker-read-reconciled", "workflow_complete": True, "final_response_allowed": True,
+        "status": "tracker-read-reconciled", "completion_contract_version": 2,
+        "collection_complete": True, "workflow_complete": run["scope"]["intent"] == "read-only",
+        "final_response_allowed": run["scope"]["intent"] == "read-only",
         "planning_application_allowed": run["scope"]["intent"] == "update-planning",
         "counts": result["counts"], "summary": result["summary"], "limitations": result["limitations"],
         "reconciled_sha256": file_digest(root / "reconciled.json"), "report_sha256": file_digest(root / "report.md"),
-        "response_contract": {"type": "emit-verbatim", "text": official_text(result), "additional_commentary_allowed": False},
+        "response_contract": {"type": "emit-verbatim" if run["scope"]["intent"] == "read-only" else "emit-progress-and-continue",
+                              "text": official_text(result), "additional_commentary_allowed": False,
+                              "delivery": "final" if run["scope"]["intent"] == "read-only" else "progress",
+                              "must_continue": run["scope"]["intent"] == "update-planning"},
         "paths": {"reconciled": str(root / "reconciled.json"), "report": str(root / "report.md"), "completion_status": str(root / "completion-status.json")},
     }
     save_json(root / "completion-status.json", completion)
     run["status"] = "tracker-read-reconciled"
     run["completed_at"] = now()
     save_run(run)
-    release_active(args.run_id)
+    if not run['scope'].get('include_history'):
+        release_active(args.run_id)
     print(json.dumps(status_payload(run), ensure_ascii=False, indent=2))
     return 0
-
-
-def resolve_conflict_command(args: argparse.Namespace) -> int:
-    run = load_run(args.run_id)
-    if run["status"] != "tracker-read-needs-resolution":
-        raise ValueError("Tracker-run не ожидает решения конфликта")
-    task = first_unresolved_conflict(reconcile_data(run))
-    if task is None or args.task_key != task["sbertrek_key"]:
-        raise ValueError("Решение относится не к текущей конфликтующей задаче")
-    if args.apply_to_following and args.choice == "custom":
-        raise ValueError("Пользовательский вариант нельзя автоматически применять к последующим задачам")
-    if args.choice == "custom":
-        if not args.custom_file:
-            raise ValueError("Для пользовательского варианта требуется --custom-file")
-        values = validated_custom_resolution(task, args.custom_file)
-    else:
-        if args.custom_file:
-            raise ValueError("--custom-file допустим только для пользовательского варианта")
-        values = {}
-    run.setdefault("conflict_resolutions", {})[args.task_key] = {
-        "choice": args.choice, "values": values, "resolved_at": now(),
-    }
-    if args.apply_to_following:
-        run["following_conflict_choice"] = args.choice
-    run["status"] = "tracker-read-needs-resolution" if first_unresolved_conflict(reconcile_data(run)) else "tracker-read-ready"
-    save_run(run)
-    payload = status_payload(run)
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return STOP_EXIT if payload.get("must_stop") else 0
 
 
 def verified_result(run_id: str) -> tuple[dict, dict]:
@@ -1767,20 +1363,32 @@ def verified_result(run_id: str) -> tuple[dict, dict]:
     if completion.get("reconciled_sha256") != file_digest(root / "reconciled.json") or completion.get("report_sha256") != file_digest(root / "report.md"):
         raise ValueError("Итоговые файлы изменены после reconciliation")
     result = load_json(root / "reconciled.json")
+    if result.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("Исторический результат сохранён без изменений; применение результата прежней схемы не поддерживается. Новый сбор требует отдельного запроса.")
     if result.get("protocol") != PROTOCOL or result.get("run_id") != run_id or result.get("scope") != run["scope"]:
         raise ValueError("Область результата не совпадает с tracker-run")
     if result != reconcile_data(run):
         raise ValueError("Результат не воспроизводится из сохранённой сверки")
     planning_allowed = run["scope"]["intent"] == "update-planning"
+    contract_version = completion.get("completion_contract_version", 1)
+    if contract_version not in (1, 2):
+        raise ValueError("Unknown completion-status contract version")
     expected = {
         "status": "tracker-read-reconciled",
-        "workflow_complete": True,
-        "final_response_allowed": True,
+        "workflow_complete": not planning_allowed if contract_version == 2 else True,
+        "final_response_allowed": not planning_allowed if contract_version == 2 else True,
         "planning_application_allowed": planning_allowed,
         "counts": result["counts"],
         "summary": result["summary"],
         "limitations": result["limitations"],
     }
+    if contract_version == 2:
+        expected["collection_complete"] = True
+        contract = completion.get("response_contract", {})
+        if (contract.get("must_continue") is not planning_allowed
+                or contract.get("delivery") != ("progress" if planning_allowed else "final")
+                or contract.get("type") != ("emit-progress-and-continue" if planning_allowed else "emit-verbatim")):
+            raise ValueError("Response contract in completion-status differs from collection intent")
     if any(
         completion.get(field) is not value if isinstance(value, bool) else completion.get(field) != value
         for field, value in expected.items()
@@ -1805,9 +1413,29 @@ def verified_result(run_id: str) -> tuple[dict, dict]:
     return completion, result
 
 
-def result_status_command(args: argparse.Namespace) -> int:
-    completion, result = verified_result(args.run_id)
-    root = run_root(args.run_id)
+def collection_diagnostics(run: dict) -> dict:
+    cards = run["cards"]["sbertrek"]
+    missing = [card["key"] for card in cards
+               if role_from_summary(card.get("summary", ""))
+               and card.get("field_observations", {}).get("estimate") == "not-returned"
+               and all(card.get("role_estimate_observations", {}).get(role) == "not-returned"
+                       for role in ROLES)]
+    return {
+        "estimate_fields_not_returned": sorted(missing),
+        "projection_review_required": bool(missing),
+        "message": (
+            "Поля оценок не получены; это не пустые оценки в трекере. Проверь текущую схему MCP "
+            "и проекцию: attributes либо поддерживаемые поля оценок. Не копируй параметры "
+            "старого вызова без проверки. Не заменяй ответ завершённого шага. Для уже завершённого сбора "
+            "сохрани ограничение оценок; отдельные снимки истории не дополняют оценки результата. "
+            "Проверка проекции не отменяет сбор истории, включая задачи created/todo."
+        ) if missing else None,
+    }
+
+
+def result_status_payload(run_id: str) -> dict:
+    completion, result = verified_result(run_id)
+    root = run_root(run_id)
     planning_allowed = completion["planning_application_allowed"]
     preview_command = "release-preview" if result["scope"]["kind"] == "release" else "execution-preview"
     completion["planning_update"] = {
@@ -1817,18 +1445,57 @@ def result_status_command(args: argparse.Namespace) -> int:
             "type": preview_command,
             "command": [
                 sys.executable, str(Path(__file__).with_name("trackerctl.py")),
-                preview_command, "--run-id", args.run_id,
+                preview_command, "--run-id", run_id,
                 "--project-root", "<resolved-project-root>",
             ],
             "required_selection": "release members" if preview_command == "release-preview" else "--quarter YYYY-QN or --feature feature",
             "mode": "execution-update",
             "contract": str(Path(__file__).resolve().parents[1] / "core" / "tracker-actualization.md"),
-            "run_id": args.run_id,
+            "run_id": run_id,
             "reconciled": str(root / "reconciled.json"),
             "reconciled_sha256": completion["reconciled_sha256"],
         } if planning_allowed else None,
     }
-    print(json.dumps(completion, ensure_ascii=False, indent=2))
+    # Derive current workflow state without rewriting historical collection files.
+    completion["paths"].update(scope=str(root / "scope.json"), run_status=str(root / "run-status.json"),
+                               providers=str(root / "providers"))
+    completion["collection_complete"] = True
+    completion["report_allowed"] = True
+    completion["collection_diagnostics"] = collection_diagnostics(load_run(run_id))
+    completion["next_action"] = completion["planning_update"]["next_action"]
+    completion["workflow_complete"] = result["scope"]["intent"] == "read-only" or completion["planning_update"]["actualization_complete"]
+    completion["final_response_allowed"] = not planning_allowed
+    completion["response_contract"] = {
+        **completion["response_contract"],
+        "type": "emit-progress-and-continue" if planning_allowed else "emit-verbatim",
+        "delivery": "progress" if planning_allowed else "final",
+        "must_continue": planning_allowed,
+    }
+    from tracker_history_status import status as history_status, collect_action
+    history = history_status(run_id, completion['reconciled_sha256'])
+    completion['history_status'] = history
+    if history['reports']:
+        completion['response_contract']['text'] = (
+            'Снимок первичного сбора карточек (до проверки истории):\n' + completion['response_contract']['text']
+            + '\nИстория сохранена отдельно; history-not-collected в первичном снимке не описывает текущее состояние. '
+            + 'Проверенные отчёты: ' + ', '.join(item['file'] for item in history['reports']))
+    if result['scope'].get('include_history') and result['scope']['intent'] == 'read-only':
+        current = history['current']
+        ready = bool(current and current['status'] == 'history-report-ready')
+        completion['workflow_complete'] = completion['final_response_allowed'] = ready
+        completion['next_action'] = None if ready else collect_action(
+            current['pending_history'] if current else [i['sbertrek_key'] for i in result['issues']])
+        completion['response_contract'].update(type='report-history' if ready else 'emit-progress-and-continue',
+                                              delivery='final' if ready else 'progress', must_continue=not ready)
+        completion['response_contract']['text'] = (
+            'История получена: ' + current['file'] if ready else
+            'Карточки собраны. Запрос истории ещё не завершён; продолжи collect-history в этом run.')
+        completion['response_contract']['additional_commentary_allowed'] = ready
+    return completion
+
+
+def result_status_command(args: argparse.Namespace) -> int:
+    print(json.dumps(result_status_payload(args.run_id), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1856,6 +1523,10 @@ def execution_preview_command(args: argparse.Namespace) -> int:
         raise ValueError("Read-only сверка не разрешает фазу актуализации")
     from tracker_execution import preview_execution
 
+    if getattr(args, "decisions", None):
+        from tracker_release import apply_scope_decisions
+        _, _, decisions = response_file(args.decisions, args.run_id)
+        result = apply_scope_decisions(Path(args.project_root).resolve(), result, decisions)
     reviewed = dict(args.reviewed_registry)
     if len(reviewed) != len(args.reviewed_registry):
         raise ValueError("Реестр указан для подтверждения несколько раз")
@@ -1866,14 +1537,29 @@ def execution_preview_command(args: argparse.Namespace) -> int:
     payload = preview_execution(
         Path(args.project_root), args.quarter, args.feature, result, reviewed, args.expected_head, args.delivery,
     )
+    from tracker_safety import application_write_gate
+    payload["analytics_write_gate"] = application_write_gate(Path(args.project_root).resolve(), payload["selected_features"])
+    payload["skipped"] = result.get("skipped", [])
     payload["run_id"] = args.run_id
     payload["reconciled_sha256"] = completion["reconciled_sha256"]
+    payload["ownership_decisions"] = {
+        "argument": "--decisions",
+        "history_manifest_field": "release_scope_decisions" if result["scope"]["kind"] == "release" else "scope_decisions",
+        "run_id": args.run_id, "scope": result["scope"],
+        "evidence_required": ["analyst_confirmed", "source.file", "source.sha256", "source.quote"],
+        "writes_before_history_required": False,
+    }
     if payload["ownership_ready"] and load_run(args.run_id).get("collection_mode") == "adaptive":
         payload["date_proposals_allowed"] = False
         payload["fact_priority"] = ["analyst-confirmation", "assignment-and-status-history", "current-state-only"]
         payload["next_action"] = {
             "type": "collect-history", "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
             "provider": result["scope"]["provider"],
+            "keys": sorted({item["sbertrek_key"] for item in payload["items"]
+                            if any(target["role"] in {"BE", "FE"} for target in item["targets"])}),
+            "include_registered_feature_tasks": True,
+            "capability_check_required": True,
+            "history_read_guidance": "If unfiltered history.list fails, check supported workflow_status/assigned_to filters; preserve timestamps and pagination. Role confirmation gates interpretation, not reading.",
             "required_before_date_proposals": True,
             "required_before_status_proposals": True,
             "command": [sys.executable, str(Path(__file__).with_name("trackerctl.py")), "history-review",
@@ -1891,7 +1577,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("config-status").set_defaults(handler=config_status_command)
     preview = commands.add_parser("scope-preview")
     preview.add_argument("--project-root", required=True)
-    preview.add_argument("--provider", choices=PROVIDERS, required=True)
+    preview.add_argument("--provider", choices=PROVIDERS, default="sbertrek")
     preview.add_argument("--quarter")
     preview.add_argument("--feature")
     preview.add_argument('--delivery', action='append', help='Exact delivery key; repeat for several deliveries')
@@ -1903,40 +1589,35 @@ def parser() -> argparse.ArgumentParser:
     execution.add_argument("--feature")
     execution.add_argument('--delivery', action='append', help='Exact delivery key; repeat for several deliveries')
     execution.add_argument("--reviewed-registry", nargs=2, action="append", default=[], metavar=("PATH", "SHA256"))
+    execution.add_argument("--decisions", help="Confirmed task ownership decisions for this exact run")
     execution.add_argument("--expected-head")
     execution.add_argument("--analyst-confirmed", action="store_true")
     execution.set_defaults(handler=execution_preview_command)
-    projects = commands.add_parser("set-projects"); projects.add_argument("--provider", choices=PROVIDERS, required=True); projects.add_argument("projects", nargs="+"); projects.set_defaults(handler=update_config_command)
-    jira = commands.add_parser("set-jira-mode"); jira.add_argument("mode", choices=("enabled", "disabled")); jira.set_defaults(handler=update_config_command)
+    projects = commands.add_parser("set-projects"); projects.add_argument("--provider", choices=PROVIDERS, default="sbertrek"); projects.add_argument("projects", nargs="+"); projects.set_defaults(handler=update_config_command)
     issue_types = commands.add_parser("set-issue-types"); issue_types.add_argument("issue_types", nargs="+"); issue_types.set_defaults(handler=update_config_command)
-    statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, required=True); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config_command)
+    statuses = commands.add_parser("set-statuses"); statuses.add_argument("--provider", choices=PROVIDERS, default="sbertrek"); statuses.add_argument("--kind", choices=("completed", "excluded"), required=True); statuses.add_argument("--none", action="store_true"); statuses.add_argument("statuses", nargs="*"); statuses.set_defaults(handler=update_config_command)
     commands.add_parser("complete-config").set_defaults(handler=complete_config_command)
     from tracker_sessions import resume_command
     resume = commands.add_parser('resume')
     resume.add_argument('--scope-kind', choices=SCOPE_KINDS, required=True)
-    resume.add_argument('--scope-provider', choices=PROVIDERS, required=True)
+    resume.add_argument('--scope-provider', choices=PROVIDERS, default="sbertrek")
     resume.add_argument('--scope-id', action='append', required=True)
     resume.add_argument('--intent', choices=('read-only', 'update-planning'), required=True)
     resume.add_argument('--epic-id', action='append', default=[])
+    resume.add_argument('--include-history', action='store_true')
     resume.add_argument('--run-id')
     resume.set_defaults(handler=resume_command)
-    begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, required=True); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning")); begin.set_defaults(handler=begin_command)
+    begin = commands.add_parser("begin"); begin.add_argument("--scope-kind", choices=SCOPE_KINDS, required=True); begin.add_argument("--scope-provider", choices=PROVIDERS, default="sbertrek"); begin.add_argument("--scope-id", action="append", required=True); begin.add_argument("--label", required=True); begin.add_argument("--scope-source", required=True); begin.add_argument("--intent", choices=("read-only", "update-planning")); begin.set_defaults(handler=begin_command)
     collection = begin.add_mutually_exclusive_group()
     collection.add_argument("--adaptive", dest="adaptive", action="store_true", default=True)
     collection.add_argument("--legacy", dest="adaptive", action="store_false")
-    begin.add_argument("--compare-trackers", action="store_true")
+    begin.add_argument("--include-history", action="store_true", help="Collect dated history before completing a read-only request")
     begin.add_argument("--epic-id", action="append", default=[])
-    from tracker_safety import application_preflight_command, identity_lookup_command
+    from tracker_safety import application_preflight_command
     preflight = commands.add_parser("application-preflight")
     preflight.add_argument("--project-root", required=True)
     preflight.add_argument("--feature", "--delivery", dest='feature', required=True)
     preflight.set_defaults(handler=application_preflight_command)
-    identity = commands.add_parser("identity-lookup")
-    identity.add_argument("--source-provider", choices=PROVIDERS, required=True)
-    identity.add_argument("--key", action="append", required=True)
-    identity.add_argument("--response-file")
-    identity.add_argument("--call-file")
-    identity.set_defaults(handler=identity_lookup_command)
     absence = commands.add_parser("confirm-absence")
     absence.add_argument("--run-id", required=True)
     absence.add_argument("--key", required=True)
@@ -1951,6 +1632,11 @@ def parser() -> argparse.ArgumentParser:
     status = commands.add_parser("run-status"); status.add_argument("--run-id", required=True); status.set_defaults(handler=run_status_command)
     ingest = commands.add_parser("ingest"); ingest.add_argument("--run-id", required=True); ingest.add_argument("--step-id", required=True); ingest.add_argument("--response-file", required=True); ingest.add_argument("--response-source", choices=RESPONSE_SOURCES, required=True); ingest.set_defaults(handler=ingest_command)
     ingest.add_argument("--call-file")
+    report = commands.add_parser('history-report')
+    report.add_argument('--run-id', required=True)
+    report.add_argument('--manifest', required=True)
+    from tracker_history_status import history_report_command
+    report.set_defaults(handler=history_report_command)
     history = commands.add_parser("history-review")
     history.add_argument("--run-id", required=True)
     history.add_argument("--project-root", required=True)
@@ -1969,9 +1655,7 @@ def parser() -> argparse.ArgumentParser:
     release.add_argument("--membership")
     from tracker_release import release_preview_command
     release.set_defaults(handler=release_preview_command)
-    error = commands.add_parser("ingest-error"); error.add_argument("--run-id", required=True); error.add_argument("--step-id", required=True); error.add_argument("--error-file", required=True); error.set_defaults(handler=ingest_error_command)
     reconcile = commands.add_parser("reconcile"); reconcile.add_argument("--run-id", required=True); reconcile.set_defaults(handler=reconcile_command)
-    resolve = commands.add_parser("resolve-conflict"); resolve.add_argument("--run-id", required=True); resolve.add_argument("--task-key", required=True); resolve.add_argument("--choice", choices=RESOLUTION_CHOICES, required=True); resolve.add_argument("--apply-to-following", action="store_true"); resolve.add_argument("--custom-file"); resolve.set_defaults(handler=resolve_conflict_command)
     result = commands.add_parser("result-status"); result.add_argument("--run-id", required=True); result.set_defaults(handler=result_status_command)
     application = commands.add_parser("application-state")
     application.add_argument("--run-id", required=True)

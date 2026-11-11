@@ -115,7 +115,7 @@ INDEX_COMMANDS = (
     "Подготовь декомпозицию клиентской части.",
     "Проверь декомпозицию.",
     "Покажи непокрытые требования.",
-    "Подготовь список для Jira.",
+    "Подготовь список для SberTrek.",
     "Декомпозиция подтверждена разработкой.",
 )
 
@@ -316,7 +316,7 @@ def validate_task_card(card_text: str, task: dict[str, Any]) -> list[str]:
         f"{task_id} уже реализована. Проверь.",
         f"Отмени {task_id}:",
         f"{task_id} подтверждена разработкой.",
-        f"Свяжи {task_id} с <ключ Jira>.",
+        f"Свяжи {task_id} с <ключ SberTrek>.",
         f"Возьми {task_id} в разработку.",
     )
     for fragment in command_fragments:
@@ -1349,9 +1349,9 @@ def validate_decomposition(
         estimate_source = task.get("estimate_source")
         if estimate_source not in {None, "developer", "sdd", "other"}:
             errors.append(f"{task_id}: invalid estimate_source")
-        jira_key = task.get("jira_key")
-        if jira_key is not None and (not isinstance(jira_key, str) or not jira_key.strip()):
-            errors.append(f"{task_id}: jira_key must be null or non-empty text")
+        sbertrek_key = task.get("sbertrek_key")
+        if sbertrek_key is not None and (not isinstance(sbertrek_key, str) or not sbertrek_key.strip()):
+            errors.append(f"{task_id}: sbertrek_key must be null or non-empty text")
         maximum = 5 if contour == "backend" else 10
         if isinstance(estimate, (int, float)) and not isinstance(estimate, bool) and estimate > maximum:
             if not isinstance(task.get("size_exception_reason"), str) or not task["size_exception_reason"].strip():
@@ -1600,7 +1600,7 @@ def prepare_implementation_command(args: argparse.Namespace) -> int:
         "decomposition_revision": args.decomposition_revision,
         "task_id": args.task_id,
         "result_revision": args.result_revision,
-        "jira_key": tasks[args.task_id].get("jira_key"),
+        "sbertrek_key": tasks[args.task_id].get("sbertrek_key"),
         "requirement_results": [implementation_result_item("requirement", item) for item in tasks[args.task_id].get("requirements", [])],
         "scenario_results": [implementation_result_item("scenario", item) for item in tasks[args.task_id].get("scenarios", [])],
     })

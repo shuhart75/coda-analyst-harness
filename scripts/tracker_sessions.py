@@ -29,7 +29,7 @@ def applied_execution(run_id: str) -> dict | None:
 
 def resume_command(args) -> int:
     from tracker_workflow import (RUN_ID, STOP_EXIT, config_status_payload, load_config,
-                                  load_run, run_path, state_root, status_payload, verified_result)
+                                  load_run, load_json, run_path, state_root, status_payload, verified_result)
 
     gate = config_status_payload(load_config())
     if gate.get('must_stop'):
@@ -41,11 +41,12 @@ def resume_command(args) -> int:
             continue
         if args.run_id and directory.name != args.run_id:
             continue
-        run = load_run(directory.name)
+        run = load_json(run_path(directory.name))
         scope = run['scope']
         matches = (scope['kind'] == args.scope_kind and scope['provider'] == args.scope_provider
                    and set(scope['ids']) == set(args.scope_id) and scope['intent'] == args.intent
-                   and set(scope.get('epic_ids', [])) == set(args.epic_id))
+                   and set(scope.get('epic_ids', [])) == set(args.epic_id)
+                   and bool(scope.get('include_history')) == bool(getattr(args, 'include_history', False)))
         if not matches:
             if args.run_id:
                 raise ValueError('Requested run does not match the current request scope and intent')
@@ -64,7 +65,7 @@ def resume_command(args) -> int:
                           'message': 'Do not substitute another release, abandon a run or begin a replacement automatically'},
                          ensure_ascii=False, indent=2))
         return 2
-    run = candidates[0]
+    run = load_run(candidates[0]["run_id"])
     payload = status_payload(run)
     payload.update(scope=run['scope'], run_json=str(run_path(run['run_id'])),
                    writes_performed=False, resume=True)

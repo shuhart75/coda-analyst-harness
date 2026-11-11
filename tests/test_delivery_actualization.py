@@ -64,10 +64,15 @@ class DeliveryActualizationTests(unittest.TestCase):
         self.write(self.groups_path, self.expected['groups'])
         self.rows['QA-REGISTRY']['Estimate (дн)'] = '7.2'
         self.rows['QA-REST']['Estimate (дн)'] = '1.8'
+        # Fixed QA end dates require separate capacity for overlapping release groups.
+        self.rows['QA-REGISTRY']['Executor'] = 'Q2'
+        self.rows['QA-REST']['Executor'] = 'Q3'
+        roster = self.project / 'planning/team.md'
+        roster.write_text(roster.read_text().replace('| QA | Q1 |', '| QA | Q1, Q2, Q3 |'))
         self.write_registry(self.registry, self.rows.values())
         (self.gantt / 'includes/actual-progress/FEATURE-kib-next.puml').write_text("' existing KIB\n")
         self.git(self.project, 'add', '--all')
-        self.git(self.project, 'commit', '-m', 'Prepare quarterly deliveries')
+        self.git(self.project, 'commit', '-m', 'RSCON-123: Prepare quarterly deliveries')
         before = self.snapshot(self.project)
         self.run_tool(self.state, 'config-status')
         run = self.run_tool(self.state, 'begin', '--adaptive', '--scope-kind', 'epic',
@@ -97,7 +102,7 @@ class DeliveryActualizationTests(unittest.TestCase):
         self.decision.write_text('Accept development facts for registry and prevalidation; retain all QA fields and KIB.')
         manifest = {'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'Delivery fixture decision',
                     'quarter': '2026-Q4', 'deliveries': ['registry', 'other'], 'provider': 'sbertrek',
-                    'participants': {'dev': 'BE', 'qa': 'QA'}, 'status_rules': {'not_started': ['created']},
+                    'participants': {'dev': 'BE', 'qa': 'QA'}, 'status_rules': {'not_started': ['created'], 'development_started': ['development']},
                     'responses': [self.history_entry(task) for task in tasks], 'qa_confirmations': [
                         {'feature': key, 'task_id': task, 'kind': 'keep-current', 'fields': {},
                          'analyst_confirmed': True, 'source': self.evidence(self.decision)}

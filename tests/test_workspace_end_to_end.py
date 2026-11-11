@@ -9,6 +9,7 @@ import tempfile
 import unicodedata
 import unittest
 from pathlib import Path
+from analysis_task_fixture import task_binding
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +31,7 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
 
     def commit_all(self, repository: Path, message: str) -> str:
         self.assertEqual(run("git", "-C", str(repository), "add", "-A").returncode, 0)
-        committed = run("git", "-C", str(repository), "commit", "-m", message)
+        committed = run("git", "-C", str(repository), "commit", "-m", "RSCON-123: " + message)
         self.assertEqual(committed.returncode, 0, committed.stdout + committed.stderr)
         return run("git", "-C", str(repository), "rev-parse", "HEAD").stdout.strip()
 
@@ -55,6 +56,7 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
             old_name = "context/source-materials/Маршруты_согласовании\u0306.md"
             new_name = unicodedata.normalize("NFC", old_name)
             (source_work / old_name).write_text("маршрут\n", encoding="utf-8")
+            (source_work / "context/analysis-task.json").write_text(json.dumps(task_binding(kind='context')))
             self.commit_all(source_work, "legacy project with embedded harness")
             source_remote = root / "changeswork-copy.git"
             self.bare_remote(source_work, source_remote)
@@ -179,6 +181,8 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
                 self.assertTrue((analytics / relative).is_file(), relative)
             for forbidden in (".workflow", ".vscode"):
                 self.assertFalse((analytics / forbidden).exists())
+            self.assertTrue((analytics / "ontology/catalog.json").is_file())
+            self.assertTrue((analytics / "ontology/README.md").is_file())
             entrypoint = analytics / "AGENTS.md"
             entrypoint_text = entrypoint.read_text(encoding="utf-8")
             gigacode_text = (analytics / "GIGACODE.md").read_text(encoding="utf-8")
@@ -293,14 +297,30 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
             self.assertEqual(run("git", "status", "--porcelain=v1", cwd=harness / "coda").stdout, "")
             self.assertEqual(run("git", "status", "--porcelain=v1", cwd=harness).stdout, harness_status_before)
 
+            from analysis_task_fixture import write_binding, write_planning_binding
+            shared = {}
+            for feature in ('from-root', 'from-analytics'):
+                write_binding(analytics / 'features' / feature)
+                for path in (analytics / 'features' / feature / 'planning').rglob('*'):
+                    if path.is_file():
+                        shared[path.relative_to(analytics).as_posix()] = '2026-Q3'
+            write_planning_binding(analytics, shared=shared)
+            # Planning must reuse the quarter epic already confirmed by context.
+            context_binding = json.loads((analytics / 'context/analysis-task.json').read_text())
+            registry_path = analytics / 'planning/task-bindings.json'
+            registry = json.loads(registry_path.read_text())
+            quarter = context_binding['owner']['id']
+            registry['epics'][quarter]['key'] = context_binding['epic']
+            registry['quarters'][quarter]['epic'] = context_binding['epic']
+            registry_path.write_text(json.dumps(registry))
             self.assertEqual(
                 run(
-                    "git", "add", "--", "features/from-root", "features/from-analytics", cwd=analytics
+                    "git", "add", "--", "features/from-root", "features/from-analytics", "planning/task-bindings.json", cwd=analytics
                 ).returncode,
                 0,
             )
             self.assertEqual(
-                run("git", "commit", "-m", "analytical work before reduced workspace", cwd=analytics).returncode,
+                run("git", "commit", "-m", "RSCON-123: analytical work before reduced workspace", cwd=analytics).returncode,
                 0,
             )
             shutil.rmtree(harness / "coda")
@@ -342,10 +362,8 @@ class CodaWorkspaceEndToEndTests(unittest.TestCase):
             reduced_relative = "context/reduced-workspace.md"
             (analytics / reduced_relative).write_text("работа только в аналитическом репозитории\n", encoding="utf-8")
             self.assertEqual(run("git", "add", "--", reduced_relative, cwd=analytics).returncode, 0)
-            self.assertEqual(
-                run("git", "commit", "-m", "work without source and code", cwd=analytics).returncode,
-                0,
-            )
+            committed = run("git", "commit", "-m", "RSCON-123: work without source and code", cwd=analytics)
+            self.assertEqual(committed.returncode, 0, committed.stdout + committed.stderr)
             review_branch = "feature/reduced-workspace"
             self.assertEqual(run("git", "push", "origin", f"HEAD:refs/heads/{review_branch}", cwd=analytics).returncode, 0)
             self.assertEqual(run("git", "fetch", "origin", review_branch, cwd=documents_work).returncode, 0)

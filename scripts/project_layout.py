@@ -15,6 +15,13 @@ REGISTRY = "delivery-index.json"
 def layout(project: Path) -> dict | None:
     path = project / REGISTRY
     if not path.exists():
+        if ((project / "migration-layout.json").exists()
+                or any((project / "quarters").glob("*/features/*/deliveries/*"))):
+            raise ValueError(
+                "delivery-index-missing: квартальная структура уже существует, но delivery-index.json отсутствует. "
+                "migration-layout.json хранит историю миграции и не заменяет действующий реестр. "
+                "Проверь удаление и согласуй восстановление реестра из принятой истории; "
+                "не переключайся на features/ и не повторяй миграцию.")
         return None
     value = json.loads(path.read_text(encoding="utf-8"))
     if value.get("schema_version") != 1:

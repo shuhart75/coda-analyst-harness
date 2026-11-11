@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -45,6 +47,49 @@ class GigaCodeWorkspaceTests(unittest.TestCase):
         self.assertIn("Новая память.", memory.read_text(encoding="utf-8"))
         self.assertEqual(memory.read_text(encoding="utf-8").count(BLOCK_START), 1)
         self.assertIn(str(ROOT), memory.read_text(encoding="utf-8"))
+        self.assertEqual(subprocess.run(
+            ("git", "-C", str(self.project), "status", "--porcelain"),
+            text=True, capture_output=True, check=True,
+        ).stdout, "")
+
+    def test_documented_routes_resolve_to_shipped_commands_skills_and_contracts(self) -> None:
+        routes = []
+        for line in (ROOT / "GIGACODE.md").read_text().splitlines():
+            if line.startswith("| `/"):
+                cells = [cell.strip() for cell in line.strip("|").split("|")]
+                command = cells[0].strip("`").removeprefix("/")
+                skill = re.fullmatch(r"`(coda-[a-z-]+)`", cells[1])
+                contract = cells[2].strip("`")
+                self.assertTrue((ROOT / ".gigacode/commands" / f"{command}.md").is_file())
+                self.assertTrue((ROOT / contract).is_file())
+                if skill:
+                    name = skill.group(1)
+                    text = (ROOT / ".gigacode/skills" / name / "SKILL.md").read_text()
+                    self.assertRegex(text, rf"(?m)^name: {re.escape(name)}$")
+                routes.append(command)
+        shipped = {p.stem for p in (ROOT / ".gigacode/commands").glob("*.md")}
+        self.assertEqual(set(routes), shipped)
+        self.assertEqual(len(routes), len(shipped))
+
+    def test_upgrade_adds_repository_skill_and_preserves_user_files(self) -> None:
+        distribution = Path(self.temp.name) / "old-distribution"
+        shutil.copytree(ROOT / ".gigacode", distribution / ".gigacode")
+        relative = ".gigacode/skills/coda-repositories/SKILL.md"
+        shutil.rmtree(distribution / ".gigacode/skills/coda-repositories")
+        with patch("gigacode_workspace.BUNDLE_ROOT", distribution):
+            install_gigacode_workspace(self.project, ROOT)
+        self.assertFalse((self.project / relative).exists())
+        user = self.project / ".gigacode/skills/custom/SKILL.md"
+        user.parent.mkdir(parents=True)
+        user.write_text("user-owned\n")
+        install_gigacode_workspace(self.project, ROOT)
+        self.assertEqual((self.project / relative).read_bytes(), (ROOT / relative).read_bytes())
+        manifest = json.loads((self.project / MANIFEST).read_text())
+        self.assertIn(relative, manifest["files"])
+        self.assertEqual(user.read_text(), "user-owned\n")
+        installed = self.snapshot()
+        install_gigacode_workspace(self.project, ROOT)
+        self.assertEqual(installed, self.snapshot())
         self.assertEqual(subprocess.run(
             ("git", "-C", str(self.project), "status", "--porcelain"),
             text=True, capture_output=True, check=True,

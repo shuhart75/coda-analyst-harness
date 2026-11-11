@@ -35,14 +35,15 @@ class RawHistoryScenario(ReleaseActualizationEndToEndTests):
         template, developer, tester, arrow = formats[variant]
         lines = ['2026-08-01T12:00:00+00:00 CREATE; actor=dev; создана карточка, исполнитель не указан']
         if key != 'LAB-112':
-            lines.append(template.format(at='2026-08-02T12:00:00+00:00', operation='ADD', values=developer))
+            lines.append(template.format(at='2026-08-02T11:59:00+00:00', operation='ADD', values=developer))
+            lines.append('2026-08-02T12:00:00+00:00 status CHANGE created -> development')
         lines.append(template.format(at='2026-08-03T12:00:00+00:00', operation='CHANGE',
                                      values=developer + arrow + tester))
         text = f'Records: {len(lines)}; offset: 0; more: False\n' + '\n'.join(lines)
         source = self.inputs / f'{key}-history.txt'
         source.write_text(text, encoding='utf-8')
         snapshot = self.write(self.inputs / f'{key}-snapshot.json',
-                              {'key': key, 'assignee': 'qa', 'status': 'created'})
+                              {'key': key, 'assignee': 'qa', 'status': 'created' if key == 'LAB-112' else 'development'})
         call = {**self.call('sbertrek'), 'arguments': {'key': key}}
         return {'provider': 'sbertrek', 'key': key, 'role': role,
                 'response_file': str(source), 'format': 'text', 'sha256': digest(source), 'call': call,
@@ -67,7 +68,7 @@ def create(destination, *, raw_history=False):
         fixture.collect(decision_text=(
             'Synthetic approval: LAB-112 is BE in registry. dev is a BE/FE developer; qa is a tester. '
             'Keep nonmembers unchanged. Approve twelve release members and three remainder members; '
-            'QA shares 7.2 and 1.8. Accept development dates supported by assignment history. '
+            'QA shares 7.2 and 1.8. Accept development start from status history and finish from QA handoff. '
             'Card creation with actor alone is not a development start. Unknown start and estimate stay unknown. '
             'QA-REGISTRY is in-progress with unknown progress and finish; start is the first handoff to QA. '
             'QA-REST facts stay unchanged.' if raw_history else None))
@@ -77,14 +78,20 @@ def create(destination, *, raw_history=False):
         immutable = {}
         for directory in (fixture.inputs, fixture.state / 'tracker-runs'):
             for path in directory.rglob('*'):
-                if path.is_file():
+                if path.is_file() and path != fixture.state / 'tracker-runs' / fixture.run_id / 'history-current.json':
                     immutable[str(path.relative_to(destination))] = digest(path)
         for path in fixture.state.glob('*-response.json'):
             immutable[str(path.relative_to(destination))] = digest(path)
         immutable[str((fixture.state / 'links.json').relative_to(destination))] = digest(fixture.state / 'links.json')
-        mutable = {'features/registry/execution/tasks.md', 'features/registry/execution/qa-groups.json',
+        mutable = {'planning/2026-Q3/gantt/actual-progress-resources.json',
+                   'planning/2026-Q3/gantt/actual-progress-estimates-only-resources.json',
+                   'features/registry/execution/tasks.md', 'features/registry/execution/qa-groups.json',
                    'planning/2026-Q3/gantt/actual-progress.puml',
                    'planning/2026-Q3/gantt/actual-progress-confluence.puml',
+                   'planning/2026-Q3/gantt/actual-progress-focus.puml',
+                   'planning/2026-Q3/gantt/actual-progress-focus-confluence.puml',
+                   'planning/2026-Q3/gantt/actual-progress-estimates-only.puml',
+                   'planning/2026-Q3/gantt/actual-progress-estimates-only-confluence.puml',
                    'planning/2026-Q3/gantt/includes/actual-progress/FEATURE-registry.puml',
                    'planning/2026-Q3/gantt/includes/actual-progress/FEATURE-other.puml'}
         project_files = fixture.snapshot(fixture.project)
