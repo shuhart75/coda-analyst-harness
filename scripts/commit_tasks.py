@@ -21,6 +21,9 @@ WORK_BINDINGS = 'work-task-bindings.json'
 def expected_title(kind, title):
     if kind not in PREFIXES or not isinstance(title, str) or not title.strip() or any(char in title for char in '\r\n'):
         raise ValueError('Укажи вид работы и название владельца')
+    if title.strip().startswith(tuple(PREFIXES.values())):
+        raise ValueError('Передай title без служебного префикса; он добавляется автоматически')
+    title = title.strip()
     if kind == 'planning' and not QUARTER.fullmatch(title):
         raise ValueError('Название квартального планирования должно иметь вид YYYY-QN')
     return PREFIXES[kind] + ' ' + title
@@ -169,46 +172,74 @@ def card_epic(item, fields, key, memberships):
     return next(iter(memberships[key]), None)
 
 
-def ingest_search(state, raw, *, items_pointer, fields, closed_values, complete, step, memberships=None):
-    if state['step_id'] != step or state['status'] not in ('search-required', 'create-outcome-unknown'):
+def revise_request(state, title, step):
+    if (state['status'] != 'search-required' or state['step_id'] != step
+            or any(state.get(key) for key in ('attempts', 'evidence', 'candidates', 'binding'))):
+        raise ValueError('Исправить название можно только до поиска и попыток создания')
+    spec = {**state['spec'], 'summary': expected_title(state['spec']['kind'], title)}
+    validate_task({**spec, 'key': 'VALIDATION-1'})
+    state.setdefault('corrections', []).append(state['spec'])
+    state.update(spec=spec, step_id=uuid.uuid4().hex)
+    return state
+
+
+def ingest_search(state, raw, *, items_pointer, fields, closed_values, complete, step,
+                  memberships=None, thematic=False):
+    if state['step_id'] != step or state['status'] not in ('search-required', 'related-search-required', 'create-ready', 'analyst-selection-required', 'create-outcome-unknown'):
         raise ValueError('Ответ не соответствует ожидаемому поиску')
+    if state['status'] == 'related-search-required' and not thematic:
+        raise ValueError('Нужен тематический поиск без фильтра по префиксу')
     items = pointer(raw, items_pointer)
     if not isinstance(items, list) or not complete:
-        raise ValueError('Нужен полный результат поиска в эпике без усечения и непрочитанных страниц')
-    if not closed_values or not isinstance(closed_values, list):
-        raise ValueError('Укажи закрытые состояния из реальных метаданных трекера')
+        raise ValueError('Нужен полный результат поиска без усечения и непрочитанных страниц')
     spec = state['spec']
-    candidates = {}
+    candidates, related = {}, {}
     for item in items:
-        card = {name: pointer(item, fields[name]) for name in ('key', 'summary', 'suit', 'status')}
-        if not isinstance(card['status'], str) or not card['status']:
-            raise ValueError('Состояние найденной задачи неизвестно')
+        card = {name: pointer(item, fields[name]) for name in ('key', 'summary', 'suit')}
         if card['suit'] != 'task':
             continue
-        if not isinstance(card['summary'], str) or not card['summary'].startswith(PREFIXES[spec['kind']] + ' '):
+        if not isinstance(card['summary'], str):
+            raise ValueError('Название найденной задачи неизвестно')
+        prefixed = card['summary'].startswith(PREFIXES[spec['kind']] + ' ')
+        if not prefixed and not thematic:
             continue
         if not isinstance(card['key'], str) or not KEY.fullmatch(card['key']):
             raise ValueError('Некорректный собственный ключ SberTrack')
         card['epic'] = card_epic(item, fields, card['key'], memberships)
         if card['epic'] != spec['epic']:
             continue
-        card['closed'] = card['status'] in closed_values
-        if card['key'] in candidates and candidates[card['key']] != card:
-            raise ValueError('Поиск вернул противоречивые карточки одной задачи')
-        candidates[card['key']] = card
+        if prefixed:
+            if not closed_values or not isinstance(closed_values, list):
+                raise ValueError('Укажи закрытые состояния из реальных метаданных трекера')
+            card['status'] = pointer(item, fields['status'])
+            if not isinstance(card['status'], str) or not card['status']:
+                raise ValueError('Состояние найденной задачи неизвестно')
+            card['closed'] = card['status'] in closed_values
+        target = candidates if prefixed else related
+        if card['key'] in candidates or card['key'] in related:
+            if (candidates.get(card['key']) or related.get(card['key'])) != card:
+                raise ValueError('Поиск вернул противоречивые карточки одной задачи')
+        target[card['key']] = card
+    if state['status'] == 'analyst-selection-required':
+        previous_keys = {card['key'] for card in state.get('candidates', []) + state.get('related_candidates', [])}
+        if not previous_keys.issubset(candidates.keys() | related.keys()):
+            raise ValueError('Повторное чтение не должно скрывать ранее найденные задачи; нужно решение аналитика')
     previous_unknown = state['status'] == 'create-outcome-unknown'
-    state['candidates'] = list(candidates.values())
+    state.update(candidates=list(candidates.values()), related_candidates=list(related.values()))
+    if thematic:
+        state['thematic_search_complete'] = True
     exact = [card for card in candidates.values() if card['summary'] == spec['summary']]
     if len(exact) == 1 and not exact[0]['closed']:
         state.update(status='resolved', binding={**spec, 'key': exact[0]['key']})
-    elif candidates:
+    elif candidates or related:
         state.update(status='analyst-selection-required',
-                     next_question='Какую из найденных задач связать с этой работой? Закрытую задачу можно использовать только по явному решению.')
+                     next_question='Какую из найденных задач использовать? Для задачи без нужного префикса требуется отдельно согласовать переименование и повторить проверочное чтение; создание отдельной задачи требует решения о различии работ.')
     elif previous_unknown:
         state.update(status='creation-reconciliation-required',
                      next_question='Результат создания неизвестен, повторный поиск не нашёл задачу. Проверь результат операции перед повторным созданием.')
     else:
-        state['status'] = 'create-ready'
+        state['status'] = ('related-search-required' if spec['kind'] == 'delivery'
+                           and not state.get('thematic_search_complete') else 'create-ready')
     state['step_id'] = uuid.uuid4().hex
     return state
 
@@ -230,13 +261,17 @@ def confirm_create(state, confirmation):
     if state['status'] not in ('analyst-selection-required', 'creation-reconciliation-required') or not confirmation.strip():
         raise ValueError('Новое создание требует явного решения после разбора найденных задач или результата прошлой попытки')
     state.setdefault('decisions', []).append({'action': 'confirm-create', 'confirmation': confirmation})
-    state.update(status='create-ready', step_id=uuid.uuid4().hex)
+    state.update(status=('related-search-required' if state['spec']['kind'] == 'delivery'
+                         and not state.get('thematic_search_complete') else 'create-ready'),
+                 step_id=uuid.uuid4().hex)
     return state
 
 
 def begin_create(state, tool, arguments, step, fields, link_separately=False):
     if state['status'] != 'create-ready' or state['step_id'] != step:
         raise ValueError('Создание допустимо только после полного поиска без подходящей задачи')
+    if state['spec']['kind'] == 'delivery' and not state.get('thematic_search_complete'):
+        raise ValueError('Перед созданием нужен полный тематический поиск; возобнови search-result')
     if not tool or not isinstance(arguments, dict):
         raise ValueError('Запиши фактический инструмент MCP и его аргументы')
     for name in (('summary', 'suit') if link_separately else ('summary', 'suit', 'epic')):

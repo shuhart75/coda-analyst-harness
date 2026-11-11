@@ -953,8 +953,79 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
 def pause_import_for_task(state_path: Path, state: dict, question: str) -> dict:
     state.update({"status": "awaiting-analysis-task", "resolution_reason": question, "next_action": "resolve-commit-task",
                   "message": question, "task_decisions_file": str(Path(state["checkout"]).parent / "task-decisions.json")})
+    state['bind_task_command'] = ['python3', 'scripts/repository-exchange.py', 'bind-import-task',
+                                  '--task-state', 'STATE', '--expected-source', state['source_commit'],
+                                  '--expected-base', state['base_commit']]
     atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
     return dict(state)
+
+
+def bind_import_task_command(args):
+    """Export a resolved receiver request into the pending isolated import."""
+    from commit_tasks import validate_task
+    root = root_path(args.root)
+    handle = lock(root)
+    try:
+        state = json.loads((root / '.workspace-state/source-import.json').read_text())
+        if (state.get('status') != 'awaiting-analysis-task'
+                or state.get('source_commit') != args.expected_source
+                or state.get('base_commit') != args.expected_base):
+            raise ValueError('Ожидающий импорт изменился; повтори sync и проверь его версии')
+        checkout = root / '.workspace-state/source-imports' / args.expected_source / 'repository'
+        if (Path(state['checkout']).resolve() != checkout.resolve()
+                or checkout.resolve() != checkout.absolute()
+                or git(checkout, 'rev-parse', 'HEAD').stdout.strip() != args.expected_base):
+            raise ValueError('Изолированный checkout не соответствует ожидающему импорту')
+        task_path = Path(args.task_state)
+        with task_path.with_suffix('.lock').open('a') as task_lock:
+            fcntl.flock(task_lock, fcntl.LOCK_EX)
+            task = json.loads(task_path.read_text())
+        if task.get('status') != 'resolved' or not task.get('evidence'):
+            raise ValueError('Нужна разрешённая задача с сохранёнными ответами MCP')
+        for evidence in task['evidence']:
+            if hashlib.sha256(Path(evidence['path']).read_bytes()).hexdigest() != evidence['sha256']:
+                raise ValueError('Контрольная сумма ответа MCP не совпала')
+        binding = validate_task(task['binding'], 'delivery')
+        if any(binding.get(key) != task['spec'].get(key) for key in ('owner', 'epic', 'kind')):
+            raise ValueError('Связь не соответствует запросу задачи')
+        # Re-read requests from the prospective merge, not a stale saved report.
+        state.pop('task_requests', None)
+        try:
+            import_task_context(checkout, state)
+        except ValueError:
+            # Missing bindings are the expected reason this import is paused.
+            # Request parsing occurs before binding validation.
+            if not state.get('task_requests'):
+                raise
+        matches = [item for item in state['task_requests'] if item['owner'] == binding['owner']]
+        if len(matches) != 1:
+            raise ValueError('Нет единственного запроса этой поставки в ожидающем импорте')
+        relative = str(Path(matches[0]['path']).with_name('analysis-task.json'))
+        if Path(relative).is_absolute() or '..' in Path(relative).parts:
+            raise ValueError('Некорректный путь связи поставки')
+        destination = checkout.parent / 'task-decisions.json'
+        if destination.is_symlink():
+            raise ValueError('Файл решений не должен быть символической ссылкой')
+        decisions = (json.loads(destination.read_text()) if destination.exists() else
+                     dict(source_commit=args.expected_source, base_commit=args.expected_base, files={}))
+        if (decisions.get('source_commit') != args.expected_source
+                or decisions.get('base_commit') != args.expected_base):
+            raise ValueError('Решение относится к другой версии импорта')
+        files = decisions.setdefault('files', {})
+        if not isinstance(files, dict) or (relative in files and files[relative] != binding):
+            raise ValueError('Для этой поставки уже сохранено другое решение')
+        for revision in (args.expected_source, args.expected_base):
+            carried = git(checkout, 'show', revision + ':' + relative)
+            if not carried.returncode and json.loads(carried.stdout) != binding:
+                raise ValueError('В импорте уже есть другая связь задачи')
+        files[relative] = binding
+        atomic_write(destination, (json.dumps(decisions, ensure_ascii=False, indent=2) + '\n').encode())
+        print(json.dumps(dict(status='import-task-bound', path=str(destination),
+                             binding_path=relative, key=binding['key'], next_action='workspace.py sync'),
+                         ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        handle.close()
 
 
 def preflight_import_tree(root: Path, source: Path, checkout: Path, incoming: str) -> None:
@@ -2577,6 +2648,11 @@ def parser() -> argparse.ArgumentParser:
     approve_deletion.set_defaults(handler=approve_deletion_command)
     inspect_conflict = commands.add_parser("inspect-source-analytics-conflict")
     inspect_conflict.set_defaults(handler=inspect_conflict_command)
+    bind_task = commands.add_parser("bind-import-task")
+    bind_task.add_argument("--task-state", required=True)
+    bind_task.add_argument("--expected-source", required=True)
+    bind_task.add_argument("--expected-base", required=True)
+    bind_task.set_defaults(handler=bind_import_task_command)
     defer_import = commands.add_parser("defer-source-import")
     defer_import.add_argument("--analyst-confirmed", action="store_true")
     defer_import.set_defaults(handler=defer_source_import_command)
