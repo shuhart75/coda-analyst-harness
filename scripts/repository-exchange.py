@@ -1063,6 +1063,14 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     report = source_import_report(checkout, state["base_commit"], candidate)
     state.update({"request_commit": candidate, "status": "prepared", "review": report})
     atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
+    from receiver_tasks import pending_requests
+    task_requests = pending_requests(checkout, candidate)
+    if task_requests:
+        state.update(status='receiver-tasks-required')
+        atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
+        return {**state, 'task_requests': task_requests, 'merge_request_created': False,
+                'allowed_next_action': 'resolve-receiver-task-requests',
+                'message': 'Импорт подготовлен локально. Требуется создать или найти задачи AN по запросам принимающей стороны; ветка ещё не отправлена.'}
     pushed = pending.get(branch) == candidate
     push_error = None
     if not no_push and not pushed:
@@ -1856,6 +1864,7 @@ def sync_command(args: argparse.Namespace) -> int:
                 "report_message": source_merge["message"],
                 "next_action": {
                     "awaiting-merge": "create-or-review-import-merge-request",
+                    "receiver-tasks-required": "resolve-receiver-task-requests",
                     "deferred": "wait-for-source-revision",
                 }.get(source_merge["status"], "retry-import-push"),
                 "forbidden_claims": ["all-repositories-synchronized"],

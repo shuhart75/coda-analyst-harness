@@ -32,6 +32,22 @@ def validate_file(path: Path) -> None:
         message = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ValueError(f"Не удалось прочитать сообщение коммита: {exc}") from exc
+    if has_tracker_identifier(message):
+        from receiver_tasks import git, read_blob, validate_request, REQUEST_FILE, KEY
+        import json
+        repository = Path.cwd()
+        paths = git(repository, 'diff', '--cached', '--name-only').splitlines()
+        if paths and all(path.endswith('/analysis-task.json') for path in paths):
+            keys = set()
+            for path in paths:
+                binding = json.loads(read_blob(repository, '', path))
+                request = validate_request(json.loads(read_blob(repository, '', path.rsplit('/', 1)[0] + '/' + REQUEST_FILE)))
+                if (binding.get('request_id') != request['request_id'] or binding.get('role') != 'AN'
+                        or binding.get('provider') != 'sbertrek' or not KEY.fullmatch(str(binding.get('key', '')))):
+                    raise ValueError('Invalid receiver task binding')
+                keys.add(binding['key'])
+            if keys <= set(TRACKER_IDENTIFIER_RE.findall(message.split('\n', 1)[0])):
+                return
     require_valid_commit_message(message)
 
 

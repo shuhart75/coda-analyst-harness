@@ -318,3 +318,7 @@ Context summaries, checkpoints and research files are internal harness operation
 - Run `python3 scripts/validate-language.py "$PROJECT_ROOT"` for changed requirements before completion.
 - Run `python3 scripts/validate-requirements-profile.py "$PROJECT_ROOT"` for changed root documents that use the profile marker.
 - Run `python3 scripts/validate-requirements-wording.py "$PROJECT_ROOT"` for changed compact requirements. A successful script result never replaces the isolated-reader review from `core/requirements-wording.md`.
+
+## Задача AN при синхронизации
+
+При receiver-tasks-required продолжай по core/receiver-tasks.md: проверь полномочия и доступные средства SberTrack, найди задачу по request_id либо зарегистрируй единственную попытку создания, сохрани реальную связь через receiver_tasks.py и повтори sync. Неизвестный исход создания требует сверки, а не повторного вызова. Source/main, обычный documents/main и исторические коммиты не меняются; человеческое принятие импорта остаётся обязательным.

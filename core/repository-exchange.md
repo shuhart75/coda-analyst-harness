@@ -174,3 +174,5 @@ The blocked result reports `source-import-whitespace-errors`, the exact base and
 candidate commits, isolated checkout, complete Git diagnostic and a read-only
 inspection command. The candidate remains local and neither documents/main nor
 the remote target branch changes on failure. Retry preserves the same import.
+
+Before pushing a source-import candidate, resolve analysis-task-request.json through core/receiver-tasks.md. receiver-tasks-required is unfinished synchronization; preserve the isolated import and resume it after binding real tasks. Do not create a second request or publish an unresolved candidate.
