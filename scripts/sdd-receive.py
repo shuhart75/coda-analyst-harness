@@ -142,6 +142,9 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
     if not isinstance(descriptor, dict):
         raise ValueError("Редакция не содержит SDD-вход")
     sdd_bundle.verify_descriptor(bundle_root, requirements_text, descriptor, allow_decision=decision is not None)
+    if "tasks" in descriptor:
+        import grooming
+        grooming.require_identity(bundle_root.parent / "tasks", feature, entry["stage_id"])
     files = {name: (bundle_root / relative_path(name)).read_bytes() for name in descriptor["files"]}
     if {name: digest(data) for name, data in files.items()} != descriptor["files"]:
         raise ValueError("SDD-вход изменился во время чтения")
@@ -251,6 +254,10 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
                      "commands": [["openspec", "status", "--change", item["imported_id"], "--json"],
                                   ["openspec", "validate", item["imported_id"], "--strict", "--no-interactive", "--json"]]}
                     for item in prepared],
+        "tasks": ({"path": str(bundle_root.parent / "tasks"),
+                   "sha256": descriptor["tasks"]["sha256"],
+                   "index": str(bundle_root.parent / "tasks/grooming.json")}
+                  if "tasks" in descriptor else None),
         "materials": ({"path": str(bundle_root.parent / "materials"),
                        "sha256": descriptor["materials"]["sha256"],
                        "file_count": len(descriptor["materials"]["files"])}

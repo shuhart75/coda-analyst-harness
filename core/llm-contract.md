@@ -1,5 +1,10 @@
 # LLM Contract
 
+## Grooming before delivery
+
+Follow `core/grooming.md` for explicit grooming commands. Confirm tasks one at a time using requirement titles, infer FE/BE from the task prefix, and use person-days exclusively. Include confirmed task documents in the audited SDD input. Create or update SberTrack Story records only after confirmed publication, with `RSCON_dev` on every new story and a revision-bound document link. The receiver preserves groomed story scope and owns technical design/tasks within it. Legacy inputs without grooming retain their previous decomposition contract.
+
+
 This is the operation contract for the GigaCode variant of the AS KODA harness.
 Read `GIGACODE.md` for native command and skill routing. `AGENTS.md` remains
 a compatibility entry point. The independent generic `analyst-harness` remains
@@ -187,7 +192,7 @@ continuing; never downgrade state to bypass stage gates.
 - The sole authored requirement source is `features/<feature>/requirements.md`.
 - An exchange revision lives under `requirements-exchange/<feature>/revisions/<NNN>/`. Its input contains immutable `requirements.md` and, for the OpenSpec profile in `core/sdd-input.md`, analyst-authored proposal/delta specs under `sdd/`; `manifest.json` at feature level selects the active revision and requests returns. Developer acceptance is recorded by an immutable `returns/receipt.json` bound to that revision and checksum, never by editing the analyst-owned manifest.
 - In configured multi-user mode, ordinary analytical edits live in `feature/<feature>/<analyst>`; later cycles use the next free `-2`, `-3` suffix instead of deleting or overwriting historical branches. Packages may be created only from an up-to-date `analytics/main` after the feature branch has been accepted by a human merge request. A feature branch never participates directly in source exchange or reverse-patch generation.
-- `returns/tasks.md` is the already agreed developer decomposition. The analytical workflow does not own or confirm the agreement process.
+- `returns/tasks.md` records the receiver technical work. With groomed input it preserves the agreed Story ids and scope from `core/grooming.md`; without grooming it records the legacy developer-owned decomposition.
 - Receiver-side context is disclosed progressively: feature `manifest.json`, active `requirements.md`, the selected contour's local SDD, matched code, then nearby tests. Do not load all of `coda` or both contours without a recorded dependency.
 - Analyst-side code inspection is progressive and strictly read-only. Resolve role `code` through `.workspace-state/code-repos.json`, snapshot it with `code-inspect.py begin`, inspect one contour and bounded matches, then prove that files, index, branch, `HEAD` and repository configuration are unchanged with `code-inspect.py verify`. The registered exchange write paths are isolated `requirements-exchange.py prepare` publication and `baselinectl.py cleanup-exchange` under core/quarter-deliveries.md. Cleanup deletes only the exact archived packet after baseline and archive acceptance in analytics/main, through a separate review branch and human merge, leaving the ordinary code checkout unchanged; no user wording extends these operations.
 - New exchange revisions require direct `REQ-*` traceability. Migrate an older document consciously before its next transfer; never manufacture product meaning.

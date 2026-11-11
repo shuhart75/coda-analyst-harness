@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "delivery": "delivery-key",
+  "stage_id": "stage-1",
+  "requirements_sha256": "<sha256 of exact requirements.md>",
+  "epic_key": "<confirmed native SberTrack epic key>",
+  "estimate_unit": "person-days",
+  "coverage_review": "<requirement, scenario, contour and cross-task coverage review>",
+  "qa_review": "<analyst decision about QA tasks and estimates without duplication>",
+  "tasks": [
+    {
+      "id": "fe-01",
+      "summary": "FE Настройка параметров",
+      "role": "FE",
+      "source_sha256": "<grooming.task_source_hash(task, requirement_blocks)>",
+      "estimate": 3,
+      "description": "<short agreed description>",
+      "acceptance": "<observable result>",
+      "depends_on": [],
+      "sdd_changes": ["frontend/change-id"],
+      "requirements": [
+        {"req_id": "REQ-EXAMPLE", "scope": "<frontend responsibility>", "scenarios": ["<exact authored scenario title>"]}
+      ],
+      "confirmation": {"text": "<exact analyst confirmation>", "sha256": "<grooming.approval_hash(task)>"}
+    }
+  ],
+  "confirmation": {"text": "<exact final scope confirmation>", "sha256": "<grooming.approval_hash(plan)>"}
+}

@@ -210,7 +210,7 @@ def install_root_contract(exchange: Path) -> None:
         if current.startswith(managed_headings[target_name]) and target.read_bytes() != source.read_bytes():
             target.write_bytes(source.read_bytes())
 
-    for name in ("sdd-receive.py", "sdd_bundle.py"):
+    for name in ("sdd-receive.py", "sdd_bundle.py", "grooming.py"):
         source = harness_root() / "scripts" / name
         target = exchange / name
         marker = b"analyst-sdd-receiver:v1"
@@ -634,6 +634,9 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
             else:
                 try:
                     sdd_bundle.verify_descriptor(path.parent / "sdd", path.read_text(encoding="utf-8"), sdd, allow_decision=sdd_bundle.decision_basis(item) is not None)
+                    if "tasks" in sdd:
+                        import grooming
+                        grooming.require_identity(path.parent / "tasks", manifest["feature"], item.get("stage_id"))
                 except (ValueError, OSError, TypeError, KeyError) as exc:
                     errors.append(str(exc))
         elif (path.parent / "sdd").exists():
@@ -688,6 +691,9 @@ def prepare_in_exchange(
     state = load_json(layout_feature_root(project, feature) / "requirements-state.json")
     stage = stages.require_audit_stage(state, requirements_text)
     sdd = sdd_audit.require_unchanged(layout_feature_root(project, feature), state)
+    if sdd and "tasks" in sdd:
+        import grooming
+        grooming.require_identity(layout_feature_root(project, feature) / "tasks", feature, stage["stage_id"])
     records = stages.registry(state)["revisions"]
     require_plain_exchange(exchange)
     feature_exchange = exchange / feature
