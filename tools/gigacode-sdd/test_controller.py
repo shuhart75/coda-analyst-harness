@@ -392,6 +392,29 @@ for name in sys.argv[1:]:
         self.assertEqual(set(resumed.state['tasks']), {'be', 'fe'})
         run.assert_called_once()
 
+    def test_missing_search_path_preserves_changes_but_cannot_pass_review(self):
+        report = {'verdict': 'changes', 'findings': ['Add missing restart test'],
+                  'coverage': {'REQ-BE': 'restart evidence missing'}}
+        result = {'ok': False, 'returncode': 0, 'terminal_result': True,
+                  'errors': ['missing path'], 'missing_path_errors': ['missing path'],
+                  'tool_calls': {'a': 'grep_search'},
+                  'tool_results': [{'tool_use_id': 'a', 'is_error': True}],
+                  'events_path': 'private-log', 'text': json.dumps(report)}
+        with patch.object(self.runner, 'session', return_value=result):
+            self.assertEqual(self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'plan-review'), report)
+            report.update(verdict='pass', findings=[])
+            result['text'] = json.dumps(report)
+            with self.assertRaisesRegex(Blocked, 'Reviewer failed'):
+                self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'plan-review')
+            report.update(verdict='changes', findings=['Fix'])
+            result['text'] = json.dumps(report)
+            for key, value in [('permission_denials', [{}]), ('timed_out', True),
+                               ('cancelled', True), ('returncode', 1),
+                               ('errors', ['missing path', 'other failure'])]:
+                with patch.dict(result, {key: value}):
+                    with self.assertRaisesRegex(Blocked, 'Reviewer failed'):
+                        self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'plan-review')
+
     def test_recovered_shell_syntax_does_not_fail_capability_probe(self):
         self.runner.env['FAKE_RECOVERED_SYNTAX'] = '1'
         self.runner.preflight()

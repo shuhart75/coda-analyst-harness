@@ -16,7 +16,7 @@ import time
 import uuid
 
 from policy import prepare_permissions, nexus_environment, audit_dependency_sources, make_policy_prompt
-from transport import run_session, finish_process, preflight_session_ok
+from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable
 from platform_support import (FileLock, launch_process, process_exists,
                               process_scope_exists, process_scope_pids)
 from workspace import git, snapshot, clone_snapshot, export_patch, apply_patch, commit_changes
@@ -580,6 +580,7 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                         self.progress('План принят: задач ' + str(len(plan['tasks'])))
                         return
                     save(self.root / 'plan-rejected.json', {'plan': plan, 'review': verdict})
+                    self.progress('План требует доработки: замечаний ' + str(len(verdict['findings'])))
                     feedback = json.dumps(verdict, ensure_ascii=False)
                     if verdict['verdict'] == 'blocked':
                         self.state['plan_feedback'] = feedback
@@ -604,7 +605,7 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                   'blocked is only for external dependency or analyst business decision. '
                   'Required identifiers: ' + json.dumps(requirements))
         result = self.session(root, cwd, prompt, 'review', name)
-        if not result['ok']:
+        if not result['ok'] and not review_feedback_usable(result):
             raise Blocked('Reviewer failed: ' + result['events_path'])
         report = parse_json(result['text'])
         if report.get('verdict') not in ('pass', 'changes', 'blocked') or not isinstance(report.get('findings'), list):
@@ -616,6 +617,12 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
             raise Blocked('Reviewer passed unresolved findings')
         if report['verdict'] != 'pass' and not report['findings']:
             raise Blocked('Reviewer rejected without actionable findings')
+        if not result['ok']:
+            if report['verdict'] != 'changes':
+                raise Blocked('Reviewer failed: ' + result['events_path'])
+            self.progress('Замечания проверяющего сохранены несмотря на ошибки поиска отсутствующих путей')
+            save(self.logdir(name + '-feedback').with_suffix('.json'),
+                 {'review': report, 'errors': result['errors'], 'events_path': result['events_path']})
         return report
 
     def checks(self, root, checks, name):
