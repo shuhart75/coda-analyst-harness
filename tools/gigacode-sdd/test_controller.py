@@ -170,8 +170,9 @@ for name in sys.argv[1:]:
         self.prepare()
         barrier = self.root / 'parallel-barrier'
         barrier.mkdir()
-        with self.runner.locked(), patch.dict(os.environ, {'FAKE_PARALLEL_BARRIER': str(barrier)}):
+        with self.runner.locked(), patch.dict(self.runner.env, {'FAKE_PARALLEL_BARRIER': str(barrier)}):
             self.runner.run()
+        self.assertTrue(all((barrier / name).is_file() for name in ('be', 'fe')))
         self.assertEqual(self.runner.state['status'], 'complete')
         self.assertEqual(self.runner.state['tasks']['be']['attempts'], 2)
         self.assertEqual(self.runner.state['tasks']['fe']['attempts'], 1)
