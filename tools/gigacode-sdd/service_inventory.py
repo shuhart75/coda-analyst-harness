@@ -75,8 +75,13 @@ def _parse_ps(text):
             if len(parts) != 10:
                 raise ValueError('Incomplete process row')
             pid, ppid, pgid, uid = map(int, parts[:4])
-            if pid <= 0 or min(ppid, pgid, uid) < 0:
+            if pid <= 0 or min(ppid, pgid) < 0:
                 raise ValueError('Invalid process identifier')
+            # macOS ps may print nobody's uid_t as signed -2. Normalize it
+            # to the unsigned representation returned by os.getuid().
+            if not -(1 << 31) <= uid < (1 << 32):
+                raise ValueError('Invalid user identifier')
+            uid %= 1 << 32
         except ValueError:
             malformed = True
             continue

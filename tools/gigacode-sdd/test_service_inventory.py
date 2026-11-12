@@ -168,6 +168,31 @@ class InventoryTests(unittest.TestCase):
         self.assertTrue(malformed)
         self.assertFalse(entries)
 
+    def test_signed_nobody_uid_does_not_block_or_become_current_user(self):
+        processes = (row(819, 1, 819, '/usr/bin/gigacode', uid=-2)
+                     + row(100, 1, 100, '/usr/bin/gigacode')
+                     + row(120, 100, 100, '/usr/bin/node server.js'))
+        result = self.collect(processes, 'p120\nn*:3002\n',
+                              'p100\nn/work/harness\np120\nn/work/poc/frontend\n')
+        self.assertTrue(result['complete'], result['limitations'])
+        nobody = next(p for p in result['processes'] if p['pid'] == 819)
+        self.assertEqual(nobody['uid'], 4294967294)
+        self.assertFalse(nobody['same_user'])
+        self.assertEqual([p['pid'] for p in result['agents']], [100])
+        self.assertEqual(result['services'][0]['agent_pids'], [100])
+        self.assertTrue(inv.assess_handoff('/work/poc', result)['blocked'])
+
+    def test_signed_uid_exception_does_not_relax_process_identifiers(self):
+        for pid, ppid, pgid in ((0, 1, 1), (-2, 1, 1), (100, -2, 100), (100, 1, -2)):
+            with self.subTest(pid=pid, ppid=ppid, pgid=pgid):
+                processes, malformed = inv._parse_ps(row(pid, ppid, pgid, 'node', uid=-2))
+                self.assertTrue(malformed)
+                self.assertFalse(processes)
+        for uid in (-(1 << 31) - 1, 1 << 32):
+            processes, malformed = inv._parse_ps(row(100, 1, 100, 'node', uid=uid))
+            self.assertTrue(malformed)
+            self.assertFalse(processes)
+
     def test_argument_separators_do_not_create_process_rows(self):
         for separator in ('\u0085', '\u2028', '\u2029', '\v', '\f', '\r'):
             with self.subTest(separator=repr(separator)):
