@@ -49,6 +49,14 @@ elif 'PLAN_SDD_WORK\n' in prompt:
 elif 'EXECUTE_TASK\n' in prompt:
     task=json.JSONDecoder().raw_decode(prompt.split('EXECUTE_TASK\n',1)[1])[0]
     event('start', task['id'])
+    if os.environ.get('FAKE_PARALLEL_BARRIER'):
+        barrier=pathlib.Path(os.environ['FAKE_PARALLEL_BARRIER'])
+        (barrier/task['id']).touch()
+        deadline=time.monotonic()+8
+        while not all((barrier/name).exists() for name in ('be','fe')):
+            if time.monotonic()>=deadline:
+                raise RuntimeError('Independent executors did not run concurrently')
+            time.sleep(.02)
     if task['id'] == 'be':
         dest=root/'backend/value.txt'
         if os.environ.get('FAKE_CHECK_FAILURE'):
@@ -160,7 +168,9 @@ for name in sys.argv[1:]:
 
     def test_real_streamed_parallel_fix_review_integration_and_export(self):
         self.prepare()
-        with self.runner.locked():
+        barrier = self.root / 'parallel-barrier'
+        barrier.mkdir()
+        with self.runner.locked(), patch.dict(os.environ, {'FAKE_PARALLEL_BARRIER': str(barrier)}):
             self.runner.run()
         self.assertEqual(self.runner.state['status'], 'complete')
         self.assertEqual(self.runner.state['tasks']['be']['attempts'], 2)
