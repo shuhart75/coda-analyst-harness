@@ -77,7 +77,7 @@ class ControllerServiceGuardTests(unittest.TestCase):
                 'agents': [], 'services': list(services)}
 
     def test_group_with_database_is_preserved_and_blocks_resume(self):
-        with patch('controller.os.killpg') as signal_probe, \
+        with patch('controller.process_scope_exists', return_value=True) as signal_probe, \
                 patch('controller.inspect_services', return_value=self.inventory([self.service()])):
             report = self.runner.cleanup_guard(54320)
             self.assertIsNotNone(report)
@@ -85,17 +85,17 @@ class ControllerServiceGuardTests(unittest.TestCase):
             self.assertTrue(Path(report['report']).is_file())
             with self.assertRaisesRegex(controller.Blocked, 'still present'):
                 self.runner.check_preserved_processes()
-            self.assertTrue(all(call.args[1] == 0 for call in signal_probe.call_args_list))
-        with patch('controller.os.killpg', side_effect=ProcessLookupError):
+            signal_probe.assert_called_with(54320)
+        with patch('controller.process_scope_exists', return_value=False):
             self.runner.check_preserved_processes()
 
     def test_incomplete_inventory_never_authorizes_group_termination(self):
-        with patch('controller.os.killpg'), \
+        with patch('controller.process_scope_exists', return_value=True), \
                 patch('controller.inspect_services', return_value=self.inventory(complete=False)):
             self.assertIsNotNone(self.runner.cleanup_guard(54320))
 
     def test_absent_group_needs_no_inventory(self):
-        with patch('controller.os.killpg', side_effect=ProcessLookupError), \
+        with patch('controller.process_scope_exists', return_value=False), \
                 patch('controller.inspect_services') as inspect:
             self.assertIsNone(self.runner.cleanup_guard(54320))
             inspect.assert_not_called()
@@ -106,18 +106,18 @@ class ControllerServiceGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(controller.Blocked, 'no automatic service shutdown'):
                 self.runner.service_audit(self.inventory(), self.runner.root, 'fake')
         resumed = controller.Runner(self.config)
-        with patch('controller.os.kill') as probe:
+        with patch('controller.process_exists', return_value=True) as probe:
             with self.assertRaisesRegex(controller.Blocked, 'detached service'):
                 resumed.check_preserved_processes()
-            probe.assert_called_once_with(service['pid'], 0)
-        with patch('controller.os.kill', side_effect=ProcessLookupError):
+            probe.assert_called_once_with(service['pid'])
+        with patch('controller.process_exists', return_value=False):
             resumed.check_preserved_processes()
 
     def test_resume_finds_late_listener_without_a_preservation_record(self):
         service = self.service()
         self.assertFalse((self.runner.root / 'preserved-services').exists())
         with patch('controller.inspect_services', return_value=self.inventory([service])), \
-                patch('controller.os.kill') as kill, patch('controller.os.killpg') as killpg:
+                patch('controller.process_exists') as kill, patch('controller.process_scope_exists') as killpg:
             with self.assertRaisesRegex(controller.Blocked, 'Existing managed agent or service'):
                 self.runner.check_preserved_processes()
             kill.assert_not_called()
@@ -128,7 +128,7 @@ class ControllerServiceGuardTests(unittest.TestCase):
         inventory = self.inventory()
         inventory['agents'] = [{'pid': 60001, 'cwd': str(self.runner.root / 'workers/demo'), 'kind': 'gigacode'}]
         with patch('controller.inspect_services', return_value=inventory), \
-                patch('controller.os.kill') as kill, patch('controller.os.killpg') as killpg:
+                patch('controller.process_exists') as kill, patch('controller.process_scope_exists') as killpg:
             with self.assertRaisesRegex(controller.Blocked, 'Existing managed agent or service'):
                 self.runner.check_preserved_processes()
             kill.assert_not_called()

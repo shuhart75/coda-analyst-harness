@@ -19,7 +19,7 @@ class TransportTests(unittest.TestCase):
         self.cli = self.root / "cli.py"
 
     def fake(self, code):
-        self.cli.write_text("import json,sys,os,time,subprocess\n" + code)
+        self.cli.write_text("import json,sys,os,time,subprocess\n" + code, encoding='utf-8')
         return [sys.executable, str(self.cli)]
 
     def run_cli(self, code, **kwargs):
@@ -28,7 +28,7 @@ class TransportTests(unittest.TestCase):
 
     def parse(self, events, tail=""):
         path = self.root / "events.jsonl"
-        path.write_text("".join(json.dumps(event) + "\n" for event in events) + tail)
+        path.write_text("".join(json.dumps(event) + "\n" for event in events) + tail, encoding='utf-8')
         return parse_events(path)
 
     def test_success_arguments_stdin_and_private_logs(self):
@@ -119,7 +119,7 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
         result = self.run_cli('''
 print(json.dumps({"type":"system","session_id":"partial"}), flush=True)
 time.sleep(10)
-''', timeout_seconds=0.15)
+''', timeout_seconds=2)
         self.assertFalse(result["ok"])
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["session_id"], "partial")
@@ -127,13 +127,22 @@ time.sleep(10)
 
     def test_cancellation(self):
         stop = threading.Event()
-        timer = threading.Timer(0.15, stop.set)
-        timer.start()
-        self.addCleanup(timer.cancel)
+        def cancel_after_event():
+            events = self.root / 'logs' / 'stdout.jsonl'
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if events.exists() and events.stat().st_size:
+                    break
+                time.sleep(.01)
+            stop.set()
+        watcher = threading.Thread(target=cancel_after_event)
+        watcher.start()
+        self.addCleanup(watcher.join, 11)
         result = self.run_cli('print(json.dumps({"type":"system"}),flush=True);time.sleep(10)',
                               stop_event=stop)
         self.assertFalse(result["ok"])
         self.assertTrue(result["cancelled"])
+        self.assertEqual(result['event_count'], 1)
 
     @unittest.skipUnless(os.name == "posix", "POSIX process groups")
     def test_child_is_stopped_even_after_parent_exits(self):

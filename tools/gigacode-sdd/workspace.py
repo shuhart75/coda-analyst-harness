@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import shutil
 import stat
 import subprocess
@@ -55,7 +55,7 @@ def _secret(path):
 
 def _forbidden(path, allow_input=False):
     parts = PurePosixPath(path).parts
-    if not parts or path.startswith("/") or ".." in parts:
+    if not parts or path.startswith("/") or ".." in parts or "\\" in path or PureWindowsPath(path).drive:
         return True
     if any(p in {".git", ".gigacode", ".codex", ".gigaide", ".idea"} for p in parts):
         return True
@@ -70,7 +70,8 @@ def _forbidden(path, allow_input=False):
 
 def _safe_path(root, relative):
     rel = PurePosixPath(relative)
-    if rel.is_absolute() or ".." in rel.parts or ".git" in rel.parts:
+    if (not rel.parts or rel.is_absolute() or ".." in rel.parts or ".git" in rel.parts
+            or "\\" in relative or PureWindowsPath(relative).drive):
         raise WorkspaceError(f"Unsafe path: {relative}")
     root = Path(root).resolve()
     path = root.joinpath(*rel.parts)
@@ -205,7 +206,8 @@ def export_patch(root, base, allowed_paths, output):
         raise WorkspaceError("Worker changed HEAD; patch export refused")
     if not allowed_paths or any(not isinstance(p, str) or p in {"", ".", "/"}
                                 or ".." in PurePosixPath(p).parts
-                                or PurePosixPath(p).is_absolute() for p in allowed_paths):
+                                or PurePosixPath(p).is_absolute() or "\\" in p
+                                or PureWindowsPath(p).drive for p in allowed_paths):
         raise WorkspaceError("Explicit repository-relative ownership paths are required")
     paths = _changed(root, expected)
     for name in paths:
@@ -294,7 +296,7 @@ def _copy_permissions(source, dest):
         if target.is_symlink():
             raise WorkspaceError("Permission settings cannot be a symlink")
         target.write_text(json.dumps({"permissions": data["permissions"]},
-                                    ensure_ascii=False, indent=2) + "\n")
+                                    ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         target.chmod(0o600)
         copied.append(name)
     return copied

@@ -49,6 +49,14 @@ elif 'PLAN_SDD_WORK\n' in prompt:
 elif 'EXECUTE_TASK\n' in prompt:
     task=json.JSONDecoder().raw_decode(prompt.split('EXECUTE_TASK\n',1)[1])[0]
     event('start', task['id'])
+    if os.environ.get('FAKE_PARALLEL_BARRIER'):
+        barrier=pathlib.Path(os.environ['FAKE_PARALLEL_BARRIER'])
+        (barrier/task['id']).touch()
+        deadline=time.monotonic()+8
+        while not all((barrier/name).exists() for name in ('be','fe')):
+            if time.monotonic()>=deadline:
+                raise RuntimeError('Independent executors did not run concurrently')
+            time.sleep(.02)
     if task['id'] == 'be':
         dest=root/'backend/value.txt'
         if os.environ.get('FAKE_CHECK_FAILURE'):
@@ -96,7 +104,7 @@ class ControllerE2E(unittest.TestCase):
         self.addCleanup(inventory.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.source = self.root / 'source'
         self.source.mkdir()
         git(self.source, 'init')
@@ -104,8 +112,8 @@ class ControllerE2E(unittest.TestCase):
         git(self.source, 'config', 'user.email', 'fixture@example.test')
         for contour in ('backend', 'frontend'):
             (self.source / contour).mkdir()
-            (self.source / contour / 'value.txt').write_text('0')
-            (self.source / contour / 'GIGACODE.md').write_text('Use existing SDD stages. Do not change requirements.')
+            (self.source / contour / 'value.txt').write_text('0', encoding="utf-8")
+            (self.source / contour / 'GIGACODE.md').write_text('Use existing SDD stages. Do not change requirements.', encoding="utf-8")
         (self.source / 'check.py').write_text('''from pathlib import Path
 import sys
 root=Path(__file__).parent
@@ -114,23 +122,23 @@ for name in sys.argv[1:]:
         assert (root/'backend/dependent.txt').read_text()=='ready'
     else:
         assert int((root/name/'value.txt').read_text())>=1
-''')
-        (self.source / 'wip.txt').write_text('initial')
+''', encoding="utf-8")
+        (self.source / 'wip.txt').write_text('initial', encoding="utf-8")
         self.plan = {
             'tasks': [self.task('be', 'backend', ['REQ-BE']), self.task('fe', 'frontend', ['REQ-FE'])],
             'integration_checks': [{'cwd': '.', 'argv': [sys.executable, 'check.py', 'backend', 'frontend']}],
         }
-        (self.source / 'fixture-plan.json').write_text(json.dumps(self.plan))
+        (self.source / 'fixture-plan.json').write_text(json.dumps(self.plan), encoding="utf-8")
         git(self.source, 'add', '--', 'backend', 'frontend', 'check.py', 'wip.txt', 'fixture-plan.json')
         git(self.source, 'commit', '-m', 'fixture')
-        (self.source / 'wip.txt').write_text('existing unfinished work')
-        (self.source / 'extra.txt').write_text('untracked existing work')
+        (self.source / 'wip.txt').write_text('existing unfinished work', encoding="utf-8")
+        (self.source / 'extra.txt').write_text('untracked existing work', encoding="utf-8")
         self.before = snapshot(self.source)
         self.packet = self.root / 'packet'
         self.packet.mkdir()
-        (self.packet / 'requirements.md').write_text('REQ-BE: value 2\nREQ-FE: value 1\n')
+        (self.packet / 'requirements.md').write_text('REQ-BE: value 2\nREQ-FE: value 1\n', encoding="utf-8")
         self.fake = self.root / 'fake-gigacode'
-        self.fake.write_text(FAKE)
+        self.fake.write_text(FAKE, encoding="utf-8")
         self.fake.chmod(0o700)
         self.trace = self.root / 'trace.jsonl'
         self.env = patch.dict(os.environ, {'FAKE_TRACE': str(self.trace), 'PIP_INDEX_URL': 'https://nexus.test/pypi/simple',
@@ -141,8 +149,11 @@ for name in sys.argv[1:]:
             packet=str(self.packet), requirements_file='requirements.md',
             requirements_sha256=digest(self.packet / 'requirements.md'), protected_root=[],
             jobs=2, session_timeout=10, commit_prefix='TEST-1', nexus_host=['nexus.test'],
-            npm_registry='https://nexus.test/npm/', pip_index_url='https://nexus.test/pypi/simple', cli=str(self.fake))
+            npm_registry='https://nexus.test/npm/', pip_index_url='https://nexus.test/pypi/simple', cli=sys.executable)
         self.config = initialize(args)
+        config_data = json.loads(Path(self.config).read_text(encoding='utf-8'))
+        config_data['cli'] = [sys.executable, str(self.fake)]
+        save(self.config, config_data)
         self.runner = Runner(self.config)
 
     def task(self, name, contour, reqs):
@@ -157,32 +168,35 @@ for name in sys.argv[1:]:
 
     def test_real_streamed_parallel_fix_review_integration_and_export(self):
         self.prepare()
-        with self.runner.locked():
+        barrier = self.root / 'parallel-barrier'
+        barrier.mkdir()
+        with self.runner.locked(), patch.dict(self.runner.env, {'FAKE_PARALLEL_BARRIER': str(barrier)}):
             self.runner.run()
+        self.assertTrue(all((barrier / name).is_file() for name in ('be', 'fe')))
         self.assertEqual(self.runner.state['status'], 'complete')
         self.assertEqual(self.runner.state['tasks']['be']['attempts'], 2)
         self.assertEqual(self.runner.state['tasks']['fe']['attempts'], 1)
-        self.assertEqual((self.runner.main / 'wip.txt').read_text(), 'existing unfinished work')
-        self.assertEqual((self.runner.main / 'extra.txt').read_text(), 'untracked existing work')
+        self.assertEqual((self.runner.main / 'wip.txt').read_text(encoding="utf-8"), 'existing unfinished work')
+        self.assertEqual((self.runner.main / 'extra.txt').read_text(encoding="utf-8"), 'untracked existing work')
         self.assertEqual(snapshot(self.source), self.before)
-        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        trace = [json.loads(line) for line in self.trace.read_text(encoding="utf-8").splitlines()]
         starts = {name: next(e for e in trace if e['kind']=='start' and e['task']==name) for name in ('be','fe')}
         ends = {name: next(e for e in trace if e['kind']=='end' and e['task']==name) for name in ('be','fe')}
         self.assertLess(max(e['time'] for e in starts.values()), min(e['time'] for e in ends.values()))
         reviewers = [e for e in trace if e['kind']=='review']
         executors = [e for e in trace if e['kind']=='start']
         self.assertFalse({e['pid'] for e in reviewers} & {e['pid'] for e in executors})
-        self.assertTrue(all('/reviews/' in e['cwd'] for e in reviewers))
+        self.assertTrue(all('reviews' in Path(e['cwd']).parts for e in reviewers))
         output = self.root / 'result.patch'
         self.runner.export(output)
-        self.assertIn('backend/value.txt', output.read_text())
-        self.assertNotIn('existing unfinished work', output.read_text())
+        self.assertIn('backend/value.txt', output.read_text(encoding="utf-8"))
+        self.assertNotIn('existing unfinished work', output.read_text(encoding="utf-8"))
         # A completed run is restartable and cannot relaunch completed work.
-        before_events = self.trace.read_text()
+        before_events = self.trace.read_text(encoding="utf-8")
         resumed = Runner(self.config)
         with resumed.locked():
             resumed.run()
-        self.assertEqual(self.trace.read_text(), before_events)
+        self.assertEqual(self.trace.read_text(encoding="utf-8"), before_events)
 
     def test_dependencies_start_only_after_both_changes_are_integrated(self):
         dependent = self.task('dependent', 'backend', ['REQ-BE'])
@@ -190,7 +204,7 @@ for name in sys.argv[1:]:
         dependent['depends_on'] = ['be', 'fe']
         dependent['checks'][0]['argv'] = [sys.executable, 'check.py', 'dependent']
         self.plan['tasks'].append(dependent)
-        (self.runner.main / 'fixture-plan.json').write_text(json.dumps(self.plan))
+        (self.runner.main / 'fixture-plan.json').write_text(json.dumps(self.plan), encoding="utf-8")
         git(self.runner.main, 'add', '--', 'fixture-plan.json')
         git(self.runner.main, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
             'commit', '-m', 'fixture dependency plan')
@@ -200,8 +214,8 @@ for name in sys.argv[1:]:
         with self.runner.locked():
             self.runner.run()
         self.assertEqual(self.runner.state['status'], 'complete')
-        self.assertEqual((self.runner.main / 'backend/dependent.txt').read_text(), 'ready')
-        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual((self.runner.main / 'backend/dependent.txt').read_text(encoding="utf-8"), 'ready')
+        trace = [json.loads(line) for line in self.trace.read_text(encoding="utf-8").splitlines()]
         dependency_start = next(e['time'] for e in trace if e['kind']=='start' and e['task']=='dependent')
         predecessor_reviews = [e['time'] for e in trace if e['kind']=='review' and e['task'] in ('be','fe')]
         self.assertTrue(all(t < dependency_start for t in predecessor_reviews))
@@ -211,7 +225,7 @@ for name in sys.argv[1:]:
         def stop_when_execution_starts():
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
-                if self.trace.exists() and '"kind": "start"' in self.trace.read_text():
+                if self.trace.exists() and '"kind": "start"' in self.trace.read_text(encoding="utf-8"):
                     self.runner.stop.set()
                     return
                 time.sleep(.01)
@@ -224,8 +238,8 @@ for name in sys.argv[1:]:
         records = list(self.runner.state['tasks'].values())
         preserved = [Path(r['workspace']) for r in records if 'workspace' in r]
         self.assertTrue(preserved)
-        self.assertTrue(any((p/'backend/value.txt').read_text()=='1' or
-                            (p/'frontend/value.txt').read_text()=='1' for p in preserved))
+        self.assertTrue(any((p/'backend/value.txt').read_text(encoding="utf-8")=='1' or
+                            (p/'frontend/value.txt').read_text(encoding="utf-8")=='1' for p in preserved))
         resumed = Runner(self.config)
         with resumed.locked():
             resumed.run(retry_blocked=True)
@@ -233,7 +247,7 @@ for name in sys.argv[1:]:
         self.assertEqual(snapshot(self.source), self.before)
 
     def update_fixture_plan(self):
-        (self.runner.main / 'fixture-plan.json').write_text(json.dumps(self.plan))
+        (self.runner.main / 'fixture-plan.json').write_text(json.dumps(self.plan), encoding="utf-8")
         git(self.runner.main, 'add', '--', 'fixture-plan.json')
         git(self.runner.main, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
             'commit', '-m', 'fixture plan')
@@ -247,13 +261,13 @@ for name in sys.argv[1:]:
             self.runner.run()
         self.assertEqual(self.runner.state['status'], 'complete')
         self.assertEqual(self.runner.state['tasks']['be']['attempts'], 2)
-        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        trace = [json.loads(line) for line in self.trace.read_text(encoding="utf-8").splitlines()]
         reviews = [e for e in trace if e['kind']=='review' and e['task']=='be']
         self.assertEqual(len(reviews), 1)
         check_logs = list((self.runner.root/'logs').glob('be-check-*/output.log'))
         self.assertEqual(len(check_logs), 2)
-        self.assertTrue(any('AssertionError' in p.read_text() for p in check_logs))
-        self.assertEqual((self.runner.main/'backend/value.txt').read_text(), '2')
+        self.assertTrue(any('AssertionError' in p.read_text(encoding="utf-8") for p in check_logs))
+        self.assertEqual((self.runner.main/'backend/value.txt').read_text(encoding="utf-8"), '2')
 
     def test_task_writes_outside_ownership_are_preserved_but_not_integrated(self):
         self.prepare()
@@ -265,7 +279,7 @@ for name in sys.argv[1:]:
         self.assertIn('outside task ownership', be['error'])
         self.assertTrue((Path(be['workspace'])/'foreign.txt').exists())
         self.assertFalse((self.runner.main/'foreign.txt').exists())
-        self.assertEqual((self.runner.main/'backend/value.txt').read_text(), '0')
+        self.assertEqual((self.runner.main/'backend/value.txt').read_text(encoding="utf-8"), '0')
         self.assertEqual(snapshot(self.source), self.before)
 
     def test_task_cannot_weaken_local_sdd_instructions(self):
@@ -276,7 +290,7 @@ for name in sys.argv[1:]:
         be = self.runner.state['tasks']['be']
         self.assertEqual(be['status'], 'blocked')
         self.assertIn('SDD context', be['error'])
-        self.assertEqual((self.runner.main/'backend/GIGACODE.md').read_text(),
+        self.assertEqual((self.runner.main/'backend/GIGACODE.md').read_text(encoding="utf-8"),
                          'Use existing SDD stages. Do not change requirements.')
         self.assertEqual(snapshot(self.source), self.before)
 
@@ -289,7 +303,7 @@ for name in sys.argv[1:]:
         self.assertEqual(be['status'], 'blocked')
         self.assertIn('Git configuration or hooks', be['error'])
         self.assertFalse((self.runner.main/'.git/hooks/pre-commit').exists())
-        self.assertEqual((self.runner.main/'backend/value.txt').read_text(), '0')
+        self.assertEqual((self.runner.main/'backend/value.txt').read_text(encoding="utf-8"), '0')
         self.assertEqual(snapshot(self.source), self.before)
 
     def test_shared_resource_serializes_entire_execution_review_cycle(self):
@@ -300,7 +314,7 @@ for name in sys.argv[1:]:
         with self.runner.locked():
             self.runner.run()
         self.assertEqual(self.runner.state['status'], 'complete')
-        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        trace = [json.loads(line) for line in self.trace.read_text(encoding="utf-8").splitlines()]
         be_reviews = [e['time'] for e in trace if e['kind']=='review' and e['task']=='be']
         fe_start = next(e['time'] for e in trace if e['kind']=='start' and e['task']=='fe')
         self.assertTrue(all(t < fe_start for t in be_reviews))
@@ -311,25 +325,25 @@ for name in sys.argv[1:]:
         self.prepare()
         marker = self.root/'hook-ok'
         hook = self.runner.main/'.git/hooks/pre-commit'
-        hook.write_text('#!/bin/sh\ntest -f '+shlex.quote(str(marker))+'\n')
+        hook.write_text('#!/bin/sh\ntest -f '+shlex.quote(marker.as_posix())+'\n', encoding="utf-8", newline='\n')
         hook.chmod(0o700)
         with self.runner.locked(), self.assertRaises(Blocked):
             self.runner.run()
         be = self.runner.state['tasks']['be']
         self.assertEqual(be['status'], 'blocked')
         self.assertIn('integration_base', be)
-        self.assertEqual((self.runner.main/'backend/value.txt').read_text(), '2')
+        self.assertEqual((self.runner.main/'backend/value.txt').read_text(encoding="utf-8"), '2')
         self.assertTrue(snapshot(self.runner.main)['status'])
-        trace_before = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        trace_before = [json.loads(line) for line in self.trace.read_text(encoding="utf-8").splitlines()]
         be_runs_before = sum(e['kind']=='start' and e['task']=='be' for e in trace_before)
         # Refuse recovery if someone added unrelated changes after the hook failure.
         foreign = self.runner.main/'foreign.txt'
-        foreign.write_text('must survive failed recovery')
+        foreign.write_text('must survive failed recovery', encoding="utf-8")
         contaminated = Runner(self.config)
         with contaminated.locked(), self.assertRaisesRegex(RuntimeError, 'ownership'):
             contaminated.run(retry_blocked=True)
-        self.assertEqual(foreign.read_text(), 'must survive failed recovery')
-        self.assertEqual((self.runner.main/'backend/value.txt').read_text(), '2')
+        self.assertEqual(foreign.read_text(encoding="utf-8"), 'must survive failed recovery')
+        self.assertEqual((self.runner.main/'backend/value.txt').read_text(encoding="utf-8"), '2')
         foreign.unlink()  # Remove only the deliberate test contamination.
         marker.touch()
         resumed = Runner(self.config)
@@ -337,19 +351,19 @@ for name in sys.argv[1:]:
             resumed.run(retry_blocked=True)
         self.assertEqual(resumed.state['status'], 'complete')
         self.assertFalse(snapshot(resumed.main)['status'])
-        trace_after = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        trace_after = [json.loads(line) for line in self.trace.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(sum(e['kind']=='start' and e['task']=='be' for e in trace_after), be_runs_before)
         self.assertEqual(snapshot(self.source), self.before)
 
     def test_init_preserves_source_and_rejects_changed_packet(self):
         self.assertEqual(snapshot(self.source), self.before)
-        (self.runner.root / 'input/requirements.md').write_text('REQ-OTHER: changed')
+        (self.runner.root / 'input/requirements.md').write_text('REQ-OTHER: changed', encoding="utf-8")
         with self.assertRaisesRegex(Blocked, 'packet changed'):
             self.runner.guard()
         self.assertEqual(snapshot(self.source), self.before)
 
     def test_protected_checkout_change_blocks(self):
-        (self.source / 'wip.txt').write_text('concurrent work')
+        (self.source / 'wip.txt').write_text('concurrent work', encoding="utf-8")
         with self.assertRaisesRegex(Blocked, 'checkout changed'):
             self.runner.guard()
 
@@ -358,7 +372,7 @@ for name in sys.argv[1:]:
         with self.assertRaisesRegex(Blocked, 'Preflight failed'):
             self.runner.preflight()
         self.assertNotIn('preflight', self.runner.state)
-        report = json.loads((self.runner.root / 'preflight.json').read_text())
+        report = json.loads((self.runner.root / 'preflight.json').read_text(encoding="utf-8"))
         self.assertIn('agent', report[-1]['missing'])
 
     def test_permission_denial_is_blocker_not_false_success(self):
@@ -369,7 +383,7 @@ for name in sys.argv[1:]:
 
     def test_pinned_plan_cannot_be_replaced(self):
         self.prepare()
-        changed = json.loads((self.runner.root / 'plan.json').read_text())
+        changed = json.loads((self.runner.root / 'plan.json').read_text(encoding="utf-8"))
         changed['tasks'][0]['writes'] = ['frontend']
         save(self.runner.root / 'plan.json', changed)
         with self.assertRaisesRegex(Blocked, 'changed plan'):

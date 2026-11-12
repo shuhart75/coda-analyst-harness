@@ -10,7 +10,9 @@ from collections import deque
 import hashlib
 import json
 import os
-from pathlib import Path
+import ntpath
+import posixpath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 
 
@@ -29,10 +31,18 @@ class PriorContextError(ValueError):
 
 
 def _cwd(value):
-    if not isinstance(value, str) or not value.startswith('/') or '\x00' in value:
+    if not isinstance(value, str) or '\x00' in value:
+        return None
+    if PureWindowsPath(value).is_absolute():
+        # Foreign paths are metadata, never relative local filesystem paths.
+        try:
+            return str(Path(value).resolve()) if os.name == 'nt' else ntpath.normpath(value)
+        except (OSError, RuntimeError):
+            return None
+    if not value.startswith('/'):
         return None
     try:
-        return str(Path(value).resolve())
+        return str(Path(value).resolve()) if os.name != 'nt' else posixpath.normpath(value)
     except (OSError, RuntimeError):
         return None
 
@@ -115,7 +125,14 @@ def redact(text):
 
 
 def _matches(cwd, repo):
-    return Path(cwd).is_relative_to(repo)
+    cwd, repo = _cwd(str(cwd)), _cwd(str(repo))
+    if cwd is None or repo is None:
+        return False
+    windows = PureWindowsPath(cwd).is_absolute()
+    if windows != PureWindowsPath(repo).is_absolute():
+        return False
+    cls = PureWindowsPath if windows else PurePosixPath
+    return cls(cwd).is_relative_to(cls(repo))
 
 
 def _read_transcript(path, *, collect_messages=True):
@@ -294,7 +311,7 @@ def verify_prior_context(metadata):
         raise PriorContextError('Файлы исторической выдержки подменены символическими ссылками.')
     if hashlib.sha256(evidence.read_bytes()).hexdigest() != metadata['evidence_sha256']:
         raise PriorContextError('Историческая выдержка изменилась после подготовки.')
-    if json.loads(manifest.read_text()) != metadata:
+    if json.loads(manifest.read_text(encoding="utf-8")) != metadata:
         raise PriorContextError('Метаданные исторической выдержки изменились после подготовки.')
     return True
 

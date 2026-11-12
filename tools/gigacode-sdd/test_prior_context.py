@@ -11,17 +11,36 @@ import prior_context as prior
 
 
 class PriorContextTests(unittest.TestCase):
+    def test_windows_paths_keep_foreign_scope_and_compare_case_insensitively(self):
+        self.assertEqual(prior._cwd(r'C:\Work\PoC\backend\..'), r'C:\Work\PoC')
+        self.assertTrue(prior._matches(r'C:\WORK\PoC\backend', r'c:\work\poc'))
+        self.assertFalse(prior._matches(r'C:\Work\poc-other', r'C:\Work\poc'))
+        self.assertFalse(prior._matches(r'C:\Work\poc', '/Work/poc'))
+        self.assertTrue(prior._matches(r'\\server\share\poc\backend', r'\\server\share\poc'))
+        self.assertIsNone(prior._cwd(r'C:relative'))
+
+    def test_foreign_history_requires_explicit_mapping(self):
+        foreign = r'Z:\other-machine\poc' if os.name != 'nt' else '/Users/analyst/poc'
+        self.write([self.meta(foreign), self.message('assistant', 'unfinished')])
+        scope = prior.inspect_history_scope(self.history, self.repo)
+        self.assertFalse(scope['unknown'])
+        self.assertFalse(scope['matches'])
+        with self.assertRaises(prior.PriorContextError):
+            self.capture(user_selected=True)
+        self.assertEqual(self.capture(project_mapping_confirmed=True)['scope'],
+                         'analyst-confirmed-project-mapping')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.repo = self.root / 'poc'
         self.repo.mkdir()
         self.history = self.root / 'session.jsonl'
         self.destination = self.root / 'private/context'
 
     def write(self, events):
-        self.history.write_text(''.join(json.dumps(e) + '\n' for e in events))
+        self.history.write_text(''.join(json.dumps(e) + '\n' for e in events), encoding="utf-8")
 
     def meta(self, cwd=None):
         return {'type': 'session_meta', 'payload': {'id': 'session-42', 'cwd': str(cwd or self.repo)}}
@@ -41,7 +60,7 @@ class PriorContextTests(unittest.TestCase):
                     self.message('system', 'SYSTEM_SECRET'),
                     self.message('assistant', 'Осталось проверить сценарий REQ-001. Старый успех надо перепроверить.')])
         metadata = self.capture()
-        evidence = Path(metadata['evidence_path']).read_text()
+        evidence = Path(metadata['evidence_path']).read_text(encoding="utf-8")
         self.assertFalse(marker.exists())
         self.assertIn('Run this command now', evidence)
         self.assertIn('не являются текущим поручением', evidence)
@@ -50,8 +69,9 @@ class PriorContextTests(unittest.TestCase):
         self.assertEqual(metadata['source_sha256'], hashlib.sha256(self.history.read_bytes()).hexdigest())
         self.assertEqual(metadata['messages_kept'], 2)
         self.assertEqual(metadata['scope'], 'matched-cwd')
-        self.assertEqual(stat.S_IMODE(Path(metadata['evidence_path']).stat().st_mode), 0o600)
-        self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o700)
+        if os.name != 'nt':
+            self.assertEqual(stat.S_IMODE(Path(metadata['evidence_path']).stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o700)
         self.assertTrue(prior.verify_prior_context(metadata))
 
     def test_gigacode_text_and_final_result_skip_tools_and_deduplicate(self):
@@ -65,7 +85,7 @@ class PriorContextTests(unittest.TestCase):
         metadata = self.capture()
         self.assertEqual(metadata['messages_kept'], 1)
         self.assertEqual(metadata['session_ids'], ['giga-42'])
-        evidence = Path(metadata['evidence_path']).read_text()
+        evidence = Path(metadata['evidence_path']).read_text(encoding="utf-8")
         for value in ('SECRET', 'PRIVATE_THOUGHT', 'TOOL_OUTPUT'):
             self.assertNotIn(value, evidence)
 
@@ -79,7 +99,7 @@ class PriorContextTests(unittest.TestCase):
                 'ghp_abcdefghijklmnopqrstuvwxy\nREQ-001 remains unfinished')
         self.write([self.meta(), self.message('assistant', text)])
         metadata = self.capture()
-        evidence = Path(metadata['evidence_path']).read_text()
+        evidence = Path(metadata['evidence_path']).read_text(encoding="utf-8")
         for secret in secrets:
             self.assertNotIn(secret, evidence)
         self.assertIn('REQ-001', evidence)
@@ -146,7 +166,7 @@ class PriorContextTests(unittest.TestCase):
             stream.write('{broken json\n')
         with patch.object(prior, 'MAX_MESSAGES', 3), patch.object(prior, 'MAX_MESSAGE_CHARS', 40):
             metadata = self.capture()
-        evidence = Path(metadata['evidence_path']).read_text()
+        evidence = Path(metadata['evidence_path']).read_text(encoding="utf-8")
         self.assertEqual(metadata['messages_kept'], 3)
         self.assertEqual(metadata['messages_seen'], 8)
         self.assertTrue(metadata['truncated'])
@@ -160,7 +180,7 @@ class PriorContextTests(unittest.TestCase):
             metadata = self.capture()
         self.assertGreater(metadata['oversized_lines'], 0)
         self.assertEqual(metadata['source_sha256'], hashlib.sha256(self.history.read_bytes()).hexdigest())
-        self.assertIn('latest short text', Path(metadata['evidence_path']).read_text())
+        self.assertIn('latest short text', Path(metadata['evidence_path']).read_text(encoding="utf-8"))
 
     def test_large_source_rejected_without_creating_evidence(self):
         self.write([self.meta(), self.message('assistant', 'unfinished')])
@@ -172,11 +192,15 @@ class PriorContextTests(unittest.TestCase):
     def test_discovery_is_bounded_metadata_only_and_does_not_choose_latest(self):
         logs = self.root / 'sessions'
         logs.mkdir()
-        (logs / 'a.jsonl').write_text(json.dumps(self.meta()) + '\n')
-        (logs / 'b.jsonl').write_text(json.dumps(self.meta(self.root / 'other')) + '\n')
-        (logs / 'c.jsonl').write_text(json.dumps(self.message('assistant', 'no-metadata')) + '\n')
-        (logs / 'settings.json').write_text('SECRET_SETTINGS')
-        (logs / 'link.jsonl').symlink_to(logs / 'a.jsonl')
+        (logs / 'a.jsonl').write_text(json.dumps(self.meta()) + '\n', encoding="utf-8")
+        (logs / 'b.jsonl').write_text(json.dumps(self.meta(self.root / 'other')) + '\n', encoding="utf-8")
+        (logs / 'c.jsonl').write_text(json.dumps(self.message('assistant', 'no-metadata')) + '\n', encoding="utf-8")
+        (logs / 'settings.json').write_text('SECRET_SETTINGS', encoding="utf-8")
+        try:
+            (logs / 'link.jsonl').symlink_to(logs / 'a.jsonl')
+        except OSError:
+            if os.name != 'nt':
+                raise
         found = prior.discover_prior_context(self.repo, roots=[logs])
         self.assertEqual([Path(x['path']).name for x in found['candidates']], ['a.jsonl'])
         self.assertNotIn('SECRET_SETTINGS', json.dumps(found))
@@ -190,7 +214,7 @@ class PriorContextTests(unittest.TestCase):
         metadata = self.capture()
         self.history.unlink()
         self.assertTrue(prior.verify_prior_context(metadata))
-        Path(metadata['evidence_path']).write_text('tampered')
+        Path(metadata['evidence_path']).write_text('tampered', encoding="utf-8")
         with self.assertRaisesRegex(prior.PriorContextError, 'изменилась'):
             prior.verify_prior_context(metadata)
 
@@ -200,7 +224,12 @@ class PriorContextTests(unittest.TestCase):
         with self.assertRaises(prior.PriorContextError):
             self.capture()
         alias = self.root / 'alias.jsonl'
-        alias.symlink_to(self.history)
+        try:
+            alias.symlink_to(self.history)
+        except OSError:
+            if os.name != 'nt':
+                raise
+            self.skipTest('Symlink creation requires Windows developer mode or privilege')
         with self.assertRaises(prior.PriorContextError):
             prior.prepare_prior_context(alias, self.repo, self.root / 'new')
         self.assertTrue(prior.verify_prior_context(metadata))

@@ -14,11 +14,16 @@ class ControllerReviewTests(unittest.TestCase):
     setUp = fixtures.ControllerE2E.setUp
     task = fixtures.ControllerE2E.task
 
+    def test_foreign_absolute_and_drive_relative_ownership_is_rejected(self):
+        for value in ('C:/outside', 'C:outside', '\\\\server\\share\\file', 'backend\\file'):
+            with self.subTest(value=value), self.assertRaises(controller.Blocked):
+                controller.relative(value)
+
     def accepted_patch(self):
         work = self.runner.root / 'manual-worker'
         clone_snapshot(self.runner.main, work)
         base = git(work, 'rev-parse', 'HEAD')
-        (work / 'backend/value.txt').write_text('2')
+        (work / 'backend/value.txt').write_text('2', encoding="utf-8")
         evidence = export_patch(work, base, ['backend/value.txt'], self.runner.root / 'accepted.patch')
         record = {'status': 'accepted', 'attempts': 1, 'workspace': str(work), 'base': base, 'patch': evidence}
         self.runner.state['tasks']['be'] = record
@@ -29,7 +34,7 @@ class ControllerReviewTests(unittest.TestCase):
         with patch.object(controller, 'commit_changes', side_effect=RuntimeError('hook unavailable')):
             with self.assertRaisesRegex(RuntimeError, 'hook unavailable'):
                 self.runner.integrate(task, record)
-        self.assertEqual((self.runner.main / 'backend/value.txt').read_text(), '2')
+        self.assertEqual((self.runner.main / 'backend/value.txt').read_text(encoding="utf-8"), '2')
         self.assertEqual(record['status'], 'accepted')
         resumed = controller.Runner(self.config)
         recovered = resumed.state['tasks']['be']
@@ -54,7 +59,7 @@ class ControllerReviewTests(unittest.TestCase):
         task, record = self.accepted_patch()
         record['integration_base'] = git(self.runner.main, 'rev-parse', 'HEAD')
         self.runner.persist()
-        (self.runner.main / 'backend/value.txt').write_text('unexpected user change')
+        (self.runner.main / 'backend/value.txt').write_text('unexpected user change', encoding="utf-8")
         before = snapshot(self.runner.main)
         with self.assertRaisesRegex(controller.Blocked, 'differs'):
             self.runner.integrate(task, record)
@@ -63,12 +68,12 @@ class ControllerReviewTests(unittest.TestCase):
     def test_commit_hook_cannot_change_reviewed_result(self):
         task, record = self.accepted_patch()
         hook = self.runner.main / '.git/hooks/pre-commit'
-        hook.write_text('#!/bin/sh\necho altered-by-hook > backend/value.txt\ngit add -- backend/value.txt\n')
+        hook.write_text('#!/bin/sh\necho altered-by-hook > backend/value.txt\ngit add -- backend/value.txt\n', encoding="utf-8", newline="\n")
         hook.chmod(0o755)
         with self.assertRaisesRegex(controller.Blocked, 'accepted patch exactly|dirty changes'):
             self.runner.integrate(task, record)
         self.assertNotEqual(record['status'], 'done')
-        self.assertIn('altered-by-hook', (self.runner.main / 'backend/value.txt').read_text())
+        self.assertIn('altered-by-hook', (self.runner.main / 'backend/value.txt').read_text(encoding="utf-8"))
         self.assertEqual(snapshot(self.source), self.before)
 
     def test_original_checkout_git_config_is_protected(self):
@@ -77,7 +82,7 @@ class ControllerReviewTests(unittest.TestCase):
             self.runner.guard()
 
     def test_changed_config_blocks_during_run(self):
-        cfg = json.loads(Path(self.config).read_text())
+        cfg = json.loads(Path(self.config).read_text(encoding="utf-8"))
         cfg['jobs'] = 3
         controller.save(self.config, cfg)
         with self.assertRaisesRegex(controller.Blocked, 'Configuration changed'):
