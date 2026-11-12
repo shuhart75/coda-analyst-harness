@@ -88,6 +88,12 @@ else:
 
 class ControllerE2E(unittest.TestCase):
     def setUp(self):
+        # Process policy has separate inventory/cleanup tests. These tests keep
+        # the streamed fake-CLI orchestration independent of host applications.
+        inventory = patch('controller.inspect_services', return_value={
+            'complete': True, 'limitations': [], 'agents': [], 'services': []})
+        inventory.start()
+        self.addCleanup(inventory.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)

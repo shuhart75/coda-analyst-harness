@@ -1,4 +1,4 @@
-"""Streamed headless GigaCode sessions with private logs and owned process trees."""
+"""Streamed headless sessions with private logs and guarded process-group cleanup."""
 from __future__ import annotations
 
 import json
@@ -123,7 +123,7 @@ def _private_file(path: Path):
 
 
 def _stop_group(process: subprocess.Popen):
-    """Terminate this session's descendants even after its group leader exits."""
+    """Terminate the owned group; descendants that changed groups are not covered."""
     if os.name == "posix":
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -148,10 +148,31 @@ def _stop_group(process: subprocess.Popen):
             process.kill()
 
 
+def finish_process(process, cleanup_guard=None):
+    """Preserve a service-bearing group rather than blindly terminating it.
+
+    The optional guard returns a diagnostic dict when cleanup is unsafe. No
+    signal is sent in that case, including on timeout or cancellation. Callers
+    must stop scheduling and record the preserved group before allowing resume.
+    """
+    if cleanup_guard is not None:
+        try:
+            diagnostic = cleanup_guard(process.pid)
+        except Exception as exc:
+            diagnostic = {"reason": "Cannot verify process cleanup: " + type(exc).__name__}
+        if diagnostic:
+            process.poll()
+            return {"preserved": True, "process_group": process.pid, "diagnostic": diagnostic}
+    _stop_group(process)
+    process.wait()
+    return {"preserved": False, "process_group": process.pid}
+
+
 def run_session(cli: list[str], cwd: Path, prompt: str, log_dir: Path,
                 approval_mode="auto-edit", timeout_seconds=3600,
                 env: dict | None = None,
-                stop_event: threading.Event | None = None) -> dict:
+                stop_event: threading.Event | None = None,
+                cleanup_guard=None) -> dict:
     """Run a fresh session with stdin task and stream-json output.
 
     cli is an argv prefix, normally ["gigacode"]. env is a complete environment
@@ -179,6 +200,7 @@ def run_session(cli: list[str], cwd: Path, prompt: str, log_dir: Path,
     argv = list(cli) + ["--output-format", "stream-json", "--approval-mode", approval_mode,
                         "--prompt", "Read the complete task from stdin and execute it."]
     timed_out, cancelled, process, launch_error = False, False, None, None
+    cleanup = None
     with _private_file(log_dir / "prompt.txt") as task:
         task.write(prompt.encode("utf-8"))
     try:
@@ -204,15 +226,16 @@ def run_session(cli: list[str], cwd: Path, prompt: str, log_dir: Path,
                 launch_error = f"Cannot start CLI: {type(exc).__name__}"
             finally:
                 if process is not None:
-                    _stop_group(process)
-                    process.wait()
+                    cleanup = finish_process(process, cleanup_guard)
     except BaseException:
-        if process is not None:
-            _stop_group(process)
+        if process is not None and cleanup is None:
+            finish_process(process, cleanup_guard)
         raise
     result = parse_events(events_path)
     result.update(returncode=process.returncode if process is not None else None,
-                  timed_out=timed_out, cancelled=cancelled)
+                  timed_out=timed_out, cancelled=cancelled, cleanup=cleanup)
+    if cleanup and cleanup['preserved']:
+        result['errors'].append('Process group preserved: service cleanup requires inspection')
     if launch_error:
         result["errors"].append(launch_error)
     if timed_out:
