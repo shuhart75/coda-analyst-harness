@@ -168,8 +168,37 @@ class InventoryTests(unittest.TestCase):
         self.assertTrue(malformed)
         self.assertFalse(entries)
 
+    def test_argument_separators_do_not_create_process_rows(self):
+        for separator in ('\u0085', '\u2028', '\u2029', '\v', '\f', '\r'):
+            with self.subTest(separator=repr(separator)):
+                processes = (row(100, 1, 100, '/usr/bin/gigacode --prompt first' + separator + 'SECRET')
+                             + row(120, 100, 100, '/usr/bin/node server.js'))
+                result = self.collect(processes, 'p120\nn*:3002\n',
+                                      'p100\nn/work/harness\np120\nn/work/poc/frontend\n')
+                self.assertTrue(result['complete'], result['limitations'])
+                self.assertEqual(result['services'][0]['agent_pids'], [100])
+                self.assertTrue(inv.assess_handoff('/work/poc', result)['blocked'])
+                self.assertNotIn('SECRET', json.dumps(result))
+
+    def test_real_incomplete_record_still_blocks_inventory(self):
+        result = self.collect(row(100, 1, 100, '/usr/bin/gigacode') + '120 100 100\n',
+                              '', 'p100\nn/work/harness\n')
+        self.assertFalse(result['complete'])
+        self.assertIn('ps-incomplete-rows', result['limitations'])
+        self.assertTrue(inv.assess_handoff('/work/poc', result)['blocked'])
+
+    def test_command_preserves_carriage_returns_in_actual_subprocess_output(self):
+        data = row(100, 1, 100, '/usr/bin/gigacode --prompt first\rsecond\u2028third').encode('utf-8')
+        output, error = inv._command([sys.executable, '-c',
+                                     'import sys;sys.stdout.buffer.write(' + repr(data) + ')'])
+        self.assertIsNone(error)
+        self.assertEqual(output.encode('utf-8'), data)
+        processes, malformed = inv._parse_ps(output)
+        self.assertFalse(malformed)
+        self.assertEqual(processes[100]['kind'], 'gigacode')
+
     def test_empty_lsof_selection_is_not_error(self):
-        completed = subprocess.CompletedProcess(['lsof'], 1, '', '')
+        completed = subprocess.CompletedProcess(['lsof'], 1, b'', b'')
         with patch.object(inv.subprocess, 'run', return_value=completed) as run:
             self.assertEqual(inv._command(['/usr/bin/lsof']), ('', None))
         self.assertEqual(run.call_args.kwargs['stdin'], subprocess.DEVNULL)

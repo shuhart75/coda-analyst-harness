@@ -23,7 +23,7 @@ import uuid
 def _command(argv):
     try:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, errors='replace',
+                                stderr=subprocess.PIPE,
                                 timeout=20, check=False, env={**os.environ, 'LC_ALL': 'C'})
     except (OSError, subprocess.TimeoutExpired):
         return None, 'command-unavailable-or-timeout'
@@ -32,7 +32,9 @@ def _command(argv):
     if result.returncode and not (Path(argv[0]).name == 'lsof' and result.returncode == 1
                                  and not result.stdout.strip() and not result.stderr.strip()):
         return None, 'command-failed'
-    return result.stdout, 'command-diagnostic' if result.stderr.strip() else None
+    # Text-mode universal newlines would turn a CR inside an argument into a
+    # new process row. Decode without altering the command's record delimiters.
+    return result.stdout.decode('utf-8', 'replace'), 'command-diagnostic' if result.stderr.strip() else None
 
 
 def _identity(arguments):
@@ -62,7 +64,9 @@ def _identity(arguments):
 def _parse_ps(text):
     result = {}
     malformed = False
-    for line in text.splitlines():
+    # ps emits LF-delimited records. Unicode separators, VT, FF and CR may
+    # occur inside arguments and must not become extra process records.
+    for line in text.split('\n'):
         if not line.strip():
             continue
         # pid, ppid, pgid, uid, five locale-stable lstart fields, args.
