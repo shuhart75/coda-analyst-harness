@@ -387,10 +387,13 @@ class Runner:
         if not services_before['complete']:
             raise Blocked('Cannot inspect services before session; run bootstrap --diagnose')
         self.check_existing_workspace_processes(services_before, root, name)
+        context = (make_policy_prompt(self.cfg['nexus']['nexus_hosts'], role)
+                   if name == 'preflight' else self.context(role, name in ('plan', 'plan-review')))
         with self.activity('Сессия ' + name + ' / ' + cwd + ' / ' + role):
-            result = run_session(self.cfg['cli'], under(root, cwd), self.context(role, name in ('plan', 'plan-review')) + '\n' + prompt,
+            result = run_session(self.cfg['cli'], under(root, cwd), context + '\n' + prompt,
                              self.logdir(name), approval_mode='plan' if role == 'review' else self.cfg['approval_mode'],
-                             timeout_seconds=self.cfg['session_timeout'], env=self.env, stop_event=self.stop,
+                             timeout_seconds=min(300, self.cfg['session_timeout']) if name == 'preflight'
+                                             else self.cfg['session_timeout'], env=self.env, stop_event=self.stop,
                              cleanup_guard=self.cleanup_guard)
         if (result.get('cleanup') or {}).get('preserved'):
             raise Blocked('Service-bearing process group preserved; inspect preserved-processes before resume')
@@ -424,11 +427,14 @@ class Runner:
         self.audit(root)
         before = snapshot(root, normalize_settings=True)
         target = under(root, cwd) / ('.sdd-permission-probe-' + uuid.uuid4().hex)
-        prompt = ('PERMISSION_PREFLIGHT\nRead existing SDD instructions. Invoke a read tool, a shell tool '
-                  '(pwd is sufficient), and a synchronous subagent; await its return. '
+        prompt = ('PERMISSION_PREFLIGHT\nThis is ONLY a bounded tool capability probe, not product work. '
+                  'Read one existing local instruction file. Invoke a shell tool with exactly pwd, '
+                  'and a synchronous subagent tasked ONLY to read that same file and return PROBE_OK; await its return. '
                   'Do not perform implementation or downloads. '
                   'Use plain pwd for the shell probe. Do not use command substitution, backticks, '
-                  'or process substitution. Do not explore unrelated files. ')
+                  'or process substitution. Do not inspect requirements, product code, Git status/history, '
+                  'or run SDD planning, audits, tests or recursive searches. '
+                  'Do not assess product readiness. Once the listed probes finish, return immediately. ')
         aliases = {'read': {'read', 'read_file'}, 'shell': {'bash', 'run_shell_command'},
                    'agent': {'agent', 'create_sub_session'}}
         if cwd != '.':
@@ -465,10 +471,35 @@ class Runner:
 
     def preflight(self):
         self.progress('Проверка возможностей: ' + str(len(self.cfg['contours']) * 2) + ' проб')
+        cache_path = self.root / 'preflight-passed.json'
+        settings = {}
+        for parent in [self.main, *self.main.parents, Path.home()]:
+            path = parent / '.gigacode/settings.json'
+            settings[str(path)] = digest(path) if path.is_file() else None
+        cli_path = shutil.which(self.cfg['cli'][0], path=self.env.get('PATH'))
+        signature = hashlib.sha256(json.dumps({
+            'config': digest(self.config_path), 'snapshot': snapshot(self.main),
+            'controls': git_controls(self.main), 'settings': settings,
+            'environment': self.env,
+            'cli': digest(Path(cli_path)) if cli_path and Path(cli_path).is_file() else None,
+            'runner': {name: digest(Path(__file__).with_name(name))
+                       for name in ('controller.py', 'policy.py', 'transport.py', 'workspace.py')}
+        }, sort_keys=True).encode()).hexdigest()
+        cached = read(cache_path) if cache_path.exists() else {}
+        passed = cached.get('passed', []) if cached.get('signature') == signature else []
+        passed = set(passed) if isinstance(passed, list) and all(isinstance(k, str) for k in passed) else set()
         def probe_one(cwd, role):
+            key = cwd + ':' + role
+            if key in passed:
+                self.progress('Проверка возможностей ' + cwd + ' / ' + role + ': сохранённый успех')
+                return
             probe = self.root / 'probes' / uuid.uuid4().hex
-            clone_snapshot(self.main, probe)
+            with self.activity('Подготовка пробы ' + cwd + ' / ' + role):
+                clone_snapshot(self.main, probe)
             self.workspace_preflight(probe, cwd, role)
+            with self._report_lock:
+                passed.add(key)
+                save(cache_path, {'signature': signature, 'passed': sorted(passed)})
         with ThreadPoolExecutor(max_workers=self.cfg['jobs']) as pool:
             active = {pool.submit(probe_one, cwd, role)
                       for cwd in self.cfg['contours'] for role in ('execute', 'review')}

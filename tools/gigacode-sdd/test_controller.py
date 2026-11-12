@@ -390,6 +390,31 @@ for name in sys.argv[1:]:
         self.assertTrue(all(r['passed'] and not r['missing'] for r in reports))
         self.assertTrue(all(not r['result']['ok'] and r['result']['errors'] for r in reports))
 
+    def test_preflight_resume_reuses_only_successful_unchanged_probes(self):
+        def probe(root, cwd, role):
+            if cwd == 'frontend' and role == 'review':
+                raise Blocked('probe failed')
+        with patch.object(self.runner, 'workspace_preflight', side_effect=probe):
+            with self.assertRaises(Blocked):
+                self.runner.preflight()
+        cache = json.loads((self.runner.root / 'preflight-passed.json').read_text())
+        self.assertGreater(len(cache['passed']), 0)
+        self.assertNotIn('frontend:review', cache['passed'])
+        resumed = Runner(self.runner.config_path)
+        resumed.env = self.runner.env.copy()
+        with patch.object(resumed, 'workspace_preflight') as retry:
+            resumed.preflight()
+            self.assertEqual(retry.call_count, 6 - len(cache['passed']))
+        with patch.object(resumed, 'workspace_preflight') as retry:
+            resumed.preflight()
+            retry.assert_not_called()
+        settings = resumed.main / '.gigacode/settings.json'
+        settings.parent.mkdir(exist_ok=True)
+        settings.write_text('{"permissions":{"deny":["Bash"]}}')
+        with patch.object(resumed, 'workspace_preflight') as retry:
+            resumed.preflight()
+            self.assertEqual(retry.call_count, 6)
+
     def test_permission_denial_is_blocker_not_false_success(self):
         self.runner.env['FAKE_DENY'] = '1'
         with self.assertRaisesRegex(Blocked, 'Permission'):
