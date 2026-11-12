@@ -81,7 +81,23 @@ def _message(event):
             return None
         role, text = payload.get('role'), _text(payload.get('content'))
     elif event.get('type') in {'user', 'assistant'} and isinstance(event.get('message'), dict):
-        role, text = event['type'], _text(event['message'].get('content'))
+        if event.get('provenance') == 'system' or event.get('subtype') == 'notification':
+            return None
+        role = event['type']
+        message = event['message']
+        if 'parts' in message:
+            # Native GigaCode stores visible text alongside thoughts and tool
+            # calls. Only plain text parts belong in historical context.
+            parts = message['parts']
+            text = '\n'.join(part['text'] for part in parts
+                            if isinstance(part, dict)
+                            and isinstance(part.get('text'), str)
+                            and not part.get('thought')
+                            and not any(key in part for key in
+                                        ('functionCall', 'functionResponse', 'thoughtSignature'))
+                            ) if isinstance(parts, list) else ''
+        else:
+            text = _text(message.get('content'))
     elif event.get('type') == 'event_msg' and isinstance(event.get('payload'), dict):
         payload = event['payload']
         role = {'user_message': 'user', 'agent_message': 'assistant'}.get(payload.get('type'))

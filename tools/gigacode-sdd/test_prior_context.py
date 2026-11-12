@@ -89,6 +89,31 @@ class PriorContextTests(unittest.TestCase):
         for value in ('SECRET', 'PRIVATE_THOUGHT', 'TOOL_OUTPUT'):
             self.assertNotIn(value, evidence)
 
+    def test_native_gigacode_parts_exclude_thoughts_tools_and_notifications(self):
+        self.write([
+            {'type': 'system', 'cwd': str(self.repo), 'sessionId': 'native-42'},
+            {'type': 'user', 'provenance': 'real_user', 'message': {
+                'role': 'user', 'parts': [{'text': 'Implement REQ-001'}]}},
+            {'type': 'assistant', 'provenance': 'assistant_output', 'message': {
+                'role': 'model', 'parts': [
+                    {'text': 'PRIVATE_THOUGHT', 'thought': True},
+                    {'functionCall': {'name': 'shell', 'args': 'TOOL_SECRET'}},
+                    {'text': 'REQ-001 pending; password=native-secret'}]}},
+            {'type': 'user', 'provenance': 'system', 'subtype': 'notification',
+             'message': {'parts': [{'text': 'NOTIFICATION_SECRET'}]}},
+            {'type': 'tool_result', 'provenance': 'tool_result', 'message': {
+                'role': 'user', 'parts': [{'functionResponse': {'response': 'OUTPUT_SECRET'}}]}}
+        ])
+        metadata = self.capture()
+        evidence = Path(metadata['evidence_path']).read_text(encoding='utf-8')
+        self.assertEqual(metadata['messages_kept'], 2)
+        self.assertIn('Implement REQ-001', evidence)
+        self.assertIn('REQ-001 pending', evidence)
+        for secret in ('PRIVATE_THOUGHT', 'TOOL_SECRET', 'NOTIFICATION_SECRET',
+                       'OUTPUT_SECRET', 'native-secret'):
+            self.assertNotIn(secret, evidence)
+        self.assertTrue(prior.verify_prior_context(metadata))
+
     def test_common_credentials_and_private_key_are_redacted(self):
         secrets = ['very-secret-password', 'abcde-secret-bearer', 'url-password', 'my-api-secret',
                    'flag-secret', 'query-secret', 'private-body-line', 'ghp_abcdefghijklmnopqrstuvwxy']
