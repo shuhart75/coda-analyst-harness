@@ -4,10 +4,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import signal
-import subprocess
 import threading
 import time
+
+from platform_support import launch_process, stop_process_scope
 
 
 def _text(value):
@@ -122,32 +122,6 @@ def _private_file(path: Path):
     return os.fdopen(os.open(path, flags, 0o600), "wb", buffering=0)
 
 
-def _stop_group(process: subprocess.Popen):
-    """Terminate the owned group; descendants that changed groups are not covered."""
-    if os.name == "posix":
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        deadline = time.monotonic() + 0.5
-        while time.monotonic() < deadline:
-            process.poll()
-            try:
-                os.killpg(process.pid, 0)
-            except ProcessLookupError:
-                return
-            time.sleep(0.025)
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    elif process.poll() is None:
-        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        if process.poll() is None:
-            process.kill()
-
-
 def finish_process(process, cleanup_guard=None):
     """Preserve a service-bearing group rather than blindly terminating it.
 
@@ -163,7 +137,7 @@ def finish_process(process, cleanup_guard=None):
         if diagnostic:
             process.poll()
             return {"preserved": True, "process_group": process.pid, "diagnostic": diagnostic}
-    _stop_group(process)
+    stop_process_scope(process)
     process.wait()
     return {"preserved": False, "process_group": process.pid}
 
@@ -208,11 +182,9 @@ def run_session(cli: list[str], cwd: Path, prompt: str, log_dir: Path,
                 _private_file(events_path) as stdout, \
                 _private_file(log_dir / "stderr.log") as stderr:
             environment = None if env is None else dict(env)
-            kwargs = {"start_new_session": True} if os.name == "posix" else {
-                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
             try:
-                process = subprocess.Popen(argv, cwd=cwd, stdin=task, stdout=stdout,
-                                           stderr=stderr, env=environment, **kwargs)
+                process = launch_process(argv, cwd=cwd, stdin=task, stdout=stdout,
+                                         stderr=stderr, env=environment)
                 started = time.monotonic()
                 while process.poll() is None:
                     if stop_event is not None and stop_event.is_set():

@@ -1,4 +1,4 @@
-"""Mac setup assistant for GigaCode SDD; no downloads, shell interpolation or service stops."""
+"""Console setup for GigaCode SDD on Windows, macOS and Linux; no downloads or service stops."""
 from __future__ import annotations
 import sys
 
@@ -28,11 +28,21 @@ SKIP_DIRS = {'.git', '.workspace-state', '.venv', 'venv', 'node_modules', 'targe
              'dist', 'build', 'logs', 'pgdata', '.m2', '.npm', '__pycache__', 'returns'}
 
 
-def app_root(home=None, platform=None):
+def app_root(home=None, platform=None, environment=None):
     home = Path.home() if home is None else Path(home)
     platform = sys.platform if platform is None else platform
-    return home / ('Library/Application Support/GigaCode SDD' if platform == 'darwin'
-                   else '.local/share/gigacode-sdd')
+    env = os.environ if environment is None else environment
+    if platform == 'win32':
+        local = Path(env.get('LOCALAPPDATA') or home / 'AppData/Local')
+        if not local.is_absolute():
+            local = home / 'AppData/Local'
+        return local / 'GigaCode SDD'
+    if platform == 'darwin':
+        return home / 'Library/Application Support/GigaCode SDD'
+    state = Path(env.get('XDG_STATE_HOME') or home / '.local/state')
+    if not state.is_absolute():
+        state = home / '.local/state'
+    return state / 'gigacode-sdd'
 
 
 def new_state_dir(root):
@@ -82,7 +92,7 @@ def is_product_repo(path):
         return False
     try:
         root = subprocess.check_output(['git', '-C', str(path), 'rev-parse', '--show-toplevel'],
-                                       stderr=subprocess.DEVNULL, text=True, timeout=10).strip()
+                                       stderr=subprocess.DEVNULL, encoding='utf-8', timeout=10).strip()
         return Path(root).resolve() == path.resolve()
     except (OSError, subprocess.SubprocessError):
         return False
@@ -153,7 +163,7 @@ def requirement_candidate(path):
             pass
     label = ' · '.join(x for x in (meta.get('title') or heading or path.parent.name,
                                   'редакция ' + meta['revision'] if 'revision' in meta else '', str(path)) if x)
-    # Display data never becomes AppleScript code or a shell argument expression.
+    # Display data never becomes code or a shell argument expression.
     label = ' '.join(label.split())
     return {'file': str(path), 'packet': str(path.parent), 'label': label, 'metadata': meta}
 
@@ -212,58 +222,66 @@ def find_cli(home=None):
         Path('/opt/homebrew/bin/gigacode'), Path('/usr/local/bin/gigacode'),
         home / '.local/bin/gigacode', home / '.npm-global/bin/gigacode',
         home / '.gigacode/bin/gigacode']
+    if sys.platform == 'win32':
+        appdata = Path(os.environ.get('APPDATA') or home / 'AppData/Roaming')
+        candidates.extend(appdata / 'npm' / name for name in ('gigacode.cmd', 'gigacode.exe'))
+        candidates.extend(home / '.gigacode/bin' / name for name in ('gigacode.exe', 'gigacode.cmd'))
     return next((str(p) for p in candidates if p.is_file() and os.access(p, os.X_OK)), None)
 
 
-class MacUI:
-    def _run(self, script, args):
-        if sys.platform != 'darwin':
-            raise Blocked('Графический запуск предназначен для macOS. Диагностика доступна через --diagnose.')
+class ConsoleUI:
+    """Numbered choices; all entered values remain data, never shell source."""
+    def __init__(self, input_fn=None, output_fn=None):
+        self.input = input if input_fn is None else input_fn
+        self.output = print if output_fn is None else output_fn
+
+    def _read(self, prompt):
         try:
-            result = subprocess.run(['/usr/bin/osascript', '-e', script, '--', *map(str, args)],
-                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            return result.stdout.rstrip('\n')
-        except subprocess.CalledProcessError:
-            raise Blocked('Выбор отменён или окно macOS недоступно. Ничего не остановлено.') from None
+            value = self.input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            raise Blocked('Выбор отменён. Ничего не остановлено.') from None
+        if value.casefold() in ('q', 'quit', 'отмена'):
+            raise Blocked('Выбор отменён. Ничего не остановлено.')
+        return value
 
     def choose(self, title, items):
         if not items:
             raise ValueError('Empty chooser')
-        script = '''on run argv
-set choices to items 2 thru -1 of argv
-set answer to choose from list choices with title "GigaCode SDD" with prompt (item 1 of argv) default items {item 1 of choices} OK button name "Выбрать" cancel button name "Отмена"
-if answer is false then return "cancel"
-repeat with n from 1 to count choices
-if item n of choices is item 1 of answer then return n as text
-end repeat
-end run'''
-        selected = self._run(script, [title, *items])
-        if not selected.isdigit() or not 1 <= int(selected) <= len(items):
-            raise Blocked('Выбор отменён. Ничего не остановлено.')
-        return int(selected) - 1
+        self.output(title)
+        for number, item in enumerate(items, 1):
+            self.output(str(number) + '. ' + str(item))
+        while True:
+            selected = self._read('Номер варианта (q: отмена): ')
+            if selected.isascii() and selected.isdigit() and 1 <= int(selected) <= len(items):
+                return int(selected) - 1
+            self.output('Введите номер от 1 до ' + str(len(items)) + '.')
+
+    def _path(self, prompt, is_folder):
+        while True:
+            value = self._read(prompt + '\nПолный путь (q: отмена): ')
+            # Accept paths copied with surrounding quotes; do not expand shell variables.
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            if not value:
+                raise Blocked('Путь не выбран. Ничего не остановлено.')
+            path = Path(value).expanduser()
+            if path.is_absolute() and (path.is_dir() if is_folder else path.is_file()):
+                return path.resolve()
+            self.output('Нужен полный путь ' + ('к существующей папке.' if is_folder else 'к существующему файлу.'))
 
     def folder(self, prompt):
-        return Path(self._run('''on run argv
-return POSIX path of (choose folder with prompt (item 1 of argv))
-end run''', [prompt])).resolve()
+        return self._path(prompt, True)
 
     def file(self, prompt):
-        return Path(self._run('''on run argv
-return POSIX path of (choose file with prompt (item 1 of argv))
-end run''', [prompt])).resolve()
+        return self._path(prompt, False)
 
     def confirm(self, message, action='Запустить'):
-        script = '''on run argv
-set answer to display dialog (item 1 of argv) with title "GigaCode SDD" buttons {"Отмена", item 2 of argv} default button (item 2 of argv)
-return button returned of answer
-end run'''
-        if self._run(script, [message, action]) != action:
+        self.output(message)
+        if self._read(action + '? [да/Нет]: ').casefold() not in ('да', 'yes', 'y'):
             raise Blocked('Запуск отменён. Ничего не остановлено.')
 
     def notify(self, message):
-        self._run('''on run argv
-display dialog (item 1 of argv) with title "GigaCode SDD" buttons {"Понятно"} default button "Понятно"
-end run''', [message])
+        self.output(message)
 
 
 def choose_repository(ui, candidates):
@@ -353,12 +371,10 @@ def launcher_dependency(inventory):
     agents = {p['pid']: p for p in inventory.get('agents', []) if isinstance(p.get('pid'), int)}
     if not agents:
         return {'complete': True, 'agent_pids': []}
-    try:
-        raw = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True,
-                                      stderr=subprocess.DEVNULL, timeout=10)
-        table = {int(parts[0]): int(parts[1]) for line in raw.splitlines()
-                 if len(parts := line.split()) == 2}
-    except (OSError, ValueError, subprocess.SubprocessError):
+    records = inventory.get('processes', [])
+    table = {p['pid']: p for p in records if isinstance(p.get('pid'), int)
+             and isinstance(p.get('ppid'), int)}
+    if not table:
         return {'complete': False, 'agent_pids': []}
     pid = os.getpid()
     seen, found = set(), set()
@@ -370,8 +386,8 @@ def launcher_dependency(inventory):
         seen.add(pid)
         if pid in agents:
             found.add(pid)
-        pid = table[pid]
-    group = os.getpgrp() if hasattr(os, 'getpgrp') else None
+        pid = table[pid]['ppid']
+    group = table.get(os.getpid(), {}).get('pgid')
     if group is not None and group > 1:
         found.update(pid for pid, agent in agents.items() if agent.get('pgid') == group)
     return {'complete': complete, 'agent_pids': sorted(found)}
@@ -388,7 +404,7 @@ def diagnostic(root, repo=None):
     if assessment is not None and (dependency['agent_pids'] or not dependency['complete']):
         assessment = {**assessment, 'blockers': list(assessment.get('blockers', [])), 'blocked': True}
         assessment['blockers'].append('Контроллер связан с GigaCode или его независимый запуск не подтверждён. '
-                                      'Откройте Start-GigaCode-SDD.command из Finder в отдельном терминале; '
+                                      'Запустите bootstrap.py установленным Python в отдельном терминале вне агента; '
                                       'текущую сессию не завершайте.')
     report = {'inventory': inventory, 'handoff': assessment, 'launcher_dependency': dependency,
               'source': str(repo) if repo is not None else None}
@@ -408,7 +424,7 @@ def require_handoff(root, repo):
 
 
 def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False):
-    ui = MacUI() if ui is None else ui
+    ui = ConsoleUI() if ui is None else ui
     home = Path.home() if home is None else Path(home)
     root = app_root(home)
     if diagnose_only:
@@ -497,11 +513,6 @@ def main(argv=None):
     except (Blocked, OSError, ValueError, RuntimeError) as exc:
         message = 'Запуск остановлен. ' + str(exc)
         print(message)
-        if sys.platform == 'darwin' and not args.diagnose:
-            try:
-                MacUI().notify(message)
-            except Blocked:
-                pass
         return 2
 
 

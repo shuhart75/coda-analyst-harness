@@ -4,6 +4,7 @@ from pathlib import Path
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,12 +17,18 @@ def row(pid, ppid, pgid, args, uid=501):
 
 
 class InventoryTests(unittest.TestCase):
+    def setUp(self):
+        self.native_platform = sys.platform
+        self.posix_platform = patch.object(inv.sys, 'platform', 'linux')
+        self.posix_platform.start()
+        self.addCleanup(self.posix_platform.stop)
+
     def collect(self, process_rows, listeners='', cwd='', diagnostics=None):
         responses = [(process_rows, None), (listeners, None), (cwd, None)]
         if diagnostics:
             responses = [(text, diagnostics.get(index)) for index, (text, _) in enumerate(responses)]
         with patch.object(inv.shutil, 'which', side_effect=lambda name: '/usr/bin/' + name), \
-                patch.object(inv.os, 'getuid', return_value=501), \
+                patch.object(inv.os, 'getuid', return_value=501, create=True), \
                 patch.object(inv, '_command', side_effect=responses * 2):
             return inv.inspect_services()
 
@@ -61,7 +68,7 @@ class InventoryTests(unittest.TestCase):
         responses = [(processes, None), ('', None),
                      ('p100\nn/work/poc\np130\nn/work/poc/database\n', None)]
         with patch.object(inv.shutil, 'which', side_effect=lambda name: '/usr/bin/' + name), \
-                patch.object(inv.os, 'getuid', return_value=501), \
+                patch.object(inv.os, 'getuid', return_value=501, create=True), \
                 patch.object(inv, '_command', side_effect=responses) as commands:
             result = inv.inspect_services()
         self.assertTrue(result['complete'], result)
@@ -172,16 +179,23 @@ class InventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'private/report.json'
             inv.save_report(path, {'safe_to_stop': 'not-established'})
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+            if self.native_platform != 'win32':
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
             with self.assertRaises(FileExistsError):
                 inv.save_report(path, {})
             alias = Path(tmp) / 'alias'
-            alias.symlink_to(path.parent, target_is_directory=True)
+            try:
+                alias.symlink_to(path.parent, target_is_directory=True)
+            except OSError:
+                if self.native_platform != 'win32':
+                    raise
+                return  # Windows may require Developer Mode for symlinks.
             with self.assertRaises(ValueError):
                 inv.save_report(alias / 'other.json', {})
 
     def test_real_read_only_smoke_keeps_listener_alive(self):
+        self.posix_platform.stop()
         try:
             listener = socket.socket()
         except PermissionError:

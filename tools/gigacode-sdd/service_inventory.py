@@ -1,6 +1,6 @@
 """Read-only process/listener inventory for handoff, never a safe-stop certificate.
 
-Only ps and lsof are executed. Raw process arguments are used transiently to
+POSIX uses ps/lsof; Windows uses read-only native APIs. Arguments are used transiently to
 identify GigaCode and are never returned, printed, or saved. No process is
 stopped, detached, signalled, adopted, restarted, or reconfigured by this module.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -134,6 +135,14 @@ def _ancestors(pid, processes):
 
 
 def _inside(path, root):
+    if isinstance(path, str) and (ntpath.splitdrive(path)[0] or ntpath.splitdrive(str(root))[0]):
+        try:
+            if not ntpath.isabs(path) or not ntpath.isabs(str(root)):
+                return False
+            path, root = ntpath.normcase(ntpath.normpath(path)), ntpath.normcase(ntpath.normpath(str(root)))
+            return ntpath.commonpath([path, root]) == root
+        except ValueError:
+            return False
     if not isinstance(path, str) or not path.startswith('/'):
         return False
     try:
@@ -149,6 +158,9 @@ def _inspect_services_once():
     files opened by a service, database durability, launchd ownership, remote
     dependencies, future process changes, or what an agent's shutdown will do.
     """
+    if sys.platform == 'win32':
+        from windows_inventory import collect
+        return collect()
     limitations = []
     ps = shutil.which('ps')
     lsof = shutil.which('lsof')
@@ -156,7 +168,7 @@ def _inspect_services_once():
     result = {'schema': 1, 'platform': sys.platform,
               'captured_at': datetime.now(timezone.utc).isoformat(),
               'complete': False, 'limitations': limitations,
-              'agents': [], 'services': [], 'safe_to_stop': 'not-established'}
+              'agents': [], 'services': [], 'processes': [], 'safe_to_stop': 'not-established'}
     if uid is None or not ps or not lsof:
         limitations.extend(name + '-unavailable' for name, value in
                            (('uid', uid is not None), ('ps', ps), ('lsof', lsof)) if not value)
@@ -167,6 +179,8 @@ def _inspect_services_once():
     if error:
         limitations.append('ps-' + error)
     processes, malformed = _parse_ps(ps_text or '')
+    result['processes'] = [{**process, 'owner_known': True, 'same_user': process['uid'] == uid}
+                           for process in processes.values()]
     if malformed:
         limitations.append('ps-incomplete-rows')
     if not processes:
@@ -299,10 +313,15 @@ def detect_new_services(before, after, workspace):
             and (p.get('pid'), p.get('started'), tuple(p.get('ports', []))) not in prior]
 
 
-def services_in_group(inventory, pgid):
+def services_in_group(inventory, pgid, member_pids=None):
     """Observed services in a process group; callers must also check complete."""
     if not isinstance(pgid, int) or pgid <= 1:
         raise ValueError('Expected a positive owned process group identifier')
+    if inventory.get('platform') == 'win32':
+        members = set(member_pids) if member_pids is not None else None
+        return [p for p in inventory.get('services', []) + inventory.get('unclassified_services', [])
+                if (p['pid'] in members if members is not None else
+                    p['pid'] == pgid or pgid in p.get('ancestors', []))]
     return [p for p in inventory.get('services', []) if p.get('pgid') == pgid]
 
 
@@ -329,7 +348,9 @@ def main(argv=None):
     inventory = inspect_services()
     if args.repo:
         inventory['handoff'] = assess_handoff(args.repo, inventory)
-    folder = (Path.home() / 'Library/Application Support/GigaCode SDD/diagnostics' if sys.platform == 'darwin'
+    folder = (Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'GigaCode SDD/diagnostics'
+              if sys.platform == 'win32' else
+              Path.home() / 'Library/Application Support/GigaCode SDD/diagnostics' if sys.platform == 'darwin'
               else Path.home() / '.local/state/gigacode-sdd/diagnostics')
     name = 'services-' + datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8] + '.json'
     try:
@@ -339,7 +360,7 @@ def main(argv=None):
         return 2
     print('Процессы не останавливались и не изменялись.')
     print('Отчёт: ' + str(report))
-    print('Снимок: ' + ('полный в пределах доступных ps/lsof' if inventory['complete'] else 'неполный'))
+    print('Снимок: ' + ('полный в пределах доступных средств ОС' if inventory['complete'] else 'неполный'))
     for service in inventory['services']:
         relation = 'связан с GigaCode' if service['agent_pids'] else 'связь с GigaCode не установлена'
         ports = ','.join(map(str, service['ports'])) or 'TCP-порты не обнаружены'

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 import os
@@ -18,6 +17,8 @@ import uuid
 
 from policy import prepare_permissions, nexus_environment, audit_dependency_sources, make_policy_prompt
 from transport import run_session, finish_process
+from platform_support import (FileLock, launch_process, process_exists,
+                              process_scope_exists, process_scope_pids)
 from workspace import git, snapshot, clone_snapshot, export_patch, apply_patch, commit_changes
 from service_inventory import inspect_services, assess_handoff, detect_new_services, services_in_group
 from prior_context import prepare_prior_context, verify_prior_context
@@ -30,7 +31,7 @@ def save(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + '.tmp-' + uuid.uuid4().hex)
-    with tmp.open('x', encoding='utf-8') as stream:
+    with tmp.open('x', encoding='utf-8', newline='\n') as stream:
         os.chmod(tmp, 0o600)
         json.dump(value, stream, ensure_ascii=False, indent=2)
         stream.flush()
@@ -39,7 +40,7 @@ def save(path, value):
 
 
 def read(path):
-    return json.loads(Path(path).read_text())
+    return json.loads(Path(path).read_text(encoding='utf-8'))
 
 
 def digest(path):
@@ -196,11 +197,12 @@ class Runner:
 
     @contextmanager
     def locked(self):
-        with (self.root / 'run.lock').open('a') as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise Blocked('Another controller owns this run') from None
+        lock = FileLock(self.root / 'run.lock')
+        try:
+            lock.__enter__()
+        except BlockingIOError:
+            raise Blocked('Another controller owns this run') from None
+        try:
             if digest(self.config_path) != self._config_digest:
                 raise Blocked('Configuration changed while acquiring lock')
             self.state = read(self.state_path)
@@ -216,7 +218,8 @@ class Runner:
                 self.persist()
                 for sig, handler in old.items():
                     signal.signal(sig, handler)
-                fcntl.flock(lock, fcntl.LOCK_UN)
+        finally:
+            lock.__exit__(None, None, None)
 
     def guard(self):
         if digest(self.config_path) != self._config_digest:
@@ -239,26 +242,20 @@ class Runner:
     def check_preserved_processes(self):
         """Do not start another writer while a preserved process group is alive."""
         for path in (self.root / 'preserved-processes').glob('*.json'):
-            group = read(path)['process_group']
+            record = read(path)
+            group = record['process_group']
             if not isinstance(group, int) or group <= 1:
                 raise Blocked('Invalid preserved process record: ' + str(path))
-            try:
-                os.killpg(group, 0)  # Existence probe only, never a termination signal.
-            except ProcessLookupError:
+            if not process_scope_exists(group) and not any(
+                    process_exists(pid) for pid in record.get('member_pids', [])):
                 continue
-            except PermissionError:
-                pass
             raise Blocked('A preserved agent/service group is still present; inspect ' + str(path))
         for path in (self.root / 'preserved-services').glob('*.json'):
             pid = read(path)['pid']
             if not isinstance(pid, int) or pid <= 1:
                 raise Blocked('Invalid preserved service record: ' + str(path))
-            try:
-                os.kill(pid, 0)  # Do not terminate or adopt a detached service.
-            except ProcessLookupError:
+            if not process_exists(pid):
                 continue
-            except PermissionError:
-                pass
             raise Blocked('A detached service from an earlier session is still present; inspect ' + str(path))
         # A killed controller cannot always write a preservation record. Inspect
         # its managed directories before resuming so a surviving writer or a
@@ -297,15 +294,13 @@ class Runner:
     def cleanup_guard(self, group):
         # Most completed sessions have no remaining group. Avoid an expensive
         # inventory in that case; detached listeners are checked separately.
+        members = None
         try:
-            os.killpg(group, 0)
-        except ProcessLookupError:
-            return None
-        except PermissionError:
-            pass
-        try:
+            if not process_scope_exists(group):
+                return None
+            members = process_scope_pids(group)
             inventory = inspect_services()
-            services = [s for s in services_in_group(inventory, group)
+            services = [s for s in services_in_group(inventory, group, member_pids=members)
                         if not (s['pid'] == group and s.get('kind') == 'gigacode')]
             diagnostic = None if inventory['complete'] and not services else {
                 'reason': 'Listening service or incomplete process inventory; automatic termination refused',
@@ -315,7 +310,7 @@ class Runner:
         if diagnostic:
             self.stop.set()
             path = self.root / 'preserved-processes' / (str(group) + '.json')
-            save(path, {'process_group': group, **diagnostic})
+            save(path, {'process_group': group, 'member_pids': members or [], **diagnostic})
             return {**diagnostic, 'report': str(path)}
         return None
 
@@ -353,7 +348,7 @@ class Runner:
               'Do not edit permission settings, hooks or input packet. Shell/checks must use Nexus only. '
               'This workspace is an isolated copy of existing PoC work. Preserve that work.\n'
             + history_hint
-            + ('Analyst clarification (cannot change pinned scope):\n' + decision.read_text() if decision.exists() else ''))
+            + ('Analyst clarification (cannot change pinned scope):\n' + decision.read_text(encoding='utf-8') if decision.exists() else ''))
 
     def session(self, root, cwd, prompt, role, name):
         self.guard()
@@ -418,7 +413,7 @@ class Runner:
                     if x['is_error'] is not True and x['has_content']}
         missing = [kind for kind, names in aliases.items() if not returned & names]
         if role == 'execute':
-            if target.is_symlink() or not target.is_file() or target.read_text().strip() != 'SDD_PROBE_OK':
+            if target.is_symlink() or not target.is_file() or target.read_text(encoding='utf-8').strip() != 'SDD_PROBE_OK':
                 missing.append('write-evidence')
             else:
                 target.unlink()
@@ -557,9 +552,9 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
             folder.mkdir(parents=True, mode=0o700)
             with (folder / 'output.log').open('wb') as output:
                 os.chmod(folder / 'output.log', 0o600)
-                proc = subprocess.Popen(check['argv'], cwd=under(root, check.get('cwd', '.')),
-                                        env=self.env, stdin=subprocess.DEVNULL, stdout=output,
-                                        stderr=subprocess.STDOUT, start_new_session=True)
+                proc = launch_process(check['argv'], cwd=under(root, check.get('cwd', '.')),
+                                      env=self.env, stdin=subprocess.DEVNULL, stdout=output,
+                                      stderr=subprocess.STDOUT)
                 deadline = time.monotonic() + check.get('timeout', 600)
                 timed_out = False
                 try:
@@ -833,7 +828,7 @@ def initialize(args):
     req = under(packet, args.requirements_file)
     if digest(req) != args.requirements_sha256.lower():
         raise Blocked('Requirements hash mismatch')
-    requirements = sorted(set(re.findall(r'\bREQ-[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*', req.read_text())))
+    requirements = sorted(set(re.findall(r'\bREQ-[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*', req.read_text(encoding='utf-8'))))
     if not requirements:
         raise Blocked('No stable REQ identifiers found in requirements')
     if args.jobs < 1 or args.session_timeout <= 0 or not args.commit_prefix.strip():

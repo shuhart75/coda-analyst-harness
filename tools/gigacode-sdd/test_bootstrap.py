@@ -1,11 +1,9 @@
-"""Launcher selection, privacy and safe handoff tests without macOS dialogs."""
-import argparse
+"""Portable console selection, privacy and safe handoff tests."""
 from contextlib import nullcontext, redirect_stdout
 import io
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,6 +39,9 @@ class UI:
 
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
+        self.env = patch.dict(os.environ, {'XDG_STATE_HOME': '', 'LOCALAPPDATA': ''})
+        self.env.start()
+        self.addCleanup(self.env.stop)
         self.temp = tempfile.TemporaryDirectory(prefix='sdd-launcher-')
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
@@ -52,8 +53,8 @@ class BootstrapTests(unittest.TestCase):
                        stderr=subprocess.DEVNULL)
         self.packet = self.home / 'Downloads' / 'new packet'
         self.packet.mkdir(parents=True)
-        (self.packet / 'requirements.md').write_text('# Модульная симуляция\nREQ-SIM-1\n')
-        (self.packet / 'manifest.json').write_text(json.dumps({'revision': 3, 'feature': 'sim'}))
+        (self.packet / 'requirements.md').write_text('# Модульная симуляция\nREQ-SIM-1\n', encoding='utf-8')
+        (self.packet / 'manifest.json').write_text(json.dumps({'revision': 3, 'feature': 'sim'}), encoding='utf-8')
         self.safe_inventory = types.SimpleNamespace(
             inspect_services=Mock(return_value={'complete': True, 'limitations': [], 'services': []}),
             assess_handoff=Mock(return_value={'blocked': False, 'blockers': [], 'warnings': []}))
@@ -61,11 +62,14 @@ class BootstrapTests(unittest.TestCase):
     def test_bounded_discovery_uses_workspace_declared_code_and_no_symlink(self):
         harness = self.home / 'work' / 'harness'
         harness.mkdir()
-        (harness / '.analyst-workspace.json').write_text(json.dumps({'code': {'path': '../PoC with spaces'}}))
+        (harness / '.analyst-workspace.json').write_text(json.dumps({'code': {'path': '../PoC with spaces'}}), encoding='utf-8')
         outside = self.home / 'outside'
         outside.mkdir()
         (outside / 'private').mkdir()
-        (self.home / 'work' / 'link').symlink_to(outside, target_is_directory=True)
+        try:
+            (self.home / 'work' / 'link').symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pass  # Windows may restrict symlinks; registry assertions still run.
         repos, protected = bootstrap.discover_repositories([self.home / 'work'])
         self.assertEqual(repos, [self.repo])
         self.assertEqual(protected, [self.repo])
@@ -74,8 +78,8 @@ class BootstrapTests(unittest.TestCase):
     def test_packet_choice_does_not_choose_largest_revision_or_newest_mtime(self):
         old = self.home / 'Downloads' / 'old packet'
         old.mkdir()
-        (old / 'requirements.md').write_text('# Старая\nREQ-OLD-1\n')
-        (old / 'manifest.json').write_text(json.dumps({'revision': 99}))
+        (old / 'requirements.md').write_text('# Старая\nREQ-OLD-1\n', encoding='utf-8')
+        (old / 'manifest.json').write_text(json.dumps({'revision': 99}), encoding='utf-8')
         candidates = bootstrap.discover_requirements(self.repo, [self.home / 'Downloads'])
         selected = bootstrap.choose_requirements(UI([0]), candidates)
         self.assertEqual(Path(selected['file']), self.packet / 'requirements.md')
@@ -87,12 +91,12 @@ class BootstrapTests(unittest.TestCase):
         state = harness / '.workspace-state'
         state.mkdir(parents=True)
         (state / 'workspace.json').write_text(json.dumps({'schema_version': 4, 'roles': {
-            'code': {'repository': 'coda', 'path': str(self.repo), 'availability': 'ready'}}}))
+            'code': {'repository': 'coda', 'path': str(self.repo), 'availability': 'ready'}}}), encoding='utf-8')
         repos, protected = bootstrap.discover_repositories([self.home / 'work'])
         self.assertEqual(repos, [self.repo])
         self.assertEqual(protected, [self.repo])
         (state / 'workspace.json').write_text(json.dumps({'schema_version': 4, 'roles': {
-            'code': {'repository': 'coda', 'path': '../PoC with spaces', 'availability': 'ready'}}}))
+            'code': {'repository': 'coda', 'path': '../PoC with spaces', 'availability': 'ready'}}}), encoding='utf-8')
         self.assertEqual(bootstrap.declared_code_roots(harness), [])
 
     def test_invalid_repository_selection_is_not_replaced(self):
@@ -101,7 +105,7 @@ class BootstrapTests(unittest.TestCase):
 
     def test_nexus_inference_never_logs_credentials_or_accepts_suffix_host(self):
         npm = self.repo / 'frontend/.npmrc'
-        npm.write_text('registry=https://nexus-ci.delta.sbrf.ru/repository/npm/\n//nexus-ci.delta.sbrf.ru/:_authToken=secret\n')
+        npm.write_text('registry=https://nexus-ci.delta.sbrf.ru/repository/npm/\n//nexus-ci.delta.sbrf.ru/:_authToken=secret\n', encoding='utf-8')
         result = bootstrap.infer_nexus(self.repo, self.home, {})
         self.assertEqual(result['npm_registry'], 'https://nexus-ci.delta.sbrf.ru/repository/npm/')
         self.assertNotIn('secret', str(result))
@@ -135,7 +139,8 @@ class BootstrapTests(unittest.TestCase):
                 bootstrap.launch(UI(), self.home, repo_arg=str(self.repo))
         init.assert_not_called()
         report = next((bootstrap.app_root(self.home) / 'diagnostics').glob('*.json'))
-        self.assertEqual(report.stat().st_mode & 0o777, 0o600)
+        if os.name != 'nt':
+            self.assertEqual(report.stat().st_mode & 0o777, 0o600)
         self.assertFalse((bootstrap.app_root(self.home) / 'runs').exists())
 
     def test_incomplete_inventory_blocks_even_without_known_service(self):
@@ -190,12 +195,12 @@ class BootstrapTests(unittest.TestCase):
     def test_launcher_rejects_agent_ancestor_from_another_working_directory(self):
         self.safe_inventory.inspect_services.return_value = {
             'complete': True, 'limitations': [], 'services': [],
+            'processes': [{'pid': 123, 'ppid': 122, 'pgid': None},
+                          {'pid': 122, 'ppid': 120}, {'pid': 120, 'ppid': 1}],
             'agents': [{'pid': 120, 'pgid': 120, 'cwd': '/different-project'}]}
         with patch.dict(sys.modules, {'service_inventory': self.safe_inventory}), \
-                patch.object(bootstrap.os, 'getpid', return_value=123), \
-                patch.object(bootstrap.os, 'getpgrp', return_value=123), \
-                patch.object(bootstrap.subprocess, 'check_output', return_value='123 122\n122 120\n120 1\n'):
-            with self.assertRaisesRegex(Blocked, 'Finder'):
+                patch.object(bootstrap.os, 'getpid', return_value=123):
+            with self.assertRaisesRegex(Blocked, 'отдельном терминале'):
                 bootstrap.require_handoff(bootstrap.app_root(self.home), self.repo)
 
     def test_git_failure_does_not_expose_hook_stderr(self):
@@ -210,34 +215,49 @@ class BootstrapTests(unittest.TestCase):
         self.assertNotIn('verysecret', str(caught.exception))
         self.assertIn('Не обходите hook', str(caught.exception))
 
-    def test_applescript_values_are_arguments_not_executable_source(self):
-        hostile = 'project "; do shell script "touch /tmp/forbidden"'
-        completed = subprocess.CompletedProcess([], 0, '1\n', '')
-        with patch.object(bootstrap.sys, 'platform', 'darwin'), \
-                patch.object(bootstrap.subprocess, 'run', return_value=completed) as call:
-            self.assertEqual(bootstrap.MacUI().choose('Select', [hostile]), 0)
-        argv = call.call_args.args[0]
-        self.assertEqual(argv[-1], hostile)
-        self.assertNotIn(hostile, argv[2])
+    def test_console_reprompts_invalid_numbers_and_never_runs_display_data(self):
+        responses = iter(['', '0', '99', '1+1', '2'])
+        output = []
+        ui = bootstrap.ConsoleUI(lambda _: next(responses), output.append)
+        hostile = 'project "; touch /tmp/forbidden; $(exit 1)'
+        with patch.object(bootstrap.subprocess, 'run') as run:
+            self.assertEqual(ui.choose('Select', ['first', hostile]), 1)
+        run.assert_not_called()
+        self.assertIn('2. ' + hostile, output)
 
-    def test_command_resolves_its_directory_with_spaces_from_arbitrary_cwd(self):
-        target = self.home / 'Unpacked tool with spaces'
-        target.mkdir()
-        shutil.copy2(Path(bootstrap.__file__).with_name('Start-GigaCode-SDD.command'), target)
-        fake_bin = self.home / 'bin'
-        fake_bin.mkdir()
-        fake = fake_bin / 'python3'
-        fake.write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" >> "$CAPTURE"\nexit 0\n')
-        fake.chmod(0o700)
-        capture = self.home / 'capture'
-        environment = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ.get('PATH', ''), CAPTURE=str(capture))
-        result = subprocess.run(['bash', str(target / 'Start-GigaCode-SDD.command'), '--diagnose'],
-                                cwd=self.home, env=environment, input='\n', text=True, capture_output=True)
+    def test_console_cancel_eof_and_confirmation_are_conservative(self):
+        for value in ('q', 'отмена', ''):
+            ui = bootstrap.ConsoleUI(lambda _: value, lambda _: None)
+            with self.assertRaises(Blocked):
+                ui.confirm('Start?')
+        for exception in (EOFError, KeyboardInterrupt):
+            ui = bootstrap.ConsoleUI(Mock(side_effect=exception), lambda _: None)
+            with self.assertRaises(Blocked):
+                ui.choose('Select', ['one'])
+
+    def test_console_accepts_full_unicode_path_with_spaces_and_quotes(self):
+        directory = self.home / "Пакет O'Brien with spaces"
+        directory.mkdir()
+        ui = bootstrap.ConsoleUI(lambda _: '"' + str(directory) + '"', lambda _: None)
+        self.assertEqual(ui.folder('Folder'), directory.resolve())
+
+    def test_state_directories_follow_platform_conventions(self):
+        local, xdg = self.home / 'Local State', self.home / 'XDG State'
+        self.assertEqual(bootstrap.app_root(self.home, 'win32', {'LOCALAPPDATA': str(local)}),
+                         local / 'GigaCode SDD')
+        self.assertEqual(bootstrap.app_root(self.home, 'win32', {}),
+                         self.home / 'AppData/Local/GigaCode SDD')
+        self.assertEqual(bootstrap.app_root(self.home, 'darwin', {}),
+                         self.home / 'Library/Application Support/GigaCode SDD')
+        self.assertEqual(bootstrap.app_root(self.home, 'linux', {'XDG_STATE_HOME': str(xdg)}),
+                         xdg / 'gigacode-sdd')
+        self.assertEqual(bootstrap.app_root(self.home, 'linux', {'XDG_STATE_HOME': 'relative'}),
+                         self.home / '.local/state/gigacode-sdd')
+
+    def test_entrypoint_checks_python_from_arbitrary_directory(self):
+        result = subprocess.run([sys.executable, str(Path(bootstrap.__file__).resolve()), '--check-python'],
+                                cwd=self.home, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        lines = capture.read_text().splitlines()
-        self.assertIn(str(target), lines)
-        self.assertIn(str(target / 'bootstrap.py'), lines)
-        self.assertIn('--diagnose', lines)
 
     def test_optional_history_is_not_latest_thread_and_supports_explicit_choice(self):
         discovered = types.SimpleNamespace(discover_prior_context=Mock(return_value={'candidates': [
@@ -250,7 +270,7 @@ class BootstrapTests(unittest.TestCase):
         history = self.home / 'old.jsonl'
         wrapper = self.home / 'work' / 'coda-local-dev'
         history.write_text(json.dumps({'type': 'session_meta', 'payload': {'cwd': str(wrapper)}}) + '\n'
-                           + json.dumps({'role': 'assistant', 'content': 'Old implementation was attempted.'}) + '\n')
+                           + json.dumps({'role': 'assistant', 'content': 'Old implementation was attempted.'}) + '\n', encoding='utf-8')
         skipped = UI([0])
         self.assertEqual(bootstrap.confirm_history_scope(skipped, str(history), self.repo), (None, False, None))
         confirmed = UI([1])
@@ -263,7 +283,7 @@ class BootstrapTests(unittest.TestCase):
     def test_matching_history_does_not_add_an_exception_confirmation(self):
         history = self.home / 'matched.jsonl'
         history.write_text(json.dumps({'type': 'session_meta', 'payload': {'cwd': str(self.repo)}}) + '\n'
-                           + json.dumps({'role': 'assistant', 'content': 'Historical result.'}) + '\n')
+                           + json.dumps({'role': 'assistant', 'content': 'Historical result.'}) + '\n', encoding='utf-8')
         ui = UI()
         selected, mapping, checksum = bootstrap.confirm_history_scope(ui, str(history), self.repo)
         self.assertEqual(selected, str(history))
