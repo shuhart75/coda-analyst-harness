@@ -22,6 +22,7 @@ import uuid
 
 from controller import Blocked, Runner, digest, initialize, read, save
 from workspace import WorkspaceError
+from prior_context import redact
 
 NEXUS_HOST = 'nexus-ci.delta.sbrf.ru'
 SKIP_DIRS = {'.git', '.workspace-state', '.venv', 'venv', 'node_modules', 'target',
@@ -491,11 +492,16 @@ def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False
         return 0
     try:
         config = initialize(args)
-    except WorkspaceError:
-        raise Blocked('Не удалось сохранить исходный снимок с действующими правилами Git. '
-                      'Возможная причина: hook требует связь с задачей или настройку репозитория. '
+    except WorkspaceError as error:
+        error_report = state / 'initialization-error.json'
+        detail, redactions = redact(str(error))
+        save(error_report, {'phase': 'initialize', 'error_type': type(error).__name__,
+                          'detail': detail, 'redactions': redactions})
+        raise Blocked('Не удалось подготовить рабочую копию. Причина записана в локальный отчёт: '
+                      + str(error_report) + '. '
                       'Исходный проект не изменён. Сохранённая рабочая копия: ' + str(state / 'work/main')
-                      + '. Не обходите hook; его вывод может содержать секреты и здесь не показан.') from None
+                      + '. Не обходите hook. Отчёт может содержать чувствительные данные; '
+                      'не отправляйте его целиком без проверки.') from None
     save(root / 'last-run.json', {'config': config})
     runner = Runner(config)
     with runner.locked():

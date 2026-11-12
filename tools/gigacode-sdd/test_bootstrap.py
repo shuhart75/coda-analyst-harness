@@ -214,6 +214,14 @@ class BootstrapTests(unittest.TestCase):
                 bootstrap.launch(ui, self.home, repo_arg=str(self.repo))
         self.assertNotIn('verysecret', str(caught.exception))
         self.assertIn('Не обходите hook', str(caught.exception))
+        reports = list(bootstrap.app_root(self.home).glob('runs/*/initialization-error.json'))
+        self.assertEqual(len(reports), 1)
+        report = json.loads(reports[0].read_text())
+        self.assertEqual(report['phase'], 'initialize')
+        self.assertIn('hook', report['detail'])
+        self.assertNotIn('verysecret', reports[0].read_text())
+        if os.name != 'nt':
+            self.assertEqual(reports[0].stat().st_mode & 0o777, 0o600)
 
     def test_verified_windows_ancestry_boundary_does_not_need_dead_parent(self):
         for boundary in ('desktop-shell', 'different-user'):
