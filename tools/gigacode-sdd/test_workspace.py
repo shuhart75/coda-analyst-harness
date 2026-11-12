@@ -98,6 +98,26 @@ class WorkspacesTest(unittest.TestCase):
         self.assertEqual(ws.git(child, 'status', '--porcelain'), '')
         self.assertEqual(ws.snapshot(self.repo), before)
 
+    def test_session_settings_ignore_only_serialization_and_version(self):
+        settings = self.repo / '.gigacode/settings.json'
+        settings.parent.mkdir()
+        data = {'permissions': {'allow': ['Read'], 'deny': ['Bash(curl:*)']}}
+        settings.write_text(json.dumps(data))
+        raw = ws.snapshot(self.repo)
+        semantic = ws.snapshot(self.repo, normalize_settings=True)
+        data['$version'] = 1
+        settings.write_text(json.dumps(data, indent=4) + '\n')
+        self.assertNotEqual(ws.snapshot(self.repo), raw)
+        self.assertEqual(ws.snapshot(self.repo, normalize_settings=True), semantic)
+        for key, value in [('permissions', {'allow': ['Bash']}),
+                           ('hooks', {}), ('mcpServers', {}), ('unknown', True)]:
+            changed = dict(data, **{key: value})
+            settings.write_text(json.dumps(changed))
+            self.assertNotEqual(ws.snapshot(self.repo, normalize_settings=True), semantic)
+        settings.write_text('{broken')
+        with self.assertRaises(ws.WorkspaceError):
+            ws.snapshot(self.repo, normalize_settings=True)
+
     def test_custom_hooks_keep_relative_directory_semantics(self):
         hooks = self.repo / ".hooks"
         hooks.mkdir()

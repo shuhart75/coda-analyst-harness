@@ -140,7 +140,7 @@ def _settings_paths(root):
     return paths
 
 
-def snapshot(root):
+def snapshot(root, *, normalize_settings=False):
     root = Path(root).resolve()
     paths = set(_tracked(root))
     paths.update(_names(_run(root, ["ls-files", "--others", "--exclude-standard", "-z"])))
@@ -154,7 +154,19 @@ def snapshot(root):
             continue
         info = path.lstat()
         if ".gigacode" in PurePosixPath(relative).parts and path.name == "settings.json":
-            files[relative] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            raw = path.read_bytes()
+            if normalize_settings:
+                from policy import _settings
+                try:
+                    _, settings = _settings(path)
+                except ValueError as error:
+                    raise WorkspaceError(str(error)) from None
+                # CLI serialization metadata is not a permission change.
+                # All other keys, values and list ordering remain significant.
+                settings.pop("$version", None)
+                raw = json.dumps(settings, sort_keys=True, ensure_ascii=False,
+                                 separators=(",", ":")).encode("utf-8")
+            files[relative] = {"sha256": hashlib.sha256(raw).hexdigest(),
                                "mode": stat.S_IMODE(info.st_mode)}
         elif _secret(relative):
             # Detect changes without reading or logging credential contents.

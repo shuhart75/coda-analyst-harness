@@ -354,7 +354,7 @@ class Runner:
     def session(self, root, cwd, prompt, role, name):
         self.guard()
         prepare_permissions(under(root, cwd), role)
-        before = snapshot(root)
+        before = snapshot(root, normalize_settings=True)
         controls = git_controls(root)
         services_before = inspect_services()
         if not services_before['complete']:
@@ -368,7 +368,7 @@ class Runner:
             raise Blocked('Service-bearing process group preserved; inspect preserved-processes before resume')
         self.service_audit(services_before, root, name)
         self.guard()
-        after = snapshot(root)
+        after = snapshot(root, normalize_settings=True)
         if git_controls(root) != controls:
             raise Blocked('Agent changed Git configuration or hooks')
         if after['head'] != before['head']:
@@ -394,7 +394,7 @@ class Runner:
             return
         prepare_permissions(under(root, cwd), role)
         self.audit(root)
-        before = snapshot(root)
+        before = snapshot(root, normalize_settings=True)
         target = under(root, cwd) / ('.sdd-permission-probe-' + uuid.uuid4().hex)
         prompt = ('PERMISSION_PREFLIGHT\nRead existing SDD instructions. Invoke a read tool, a shell tool '
                   '(pwd is sufficient), and a synchronous subagent; await its return. '
@@ -418,7 +418,7 @@ class Runner:
                 missing.append('write-evidence')
             else:
                 target.unlink()
-        if snapshot(root) != before:
+        if snapshot(root, normalize_settings=True) != before:
             raise Blocked('Preflight changed files beyond its disposable probe; inspect ' + str(root))
         report = {'root': str(root), 'cwd': cwd, 'role': role, 'result': result, 'missing': missing}
         save(self.logdir('preflight-report').with_suffix('.json'), report)
