@@ -29,6 +29,7 @@ def parse_events(path: Path) -> dict:
     errors, denials, tool_calls, tool_results = [], [], {}, []
     syntax_errors = []
     missing_path_errors = []
+    read_tool_errors = []
     session_id, final_text, terminal = None, "", None
     event_count = 0
     if not path.exists():
@@ -95,6 +96,11 @@ def parse_events(path: Path) -> dict:
                                      or body.startswith('file not found:')
                                      or body.startswith('error listing directory: enoent:'))):
                             missing_path_errors.append(error)
+                        if (tool_calls.get(tool_id, '').lower() in
+                                {'grep_search', 'read_file', 'list_directory', 'glob', 'read', 'grep'}
+                                and not denied and (error in missing_path_errors or not any(
+                                    word in body for word in ('denied', 'blocked', 'permission', 'approval')))):
+                            read_tool_errors.append(error)
                         if (tool_calls.get(tool_id, '').lower() in {'bash', 'run_shell_command'}
                                 and 'shell security policy denied this command' in body
                                 and 'reason: command_substitution' in body):
@@ -124,17 +130,18 @@ def parse_events(path: Path) -> dict:
             "events_path": str(path), "errors": errors,
             "event_count": event_count, "terminal_result": terminal is not None,
             "tool_calls": tool_calls, "tool_results": tool_results,
-            "syntax_errors": syntax_errors, "missing_path_errors": missing_path_errors}
+            "syntax_errors": syntax_errors, "missing_path_errors": missing_path_errors,
+            "read_tool_errors": read_tool_errors}
 
 
 def review_feedback_usable(result):
-    """Missing search paths may inform rejection, never successful acceptance."""
+    """Read/search failures may inform rejection, never successful acceptance."""
     return (result.get('returncode') == 0 and result.get('terminal_result')
             and not result.get('timed_out') and not result.get('cancelled')
             and not result.get('permission_denials')
             and not (result.get('cleanup') or {}).get('preserved')
-            and bool(result.get('missing_path_errors'))
-            and set(result['errors']) == set(result['missing_path_errors'])
+            and bool(result.get('read_tool_errors', result.get('missing_path_errors')))
+            and set(result['errors']) == set(result.get('read_tool_errors', result.get('missing_path_errors', [])))
             and not (set(result['tool_calls']) - {r['tool_use_id'] for r in result['tool_results']}))
 
 

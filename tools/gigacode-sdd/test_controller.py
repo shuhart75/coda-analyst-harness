@@ -415,6 +415,20 @@ for name in sys.argv[1:]:
                     with self.assertRaisesRegex(Blocked, 'Reviewer failed'):
                         self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'plan-review')
 
+    def test_failed_plan_review_resumes_saved_candidate_without_planner(self):
+        self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
+        self.runner.persist()
+        with patch.object(self.runner, 'review', side_effect=Blocked('review interrupted')):
+            with self.assertRaisesRegex(Blocked, 'review interrupted'):
+                self.runner.plan()
+        self.assertIn('plan_candidate', self.runner.state)
+        resumed = Runner(self.runner.config_path)
+        with patch.object(resumed, 'session', wraps=resumed.session) as session:
+            resumed.plan()
+        self.assertEqual([c.args[4] for c in session.call_args_list], ['plan-review'])
+        self.assertEqual(resumed.state['status'], 'planned')
+        self.assertNotIn('plan_candidate', resumed.state)
+
     def test_recovered_shell_syntax_does_not_fail_capability_probe(self):
         self.runner.env['FAKE_RECOVERED_SYNTAX'] = '1'
         self.runner.preflight()

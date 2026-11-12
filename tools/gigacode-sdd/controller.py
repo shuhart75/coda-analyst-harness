@@ -552,13 +552,24 @@ Do not invent blockers from unrelated legacy IT failures, but do not suppress re
 Every requirement must have an owner. Cross-contour work depends on contract/SDD prerequisites.
 '''
         feedback = self.state.get('plan_feedback', '')
+        candidate_path = self.root / 'plan-candidate.json'
+        candidate_scope = hashlib.sha256(json.dumps({'config': digest(self.config_path),
+            'workspace': snapshot(self.main)}, sort_keys=True).encode()).hexdigest()
         previous = None
         repeats = 0
         while not self.stop.is_set():
             planner = self.root / 'planners' / uuid.uuid4().hex
             clone_snapshot(self.main, planner)
-            result = self.session(planner, '.', prompt + '\nCorrect previous review findings:\n' + feedback,
-                                  'review', 'plan')
+            candidate = self.state.get('plan_candidate', {})
+            if candidate:
+                if (candidate.get('scope') != candidate_scope or not candidate_path.is_file()
+                        or digest(candidate_path) != candidate.get('sha256')):
+                    raise Blocked('Saved plan candidate changed or no longer matches the input')
+                result = {'ok': True, 'text': json.dumps(read(candidate_path))}
+                self.progress('Кандидат плана сохранён; продолжается его независимая проверка')
+            else:
+                result = self.session(planner, '.', prompt + '\nCorrect previous review findings:\n' + feedback,
+                                      'review', 'plan')
             if not result['ok']:
                 feedback = json.dumps({'errors': result['errors']})
             else:
@@ -567,6 +578,9 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                 except (Blocked, ValueError, TypeError, AttributeError) as error:
                     feedback = 'Correct invalid plan: ' + str(error)
                 else:
+                    save(candidate_path, plan)
+                    self.state['plan_candidate'] = {'scope': candidate_scope, 'sha256': digest(candidate_path)}
+                    self.persist()
                     verdict = self.review(planner, '.', 'Review proposed plan, coverage, SDD prerequisites '
                         'and executable checks against the complete input. A pass here validates the plan, '
                         'not completed implementation.\n' + json.dumps(plan, ensure_ascii=False),
@@ -576,12 +590,16 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                         self.state['plan_sha256'] = digest(self.root / 'plan.json')
                         self.state['tasks'] = {t['id']: {'status': 'pending', 'attempts': 0} for t in plan['tasks']}
                         self.state['status'] = 'planned'
+                        self.state.pop('plan_candidate', None)
                         self.persist()
                         self.progress('План принят: задач ' + str(len(plan['tasks'])))
                         return
                     save(self.root / 'plan-rejected.json', {'plan': plan, 'review': verdict})
                     self.progress('План требует доработки: замечаний ' + str(len(verdict['findings'])))
                     feedback = json.dumps(verdict, ensure_ascii=False)
+                    self.state.pop('plan_candidate', None)
+                    self.state['plan_feedback'] = feedback
+                    self.persist()
                     if verdict['verdict'] == 'blocked':
                         self.state['plan_feedback'] = feedback
                         self.persist()
@@ -620,7 +638,7 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
         if not result['ok']:
             if report['verdict'] != 'changes':
                 raise Blocked('Reviewer failed: ' + result['events_path'])
-            self.progress('Замечания проверяющего сохранены несмотря на ошибки поиска отсутствующих путей')
+            self.progress('Замечания проверяющего сохранены с диагностикой ошибок чтения/поиска')
             save(self.logdir(name + '-feedback').with_suffix('.json'),
                  {'review': report, 'errors': result['errors'], 'events_path': result['events_path']})
         return report
