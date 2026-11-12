@@ -16,7 +16,7 @@ import time
 import uuid
 
 from policy import prepare_permissions, nexus_environment, audit_dependency_sources, make_policy_prompt
-from transport import run_session, finish_process
+from transport import run_session, finish_process, preflight_session_ok
 from platform_support import (FileLock, launch_process, process_exists,
                               process_scope_exists, process_scope_pids)
 from workspace import git, snapshot, clone_snapshot, export_patch, apply_patch, commit_changes
@@ -191,10 +191,37 @@ class Runner:
         self._probed = set()
         self._preflight_reports = []
         self._report_lock = threading.Lock()
+        self._output_lock = threading.Lock()
         self._config_digest = digest(self.config_path)
 
     def persist(self):
         save(self.state_path, self.state)
+
+    def progress(self, message):
+        with self._output_lock:
+            print(time.strftime('[%H:%M:%S] ') + message, flush=True)
+
+    @contextmanager
+    def activity(self, label):
+        started = time.monotonic()
+        finished = threading.Event()
+        self.progress(label + ': начало')
+        def heartbeat():
+            while not finished.wait(30):
+                self.progress(label + ': ожидание, прошло ' + str(int(time.monotonic() - started))
+                              + ' с; срок завершения пока неизвестен')
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
+        try:
+            yield
+        except BaseException:
+            self.progress(label + ': остановка с ошибкой')
+            raise
+        else:
+            self.progress(label + ': завершено за ' + str(int(time.monotonic() - started)) + ' с')
+        finally:
+            finished.set()
+            thread.join()
 
     @contextmanager
     def locked(self):
@@ -360,7 +387,8 @@ class Runner:
         if not services_before['complete']:
             raise Blocked('Cannot inspect services before session; run bootstrap --diagnose')
         self.check_existing_workspace_processes(services_before, root, name)
-        result = run_session(self.cfg['cli'], under(root, cwd), self.context(role, name in ('plan', 'plan-review')) + '\n' + prompt,
+        with self.activity('Сессия ' + name + ' / ' + cwd + ' / ' + role):
+            result = run_session(self.cfg['cli'], under(root, cwd), self.context(role, name in ('plan', 'plan-review')) + '\n' + prompt,
                              self.logdir(name), approval_mode='plan' if role == 'review' else self.cfg['approval_mode'],
                              timeout_seconds=self.cfg['session_timeout'], env=self.env, stop_event=self.stop,
                              cleanup_guard=self.cleanup_guard)
@@ -398,7 +426,9 @@ class Runner:
         target = under(root, cwd) / ('.sdd-permission-probe-' + uuid.uuid4().hex)
         prompt = ('PERMISSION_PREFLIGHT\nRead existing SDD instructions. Invoke a read tool, a shell tool '
                   '(pwd is sufficient), and a synchronous subagent; await its return. '
-                  'Do not perform implementation or downloads. ')
+                  'Do not perform implementation or downloads. '
+                  'Use plain pwd for the shell probe. Do not use command substitution, backticks, '
+                  'or process substitution. Do not explore unrelated files. ')
         aliases = {'read': {'read', 'read_file'}, 'shell': {'bash', 'run_shell_command'},
                    'agent': {'agent', 'create_sub_session'}}
         if cwd != '.':
@@ -420,16 +450,21 @@ class Runner:
                 target.unlink()
         if snapshot(root, normalize_settings=True) != before:
             raise Blocked('Preflight changed files beyond its disposable probe; inspect ' + str(root))
-        report = {'root': str(root), 'cwd': cwd, 'role': role, 'result': result, 'missing': missing}
+        passed = preflight_session_ok(result) and not missing
+        report = {'root': str(root), 'cwd': cwd, 'role': role, 'result': result, 'missing': missing,
+                  'passed': passed}
         save(self.logdir('preflight-report').with_suffix('.json'), report)
         with self._report_lock:
             self._preflight_reports.append(report)
             save(self.root / 'preflight.json', self._preflight_reports)
-        if not result['ok'] or missing:
+        if not passed:
             raise Blocked('Preflight failed in probe folder; inspect ' + result['events_path'])
+        self.progress('Проверка возможностей ' + cwd + ' / ' + role + ': пройдена'
+                      + ('; синтаксический отказ преодолён успешной пробой' if result['errors'] else ''))
         self._probed.add(key)
 
     def preflight(self):
+        self.progress('Проверка возможностей: ' + str(len(self.cfg['contours']) * 2) + ' проб')
         def probe_one(cwd, role):
             probe = self.root / 'probes' / uuid.uuid4().hex
             clone_snapshot(self.main, probe)
@@ -442,6 +477,7 @@ class Runner:
                     completed, active = wait(active, return_when=FIRST_COMPLETED)
                     for future in completed:
                         future.result()
+                    self.progress('Проверка возможностей: осталось проб ' + str(len(active)))
             except BaseException:
                 self.stop.set()
                 for future in active:
@@ -455,6 +491,7 @@ class Runner:
             raise Blocked('Run preflight successfully for this exact configuration first')
 
     def plan(self):
+        self.progress('Подготовка и независимая проверка плана')
         self.require_preflight()
         if self.state.get('tasks'):
             raise Blocked('Existing plan is immutable; resume run instead')
@@ -499,6 +536,7 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                         self.state['tasks'] = {t['id']: {'status': 'pending', 'attempts': 0} for t in plan['tasks']}
                         self.state['status'] = 'planned'
                         self.persist()
+                        self.progress('План принят: задач ' + str(len(plan['tasks'])))
                         return
                     save(self.root / 'plan-rejected.json', {'plan': plan, 'review': verdict})
                     feedback = json.dumps(verdict, ensure_ascii=False)
@@ -542,6 +580,7 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
     def checks(self, root, checks, name):
         reports = []
         for check in checks:
+            self.progress('Проверка ' + name + ': ' + str(len(reports) + 1) + '/' + str(len(checks)))
             self.guard()
             before = snapshot(root)
             controls = git_controls(root)
@@ -557,9 +596,13 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                                       env=self.env, stdin=subprocess.DEVNULL, stdout=output,
                                       stderr=subprocess.STDOUT)
                 deadline = time.monotonic() + check.get('timeout', 600)
+                next_update = time.monotonic() + 30
                 timed_out = False
                 try:
                     while proc.poll() is None and not self.stop.is_set():
+                        if time.monotonic() >= next_update:
+                            self.progress('Проверка ' + name + ': процесс ещё работает')
+                            next_update = time.monotonic() + 30
                         if time.monotonic() >= deadline:
                             timed_out = True
                             break
@@ -685,12 +728,14 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
         return record
 
     def start(self, retry_blocked=False):
+        self.progress('Запуск сохранённой работы. Каталог: ' + str(self.root))
         expected = {'config_sha256': digest(self.config_path), 'passed': True}
         if self.state.get('preflight') != expected:
             self.preflight()
         if not self.state.get('tasks'):
             self.plan()
         self.run(retry_blocked)
+        self.progress('Состояние работы: ' + self.state['status'])
 
     def run(self, retry_blocked=False):
         self.require_preflight()
@@ -731,6 +776,7 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                         clone_snapshot(self.main, work)
                         record.update(workspace=str(work), base=git(work, 'rev-parse', 'HEAD'))
                     record['status'] = 'running'
+                    self.progress('Запуск задачи ' + task['id'])
                     self.persist()
                     active[pool.submit(self.worker, task, record.copy())] = task
                 if not active:
@@ -743,7 +789,10 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                         self.state['tasks'][task['id']] = accepted
                         self.persist()
                         self.integrate(task, accepted)
+                        done = sum(r['status'] == 'done' for r in self.state['tasks'].values())
+                        self.progress('Принято задач: ' + str(done) + '/' + str(len(tasks)))
                     except Exception as exc:
+                        self.progress('Задача ' + task['id'] + ': заблокирована; подробности в state.json')
                         failed = self.state['tasks'][task['id']]
                         if 'integration_base' not in failed:
                             failed = self.checkpoint(failed)

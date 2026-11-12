@@ -33,6 +33,12 @@ def call(name):
     emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':name,'is_error':False,'content':'verified'}]}})
 emit({'type':'system','subtype':'init','session_id':str(os.getpid())})
 if 'PERMISSION_PREFLIGHT\n' in prompt:
+    if os.environ.get('FAKE_RECOVERED_SYNTAX'):
+        emit({'type':'assistant','message':{'content':[{'type':'tool_use',
+              'id':'syntax-rejected','name':'run_shell_command'}]}})
+        emit({'type':'user','message':{'content':[{'type':'tool_result',
+              'tool_use_id':'syntax-rejected','is_error':True,
+              'content':'Shell security policy denied this command: Reason: command_substitution'}]}})
     if os.environ.get('FAKE_DENY'):
         emit({'type':'result','subtype':'success','is_error':False,'permission_denials':[{'tool_name':'agent'}],'result':'denied'})
         sys.exit(0)
@@ -374,6 +380,15 @@ for name in sys.argv[1:]:
         self.assertNotIn('preflight', self.runner.state)
         report = json.loads((self.runner.root / 'preflight.json').read_text(encoding="utf-8"))
         self.assertIn('agent', report[-1]['missing'])
+
+    def test_recovered_shell_syntax_does_not_fail_capability_probe(self):
+        self.runner.env['FAKE_RECOVERED_SYNTAX'] = '1'
+        self.runner.preflight()
+        self.assertTrue(self.runner.state['preflight']['passed'])
+        reports = json.loads((self.runner.root / 'preflight.json').read_text())
+        self.assertEqual(len(reports), 6)
+        self.assertTrue(all(r['passed'] and not r['missing'] for r in reports))
+        self.assertTrue(all(not r['result']['ok'] and r['result']['errors'] for r in reports))
 
     def test_permission_denial_is_blocker_not_false_success(self):
         self.runner.env['FAKE_DENY'] = '1'

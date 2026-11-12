@@ -27,6 +27,7 @@ def parse_events(path: Path) -> dict:
     """
     path = Path(path)
     errors, denials, tool_calls, tool_results = [], [], {}, []
+    syntax_errors = []
     session_id, final_text, terminal = None, "", None
     event_count = 0
     if not path.exists():
@@ -86,8 +87,12 @@ def parse_events(path: Path) -> dict:
                                         "tool_name": tool_calls.get(tool_id, "unknown"),
                                         "reason": "Tool permission/confirmation denied"})
                     if item.get("is_error") is True:
-                        errors.append(f"Tool {tool_calls.get(tool_id, 'unknown')} "
-                                      f"({tool_id}) returned an error")
+                        error = f"Tool {tool_calls.get(tool_id, 'unknown')} ({tool_id}) returned an error"
+                        errors.append(error)
+                        if (tool_calls.get(tool_id, '').lower() in {'bash', 'run_shell_command'}
+                                and 'shell security policy denied this command' in body
+                                and 'reason: command_substitution' in body):
+                            syntax_errors.append({'error': error, 'result_index': len(tool_results) - 1})
                 if root and event.get("type") == "assistant":
                     text = _text(content)
                     if text:
@@ -112,7 +117,28 @@ def parse_events(path: Path) -> dict:
             "session_id": session_id, "text": final_text,
             "events_path": str(path), "errors": errors,
             "event_count": event_count, "terminal_result": terminal is not None,
-            "tool_calls": tool_calls, "tool_results": tool_results}
+            "tool_calls": tool_calls, "tool_results": tool_results,
+            "syntax_errors": syntax_errors}
+
+
+def preflight_session_ok(result):
+    """Accept a recovered shell syntax rejection only for capability probes."""
+    if (result.get('returncode') != 0 or result.get('timed_out') or result.get('cancelled')
+            or result.get('permission_denials') or not result.get('terminal_result')
+            or (result.get('cleanup') or {}).get('preserved')):
+        return False
+    calls, returned = result['tool_calls'], result['tool_results']
+    if set(calls) - {item['tool_use_id'] for item in returned}:
+        return False
+    recoverable = result.get('syntax_errors', [])
+    if set(result['errors']) != {item['error'] for item in recoverable}:
+        return False
+    for item in recoverable:
+        if not any(value['is_error'] is not True and value['has_content']
+                   and calls.get(value['tool_use_id'], '').lower() in {'bash', 'run_shell_command'}
+                   for value in returned[item['result_index'] + 1:]):
+            return False
+    return True
 
 
 def _private_file(path: Path):

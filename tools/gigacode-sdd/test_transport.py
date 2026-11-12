@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 
-from transport import parse_events, run_session
+from transport import parse_events, run_session, preflight_session_ok
 
 
 class TransportTests(unittest.TestCase):
@@ -47,6 +47,34 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
             self.assertEqual(stat.S_IMODE((self.root / "logs").stat().st_mode), 0o700)
             for name in ("prompt.txt", "stdout.jsonl", "stderr.log"):
                 self.assertEqual(stat.S_IMODE((self.root / "logs" / name).stat().st_mode), 0o600)
+
+    def test_preflight_accepts_only_recovered_substitution_rejection(self):
+        def call(identifier):
+            return {'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': identifier, 'name': 'run_shell_command'}]}}
+        def response(identifier, error, body):
+            return {'type': 'user', 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': identifier,
+                 'is_error': error, 'content': body}]}}
+        rejected = response('a', True, 'Shell security policy denied this command: '
+                            'Reason: command_substitution')
+        terminal = {'type': 'result', 'subtype': 'success'}
+        events = [call('a'), rejected, call('b'), response('b', False, '/workspace'), terminal]
+        result = self.parse(events)
+        result['returncode'] = 0
+        self.assertFalse(result['ok'])  # Execution/review policy is unchanged.
+        self.assertTrue(preflight_session_ok(result))
+        for key, value in [('timed_out', True), ('cancelled', True), ('returncode', 1),
+                           ('permission_denials', [{}]), ('terminal_result', False)]:
+            self.assertFalse(preflight_session_ok(dict(result, **{key: value})))
+        for invalid in ([call('a'), rejected, terminal],
+                        events[:-1] + [call('unfinished'), terminal],
+                        events[:-1] + [response('b', True, 'other failure'), terminal],
+                        events[:-1],
+                        [call('b'), response('b', False, '/workspace'), call('a'), rejected, terminal]):
+            failed = self.parse(invalid)
+            failed['returncode'] = 0
+            self.assertFalse(preflight_session_ok(failed))
 
     def test_tool_denial_overrules_successful_final_prose(self):
         result = self.parse([
