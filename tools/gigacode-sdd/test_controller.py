@@ -381,6 +381,17 @@ for name in sys.argv[1:]:
         report = json.loads((self.runner.root / 'preflight.json').read_text(encoding="utf-8"))
         self.assertIn('agent', report[-1]['missing'])
 
+    def test_start_reuses_completed_preflight_and_reaches_reviewed_plan(self):
+        self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
+        self.runner.persist()
+        resumed = Runner(self.runner.config_path)
+        with patch.object(resumed, 'preflight', side_effect=AssertionError('Do not repeat completed preflight')), \
+                patch.object(resumed, 'run') as run:
+            resumed.start()
+        self.assertEqual(resumed.state['status'], 'planned')
+        self.assertEqual(set(resumed.state['tasks']), {'be', 'fe'})
+        run.assert_called_once()
+
     def test_recovered_shell_syntax_does_not_fail_capability_probe(self):
         self.runner.env['FAKE_RECOVERED_SYNTAX'] = '1'
         self.runner.preflight()
