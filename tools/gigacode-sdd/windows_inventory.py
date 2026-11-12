@@ -234,11 +234,24 @@ class NativeWindows:
             raise OSError('Current user SID unavailable')
         return sid
 
+    def desktop_shell_pid(self):
+        # Explorer commonly retains the PID of an exited userinit process.
+        # Query the OS shell window rather than trusting an executable name.
+        user = C.WinDLL('user32', use_last_error=True)
+        shell_window = self._bind(user, 'GetShellWindow', [], W.HWND)()
+        if not shell_window:
+            return None  # service/CI sessions need not have a desktop shell
+        pid = W.DWORD()
+        self._bind(user, 'GetWindowThreadProcessId', [W.HWND, C.POINTER(W.DWORD)], W.DWORD)(shell_window, C.byref(pid))
+        return pid.value or None
+
 
 def ancestors(pid, processes):
     chain, seen = [], {pid}
     process = processes.get(pid)
     while process and process['ppid']:
+        if process.get('ancestry_boundary'):
+            return chain, True
         parent_id = process['ppid']
         parent = processes.get(parent_id)
         if parent_id in seen or len(chain) >= 128 or parent is None:
@@ -264,6 +277,10 @@ def collect(native=None):
         limits.append('windows-process-table-unavailable')
         return result
     try:
+        shell_pid = native.desktop_shell_pid() if hasattr(native, 'desktop_shell_pid') else None
+    except OSError:
+        shell_pid = None
+    try:
         listeners = native.listeners()
     except (OSError, ValueError):
         listeners = {}
@@ -277,6 +294,10 @@ def collect(native=None):
                    'started': details.get('started'), 'kind': kind,
                    'owner_known': details.get('owner_known', False), 'same_user': details.get('same_user', False)}
         processes[pid] = process
+        if pid == shell_pid and process['owner_known'] and process['same_user']:
+            process['ancestry_boundary'] = 'desktop-shell'
+        elif process['owner_known'] and not process['same_user']:
+            process['ancestry_boundary'] = 'different-user'
         candidate = kind != 'other' or ntpath.basename(row['executable']).lower() in {
             'cmd.exe', 'powershell.exe', 'pwsh.exe', 'wscript.exe', 'cscript.exe'}
         if pid and not process['owner_known']:

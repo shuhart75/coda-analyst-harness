@@ -35,7 +35,10 @@ def _cwd(value):
         return None
     if PureWindowsPath(value).is_absolute():
         # Foreign paths are metadata, never relative local filesystem paths.
-        return ntpath.normpath(value)
+        try:
+            return str(Path(value).resolve()) if os.name == 'nt' else ntpath.normpath(value)
+        except (OSError, RuntimeError):
+            return None
     if not value.startswith('/'):
         return None
     try:

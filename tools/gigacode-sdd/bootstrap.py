@@ -386,6 +386,8 @@ def launcher_dependency(inventory):
         seen.add(pid)
         if pid in agents:
             found.add(pid)
+        if table[pid].get('ancestry_boundary') in ('desktop-shell', 'different-user'):
+            break
         pid = table[pid]['ppid']
     group = table.get(os.getpid(), {}).get('pgid')
     if group is not None and group > 1:
@@ -503,6 +505,11 @@ def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False
 
 
 def main(argv=None):
+    # Windows redirects otherwise use the system ANSI codepage, which may not
+    # encode Russian. Native consoles retain Python's console handling.
+    for stream in (sys.stdout, sys.stderr):
+        if not stream.isatty() and hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--diagnose', action='store_true', help='Read-only process/service inventory; no GUI or agent launch')
     parser.add_argument('--repo', help='Optional exact source root for diagnosis/advanced use')

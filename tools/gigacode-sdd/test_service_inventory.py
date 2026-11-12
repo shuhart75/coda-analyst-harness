@@ -177,14 +177,15 @@ class InventoryTests(unittest.TestCase):
 
     def test_private_report_never_overwrites_or_follows_link(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'private/report.json'
+            root = Path(tmp).resolve()
+            path = root / 'private/report.json'
             inv.save_report(path, {'safe_to_stop': 'not-established'})
             if self.native_platform != 'win32':
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
                 self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
             with self.assertRaises(FileExistsError):
                 inv.save_report(path, {})
-            alias = Path(tmp) / 'alias'
+            alias = root / 'alias'
             try:
                 alias.symlink_to(path.parent, target_is_directory=True)
             except OSError:

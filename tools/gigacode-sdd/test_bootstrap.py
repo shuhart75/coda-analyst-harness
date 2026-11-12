@@ -44,7 +44,7 @@ class BootstrapTests(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.temp = tempfile.TemporaryDirectory(prefix='sdd-launcher-')
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name)
+        self.home = Path(self.temp.name).resolve()
         self.repo = self.home / 'work' / 'PoC with spaces'
         self.repo.mkdir(parents=True)
         for name in ('backend', 'frontend'):
@@ -215,6 +215,27 @@ class BootstrapTests(unittest.TestCase):
         self.assertNotIn('verysecret', str(caught.exception))
         self.assertIn('Не обходите hook', str(caught.exception))
 
+    def test_verified_windows_ancestry_boundary_does_not_need_dead_parent(self):
+        for boundary in ('desktop-shell', 'different-user'):
+            inventory = {'agents': [{'pid': 400}], 'processes': [
+                {'pid': 123, 'ppid': 122},
+                {'pid': 122, 'ppid': 999, 'ancestry_boundary': boundary}]}
+            with patch.object(bootstrap.os, 'getpid', return_value=123):
+                self.assertEqual(bootstrap.launcher_dependency(inventory),
+                                 {'complete': True, 'agent_pids': []})
+
+    def test_ancestry_boundary_does_not_hide_agent_or_accept_unverified_label(self):
+        inventory = {'agents': [{'pid': 122}], 'processes': [
+            {'pid': 123, 'ppid': 122},
+            {'pid': 122, 'ppid': 999, 'ancestry_boundary': 'desktop-shell'}]}
+        with patch.object(bootstrap.os, 'getpid', return_value=123):
+            self.assertEqual(bootstrap.launcher_dependency(inventory),
+                             {'complete': True, 'agent_pids': [122]})
+            inventory['agents'] = [{'pid': 400}]
+            inventory['processes'][1]['ancestry_boundary'] = 'explorer.exe'
+            self.assertEqual(bootstrap.launcher_dependency(inventory),
+                             {'complete': False, 'agent_pids': []})
+
     def test_console_reprompts_invalid_numbers_and_never_runs_display_data(self):
         responses = iter(['', '0', '99', '1+1', '2'])
         output = []
@@ -258,6 +279,17 @@ class BootstrapTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(Path(bootstrap.__file__).resolve()), '--check-python'],
                                 cwd=self.home, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_redirected_console_output_is_utf8_with_legacy_default_encoding(self):
+        message = 'Выберите проект'
+        script = ('import bootstrap; '
+                  'bootstrap.launch = lambda **kwargs: bootstrap.ConsoleUI().notify('
+                  + repr(message) + '); bootstrap.main([])')
+        result = subprocess.run([sys.executable, '-c', script],
+                                cwd=Path(bootstrap.__file__).parent,
+                                env=dict(os.environ, PYTHONIOENCODING='ascii'), capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.decode('utf-8').strip(), message)
 
     def test_optional_history_is_not_latest_thread_and_supports_explicit_choice(self):
         discovered = types.SimpleNamespace(discover_prior_context=Mock(return_value={'candidates': [

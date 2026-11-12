@@ -85,6 +85,20 @@ class PlatformTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Native Windows Job Objects')
 class WindowsJobTests(unittest.TestCase):
+    def test_delayed_helper_keeps_inherited_gate_after_parent_returns(self):
+        original_popen = subprocess.Popen
+        def delayed_helper(argv, **kwargs):
+            delayed = [argv[0], '-c',
+                       'import runpy,sys,time;time.sleep(.3);sys.argv=sys.argv[1:];'
+                       'runpy.run_path(sys.argv[0],run_name="__main__")', *argv[1:]]
+            return original_popen(delayed, **kwargs)
+        with patch.object(platform.subprocess, 'Popen', side_effect=delayed_helper):
+            process = platform.launch_process([sys.executable, '-c', 'raise SystemExit(7)'])
+        try:
+            self.assertEqual(process.wait(timeout=10), 7)
+        finally:
+            finish_process(process)
+
     def test_descendant_remains_owned_after_cli_exit(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / 'child-survived'

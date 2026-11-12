@@ -33,7 +33,7 @@ class PriorContextTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.repo = self.root / 'poc'
         self.repo.mkdir()
         self.history = self.root / 'session.jsonl'

@@ -96,7 +96,7 @@ class ControllerE2E(unittest.TestCase):
         self.addCleanup(inventory.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.source = self.root / 'source'
         self.source.mkdir()
         git(self.source, 'init')
@@ -175,7 +175,7 @@ for name in sys.argv[1:]:
         reviewers = [e for e in trace if e['kind']=='review']
         executors = [e for e in trace if e['kind']=='start']
         self.assertFalse({e['pid'] for e in reviewers} & {e['pid'] for e in executors})
-        self.assertTrue(all('/reviews/' in e['cwd'] for e in reviewers))
+        self.assertTrue(all('reviews' in Path(e['cwd']).parts for e in reviewers))
         output = self.root / 'result.patch'
         self.runner.export(output)
         self.assertIn('backend/value.txt', output.read_text(encoding="utf-8"))
@@ -314,7 +314,7 @@ for name in sys.argv[1:]:
         self.prepare()
         marker = self.root/'hook-ok'
         hook = self.runner.main/'.git/hooks/pre-commit'
-        hook.write_text('#!/bin/sh\ntest -f '+shlex.quote(str(marker))+'\n', encoding="utf-8")
+        hook.write_text('#!/bin/sh\ntest -f '+shlex.quote(marker.as_posix())+'\n', encoding="utf-8", newline='\n')
         hook.chmod(0o700)
         with self.runner.locked(), self.assertRaises(Blocked):
             self.runner.run()

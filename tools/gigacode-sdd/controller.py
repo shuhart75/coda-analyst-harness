@@ -6,7 +6,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import signal
@@ -48,7 +48,8 @@ def digest(path):
 
 
 def relative(value):
-    if not isinstance(value, str) or not value or Path(value).is_absolute() or '..' in Path(value).parts:
+    if (not isinstance(value, str) or not value or Path(value).is_absolute()
+            or '..' in Path(value).parts or '\\' in value or PureWindowsPath(value).drive):
         raise Blocked('Expected safe repository-relative path')
     if value != Path(value).as_posix():
         raise Blocked('Repository-relative paths must use canonical slash spelling')

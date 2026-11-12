@@ -82,7 +82,7 @@ class WorkspacesTest(unittest.TestCase):
         ws.git(self.repo, "add", "--", "hook-marker")
         ws.git(self.repo, "commit", "-qm", "hook helper")
         hook = hooks / "commit-msg"
-        hook.write_text('#!/bin/sh\ntest -f "$(dirname "$0")/../hook-marker" || exit 17\nexit 19\n', encoding="utf-8")
+        hook.write_text('#!/bin/sh\ntest -f "$(dirname "$0")/../hook-marker" || exit 17\nexit 19\n', encoding="utf-8", newline="\n")
         hook.chmod(0o755)
         ws.git(self.repo, "config", "core.hooksPath", ".hooks")
         dest = self.root / "clone"
@@ -177,7 +177,7 @@ class WorkspacesTest(unittest.TestCase):
 
     def test_commit_runs_hook(self):
         hook = self.repo / ".git/hooks/commit-msg"
-        hook.write_text("#!/bin/sh\nexit 17\n", encoding="utf-8")
+        hook.write_text("#!/bin/sh\nexit 17\n", encoding="utf-8", newline="\n")
         hook.chmod(0o755)
         (self.repo / "backend/a.txt").write_text("changed", encoding="utf-8")
         with self.assertRaises(ws.WorkspaceError):
@@ -186,7 +186,7 @@ class WorkspacesTest(unittest.TestCase):
 
     def test_commit_hook_receives_complete_nexus_environment(self):
         hook = self.repo / ".git/hooks/pre-commit"
-        hook.write_text('#!/bin/sh\ntest "$SDD_NEXUS_TEST" = yes || exit 27\ntest -z "$SDD_PUBLIC_FALLBACK" || exit 28\n', encoding="utf-8")
+        hook.write_text('#!/bin/sh\ntest "$SDD_NEXUS_TEST" = yes || exit 27\ntest -z "$SDD_PUBLIC_FALLBACK" || exit 28\n', encoding="utf-8", newline="\n")
         hook.chmod(0o755)
         (self.repo / "backend/a.txt").write_text("changed", encoding="utf-8")
         os.environ["SDD_PUBLIC_FALLBACK"] = "must-not-leak"

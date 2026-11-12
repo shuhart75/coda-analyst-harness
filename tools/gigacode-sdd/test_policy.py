@@ -10,7 +10,7 @@ import policy
 class PermissionsTests(unittest.TestCase):
     def test_merge_preserves_constraints_and_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / ".git").mkdir()
             directory = root / ".gigacode"
             directory.mkdir()
@@ -33,7 +33,7 @@ class PermissionsTests(unittest.TestCase):
 
     def test_contour_reports_parent_restrictions_without_modifying_parent(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / ".git").mkdir()
             (root / ".gigacode").mkdir()
             parent = root / ".gigacode/settings.json"
@@ -48,7 +48,7 @@ class PermissionsTests(unittest.TestCase):
 
     def test_invalid_and_symlink_settings_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / ".git").mkdir()
             (root / ".gigacode").mkdir()
             path = root / ".gigacode/settings.json"
@@ -102,7 +102,7 @@ class NexusTests(unittest.TestCase):
 
     def test_downloads_only_audit(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / "package-lock.json").write_text(json.dumps({"packages": {
                 "node_modules/a": {"resolved": "https://nexus.example/npm/a.tgz"},
                 "node_modules/b": {"resolved": "https://user:SECRET@registry.npmjs.org/b.tgz"}}}), encoding="utf-8")
@@ -116,7 +116,7 @@ class NexusTests(unittest.TestCase):
 
     def test_manifest_direct_downloads_and_git_shorthand_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / "package.json").write_text(json.dumps({
                 "homepage": "https://docs.example",
                 "dependencies": {"a": "https://public.example/a.tgz",
@@ -129,7 +129,7 @@ class NexusTests(unittest.TestCase):
 
     def test_maven_download_urls_and_unresolved_values(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / "settings.xml").write_text('''<settings><mirrors><mirror><url>https://repo.maven.apache.org/maven2</url></mirror></mirrors></settings>''', encoding="utf-8")
             (root / ".npmrc").write_text("registry=${UNKNOWN_REGISTRY}\n", encoding="utf-8")
             findings = policy.audit_dependency_sources(root, ["nexus.example"])
@@ -137,7 +137,7 @@ class NexusTests(unittest.TestCase):
 
     def test_installed_dependencies_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             nested = root / "node_modules/a"
             nested.mkdir(parents=True)
             (nested / ".npmrc").write_text("registry=https://registry.npmjs.org", encoding="utf-8")

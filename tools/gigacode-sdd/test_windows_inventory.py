@@ -147,6 +147,31 @@ class WindowsInventoryTests(unittest.TestCase):
         self.assertFalse(result['services'][0]['ancestry_complete'])
         self.assertFalse(result['services'][0]['agent_pids'])
 
+    def test_os_desktop_shell_bounds_historical_orphan_parent(self):
+        fake = FakeNative([row(80, 79, 'explorer.exe'), row(100, 80, 'gigacode.exe'), row(120, 100, 'postgres.exe')],
+            {80: own(r'C:\Windows'), 100: own(r'C:\work'), 120: own(r'C:\work')})
+        fake.desktop_shell_pid = lambda: 80
+        result = win.collect(fake)
+        self.assertTrue(result['complete'], result)
+        self.assertEqual(result['services'][0]['ancestors'], [100, 80])
+        self.assertEqual(result['services'][0]['agent_pids'], [100])
+        # The executable name alone never creates a trusted boundary.
+        fake.desktop_shell_pid = lambda: None
+        self.assertFalse(win.collect(fake)['complete'])
+
+    def test_confirmed_other_user_bounds_current_user_ancestry(self):
+        fake = FakeNative([row(80, 79, 'service.exe'), row(120, 80, 'postgres.exe')],
+            {80: {'owner_known': True, 'same_user': False, 'started': 1}, 120: own(r'C:\work')})
+        result = win.collect(fake)
+        self.assertTrue(result['complete'], result)
+        self.assertEqual(result['services'][0]['ancestors'], [80])
+
+    def test_unknown_owner_is_not_a_trusted_ancestry_boundary(self):
+        fake = FakeNative([row(80, 79, 'service.exe'), row(120, 80, 'postgres.exe')], {120: own(r'C:\work')})
+        result = win.collect(fake)
+        self.assertFalse(result['complete'])
+        self.assertFalse(result['services'][0]['ancestry_complete'])
+
     def test_tcp_ipv4_ipv6_ports_and_malformed_rows(self):
         ipv4 = struct.pack('<7I', 1, 2, 0, socket.htons(5432), 0, 0, 120)
         ipv6 = bytearray(60)

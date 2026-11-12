@@ -14,6 +14,11 @@ class ControllerReviewTests(unittest.TestCase):
     setUp = fixtures.ControllerE2E.setUp
     task = fixtures.ControllerE2E.task
 
+    def test_foreign_absolute_and_drive_relative_ownership_is_rejected(self):
+        for value in ('C:/outside', 'C:outside', '\\\\server\\share\\file', 'backend\\file'):
+            with self.subTest(value=value), self.assertRaises(controller.Blocked):
+                controller.relative(value)
+
     def accepted_patch(self):
         work = self.runner.root / 'manual-worker'
         clone_snapshot(self.runner.main, work)
@@ -63,7 +68,7 @@ class ControllerReviewTests(unittest.TestCase):
     def test_commit_hook_cannot_change_reviewed_result(self):
         task, record = self.accepted_patch()
         hook = self.runner.main / '.git/hooks/pre-commit'
-        hook.write_text('#!/bin/sh\necho altered-by-hook > backend/value.txt\ngit add -- backend/value.txt\n', encoding="utf-8")
+        hook.write_text('#!/bin/sh\necho altered-by-hook > backend/value.txt\ngit add -- backend/value.txt\n', encoding="utf-8", newline="\n")
         hook.chmod(0o755)
         with self.assertRaisesRegex(controller.Blocked, 'accepted patch exactly|dirty changes'):
             self.runner.integrate(task, record)

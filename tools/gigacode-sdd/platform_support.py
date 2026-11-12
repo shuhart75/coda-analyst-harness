@@ -16,7 +16,6 @@ import signal
 import subprocess
 import sys
 import time
-import uuid
 
 WINDOWS = os.name == 'nt'
 
@@ -72,7 +71,6 @@ def _kernel32():
         'QueryInformationJobObject': ([w.HANDLE, ctypes.c_int, ctypes.c_void_p,
                                        w.DWORD, ctypes.POINTER(w.DWORD)], w.BOOL),
         'CreateEventW': ([ctypes.c_void_p, w.BOOL, w.BOOL, w.LPCWSTR], w.HANDLE),
-        'OpenEventW': ([w.DWORD, w.BOOL, w.LPCWSTR], w.HANDLE),
         'SetEvent': ([w.HANDLE], w.BOOL),
         'WaitForSingleObject': ([w.HANDLE, w.DWORD], w.DWORD),
     }
@@ -187,8 +185,7 @@ def launch_process(argv, **kwargs):
     if not WINDOWS:
         return subprocess.Popen(argv, **kwargs, **launch_kwargs())
     api = _kernel32()
-    name = 'Local\\gigacode-sdd-' + uuid.uuid4().hex
-    event = api.CreateEventW(None, True, False, name)
+    event = api.CreateEventW(None, True, False, None)
     job = api.CreateJobObjectW(None, None)
     if not event or not job:
         if event:
@@ -198,8 +195,14 @@ def launch_process(argv, **kwargs):
         raise OSError('Cannot create Windows process ownership scope')
     process = None
     try:
+        # Inherit a reference before the parent closes its handle. A named
+        # event alone can disappear before a delayed helper calls OpenEvent.
+        os.set_handle_inheritable(event, True)
+        startup = subprocess.STARTUPINFO()
+        startup.lpAttributeList = {'handle_list': [event]}
         process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
-                                    '--child', name, json.dumps(argv)],
+                                    '--child', str(event), json.dumps(argv)],
+                                   startupinfo=startup, close_fds=True,
                                    **kwargs, **launch_kwargs())
         if not api.AssignProcessToJobObject(job, int(process._handle)):
             raise OSError('Cannot assign child to Windows Job; parent policy may prohibit nested jobs')
@@ -247,11 +250,9 @@ def stop_process_scope(process):
         pass
 
 
-def _child(event_name, encoded_argv):
+def _child(event_handle, encoded_argv):
     api = _kernel32()
-    event = api.OpenEventW(0x100000, False, event_name)  # SYNCHRONIZE
-    if not event:
-        return 125
+    event = int(event_handle)
     try:
         if api.WaitForSingleObject(event, 15000) != 0:
             return 125
