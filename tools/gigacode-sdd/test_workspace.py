@@ -74,6 +74,30 @@ class WorkspacesTest(unittest.TestCase):
         self.assertNotIn("SECRET", repr(result))
         self.assertEqual(ws.git(dest, "status", "--porcelain"), "")
 
+    def test_initial_snapshot_keeps_tracked_permissions_local(self):
+        name = 'backend/.gigacode/settings.json'
+        settings = self.repo / name
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({'permissions': {'deny': ['Bash(curl:*)']},
+                                       'mcpServers': {'private': {'token': 'SECRET'}}}))
+        ws.git(self.repo, 'add', '-f', '--', name)
+        ws.git(self.repo, 'commit', '-qm', 'existing local settings')
+        (self.repo / 'backend/a.txt').write_text('unfinished work\n')
+        before = ws.snapshot(self.repo)
+        dest = self.root / 'clone'
+        ws.clone_snapshot(self.repo, dest, include_dirty=True)
+        ws.commit_changes(dest, 'preserve work', allow_input=True)
+        self.assertEqual(ws.git(dest, 'status', '--porcelain'), '')
+        self.assertEqual(ws.git(dest, 'ls-files', '--', name), '')
+        self.assertEqual(json.loads((dest / name).read_text()),
+                         {'permissions': {'deny': ['Bash(curl:*)']}})
+        self.assertEqual(ws.git(dest, 'show', 'HEAD:backend/a.txt'), 'unfinished work')
+        child = self.root / 'child'
+        ws.clone_snapshot(dest, child)
+        self.assertEqual((child / name).read_bytes(), (dest / name).read_bytes())
+        self.assertEqual(ws.git(child, 'status', '--porcelain'), '')
+        self.assertEqual(ws.snapshot(self.repo), before)
+
     def test_custom_hooks_keep_relative_directory_semantics(self):
         hooks = self.repo / ".hooks"
         hooks.mkdir()

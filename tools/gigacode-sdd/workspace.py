@@ -371,14 +371,29 @@ def commit_changes(root, message, allow_input=False, env=None):
     if not isinstance(message, str) or not message.strip():
         raise WorkspaceError("Commit message is required")
     paths = _changed(root, "HEAD")
+    # Initial managed baseline must stop tracking local permission overlays.
+    # Keep their sanitized working files and restrictions, never commit them.
+    local_settings = [name for name in _tracked(root)
+                      if allow_input and PurePosixPath(name).name == "settings.json"
+                      and ".gigacode" in PurePosixPath(name).parts]
+    paths = [name for name in paths if name not in local_settings]
     for name in paths:
         _safe_path(root, name)
         if _forbidden(name, allow_input=allow_input):
             raise WorkspaceError(f"Protected path cannot be committed: {name}")
-    if not paths:
+    if not paths and not local_settings:
         return git(root, "rev-parse", "HEAD")
     # Honor repository hooks. Never use --no-verify, commit-tree, or broad staging.
-    git(root, "add", "-A", "--", *paths)
+    if paths:
+        git(root, "add", "-A", "--", *paths)
+    if local_settings:
+        # Only this fresh managed clone's index changes. info/exclude already
+        # keeps the files local after the baseline removes them from tracking.
+        git(root, "rm", "--cached", "--", *local_settings)
+        staged = set(_names(_run(root, ["diff", "--cached", "--name-only", "-z"])))
+        if staged != set(paths) | set(local_settings):
+            raise WorkspaceError("Unexpected staged paths in initial managed snapshot")
     _run(root, ["-c", "user.name=SDD Runner", "-c", "user.email=sdd-runner@localhost",
-                "commit", "-m", message, "--", *paths], base_env=env)
+                "commit", "-m", message,
+                *([] if local_settings else ["--", *paths])], base_env=env)
     return git(root, "rev-parse", "HEAD")
