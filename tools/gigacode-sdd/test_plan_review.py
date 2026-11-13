@@ -37,6 +37,17 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'changed'):
                 plan_review.audit(root, events, sha)
 
+    def test_only_exact_noops_are_tolerated(self):
+        for command in ('true', 'echo no'):
+            self.assertTrue(plan_review.harmless_shell_call({'name':'run_shell_command',
+                'input':{'command':command,'description':'no-op'}}))
+        for command in ('true; touch x', 'echo no > x', 'true && pwd', '$(true)',
+                        'echo `pwd`', 'true\npwd', ' true', 'echo no ', 'pwd', 'cat secret'):
+            self.assertFalse(plan_review.harmless_shell_call({'name':'run_shell_command',
+                'input':{'command':command}}))
+        self.assertFalse(plan_review.harmless_shell_call({'name':'run_shell_command',
+            'input':{'command':'true','cwd':'..'}}))
+
     def test_rejection_stops_and_resume_does_not_call_model(self):
         f = fixtures.ImportTests('test_import_preserves_checkpoint_and_requires_review')
         f.setUp()
@@ -71,7 +82,19 @@ class BoundaryTests(unittest.TestCase):
         with patch.object(f.runner,'session',return_value=result):
             with self.assertRaisesRegex(Blocked,'SHA256 mismatch'):
                 f.runner.review(root,'.','review',['REQ-BE','REQ-FE'],'plan-review')
+        with events.open('a') as stream:
+            stream.write(json.dumps({'message':{'content':[{'type':'tool_use','id':'noop',
+                'name':'run_shell_command','input':{'command':'true'}}]}})+'\n')
         report['candidate_sha256']=sha
         result['text']=json.dumps(report)
         with patch.object(f.runner,'session',return_value=result):
-            self.assertEqual(f.runner.review(root,'.','review',['REQ-BE','REQ-FE'],'plan-review')['verdict'],'pass')
+            accepted = f.runner.review(root,'.','review',['REQ-BE','REQ-FE'],'plan-review')
+            self.assertEqual(accepted['verdict'],'pass')
+            self.assertNotIn('protocol_warnings', accepted)
+            self.assertFalse((root/'review-audit.json').exists())
+        with events.open('a') as stream:
+            stream.write(json.dumps({'message':{'content':[{'type':'tool_use','name':'run_shell_command',
+                'input':{'command':'true; touch x'}}]}})+'\n')
+        with patch.object(f.runner,'session',return_value=result):
+            with self.assertRaisesRegex(Blocked,'disallowed tool'):
+                f.runner.review(root,'.','review',['REQ-BE','REQ-FE'],'plan-review')

@@ -15,6 +15,14 @@ def prepare(root, packet, candidate, decision):
     return hashlib.sha256((target / 'plan.json').read_bytes()).hexdigest()
 
 
+def harmless_shell_call(item):
+    """Exact literals only: never parse, normalize or execute model commands."""
+    args = item.get('input')
+    return (item.get('name') == 'run_shell_command' and isinstance(args, dict)
+            and set(args) <= {'command', 'description'}
+            and args.get('command') in ('true', 'echo no'))
+
+
 def audit(root, events, expected):
     root = Path(root).resolve()
     candidate = root / '.review-input/plan.json'
@@ -29,6 +37,8 @@ def audit(root, events, expected):
             if not isinstance(item, dict) or item.get('type') != 'tool_use':
                 continue
             name = item.get('name')
+            if harmless_shell_call(item):
+                continue
             if name not in keys:
                 raise ValueError('Plan review used a disallowed tool: ' + str(name))
             args = item.get('input')
