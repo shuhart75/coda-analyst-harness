@@ -139,6 +139,33 @@ class ComparisonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             experiment.valid_review('{"verdict":"pass","findings":[],"coverage":{}}', ['REQ-1'])
 
+    def test_review_preamble_and_recovery_preserve_original_errors(self):
+        report = {'verdict':'changes','findings':[{'claim':'gap','requirements':['REQ-1'],
+            'evidence':[{'path':'a','locator':'line 1','observation':'missing test'}]}],
+            'coverage':{'REQ-1':'gap'}}
+        text = 'Verification complete.\n\n```json\n' + json.dumps(report) + '\n```\n'
+        self.assertEqual(experiment.valid_review(text, ['REQ-1']), report)
+        with self.assertRaises(ValueError):
+            experiment.valid_review(text + '\n' + text, ['REQ-1'])
+        with self.assertRaises(ValueError):
+            experiment.valid_review('Result:\n```json\n{broken}\n```', ['REQ-1'])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            save(root / 'manifest.json', {'requirements':['REQ-1'], 'input_id':'pinned'})
+            original = {'text':text, 'errors':['Tool list_directory (call_x) returned an error'],
+                        'ok':False, 'comparison_valid':False}
+            for label in ('deepseek', 'glm'):
+                save(root / label / 'result.json', original)
+            before = (root / 'glm/result.json').read_bytes()
+            with patch.object(experiment, 'run_session', side_effect=AssertionError('No model calls')):
+                self.assertEqual(experiment.recover_comparison(root), 0)
+            self.assertEqual((root / 'glm/result.json').read_bytes(), before)
+            recovered = next(root.glob('recovered-*'))
+            result = read(recovered / 'glm-result.json')
+            self.assertEqual(result['review'], report)
+            self.assertEqual(result['errors'], original['errors'])
+            self.assertFalse(result['comparison_valid'])
+
 
 if __name__ == '__main__':
     unittest.main()

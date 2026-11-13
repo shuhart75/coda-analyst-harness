@@ -192,7 +192,16 @@ def review_prompt(requirements, nexus_hosts, input_id):
 
 
 def valid_review(text, requirements):
-    report = parse_json(text)
+    try:
+        report = parse_json(text)
+    except (ValueError, Blocked):
+        # Accept one explicitly delimited JSON report with surrounding prose.
+        # Never guess between reports or repair malformed JSON.
+        blocks = re.findall(r'^```(?:json)?[ \t]*\r?\n(.*?)^```[ \t]*$', text,
+                            flags=re.MULTILINE | re.DOTALL)
+        if len(blocks) != 1 or text.count('```') != 2:
+            raise ValueError('Expected exactly one JSON report') from None
+        report = parse_json(blocks[0])
     if report.get('verdict') not in ('pass', 'changes', 'blocked'):
         raise ValueError('invalid verdict')
     findings = report.get('findings')
@@ -292,6 +301,7 @@ def experiment(config, models, timeout=1200):
             say('Эксперимент', 'кандидат ' + frozen['plan'][:12] + ', код ' + frozen['head'][:12]
                 + '; основной state не изменяется')
             save(output / 'manifest.json', {'input_id': input_id, 'frozen': frozen,
+                'requirements': runner.cfg['requirements'],
                 'models_requested': models, 'model_identifiers_verified_before_launch': False,
                 'candidate_status': 'unaccepted saved candidate', 'config': str(runner.config_path),
                 'subagents_requested': False, 'isolation': 'separate copies and prompts; not an OS sandbox'})
@@ -427,14 +437,69 @@ def experiment(config, models, timeout=1200):
             signal.signal(sig, handler)
 
 
+def recover_comparison(output):
+    """Reparse saved text only; no CLI, source mutation, or main-state access."""
+    output = Path(output).resolve()
+    manifest = read(output / 'manifest.json')
+    requirements = manifest.get('requirements')
+    if requirements is None:
+        config = Path(manifest['config'])
+        if digest(config) != manifest['frozen']['config']:
+            raise Blocked('Original config changed; cannot recover pinned requirement identifiers')
+        requirements = read(config)['requirements']
+    if not isinstance(requirements, list) or not requirements:
+        raise Blocked('Missing pinned requirement identifiers')
+    recovered_dir = output / ('recovered-' + uuid.uuid4().hex[:8])
+    recovered_dir.mkdir(mode=0o700)
+    results = []
+    for label in ('deepseek', 'glm'):
+        source = output / label / 'result.json'
+        checksum = digest(source)
+        result = read(source)
+        try:
+            result['review'] = valid_review(result['text'], requirements)
+            result['report_error'] = None
+        except (ValueError, Blocked, TypeError, KeyError):
+            result['review'] = None
+            result['report_error'] = 'Saved answer still has no valid complete review JSON'
+        # Recovery never upgrades execution/integrity/model-identity evidence.
+        result['comparison_valid'] = bool(result.get('comparison_valid') and result['review'] is not None)
+        result['recovered_from'] = {'path': str(source), 'sha256': checksum,
+                                  'operation': 'JSON extraction only; original errors retained'}
+        if digest(source) != checksum:
+            raise Blocked('Saved result changed during recovery')
+        save(recovered_dir / (label + '-result.json'), result)
+        results.append(result)
+        say(label, 'восстановление без вызова модели: вердикт '
+            + str((result['review'] or {}).get('verdict', 'не распознан'))
+            + '; замечаний ' + str(len((result['review'] or {}).get('findings', [])))
+            + '; исходных ошибок ' + str(len(result.get('errors', []))))
+    comparison = compare(results)
+    comparison['input_id'] = manifest['input_id']
+    comparison['recovery_only'] = True
+    comparison['controlled_comparison_valid'] = all(r['comparison_valid'] for r in results)
+    comparison['execution_limitations'] = [{k: r.get(k) for k in (
+        'model_requested', 'models_reported', 'model_identity_status', 'elapsed_seconds',
+        'errors', 'report_error', 'input_intact', 'subagents_observed')} for r in results]
+    save(recovered_dir / 'comparison.json', comparison)
+    path = recovered_dir / 'comparison-redacted.json'
+    path.write_text(redact(json.dumps(comparison, ensure_ascii=False, indent=2))[0], encoding='utf-8')
+    path.chmod(0o600)
+    say('Результаты', str(recovered_dir) + '; исходные файлы не изменены, API не вызывался')
+    return 0 if all(r['review'] is not None for r in results) else 2
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path)
     parser.add_argument('--deepseek-model', default=MODELS[0])
     parser.add_argument('--glm-model', default=MODELS[1])
     parser.add_argument('--timeout', type=int, default=1200)
+    parser.add_argument('--recover', type=Path, help='Reparse an existing experiment without calling models')
     args = parser.parse_args(argv)
     try:
+        if args.recover:
+            return recover_comparison(args.recover)
         config = args.config or Path(read(app_root() / 'last-run.json')['config'])
         if args.timeout <= 0 or args.deepseek_model == args.glm_model:
             raise Blocked('Invalid timeout or identical model selectors')
