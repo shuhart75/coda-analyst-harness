@@ -86,6 +86,8 @@ def release_owners(project: Path, result: dict) -> dict:
     from tracker_execution import registry_paths
     from tracker_registry import read_registry
 
+    from tracker_execution import restore_registered_tasks
+    result = restore_registered_tasks(project, result)
     provider = result["scope"]["provider"]
     column = "SberTrek"
     owners, epics, blockers = {}, {}, []
@@ -164,9 +166,12 @@ def release_preview_command(args) -> int:
         from tracker_release_evidence import review_membership
         _, _, membership = response_file(args.membership, args.run_id)
         result = review_membership(args.run_id, result, membership)
+    from tracker_execution import restore_registered_tasks
+    result = restore_registered_tasks(project, result)
     ownership = release_owners(project, result)
     output = {"status": "release-ownership-preview", **ownership, "skipped": result.get("skipped", []),
               "writes_performed": False, "next_action": {"type": "resolve-release-ownership"},
+              "history_manifest_defaults": {"development_scope": "feature-tasks"},
               "release_membership_evidence": result.get("release_membership_evidence"),
               "registration": {
                   "existing_features": sorted(delivery_key(project, path) for path in feature_roots(project)),

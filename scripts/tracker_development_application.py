@@ -90,6 +90,11 @@ def development_updates(comparison: dict, decision: dict | None) -> list[dict]:
                     # and analyst decision still gate application of this correction.
                     expected.update({'Actual Start': '', 'Actual Finish': '', 'Completed By': ''})
         expected.update(overrides.get((row['feature'], row['task_id']), {}))
+        observed = row.get('observed_state')
+        explicit_status = overrides.get((row['feature'], row['task_id']), {}).get('Status')
+        if observed and not explicit_status and STATUSES.get(expected.get('Status'), expected.get('Status')) != observed:
+            raise ValueError('Fresh tracker state contradicts retained execution for ' + row['task_id'] +
+                             '; accept verified history or record an explicit per-task status decision')
         if row.get('suit') == 'bug':
             expected['Suit'] = 'bug'
         updates.append({'feature': row['feature'], 'task_id': row['task_id'], 'role': row['role'],

@@ -409,6 +409,12 @@ def review_history(args) -> int:
     elif manifest.get("scope_decisions") is not None:
         from tracker_release import apply_scope_decisions
         result = apply_scope_decisions(project, result, manifest["scope_decisions"])
+    from tracker_execution import restore_registered_tasks
+    result = restore_registered_tasks(project, result)
+    development_scope = manifest.get('development_scope', 'release-members')
+    if development_scope not in {'release-members', 'feature-tasks'}:
+        raise ValueError('Unsupported development_scope')
+    result['scope'] = {**result['scope'], 'development_scope': development_scope}
     preview = preview_execution(project, manifest.get("quarter"), manifest.get("feature"), result,
                                 manifest.get("reviewed_registries", {}), manifest.get("expected_head"),
                                 manifest.get('deliveries'))
@@ -418,6 +424,7 @@ def review_history(args) -> int:
     incomplete_fields = []
     application_scope = preview.get("application_scope")
     member_keys = set(application_scope["member_keys"]) if application_scope and application_scope['kind'] == 'release-members-only' else None
+    development_keys = set(application_scope.get('development_keys', member_keys)) if member_keys is not None else None
     reference_history = {f"{item.get(manifest['provider'] + '_key')}/{target['role']}"
                          for item in preview['items'] if item.get('proposed_action') == 'reference-only'
                          for target in item['targets'] if target['role'] in {'BE', 'FE'}}
@@ -476,9 +483,9 @@ def review_history(args) -> int:
             assigned.update(person for event in history.events if event.assignee for person in event.assignee)
             if not any(participants.get(person) in {'BE', 'FE'} for person in assigned):
                 raise ValueError('Bug requires a confirmed developer assignment in its history or snapshot')
-        if (member_keys is None or entry['key'] in member_keys) and 'history-field-coverage-not-proven' in limits:
+        if (development_keys is None or entry['key'] in development_keys) and 'history-field-coverage-not-proven' in limits:
             incomplete_fields.append(f"{entry['key']}/{entry['role']}")
-        if (member_keys is None or entry["key"] in member_keys) and {"history-text-requires-dated-source", "history-event-timestamps-not-returned", "history-text-extraction-unresolved"}.intersection(limits):
+        if (development_keys is None or entry["key"] in development_keys) and {"history-text-requires-dated-source", "history-event-timestamps-not-returned", "history-text-extraction-unresolved"}.intersection(limits):
             undated_history.append(f"{entry['key']}/{entry['role']}")
         history = replace(history, task_key=f"{entry['key']}/{entry['role']}")
         histories[identity] = (targets[0]["feature"], history)
@@ -501,6 +508,22 @@ def review_history(args) -> int:
             raise ValueError('QA completion semantics changed for ' + ', '.join(sorted(omitted))
                              + '; use the established QA completion meaning or record an explicit qa_completion_override with reason, source and analyst quote')
     reviews, missing_history, qa_blockers = [], [], []
+    observed_states = {}
+    # A narrow release review must not certify contradictory future work as fresh.
+    for item in preview['items']:
+        status = item.get('source_status')
+        observed = ('cancelled' if status in rules.cancelled or status in {'cancelled', 'canceled'}
+                    else 'completed' if status in rules.development_completed | rules.development_review | rules.qa_started | rules.qa_completed
+                    or status in {'ready_for_ift', 'ready_for_uat'} else None)
+        observed_states[item['tracker_key']] = observed
+        if observed and item.get('proposed_action') == 'reference-only':
+            for target in item['targets']:
+                saved = target['saved_facts'].get('Status', '').strip().lower()
+                if target['role'] in {'BE', 'FE'} and saved not in ({'completed', 'done'} if observed == 'completed' else {'cancelled', 'canceled'}):
+                    qa_blockers.append({'feature': target['feature'], 'task_id': target['task_id'],
+                        'reason': 'fresh-state-conflicts-with-protected-execution',
+                        'source_status': status, 'required_action': 'review-feature-development-with-history'})
+
     deleted_keys = {issue.get(provider + "_key") for issue in result["excluded"]
                     if issue.get("reason") == "confirmed-source-deletion"}
     skipped_keys = {issue.get(provider + "_key") for issue in result.get("skipped", [])}
@@ -521,7 +544,7 @@ def review_history(args) -> int:
                 key = row.get("SberTrek", "").split("/")[0].strip()
                 if proposal.get('qa_not_applicable') and key not in selected_bug_keys:
                     continue
-                if member_keys is not None and key not in member_keys:
+                if development_keys is not None and key not in development_keys:
                     continue
                 if key in deleted_keys | skipped_keys:
                     continue
@@ -530,7 +553,7 @@ def review_history(args) -> int:
                 else:
                     expected.add(f"{key}/{row['Role'].upper()}")
         selected = tuple(history for (source_provider, key, role), (owner, history) in histories.items()
-                         if owner == feature and (member_keys is None or key in member_keys))
+                         if owner == feature and (development_keys is None or key in development_keys))
         missing_history.extend(sorted(expected - {history.task_key for history in selected}))
         bug_keys = {issue.get(provider + "_key") for issue in result["issues"] if issue.get("issue_type") == "bug"}
         qa_excluded = tuple(history.task_key for history in selected if history.task_key.rsplit("/", 1)[0] in bug_keys)
@@ -573,6 +596,13 @@ def review_history(args) -> int:
     pending_history = sorted((set(missing_history) - set(unavailable)) | set(pending_dates) | set(incomplete_fields))
     from tracker_comparison import build_comparison
     comparison = build_comparison(preview, reviews, provider) if not pending_history else None
+    if comparison:
+        for row in comparison['rows']:
+            for item in preview['items']:
+                if any(target['feature'] == row['feature'] and target['task_id'] == row['task_id']
+                       for target in item['targets']):
+                    row['observed_state'] = observed_states.get(item['tracker_key'])
+
     from tracker_qa_application import confirmed_qa_updates
     if pending_history and manifest.get('qa_confirmations'):
         raise ValueError('Collect or document unavailable history before QA application review')

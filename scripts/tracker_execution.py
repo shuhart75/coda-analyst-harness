@@ -1,6 +1,7 @@
 from __future__ import annotations
 from project_layout import feature_root as layout_feature_root, artifact_glob, logical_path, delivery_key, layout as project_layout, delivery_selection
 
+import copy
 import hashlib
 from decimal import Decimal
 from importlib import import_module
@@ -78,6 +79,34 @@ def read_key(value: str, role: str) -> tuple[str | None, bool]:
     return match.group(1), bool(match.group(2) and match.group(2) != role)
 
 
+def restore_registered_tasks(project: Path, result: dict) -> dict:
+    """Recover known work hidden by a renamed title, without rewriting reconciliation."""
+    skipped = [issue for issue in result.get('skipped', [])
+               if issue.get('reason') == 'outside-supported-roles']
+    if not skipped:
+        return result
+    roles = {}
+    for path in registry_paths(project):
+        tables, _ = read_registry(path)
+        for row in (row for table in tables for row in table):
+            role = row.get('Role', '').upper()
+            key, invalid = read_key(row.get('SberTrek', ''), role)
+            if key and not invalid and role in {'BE', 'FE'} and row.get('Kind', '').lower() == 'real':
+                roles.setdefault(key, set()).add(role)
+    reviewed = copy.deepcopy(result)
+    for issue in list(reviewed.get('skipped', [])):
+        known = roles.get(issue.get('sbertrek_key'), set())
+        if issue.get('reason') != 'outside-supported-roles' or len(known) != 1:
+            continue
+        issue.pop('reason', None)
+        issue.update(task_role=next(iter(known)), role_basis='existing-execution-registry')
+        reviewed['skipped'].remove(issue)
+        reviewed['issues'].append(issue)
+    from tracker_workflow import work_items
+    reviewed['work_items'] = work_items(reviewed['issues'])
+    return reviewed
+
+
 def preview_execution(
     project: Path, quarter: str | None, feature: str | None, result: dict,
     reviewed: dict[str, str] | None = None, expected_head: str | None = None,
@@ -86,6 +115,7 @@ def preview_execution(
     project = project.expanduser().resolve()
     if Path(git(project, "rev-parse", "--show-toplevel").strip()).resolve() != project:
         raise ValueError("PROJECT_ROOT должен быть корнем аналитического Git-репозитория")
+    result = restore_registered_tasks(project, result)
     before = repository_state(project)
     reviewed = reviewed or {}
     if reviewed and before["head"] != expected_head:
@@ -223,6 +253,7 @@ def preview_execution(
         entry = {
             "tracker_key": identity, "sbertrek_key": sbertrek_key,
             "summary": issue.get("summary"),
+            "source_status": issue.get("status"),
             "suit": issue.get("issue_type", ""),
             "owners": owners, "targets": matched, "work_item_ids": [item["work_item_id"] for item in roles],
             "internal_id_collisions": local_collisions, "blockers": sorted(set(reasons)),
@@ -290,14 +321,19 @@ def preview_execution(
         member_keys = set(result.get("release_member_keys", [
             issue.get(str(provider) + "_key") for issue in [*result["issues"], *result.get("skipped", [])]
             if issue.get(str(provider) + "_key")]))
+        development_keys = set(member_keys)
+        if scope.get('development_scope') == 'feature-tasks':
+            development_keys.update(item.get(str(provider) + '_key') for item in items
+                                    if any(target['role'] in {'BE', 'FE'} and target['feature'] in selected
+                                           for target in item['targets']))
         for item in items:
-            if item.get(str(provider) + "_key") not in member_keys:
+            if item.get(str(provider) + "_key") not in development_keys:
                 item["proposed_action"] = "reference-only"
         application_scope = {
             "kind": "release-members-only", "provider": provider, "release": scope["ids"][0],
-            "member_keys": sorted(member_keys),
+            "member_keys": sorted(member_keys), "development_keys": sorted(development_keys),
             "protected_rows": [row for row in rows if row["feature"] in selected
-                               and row["role"] != "QA" and row.get(str(provider) + "_key") not in member_keys
+                               and row["role"] != "QA" and row.get(str(provider) + "_key") not in development_keys
                                and not row.get("registration_required")],
         }
         for proposal in qa_proposals:
