@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -8,6 +9,7 @@ from unittest.mock import patch
 import compare_plan_models as experiment
 from controller import read, save
 from platform_support import FileLock
+from workspace import git
 import test_controller as controller_tests
 
 
@@ -42,6 +44,11 @@ class ComparisonTests(unittest.TestCase):
         config['cli'] = [sys.executable, str(fake)]
         save(fixture.config, config)
         save(fixture.runner.root / 'plan-candidate.json', fixture.plan)
+        # Tracked legacy config receives different checkout mtimes in copies.
+        (fixture.runner.main / '.env.test').write_text('TOKEN=fixture-private-value\n')
+        git(fixture.runner.main, 'add', '--', '.env.test')
+        git(fixture.runner.main, '-c', 'user.name=Test', '-c', 'user.email=test@localhost',
+            'commit', '-qm', 'fixture private config')
         before = fixture.runner.state_path.read_bytes()
         inventory = {'complete': True, 'services': [], 'agents': [], 'limitations': []}
         with patch.object(experiment, 'app_root', return_value=fixture.root / 'app'), \
@@ -69,6 +76,31 @@ class ComparisonTests(unittest.TestCase):
             with self.assertRaises(BlockingIOError):
                 experiment.experiment(fixture.config, list(experiment.MODELS))
             run.assert_not_called()
+
+    def test_private_config_timestamps_ignored_but_content_changes_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roots = [Path(tmp) / name for name in ('a', 'b')]
+            base = {'head': 'same', 'status': '', 'files': {
+                '.env': {'redacted': True, 'size': 8, 'mtime_ns': 1, 'mode': 0o600}}}
+            for index, root in enumerate(roots):
+                root.mkdir()
+                (root / '.env').write_text('TOKEN=aa')
+                os.utime(root / '.env', ns=(index + 1, index + 1))
+            def snap(root, **kwargs):
+                value = json.loads(json.dumps(base))
+                value['files']['.env']['mtime_ns'] = (root / '.env').stat().st_mtime_ns
+                return value
+            with patch.object(experiment, 'snapshot', side_effect=snap):
+                self.assertNotEqual(snap(roots[0]), snap(roots[1]))
+                left, right = [experiment.comparable_input(root) for root in roots]
+                self.assertEqual(left, right)
+                (roots[1] / '.env').write_text('TOKEN=bb')
+                right = experiment.comparable_input(roots[1])
+                self.assertNotEqual(left, right)
+                diagnostic = experiment.input_differences(left, right, {}, {})
+                self.assertEqual(diagnostic['workspace_paths'], ['.env'])
+                self.assertNotIn('TOKEN', json.dumps(diagnostic))
+                self.assertNotIn(left['files']['.env']['sha256'], json.dumps(diagnostic))
 
     def test_activity_handles_partial_events_and_distinguishes_subagent_models(self):
         with tempfile.TemporaryDirectory() as tmp:

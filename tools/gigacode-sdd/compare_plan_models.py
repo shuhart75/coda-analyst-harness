@@ -40,6 +40,31 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def comparable_input(root):
+    """Compare copy contents, not checkout timestamps of private config files.
+
+    Original snapshots remain strict for mutation detection. Private values are
+    hashed locally and are never included in diagnostics or console output.
+    """
+    result = snapshot(root, normalize_settings=True)
+    for name, entry in result['files'].items():
+        if entry.get('redacted'):
+            entry.pop('mtime_ns', None)
+            entry['sha256'] = digest(Path(root) / name)
+    return result
+
+
+def input_differences(left, right, left_packet, right_packet):
+    """Only paths/field names, no file content or credential digests."""
+    return {
+        'head_differs': left['head'] != right['head'],
+        'status_differs': left['status'] != right['status'],
+        'workspace_paths': [name for name in sorted(left['files'].keys() | right['files'].keys())
+                            if left['files'].get(name) != right['files'].get(name)],
+        'packet_paths': [name for name in sorted(left_packet.keys() | right_packet.keys())
+                         if left_packet.get(name) != right_packet.get(name)]}
+
+
 def identity(event):
     """Only explicit metadata, never model self-identification in prose."""
     if event.get('type') not in ('system', 'result'):
@@ -289,8 +314,11 @@ def experiment(config, models, timeout=1200):
                         path.chmod(0o700 if path.is_dir() else 0o600)
                     workspaces.append(work)
             baselines = [snapshot(w, normalize_settings=True) for w in workspaces]
+            comparable = [comparable_input(w) for w in workspaces]
             packets = [file_manifest(w / '.review-input') for w in workspaces]
-            if baselines[0] != baselines[1] or packets[0] != packets[1]:
+            if comparable[0] != comparable[1] or packets[0] != packets[1]:
+                save(output / 'input-differences.json', input_differences(
+                    comparable[0], comparable[1], packets[0], packets[1]))
                 raise Blocked('Model inputs differ; neither model started')
             controls = [git_controls(w) for w in workspaces]
             if (fingerprint(snapshot(runner.main)) != frozen['code']
@@ -301,7 +329,7 @@ def experiment(config, models, timeout=1200):
                     or (digest(runner.root / 'decision.md') if (runner.root / 'decision.md').exists() else None) != frozen['decision']):
                 raise Blocked('Source changed during preparation; neither model started')
             save(output / 'effective-input.json', {'input_id': input_id,
-                'workspace_sha256': fingerprint(baselines[0]), 'packet_files': packets[0]})
+                'workspace_sha256': fingerprint(comparable[0]), 'packet_files': packets[0]})
             prompt = review_prompt(runner.cfg['requirements'], runner.cfg['nexus']['nexus_hosts'], input_id)
 
             def run_one(index):
