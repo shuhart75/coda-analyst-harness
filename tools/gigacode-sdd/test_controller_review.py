@@ -88,7 +88,7 @@ class ControllerReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(controller.Blocked, 'Configuration changed'):
             self.runner.guard()
 
-    def test_plan_review_changes_stop_without_automatic_replanning(self):
+    def test_plan_review_changes_retries_automatically_with_feedback(self):
         self.runner.state['preflight'] = {'config_sha256': controller.digest(self.config), 'passed': True}
         calls = []
         def session(root, cwd, prompt, role, name):
@@ -97,13 +97,12 @@ class ControllerReviewTests(unittest.TestCase):
         reviews = [
             {'verdict': 'changes', 'findings': ['Clarify SDD prerequisites'], 'coverage': {'REQ-BE': 'gap', 'REQ-FE': 'covered'}},
             {'verdict': 'pass', 'findings': [], 'coverage': {'REQ-BE': 'covered', 'REQ-FE': 'covered'}}]
-        with patch.object(self.runner, 'session', side_effect=session), patch.object(self.runner, 'review', side_effect=reviews):
-            with self.assertRaisesRegex(controller.Blocked, 'automatic replanning stopped'):
-                self.runner.plan()
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(self.runner.state['plan_review_pending']['status'], 'changes')
-        self.assertIn('Clarify SDD prerequisites', self.runner.state['plan_feedback'])
-        self.assertTrue((self.runner.root / 'plan-rejected.json').is_file())
+        with patch.object(self.runner, 'session', side_effect=session), patch('review_cycle.review_pair', side_effect=reviews):
+            self.runner.plan()
+        self.assertEqual(self.runner.state['status'], 'planned')
+        self.assertEqual(len(calls), 2)
+        self.assertNotEqual(calls[0][0], calls[1][0])
+        self.assertIn('Clarify SDD prerequisites', calls[1][1])
 
     def test_check_cannot_change_git_hook_configuration(self):
         check = {'cwd': '.', 'argv': ['git', 'config', 'core.hooksPath', '.disabled-hooks']}

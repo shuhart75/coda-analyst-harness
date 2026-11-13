@@ -35,7 +35,7 @@ class ImportTests(unittest.TestCase):
         resumed = importer.Runner(self.fixture.config)
         with patch.object(resumed, 'require_preflight'), \
                 patch.object(resumed, 'session', side_effect=AssertionError('planner must not run')), \
-                patch.object(resumed, 'review', return_value={'verdict': 'pass', 'findings': []}) as review:
+                patch('review_cycle.review_pair', return_value={'verdict': 'pass', 'findings': []}) as review:
             resumed.plan()
         review.assert_called_once()
         self.assertEqual(read(resumed.state_path)['status'], 'planned')

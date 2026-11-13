@@ -27,7 +27,7 @@ def collect(config, destination=None, error=None):
                'mode': 'local UTF-8 diagnostic report', 'omitted': [], 'files': {}}
     # Never traverse workspaces, credentials, .git or links supplied by agents.
     files = list(root.glob('*.json')) + list(root.glob('*.md'))
-    for name in ('logs', 'input', 'plan-imports', 'preserved-services'):
+    for name in ('logs', 'input', 'plan-imports', 'preserved-services', 'review-cycles'):
         directory = root / name
         if directory.is_symlink():
             summary['omitted'].append(str(directory))

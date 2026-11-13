@@ -21,7 +21,8 @@ class BoundaryTests(unittest.TestCase):
             events = Path(tmp) / 'events'
             def write(path, name='read_file'):
                 events.write_text(json.dumps({'message': {'content': [{'type': 'tool_use',
-                    'name': name, 'input': {'file_path': path}}]}})+'\n')
+                    'id': 'read', 'name': name, 'input': {'file_path': path}},
+                    {'type': 'tool_result', 'tool_use_id': 'read', 'is_error': False, 'content': 'read'}]}})+'\n')
             write('.review-input/plan.json')
             plan_review.audit(root, events, sha)
             write('../candidate.json')
@@ -48,25 +49,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertFalse(plan_review.harmless_shell_call({'name':'run_shell_command',
             'input':{'command':'true','cwd':'..'}}))
 
-    def test_rejection_stops_and_resume_does_not_call_model(self):
-        f = fixtures.ImportTests('test_import_preserves_checkpoint_and_requires_review')
-        f.setUp()
-        self.addCleanup(f.doCleanups)
-        fixtures.importer.import_plan(f.fixture.config, f.new, f.sha)
-        runner = fixtures.importer.Runner(f.fixture.config)
-        with patch.object(runner, 'require_preflight'), \
-                patch.object(runner, 'session', side_effect=AssertionError('no planner')), \
-                patch.object(runner, 'review', return_value={'verdict':'changes','findings':['fix task be']}) as review:
-            with self.assertRaisesRegex(Blocked, 'automatic replanning stopped'):
-                runner.plan()
-            with self.assertRaisesRegex(Blocked, 'requires attention'):
-                runner.plan()
-        self.assertEqual(review.call_count, 1)
-        rejected = read(runner.root / 'plan-rejected.json')
-        self.assertEqual(rejected['candidate_sha256'], runner.state['plan_review_pending']['sha256'])
-        self.assertFalse(runner.state['tasks'])
-
-    def test_review_checks_returned_sha(self):
+    def test_review_binds_candidate_without_trusting_model_sha(self):
         f = fixtures.ImportTests('test_import_preserves_checkpoint_and_requires_review')
         f.setUp()
         self.addCleanup(f.doCleanups)
@@ -75,16 +58,18 @@ class BoundaryTests(unittest.TestCase):
         sha = plan_review.prepare(root, f.fixture.packet, f.old, root / 'missing')
         events = root / 'events.jsonl'
         events.write_text(json.dumps({'message':{'content':[{'type':'tool_use','name':'read_file',
-            'input':{'file_path':'.review-input/plan.json'}}]}})+'\n')
+            'id':'candidate', 'input':{'file_path':'.review-input/plan.json'}},
+            {'type':'tool_result','tool_use_id':'candidate','is_error':False,'content':'read'}]}})+'\n')
         report = {'verdict':'pass','findings':[], 'coverage':{'REQ-BE':'task be','REQ-FE':'task fe'},
                   'candidate_sha256':'wrong'}
         result = {'ok':True,'events_path':str(events),'text':json.dumps(report)}
         with patch.object(f.runner,'session',return_value=result):
-            with self.assertRaisesRegex(Blocked,'SHA256 mismatch'):
-                f.runner.review(root,'.','review',['REQ-BE','REQ-FE'],'plan-review')
+            bound = f.runner.review(root,'.','review',['REQ-BE','REQ-FE'],'plan-review')
+            self.assertEqual(bound['candidate_sha256'], sha)
         with events.open('a') as stream:
             stream.write(json.dumps({'message':{'content':[{'type':'tool_use','id':'noop',
-                'name':'run_shell_command','input':{'command':'true'}}]}})+'\n')
+                'name':'run_shell_command','input':{'command':'true'}},
+                {'type':'tool_result','tool_use_id':'noop','is_error':False,'content':'ok'}]}})+'\n')
         report['candidate_sha256']=sha
         result['text']=json.dumps(report)
         with patch.object(f.runner,'session',return_value=result):
@@ -93,8 +78,9 @@ class BoundaryTests(unittest.TestCase):
             self.assertNotIn('protocol_warnings', accepted)
             self.assertFalse((root/'review-audit.json').exists())
         with events.open('a') as stream:
-            stream.write(json.dumps({'message':{'content':[{'type':'tool_use','name':'run_shell_command',
-                'input':{'command':'true; touch x'}}]}})+'\n')
+            stream.write(json.dumps({'message':{'content':[{'type':'tool_use','id':'bad','name':'run_shell_command',
+                'input':{'command':'true; touch x'}},
+                {'type':'tool_result','tool_use_id':'bad','is_error':False,'content':'ok'}]}})+'\n')
         with patch.object(f.runner,'session',return_value=result):
             with self.assertRaisesRegex(Blocked,'disallowed tool'):
                 f.runner.review(root,'.','review',['REQ-BE','REQ-FE'],'plan-review')

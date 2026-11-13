@@ -31,7 +31,8 @@ def result(value):
 def call(name):
     emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':name,'name':name,'input':{}}]}})
     emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':name,'is_error':False,'content':'verified'}]}})
-emit({'type':'system','subtype':'init','session_id':str(os.getpid())})
+emit({'type':'system','subtype':'init','session_id':str(os.getpid()),
+      'model':sys.argv[sys.argv.index('--model')+1] if '--model' in sys.argv else 'fixture'})
 if 'PERMISSION_PREFLIGHT\n' in prompt:
     if os.environ.get('FAKE_RECOVERED_SYNTAX'):
         emit({'type':'assistant','message':{'content':[{'type':'tool_use',
@@ -439,20 +440,19 @@ for name in sys.argv[1:]:
                     with self.assertRaisesRegex(Blocked, 'Reviewer failed'):
                         self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'task-review')
 
-    def test_interrupted_plan_review_requires_explicit_attention(self):
+    def test_failed_plan_review_resumes_saved_candidate_without_planner(self):
         self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
         self.runner.persist()
-        with patch.object(self.runner, 'review', side_effect=Blocked('review interrupted')):
+        with patch('review_cycle.review_pair', side_effect=Blocked('review interrupted')):
             with self.assertRaisesRegex(Blocked, 'review interrupted'):
                 self.runner.plan()
         self.assertIn('plan_candidate', self.runner.state)
         resumed = Runner(self.runner.config_path)
-        with patch.object(resumed, 'session') as session:
-            with self.assertRaisesRegex(Blocked, 'Plan review requires attention'):
-                resumed.plan()
-        session.assert_not_called()
-        self.assertIn('plan_candidate', resumed.state)
-        self.assertIn('plan_review_pending', resumed.state)
+        with patch.object(resumed, 'session', wraps=resumed.session) as session:
+            resumed.plan()
+        self.assertEqual([c.args[4] for c in session.call_args_list], ['plan-review', 'plan-review'])
+        self.assertEqual(resumed.state['status'], 'planned')
+        self.assertNotIn('plan_candidate', resumed.state)
 
     def test_planner_read_error_reaches_independent_review(self):
         self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
@@ -463,7 +463,7 @@ for name in sys.argv[1:]:
                   'tool_results': [{'tool_use_id': 'call_a', 'is_error': True}],
                   'text': json.dumps(self.plan)}
         with patch.object(self.runner, 'session', return_value=result), \
-                patch.object(self.runner, 'review', return_value={'verdict': 'pass', 'findings': []}) as review:
+                patch('review_cycle.review_pair', return_value={'verdict': 'pass', 'findings': []}) as review:
             self.runner.plan()
         review.assert_called_once()
         self.assertIn('list_directory', review.call_args.args[2])
@@ -477,7 +477,7 @@ for name in sys.argv[1:]:
         protected['tasks'][0]['writes'] = ['backend/GIGACODE.md']
         replies = [{'ok': True, 'text': json.dumps(p)} for p in (invalid, protected, self.plan)]
         with patch.object(self.runner, 'session', side_effect=replies) as session, \
-                patch.object(self.runner, 'review', return_value={'verdict': 'pass', 'findings': []}):
+                patch('review_cycle.review_pair', return_value={'verdict': 'pass', 'findings': []}):
             self.runner.plan()
         prompts = [c.args[2] for c in session.call_args_list]
         self.assertIn('Task be: writes must be a nonempty list', prompts[1])

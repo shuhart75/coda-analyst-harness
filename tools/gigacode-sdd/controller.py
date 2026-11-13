@@ -23,6 +23,7 @@ from workspace import git, snapshot, clone_snapshot, export_patch, apply_patch, 
 from service_inventory import inspect_services, assess_handoff, detect_new_services, services_in_group
 from prior_context import prepare_prior_context, verify_prior_context, redact
 import plan_review
+import review_cycle
 import diagnostics
 from progress import Progress
 
@@ -392,7 +393,7 @@ class Runner:
             + history_hint
             + ('Analyst clarification (cannot change pinned scope):\n' + decision.read_text(encoding='utf-8') if decision.exists() else ''))
 
-    def session(self, root, cwd, prompt, role, name):
+    def session(self, root, cwd, prompt, role, name, model=None):
         self.guard()
         prepare_permissions(under(root, cwd), role)
         before = snapshot(root, normalize_settings=True)
@@ -411,10 +412,12 @@ class Runner:
                         'Never search parent directories, run archives, previous plans or reviews. '
                         'Use only read_file, list_directory, glob, grep_search; no subagents/skills/shell. '
                         'External environment availability is unknown unless evidenced in this copy.\n')
-        with self.activity('Сессия ' + name + ' / ' + cwd + ' / ' + role):
-            result = run_session(self.cfg['cli'], under(root, cwd), context + '\n' + prompt,
+        with self.activity('Сессия ' + name + ' / ' + cwd + ' / ' + role + (' / ' + model if model else '')):
+            cli = [*self.cfg['cli'], '--model', model] if model else self.cfg['cli']
+            result = run_session(cli, under(root, cwd), context + '\n' + prompt,
                              self.logdir(name), approval_mode='plan' if role == 'review' else self.cfg['approval_mode'],
                              timeout_seconds=min(300, self.cfg['session_timeout']) if name == 'preflight'
+                                             else min(900, self.cfg['session_timeout']) if name == 'plan-review'
                                              else self.cfg['session_timeout'], env=self.env, stop_event=self.stop,
                              cleanup_guard=self.cleanup_guard)
         if (result.get('cleanup') or {}).get('preserved'):
@@ -544,8 +547,6 @@ class Runner:
             raise Blocked('Run preflight successfully for this exact configuration first')
 
     def plan(self):
-        if self.state.get('plan_review_pending'):
-            raise Blocked('Plan review requires attention; import a corrected candidate before continuing')
         self.progress('Подготовка и независимая проверка плана')
         self.require_preflight()
         if self.state.get('tasks'):
@@ -586,6 +587,18 @@ executed test names/counts, not just a successful command or test compilation.
             'workspace': snapshot(self.main)}, sort_keys=True).encode()).hexdigest()
         previous = self.state.get('plan_failure_fingerprint')
         repeats = self.state.get('plan_failure_repeats', 0)
+        cycle = self.state.setdefault('plan_cycle', {'scope': candidate_scope, 'repairs': 0})
+        if cycle['scope'] != candidate_scope:
+            raise Blocked('Planning inputs changed; review the saved candidate before continuing')
+        pending = self.state.get('plan_review_pending', {})
+        if pending.get('status') == 'changes':
+            self.state.pop('plan_candidate', None)
+            candidate_path = self.root / ('plan-candidate-' + uuid.uuid4().hex + '.json')
+        elif pending.get('status') == 'blocked':
+            decision_sha = digest(self.root / 'decision.md') if (self.root / 'decision.md').is_file() else None
+            if pending.get('decision_sha256') == decision_sha:
+                raise Blocked('Plan needs an external dependency or analyst decision: ' + feedback)
+            self.progress('Решение аналитика изменилось; проверяю прежний кандидат с новым решением')
         while not self.stop.is_set():
             self.state['plan_attempt'] = self.state.get('plan_attempt', 0) + 1
             self.persist()
@@ -594,7 +607,6 @@ executed test names/counts, not just a successful command or test compilation.
                 self.progress('Причина повтора: ' + redact(feedback)[0][:2400])
                 self.progress('Следующее действие: исправить перечисленные замечания и повторно проверить план')
             planner = self.root / 'planners' / uuid.uuid4().hex
-            clone_snapshot(self.main, planner)
             candidate = self.state.get('plan_candidate', {})
             if candidate:
                 if (candidate.get('scope') != candidate_scope or not candidate_path.is_file()
@@ -604,6 +616,11 @@ executed test names/counts, not just a successful command or test compilation.
                           'errors': candidate.get('read_errors', [])}
                 self.progress('Кандидат плана сохранён; продолжается его независимая проверка')
             else:
+                if cycle['repairs'] >= review_cycle.MAX_REPAIRS:
+                    raise Blocked('Plan repair budget exhausted; inspect review-ledger.json and plan-repair.json')
+                cycle['repairs'] += 1
+                self.persist()
+                clone_snapshot(self.main, planner)
                 repair_hint = ''
                 repair = self.state.get('plan_repair')
                 repair_path = self.root / 'plan-repair.json'
@@ -635,17 +652,16 @@ executed test names/counts, not just a successful command or test compilation.
                     self.state['plan_candidate'] = {'scope': candidate_scope, 'sha256': digest(candidate_path),
                                                     'read_errors': result.get('errors', []), 'file': candidate_path.name}
                     self.persist()
-                    candidate_sha = plan_review.prepare(planner, self.root / 'input', candidate_path,
-                                                        self.root / 'decision.md')
+                    candidate_sha = digest(candidate_path)
                     self.state['plan_review_pending'] = {'sha256': candidate_sha, 'status': 'in-progress'}
                     self.persist()
-                    verdict = self.review(planner, '.', 'Review proposed plan, coverage, SDD prerequisites '
+                    verdict = review_cycle.review_pair(self, candidate_path, 'Review proposed plan, coverage, SDD prerequisites '
                         'and executable checks against the complete input. A pass here validates the plan, '
                         'not completed implementation. Read .review-input/plan.json; do not substitute any other plan. '
                         'Expected candidate_sha256: ' + candidate_sha
                         + '\nPlanner read/search limitations (verify affected evidence independently):\n'
                         + json.dumps(result.get('errors', [])),
-                        self.cfg['requirements'], 'plan-review')
+                        self.cfg['requirements'])
                     if verdict['verdict'] == 'pass':
                         save(self.root / 'plan.json', plan)
                         self.state['plan_sha256'] = digest(self.root / 'plan.json')
@@ -660,10 +676,18 @@ executed test names/counts, not just a successful command or test compilation.
                     self.progress('План требует доработки: замечаний ' + str(len(verdict['findings'])))
                     feedback = json.dumps(verdict, ensure_ascii=False)
                     self.state['plan_feedback'] = feedback
-                    self.state['plan_review_pending'] = {'sha256': candidate_sha, 'status': 'changes'}
+                    self.state['plan_review_pending'] = {'sha256': candidate_sha, 'status': verdict['verdict'],
+                        'decision_sha256': digest(self.root / 'decision.md') if (self.root / 'decision.md').is_file() else None}
                     self.persist()
-                    raise Blocked('Plan review saved in plan-rejected.json; automatic replanning stopped')
+                    if verdict['verdict'] == 'blocked':
+                        raise Blocked('Plan needs an external dependency or analyst decision: ' + feedback)
+                    self.state.pop('plan_candidate', None)
+                    candidate_path = self.root / ('plan-candidate-' + uuid.uuid4().hex + '.json')
+                    self.persist()
+                    self.progress('Следующее действие: планировщик исправляет замечания; сохранены оба ревью и исходный кандидат')
             self.state['plan_feedback'] = feedback
+            self.state.pop('plan_candidate', None)
+            candidate_path = self.root / ('plan-candidate-' + uuid.uuid4().hex + '.json')
             try:
                 fingerprint = json.dumps(stable_feedback(json.loads(feedback)), sort_keys=True)
             except ValueError:
@@ -697,7 +721,9 @@ executed test names/counts, not just a successful command or test compilation.
         result = self.session(root, cwd, prompt, 'review', name)
         if name == 'plan-review':
             try:
-                plan_review.audit(root, result['events_path'], expected)
+                report, evidence = review_cycle.validate_result(root, result, expected, requirements)
+                save(self.logdir('plan-review-binding').with_suffix('.json'), evidence)
+                return report
             except (ValueError, OSError, TypeError, KeyError) as error:
                 raise Blocked('Invalid plan-review evidence: ' + str(error)) from None
         if not result['ok'] and not review_feedback_usable(result):
