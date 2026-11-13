@@ -519,7 +519,7 @@ def main(argv=None):
         if not stream.isatty() and hasattr(stream, 'reconfigure'):
             stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--diagnostics-config', type=Path, help='Collect one local ZIP for a stopped run; no agent launch')
+    parser.add_argument('--diagnostics-config', type=Path, help='Collect one local UTF-8 text report for a stopped run; no agent launch')
     parser.add_argument('--diagnose', action='store_true', help='Read-only process/service inventory; no GUI or agent launch')
     parser.add_argument('--repo', help='Optional exact source root for diagnosis/advanced use')
     parser.add_argument('--dry-run', action='store_true', help='Select and validate without initializing or starting agents')

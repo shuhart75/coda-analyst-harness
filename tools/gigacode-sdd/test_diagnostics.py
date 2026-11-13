@@ -3,10 +3,27 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-import zipfile
+import re
 import diagnostics
 import test_controller as fixtures
 from controller import Blocked
+
+
+def read_sections(path):
+    text = path.read_bytes().decode('utf-8')
+    result = {}
+    offset = text.index('=== FILE ')
+    while offset < len(text):
+        end = text.index('\n', offset)
+        match = re.fullmatch(r'=== FILE (.+) CHARS ([0-9]+) ===', text[offset:end])
+        name, length = json.loads(match[1]), int(match[2])
+        start = end + 1
+        result[name] = text[start:start + length]
+        offset = start + length
+        trailer = '\n=== END FILE ===\n\n'
+        assert text[offset:offset + len(trailer)] == trailer
+        offset += len(trailer)
+    return result
 
 
 class BundleTests(unittest.TestCase):
@@ -18,19 +35,26 @@ class BundleTests(unittest.TestCase):
             config.write_text('{}')
             (root / 'state.json').write_text('{"status":"initialized"}')
             (root / 'logs/session').mkdir(parents=True)
-            (root / 'logs/session/stdout.jsonl').write_text('event')
+            (root / 'logs/session/stdout.jsonl').write_bytes('событие\r\n=== END FILE ===\n'.encode('utf-8'))
+            (root / 'logs/binary').write_bytes(b'\x00\xffSECRET_BINARY')
+            (root / 'logs/control').write_bytes(b'\x1b[31mCONTROL')
             (root / 'work').mkdir()
             (root / 'work/secret').write_text('excluded')
             (root / 'logs/link').symlink_to(root / 'work', target_is_directory=True)
             (root / 'logs/secret').symlink_to(root / 'work/secret')
             out = diagnostics.collect(config, error='review rejected')
-            self.assertEqual(out, Path(folder) / 'diagnostics/latest.zip')
-            with zipfile.ZipFile(out) as z:
-                summary = json.loads(z.read('summary.json'))
-                self.assertEqual(summary['error'], 'review rejected')
-                self.assertEqual(z.read('run/logs/session/stdout.jsonl'), b'event')
-                self.assertFalse(any('secret' in n for n in z.namelist()))
-                self.assertIsNone(z.testzip())
+            self.assertEqual(out, Path(folder) / 'diagnostics/latest-diagnostics.txt')
+            sections = read_sections(out)
+            summary = json.loads(sections['summary.json'])
+            self.assertEqual(summary['error'], 'review rejected')
+            self.assertEqual(sections['run/logs/session/stdout.jsonl'], 'событие\r\n=== END FILE ===\n')
+            self.assertFalse(any('secret' in n for n in sections))
+            self.assertNotIn('run/logs/binary', sections)
+            self.assertNotIn('run/logs/control', sections)
+            self.assertNotIn(bytes([0, 255]), out.read_bytes())
+            self.assertFalse(summary['files']['run/logs/binary']['included'])
+            self.assertFalse(summary['files']['run/logs/control']['included'])
+            self.assertFalse(list(out.parent.glob('*.zip')))
             before = out.read_bytes()
             with patch.object(diagnostics.os, 'replace', side_effect=OSError('disk')):
                 self.assertIsNone(diagnostics.report(config))
@@ -44,9 +68,9 @@ class BundleTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, 'specific failure'):
             with fixture.runner.locked():
                 raise Blocked('specific failure')
-        with zipfile.ZipFile(fixture.runner.root / 'diagnostics/latest.zip') as z:
-            self.assertEqual(json.loads(z.read('summary.json'))['error'], 'specific failure')
-            self.assertEqual(z.read('run/state.json'), fixture.runner.state_path.read_bytes())
+        sections = read_sections(fixture.runner.root / 'diagnostics/latest-diagnostics.txt')
+        self.assertEqual(json.loads(sections['summary.json'])['error'], 'specific failure')
+        self.assertEqual(sections['run/state.json'].encode('utf-8'), fixture.runner.state_path.read_bytes())
 
     def test_manual_collection_does_not_launch_agents_or_change_state(self):
         import bootstrap
