@@ -34,6 +34,12 @@ print(json.dumps({'type':'result','subtype':'success','result':json.dumps(report
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_protocol_rejects_shell_writes_and_missing_inventory(self):
+        self.assertEqual(experiment.protocol_violations({'tool_calls': {'a': 'read_file'}}), [])
+        self.assertEqual(experiment.protocol_violations({'tool_calls': {'a': 'run_shell_command'}}), ['run_shell_command'])
+        self.assertTrue(experiment.protocol_violations({'tool_calls': {'a': 'write_file'}}))
+        self.assertTrue(experiment.protocol_violations({}))
+
     def test_parallel_sessions_pin_models_inputs_and_preserve_state(self):
         fixture = controller_tests.ControllerE2E('test_start_reuses_completed_preflight_and_reaches_reviewed_plan')
         fixture.setUp()

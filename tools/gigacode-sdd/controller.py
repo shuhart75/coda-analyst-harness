@@ -47,6 +47,13 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def plan_candidate_path(root, state):
+    name = state.get('plan_candidate', {}).get('file', 'plan-candidate.json')
+    if not isinstance(name, str) or not re.fullmatch(r'plan-candidate(?:-[a-f0-9]{32})?\.json', name):
+        raise Blocked('Invalid saved candidate filename')
+    return Path(root) / name
+
+
 def relative(value):
     if (not isinstance(value, str) or not value or Path(value).is_absolute()
             or '..' in Path(value).parts or '\\' in value or PureWindowsPath(value).drive):
@@ -564,9 +571,17 @@ Do not run tests or write files. Return ONLY JSON with this structure:
 Checks must exercise behavior, not just echo/compile. Use actual existing commands. No public downloads.
 Do not invent blockers from unrelated legacy IT failures, but do not suppress relevant failing tests.
 Every requirement must have an owner. Cross-contour work depends on contract/SDD prerequisites.
+Assign every unfinished SDD item explicitly; preparation is not implementation evidence.
+Keep requirement arrays consistent with task instructions. Required evidence stays required even
+when an environment is unavailable: record not-run, never substitute a weaker proof as a pass.
+For no-rebuild experiments define the exact built artifacts, checksums and freeze boundary.
+Assign one owner to each expensive stand sequence; downstream tasks consume recorded evidence
+and concrete record identifiers instead of repeating the sequence without a stated reason.
+Use pinned packet paths. Reconcile existing tests before adding duplicates and verify actual
+executed test names/counts, not just a successful command or test compilation.
 '''
         feedback = self.state.get('plan_feedback', '')
-        candidate_path = self.root / 'plan-candidate.json'
+        candidate_path = plan_candidate_path(self.root, self.state)
         candidate_scope = hashlib.sha256(json.dumps({'config': digest(self.config_path),
             'workspace': snapshot(self.main)}, sort_keys=True).encode()).hexdigest()
         previous = self.state.get('plan_failure_fingerprint')
@@ -618,7 +633,7 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                         self.progress('План сформирован с ошибками чтения/поиска; передаю на независимую проверку')
                     save(candidate_path, plan)
                     self.state['plan_candidate'] = {'scope': candidate_scope, 'sha256': digest(candidate_path),
-                                                    'read_errors': result.get('errors', [])}
+                                                    'read_errors': result.get('errors', []), 'file': candidate_path.name}
                     self.persist()
                     verdict = self.review(planner, '.', 'Review proposed plan, coverage, SDD prerequisites '
                         'and executable checks against the complete input. A pass here validates the plan, '

@@ -18,7 +18,7 @@ import uuid
 
 from bootstrap import app_root
 from controller import (Blocked, Runner, digest, file_manifest, git_controls,
-                        parse_json, read, save, validate_plan)
+                        parse_json, read, save, validate_plan, plan_candidate_path)
 from platform_support import FileLock, process_scope_pids, process_exists, process_scope_exists
 from policy import prepare_permissions, make_policy_prompt
 from prior_context import redact
@@ -224,6 +224,14 @@ def valid_review(text, requirements):
     return report
 
 
+def protocol_violations(result):
+    calls = result.get('tool_calls')
+    if not isinstance(calls, dict):
+        return ['tool-call inventory unavailable']
+    allowed = {'read_file', 'list_directory', 'glob', 'grep_search'}
+    return sorted({str(name) for name in calls.values() if name not in allowed})
+
+
 def compare(results):
     """Mechanical comparison only. Semantics/evidence remain a human review."""
     indexes = []
@@ -274,7 +282,7 @@ def experiment(config, models, timeout=1200):
                 if any(flag in ('-m', '--model', '--fallback-model') or flag.startswith(
                         ('--model=', '--fallback-model=')) for flag in runner.cfg['cli']):
                     raise Blocked('CLI prefix already contains model/fallback selection')
-                plan_path = runner.root / 'plan-candidate.json'
+                plan_path = plan_candidate_path(runner.root, runner.state)
                 if not plan_path.is_file():
                     raise Blocked('No saved plan-candidate.json; do not substitute a new plan')
                 candidate = runner.state.get('plan_candidate')
@@ -382,7 +390,8 @@ def experiment(config, models, timeout=1200):
                         subagent_model_identity='not inferred from main model',
                         input_intact=intact, service_inventory_complete=current['complete'],
                         new_workspace_services=new_services, elapsed_seconds=round(time.monotonic() - started, 2))
-                    result['comparison_valid'] = (result['ok'] and report is not None and intact
+                    result['protocol_violations'] = protocol_violations(result)
+                    result['comparison_valid'] = (not result['protocol_violations'] and result['ok'] and report is not None and intact
                         and current['complete'] and not new_services and not activity.subagents
                         and model_status == 'exact-match')
                     if not intact or new_services:
@@ -409,7 +418,7 @@ def experiment(config, models, timeout=1200):
             say('Сравнение', 'обе сессии завершены; сопоставляю отчёты без принятия плана')
             comparison = compare(results)
             comparison['models'] = [{k: r.get(k) for k in ('model_requested', 'models_reported',
-                'model_identity_status', 'elapsed_seconds', 'comparison_valid', 'subagents_observed')} for r in results]
+                'model_identity_status', 'elapsed_seconds', 'comparison_valid', 'subagents_observed', 'protocol_violations')} for r in results]
             comparison['controlled_comparison_valid'] = all(r['comparison_valid'] for r in results)
             comparison['original_unchanged'] = (
                 digest(runner.config_path) == frozen['config'] and digest(runner.state_path) == frozen['state']
@@ -463,7 +472,9 @@ def recover_comparison(output):
             result['review'] = None
             result['report_error'] = 'Saved answer still has no valid complete review JSON'
         # Recovery never upgrades execution/integrity/model-identity evidence.
-        result['comparison_valid'] = bool(result.get('comparison_valid') and result['review'] is not None)
+        result['protocol_violations'] = protocol_violations(result)
+        result['comparison_valid'] = bool(result.get('comparison_valid') and result['review'] is not None
+                                          and not result['protocol_violations'])
         result['recovered_from'] = {'path': str(source), 'sha256': checksum,
                                   'operation': 'JSON extraction only; original errors retained'}
         if digest(source) != checksum:
