@@ -66,7 +66,8 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(self.runner.config_path.read_bytes(), config_bytes)
 
     def test_import_rejects_changed_working_copy_head(self):
-        git(self.runner.main, 'commit', '--allow-empty', '-m', 'Unexpected update')
+        git(self.runner.main, '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+            'commit', '--allow-empty', '-m', 'Unexpected update')
         with self.assertRaisesRegex(Blocked, 'Working copy HEAD changed'):
             importer.import_plan(self.fixture.config, self.new, self.sha)
 

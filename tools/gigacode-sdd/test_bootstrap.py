@@ -176,6 +176,7 @@ class BootstrapTests(unittest.TestCase):
             captured.append(args)
             return str(Path(args.state_dir) / 'config.json')
         with patch.dict(sys.modules, {'service_inventory': self.safe_inventory}), \
+                patch.object(bootstrap, 'choose_requirements', return_value={'packet': str(self.packet), 'file': str(self.packet / 'requirements.md'), 'label': 'Synthetic requirements'}), \
                 patch.object(bootstrap, 'choose_prior_history', return_value=None), \
                 patch.object(bootstrap, 'infer_nexus', return_value={'nexus_host': [bootstrap.NEXUS_HOST], 'npm_registry': None, 'pip_index_url': None}), \
                 patch.object(bootstrap, 'find_cli', return_value='/installed/gigacode'), \

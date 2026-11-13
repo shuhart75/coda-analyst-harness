@@ -45,6 +45,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                 rows.append({"feature": feature, "task_id": target["task_id"], "role": target["role"],
                              "suit": item.get("suit", ""),
                              "summary": item.get("summary"),
+                             "observed_state": item.get("observed_state"),
                              "registry": target["registry"], "current": target["saved_facts"],
                              "registration_required": target.get("registration_required", False),
                              "proposed_action": item.get('proposed_action', 'update'),

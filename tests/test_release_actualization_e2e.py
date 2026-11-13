@@ -206,7 +206,7 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
                              'call': {**call, 'tool': 'synthetic-snapshot-reader'},
                              'mapping': {'key': '/key', 'assignee': '/assignee', 'status': '/status'}}}
 
-    def collect(self, *, decision_text=None):
+    def collect(self, *, decision_text=None, remainder_status="created"):
         self.run_tool(self.state, 'config-status')
         run = self.run_tool(self.state, 'begin', '--adaptive', '--scope-kind', 'release',
                             '--scope-provider', 'sbertrek', '--scope-id', self.expected['release'],
@@ -226,8 +226,8 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
                                  'Approve twelve release members and three remainder members; QA shares 7.2 and 1.8. '
                                  'Accept development dates from expected.json; unknown start and estimate stay unknown.', encoding='utf-8')
         supplement = self.write(self.inputs / 'supplement.json', {'issues': [
-            self.sber_issue('LAB-201'), self.sber_issue('LAB-202', summary='[FE] Protected form', status='cancelled'),
-            self.sber_issue('LAB-203', summary='Protected actions without prefix', status='cancelled')]})
+            self.sber_issue('LAB-201'), self.sber_issue('LAB-202', summary='[FE] Protected form', status=remainder_status),
+            self.sber_issue('LAB-203', summary='Protected actions without prefix', status=remainder_status)]})
         from tracker_workflow import tql_units
         self.manifest = {
             'schema_version': 1, 'analyst_confirmed': True, 'decision_source': 'Synthetic fixture approval',
@@ -311,6 +311,17 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
             source.write_bytes(original)
         self.generate()
         self.assertEqual(self.collab('save-preview', '--review-file', review['review_file'])['qa_verified_runs'], [self.run_id])
+
+    def test_fresh_cancellation_outside_release_blocks_stale_gantt(self):
+        self.collect(remainder_status='cancelled')
+        review = self.review('cancelled-remainder')
+        conflicts = [item for item in review['qa_application_blockers']
+                     if item['reason'] == 'fresh-state-conflicts-with-protected-execution']
+        self.assertEqual({item['task_id'] for item in conflicts}, {'LAB-202/FE', 'LAB-203/FE'})
+        before = self.snapshot(self.gantt)
+        self.qa_check(review, expected=2)
+        self.generate(expected=1)
+        self.assertEqual(self.snapshot(self.gantt), before)
 
     def test_offline_release_from_collection_to_save_preview(self):
         protected = {task: copy.deepcopy(self.rows[task]) for task in self.expected['remainder']}

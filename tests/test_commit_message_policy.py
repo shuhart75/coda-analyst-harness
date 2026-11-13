@@ -134,7 +134,8 @@ class CommitMessagePolicyTests(unittest.TestCase):
                 quarters={'2026-Q4': binding('RSCON-456', 'planning')}))}
         for path in ['quarters/2026-Q4/quarter/README.md',
                      'quarters/2026-Q4/gantt/quarter-plan.puml', root + '/planning/estimates.md',
-                     root + '/execution/tasks.md', root + '/execution/qa-groups.json']:
+                     root + '/execution/tasks.md', root + '/execution/qa-groups.json',
+                     root + '/execution-context.md', root + '/slices/legacy/execution/tasks.md']:
             self.assertEqual(keys_for_paths([path], files.get), {'RSCON-456'})
         self.assertEqual(keys_for_paths([root + '/requirements.md',
             'quarters/2026-Q4/gantt/actual-progress.puml'], files.get), {'RSCON-123', 'RSCON-456'})

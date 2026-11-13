@@ -259,3 +259,44 @@ class BugHistoryWorkflowTests(unittest.TestCase):
         self.assertEqual(review['features'][0]['qa_task_keys'], [])
         self.run_tool(self.state, 'qa-application-check', '--project-root', str(self.project),
                       '--review-file', review['review_file'])
+
+
+class RegisteredTaskRecoveryTests(unittest.TestCase):
+    def test_cancelled_renamed_task_is_recovered_without_rewriting_source(self):
+        import copy
+        import tempfile
+        from pathlib import Path
+        from tracker_execution import restore_registered_tasks
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = root / 'features/owner/execution/tasks.md'
+            registry.parent.mkdir(parents=True)
+            registry.write_text('| Task ID | SberTrek | Role | Kind | Status |\n'
+                                '|---|---|---|---|---|\n'
+                                '| OLD/BE | RSCON-7194 | BE | real | not-started |\n')
+            result = {'issues': [], 'work_items': [], 'skipped': [
+                {'sbertrek_key': 'RSCON-7194', 'summary': 'отменена[Пр1][BE] Work',
+                 'status': 'cancelled', 'reason': 'outside-supported-roles',
+                 'development': {'state': 'unknown'}},
+                {'sbertrek_key': 'RSCON-8191', 'reason': 'analyst-excluded-from-execution'}]}
+            before = copy.deepcopy(result)
+            reviewed = restore_registered_tasks(root, result)
+            self.assertEqual(result, before)
+            self.assertEqual(reviewed['issues'][0]['task_role'], 'BE')
+            self.assertEqual(reviewed['issues'][0]['status'], 'cancelled')
+            self.assertEqual([x['sbertrek_key'] for x in reviewed['skipped']], ['RSCON-8191'])
+            self.assertEqual(restore_registered_tasks(root, reviewed), reviewed)
+
+    def test_keep_current_cannot_hide_fresh_terminal_state(self):
+        from tracker_development_application import development_updates
+        for observed in ('cancelled', 'completed'):
+            comparison = {'rows': [{'feature': 'owner', 'task_id': 'TASK/BE', 'role': 'BE',
+                'registry': 'tasks.md', 'current': {'Status': 'not-started', 'Progress %': '0'},
+                'observed_state': observed}]}
+            with patch('tracker_development_application.verify_decision'):
+                with self.assertRaisesRegex(ValueError, 'Fresh tracker state'):
+                    development_updates(comparison, {'kind': 'keep-current'})
+                updates = development_updates(comparison, {'kind': 'custom', 'overrides': [
+                    {'feature': 'owner', 'task_id': 'TASK/BE', 'fields': {'Status': observed,
+                     'Progress %': '100' if observed == 'completed' else '0'}}]})
+                self.assertEqual(updates[0]['expected_registry_fields']['Status'], observed)

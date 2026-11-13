@@ -425,11 +425,11 @@ for name in sys.argv[1:]:
                   'tool_results': [{'tool_use_id': 'a', 'is_error': True}],
                   'events_path': 'private-log', 'text': json.dumps(report)}
         with patch.object(self.runner, 'session', return_value=result):
-            self.assertEqual(self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'plan-review'), report)
+            self.assertEqual(self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'task-review'), report)
             report.update(verdict='pass', findings=[])
             result['text'] = json.dumps(report)
             with self.assertRaisesRegex(Blocked, 'Reviewer failed'):
-                self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'plan-review')
+                self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'task-review')
             report.update(verdict='changes', findings=['Fix'])
             result['text'] = json.dumps(report)
             for key, value in [('permission_denials', [{}]), ('timed_out', True),
@@ -437,9 +437,9 @@ for name in sys.argv[1:]:
                                ('errors', ['missing path', 'other failure'])]:
                 with patch.dict(result, {key: value}):
                     with self.assertRaisesRegex(Blocked, 'Reviewer failed'):
-                        self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'plan-review')
+                        self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'task-review')
 
-    def test_failed_plan_review_resumes_saved_candidate_without_planner(self):
+    def test_interrupted_plan_review_requires_explicit_attention(self):
         self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
         self.runner.persist()
         with patch.object(self.runner, 'review', side_effect=Blocked('review interrupted')):
@@ -447,11 +447,12 @@ for name in sys.argv[1:]:
                 self.runner.plan()
         self.assertIn('plan_candidate', self.runner.state)
         resumed = Runner(self.runner.config_path)
-        with patch.object(resumed, 'session', wraps=resumed.session) as session:
-            resumed.plan()
-        self.assertEqual([c.args[4] for c in session.call_args_list], ['plan-review'])
-        self.assertEqual(resumed.state['status'], 'planned')
-        self.assertNotIn('plan_candidate', resumed.state)
+        with patch.object(resumed, 'session') as session:
+            with self.assertRaisesRegex(Blocked, 'Plan review requires attention'):
+                resumed.plan()
+        session.assert_not_called()
+        self.assertIn('plan_candidate', resumed.state)
+        self.assertIn('plan_review_pending', resumed.state)
 
     def test_planner_read_error_reaches_independent_review(self):
         self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}

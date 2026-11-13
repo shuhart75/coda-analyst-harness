@@ -86,6 +86,8 @@ def release_owners(project: Path, result: dict) -> dict:
     from tracker_execution import registry_paths
     from tracker_registry import read_registry
 
+    from tracker_execution import restore_registered_tasks
+    result = restore_registered_tasks(project, result)
     provider = result["scope"]["provider"]
     column = "SberTrek"
     owners, epics, blockers = {}, {}, []
@@ -164,9 +166,12 @@ def release_preview_command(args) -> int:
         from tracker_release_evidence import review_membership
         _, _, membership = response_file(args.membership, args.run_id)
         result = review_membership(args.run_id, result, membership)
+    from tracker_execution import restore_registered_tasks
+    result = restore_registered_tasks(project, result)
     ownership = release_owners(project, result)
     output = {"status": "release-ownership-preview", **ownership, "skipped": result.get("skipped", []),
               "writes_performed": False, "next_action": {"type": "resolve-release-ownership"},
+              "history_manifest_defaults": {"development_scope": "feature-tasks"},
               "release_membership_evidence": result.get("release_membership_evidence"),
               "registration": {
                   "existing_features": sorted(delivery_key(project, path) for path in feature_roots(project)),
@@ -253,7 +258,8 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
     if any(not row.get(field) or row[field] not in by_key for row in development):
         return {"ready": False, "reason": "collect-all-feature-cards-before-partition", "path": path.relative_to(project).as_posix()}
     def is_active(row: dict) -> bool:
-        if scope.get("kind") == "release" and row[field] not in (release_members or set()):
+        if (scope.get("kind") == "release" and scope.get("development_scope") != "feature-tasks"
+                and row[field] not in (release_members or set())):
             status = str(row.get("saved_facts", {}).get("Status", "")).strip().lower()
             return status not in {"cancelled", "canceled", "superseded"}
         return by_key[row[field]].get("development", {}).get("state") != "excluded"

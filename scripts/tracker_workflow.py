@@ -1527,6 +1527,8 @@ def execution_preview_command(args: argparse.Namespace) -> int:
         from tracker_release import apply_scope_decisions
         _, _, decisions = response_file(args.decisions, args.run_id)
         result = apply_scope_decisions(Path(args.project_root).resolve(), result, decisions)
+    from tracker_execution import restore_registered_tasks
+    result = restore_registered_tasks(Path(args.project_root).resolve(), result)
     reviewed = dict(args.reviewed_registry)
     if len(reviewed) != len(args.reviewed_registry):
         raise ValueError("Реестр указан для подтверждения несколько раз")
@@ -1542,6 +1544,7 @@ def execution_preview_command(args: argparse.Namespace) -> int:
     payload["skipped"] = result.get("skipped", [])
     payload["run_id"] = args.run_id
     payload["reconciled_sha256"] = completion["reconciled_sha256"]
+    payload["history_manifest_defaults"] = {"development_scope": "feature-tasks"}
     payload["ownership_decisions"] = {
         "argument": "--decisions",
         "history_manifest_field": "release_scope_decisions" if result["scope"]["kind"] == "release" else "scope_decisions",

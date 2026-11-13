@@ -94,6 +94,16 @@ class ReleasePartitionTests(unittest.TestCase):
         self.assertEqual(self.rows, original)
         self.assertEqual(sum(Decimal(group['estimate']) for group in result['groups']), Decimal(10))
 
+    def test_feature_development_scope_removes_cancelled_supplement_from_qa(self):
+        self.scope['development_scope'] = 'feature-tasks'
+        self.issues[2]['development']['state'] = 'excluded'
+        self.rows[2]['saved_facts'] = {'Status': 'not-started'}
+        groups = self.calculate()['groups']
+        self.assertEqual(groups[0]['members'], ['TASK-1'])
+        self.assertEqual(groups[1]['members'], ['TASK-2'])
+        self.assertEqual([Decimal(group['estimate']) for group in groups], [Decimal(5), Decimal(5)])
+        self.assertEqual(self.rows[2]['saved_facts']['Status'], 'not-started')
+
     def test_excluded_protected_registry_status_overrides_active_snapshot(self):
         for status in ('cancelled', 'canceled', 'superseded'):
             with self.subTest(status=status):
@@ -799,7 +809,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.save_sources()
             corrected = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
                                       '--project-root', str(self.project), '--manifest', str(manifest))
-            self.assertEqual(corrected['qa_application_blockers'], [])
+            self.assertIn('fresh-state-conflicts-with-protected-execution',
+                          [item['reason'] for item in corrected['qa_application_blockers']])
             self.assertEqual([group['members'] for group in corrected['features'][0]['qa_groups']],
                              [['FIRST'], ['REST']])
             self.assertEqual([Decimal(group['estimate']) for group in corrected['features'][0]['qa_groups']],
@@ -869,6 +880,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
                                 '--project-root', str(self.project), '--manifest', str(manifest))
         self.assertEqual(repeated['review_file'], review['review_file'])
         evidence = self.state / 'analyst.txt'
+        expanded = json.loads(manifest.read_text())
+        expanded['development_scope'] = 'feature-tasks'
+        self.write(manifest, expanded)
+        expanded_review = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
+                                       '--project-root', str(self.project), '--manifest', str(manifest))
+        self.assertIn('SECOND', [row['task_id'] for row in expanded_review['comparison']['rows']])
+        self.assertEqual(expanded_review['application_scope']['protected_rows'], [])
+        self.assertEqual(expanded_review['features'][0]['qa_groups'], groups)
+        expanded['responses'] = histories[:1]
+        self.write(manifest, expanded)
+        incomplete_development = self.run_tool(self.state, 'history-review', '--run-id', run['run_id'],
+                                              '--project-root', str(self.project), '--manifest', str(manifest))
+        self.assertIn('SBER-2/BE', incomplete_development['pending_history'])
+        expanded.pop('development_scope')
+        expanded['responses'] = histories
+        self.write(manifest, expanded)
         without_remainder = json.loads(manifest.read_text())
         without_remainder['responses'] = histories[:1]
         self.write(manifest, without_remainder)
