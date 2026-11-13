@@ -91,7 +91,7 @@ class ComparisonTests(unittest.TestCase):
             for index, root in enumerate(roots):
                 root.mkdir()
                 (root / '.env').write_text('TOKEN=aa')
-                os.utime(root / '.env', ns=(index + 1, index + 1))
+                os.utime(root / '.env', ns=((index + 1) * 1_000_000_000, (index + 1) * 1_000_000_000))
             def snap(root, **kwargs):
                 value = json.loads(json.dumps(base))
                 value['files']['.env']['mtime_ns'] = (root / '.env').stat().st_mtime_ns

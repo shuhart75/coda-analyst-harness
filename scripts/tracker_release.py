@@ -258,7 +258,8 @@ def qa_groups(project: Path, feature: str, rows: list[dict], issues: list[dict],
     if any(not row.get(field) or row[field] not in by_key for row in development):
         return {"ready": False, "reason": "collect-all-feature-cards-before-partition", "path": path.relative_to(project).as_posix()}
     def is_active(row: dict) -> bool:
-        if scope.get("kind") == "release" and row[field] not in (release_members or set()):
+        if (scope.get("kind") == "release" and scope.get("development_scope") != "feature-tasks"
+                and row[field] not in (release_members or set())):
             status = str(row.get("saved_facts", {}).get("Status", "")).strip().lower()
             return status not in {"cancelled", "canceled", "superseded"}
         return by_key[row[field]].get("development", {}).get("state") != "excluded"

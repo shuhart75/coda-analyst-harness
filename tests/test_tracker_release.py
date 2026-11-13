@@ -94,6 +94,16 @@ class ReleasePartitionTests(unittest.TestCase):
         self.assertEqual(self.rows, original)
         self.assertEqual(sum(Decimal(group['estimate']) for group in result['groups']), Decimal(10))
 
+    def test_feature_development_scope_removes_cancelled_supplement_from_qa(self):
+        self.scope['development_scope'] = 'feature-tasks'
+        self.issues[2]['development']['state'] = 'excluded'
+        self.rows[2]['saved_facts'] = {'Status': 'not-started'}
+        groups = self.calculate()['groups']
+        self.assertEqual(groups[0]['members'], ['TASK-1'])
+        self.assertEqual(groups[1]['members'], ['TASK-2'])
+        self.assertEqual([Decimal(group['estimate']) for group in groups], [Decimal(5), Decimal(5)])
+        self.assertEqual(self.rows[2]['saved_facts']['Status'], 'not-started')
+
     def test_excluded_protected_registry_status_overrides_active_snapshot(self):
         for status in ('cancelled', 'canceled', 'superseded'):
             with self.subTest(status=status):
