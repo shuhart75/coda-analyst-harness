@@ -376,9 +376,25 @@ for name in sys.argv[1:]:
             self.runner.guard()
         self.assertEqual(snapshot(self.source), self.before)
 
-    def test_protected_checkout_change_blocks(self):
+    def test_external_checkout_change_preserves_captured_copy(self):
+        captured = snapshot(self.runner.main)
+        config_bytes = Path(self.config).read_bytes()
         (self.source / 'wip.txt').write_text('concurrent work', encoding="utf-8")
-        with self.assertRaisesRegex(Blocked, 'checkout changed'):
+        git(self.source, 'add', 'wip.txt')
+        git(self.source, 'commit', '-m', 'Independent update')
+        (self.source / 'extra.txt').write_text('local work', encoding="utf-8")
+        (self.source / '.git/hooks/pre-commit').write_text('# external hook')
+        external = snapshot(self.source)
+        Runner(self.config).guard()
+        self.assertEqual(snapshot(self.runner.main), captured)
+        self.assertEqual(snapshot(self.source), external)
+        self.assertEqual(Path(self.config).read_bytes(), config_bytes)
+
+    def test_configuration_change_still_blocks(self):
+        data = json.loads(Path(self.config).read_text())
+        data['jobs'] = 42
+        save(self.config, data)
+        with self.assertRaisesRegex(Blocked, 'Configuration changed'):
             self.runner.guard()
 
     def test_missing_actual_agent_return_fails_preflight(self):

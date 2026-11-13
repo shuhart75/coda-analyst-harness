@@ -254,11 +254,9 @@ class Runner:
             raise Blocked('Pinned packet changed; create a new run for revised requirements')
         if self.cfg.get('prior_context'):
             verify_prior_context(self.cfg['prior_context'])
-        for path, before in self.cfg['protected_snapshots'].items():
-            if snapshot(path) != before:
-                raise Blocked('Source/protected checkout changed: ' + path)
-            if git_controls(path) != self.cfg['protected_git_controls'][path]:
-                raise Blocked('Source/protected Git configuration or hooks changed: ' + path)
+        # External checkouts are capture-time provenance, not live run inputs.
+        # Keep their protected paths for export; validate owned copies at the
+        # plan, session and integration boundaries, including crash recovery.
 
     def audit(self, root):
         findings = audit_dependency_sources(root, self.cfg['nexus']['nexus_hosts'])

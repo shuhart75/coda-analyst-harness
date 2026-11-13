@@ -4,6 +4,8 @@ import import_plan as importer
 from controller import Blocked, digest, read, save, plan_candidate_path
 import test_controller as fixtures
 from platform_support import FileLock
+from workspace import git, snapshot
+from controller import git_controls
 
 
 class ImportTests(unittest.TestCase):
@@ -38,6 +40,35 @@ class ImportTests(unittest.TestCase):
         review.assert_called_once()
         self.assertEqual(read(resumed.state_path)['status'], 'planned')
 
+
+    def test_import_after_auxiliary_sync_preserves_captured_copy(self):
+        auxiliary = self.fixture.root / 'auxiliary'
+        auxiliary.mkdir()
+        git(auxiliary, 'init')
+        git(auxiliary, 'config', 'user.email', 'test@example.test')
+        git(auxiliary, 'config', 'user.name', 'Test')
+        (auxiliary / 'file').write_text('old')
+        git(auxiliary, 'add', 'file')
+        git(auxiliary, 'commit', '-m', 'Initial')
+        cfg = read(self.fixture.config)
+        cfg['protected_snapshots'][str(auxiliary)] = snapshot(auxiliary)
+        cfg['protected_git_controls'][str(auxiliary)] = git_controls(auxiliary)
+        save(self.fixture.config, cfg)
+        config_bytes = self.runner.config_path.read_bytes()
+        captured = snapshot(self.runner.main)
+        (auxiliary / 'file').write_text('synced')
+        git(auxiliary, 'commit', '-am', 'Sync')
+        external = snapshot(auxiliary)
+        target = importer.import_plan(self.fixture.config, self.new, self.sha)
+        self.assertTrue(target.is_file())
+        self.assertEqual(snapshot(self.runner.main), captured)
+        self.assertEqual(snapshot(auxiliary), external)
+        self.assertEqual(self.runner.config_path.read_bytes(), config_bytes)
+
+    def test_import_rejects_changed_working_copy_head(self):
+        git(self.runner.main, 'commit', '--allow-empty', '-m', 'Unexpected update')
+        with self.assertRaisesRegex(Blocked, 'Working copy HEAD changed'):
+            importer.import_plan(self.fixture.config, self.new, self.sha)
 
     def test_wrong_hash_and_existing_tasks_rejected(self):
         before = self.runner.state_path.read_bytes()
