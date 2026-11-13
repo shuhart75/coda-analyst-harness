@@ -43,6 +43,7 @@ def import_plan(config, plan, expected_sha256):
             'scope': scope, 'accepted': False})
         runner.state['plan_candidate'] = {'file': target.name, 'scope': scope,
             'sha256': digest(target), 'read_errors': []}
+        runner.state.pop('plan_review_pending', None)
         runner.state['plan_feedback'] = ''
         runner.state.pop('plan_failure_fingerprint', None)
         runner.state.pop('plan_failure_repeats', None)

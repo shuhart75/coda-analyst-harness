@@ -88,14 +88,22 @@ elif 'EXECUTE_TASK\n' in prompt:
     event('end', task['id'])
     result('implemented')
 elif 'INDEPENDENT_REVIEW\n' in prompt:
-    ids=json.loads(prompt.rsplit('Required identifiers: ',1)[1])
+    ids=json.JSONDecoder().raw_decode(prompt.rsplit('Required identifiers: ',1)[1])[0]
     findings=[]
     if '\nTask:\n' in prompt:
         task=json.JSONDecoder().raw_decode(prompt.split('\nTask:\n',1)[1])[0]
         event('review',task['id'])
         if task['id']=='be' and (root/'backend/value.txt').read_text()!='2':
             findings=['REQ-BE requires value 2; correct backend/value.txt without weakening checks']
-    result({'verdict':'changes' if findings else 'pass','findings':findings,'coverage':{r:'verified value.txt and behavior check' for r in ids}})
+    report={'verdict':'changes' if findings else 'pass','findings':findings,'coverage':{r:'verified value.txt and behavior check' for r in ids}}
+    if 'Expected candidate_sha256:' in prompt:
+        import hashlib
+        report['candidate_sha256']=hashlib.sha256((root/'.review-input/plan.json').read_bytes()).hexdigest()
+        emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'candidate-read',
+            'name':'read_file','input':{'file_path':'.review-input/plan.json'}}]}})
+        emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'candidate-read',
+            'is_error':False,'content':'read candidate'}]}})
+    result(report)
 else:
     raise RuntimeError('Unexpected prompt')
 '''

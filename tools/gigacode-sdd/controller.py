@@ -22,6 +22,7 @@ from platform_support import (FileLock, launch_process, process_exists,
 from workspace import git, snapshot, clone_snapshot, export_patch, apply_patch, commit_changes
 from service_inventory import inspect_services, assess_handoff, detect_new_services, services_in_group
 from prior_context import prepare_prior_context, verify_prior_context, redact
+import plan_review
 
 class Blocked(RuntimeError):
     pass
@@ -413,6 +414,14 @@ class Runner:
         self.check_existing_workspace_processes(services_before, root, name)
         context = (make_policy_prompt(self.cfg['nexus']['nexus_hosts'], role)
                    if name == 'preflight' else self.context(role, name in ('plan', 'plan-review')))
+        if name == 'plan-review':
+            context = self.context(role, False).replace(str(self.root / 'input'),
+                                                       str(Path(root) / '.review-input/packet'))
+            context += ('\nPLAN_REVIEW_BOUNDARY: Read only within the current workspace. '
+                        'The ONLY plan is .review-input/plan.json. Read that file explicitly. '
+                        'Never search parent directories, run archives, previous plans or reviews. '
+                        'Use only read_file, list_directory, glob, grep_search; no subagents/skills/shell. '
+                        'External environment availability is unknown unless evidenced in this copy.\n')
         with self.activity('Сессия ' + name + ' / ' + cwd + ' / ' + role):
             result = run_session(self.cfg['cli'], under(root, cwd), context + '\n' + prompt,
                              self.logdir(name), approval_mode='plan' if role == 'review' else self.cfg['approval_mode'],
@@ -546,6 +555,8 @@ class Runner:
             raise Blocked('Run preflight successfully for this exact configuration first')
 
     def plan(self):
+        if self.state.get('plan_review_pending'):
+            raise Blocked('Plan review requires attention; import a corrected candidate before continuing')
         self.progress('Подготовка и независимая проверка плана')
         self.require_preflight()
         if self.state.get('tasks'):
@@ -635,9 +646,14 @@ executed test names/counts, not just a successful command or test compilation.
                     self.state['plan_candidate'] = {'scope': candidate_scope, 'sha256': digest(candidate_path),
                                                     'read_errors': result.get('errors', []), 'file': candidate_path.name}
                     self.persist()
+                    candidate_sha = plan_review.prepare(planner, self.root / 'input', candidate_path,
+                                                        self.root / 'decision.md')
+                    self.state['plan_review_pending'] = {'sha256': candidate_sha, 'status': 'in-progress'}
+                    self.persist()
                     verdict = self.review(planner, '.', 'Review proposed plan, coverage, SDD prerequisites '
                         'and executable checks against the complete input. A pass here validates the plan, '
-                        'not completed implementation.\n' + json.dumps(plan, ensure_ascii=False)
+                        'not completed implementation. Read .review-input/plan.json; do not substitute any other plan. '
+                        'Expected candidate_sha256: ' + candidate_sha
                         + '\nPlanner read/search limitations (verify affected evidence independently):\n'
                         + json.dumps(result.get('errors', [])),
                         self.cfg['requirements'], 'plan-review')
@@ -647,19 +663,17 @@ executed test names/counts, not just a successful command or test compilation.
                         self.state['tasks'] = {t['id']: {'status': 'pending', 'attempts': 0} for t in plan['tasks']}
                         self.state['status'] = 'planned'
                         self.state.pop('plan_candidate', None)
+                        self.state.pop('plan_review_pending', None)
                         self.persist()
                         self.progress('План принят: задач ' + str(len(plan['tasks'])))
                         return
-                    save(self.root / 'plan-rejected.json', {'plan': plan, 'review': verdict})
+                    save(self.root / 'plan-rejected.json', {'plan': plan, 'review': verdict, 'candidate_sha256': candidate_sha})
                     self.progress('План требует доработки: замечаний ' + str(len(verdict['findings'])))
                     feedback = json.dumps(verdict, ensure_ascii=False)
-                    self.state.pop('plan_candidate', None)
                     self.state['plan_feedback'] = feedback
+                    self.state['plan_review_pending'] = {'sha256': candidate_sha, 'status': 'changes'}
                     self.persist()
-                    if verdict['verdict'] == 'blocked':
-                        self.state['plan_feedback'] = feedback
-                        self.persist()
-                        raise Blocked('Plan needs external input: ' + feedback)
+                    raise Blocked('Plan review saved in plan-rejected.json; automatic replanning stopped')
             self.state['plan_feedback'] = feedback
             try:
                 fingerprint = json.dumps(stable_feedback(json.loads(feedback)), sort_keys=True)
@@ -685,10 +699,23 @@ executed test names/counts, not just a successful command or test compilation.
                   +
                   'blocked is only for external dependency or analyst business decision. '
                   'Required identifiers: ' + json.dumps(requirements))
+        if name == 'plan-review':
+            expected = digest(Path(root) / '.review-input/plan.json')
+            prompt += ('\nInclude candidate_sha256 in the JSON, exactly ' + expected
+                       + '. Findings must address this candidate, not missing implementation that '
+                         'its tasks already explicitly assign. Shared writes are serialized by the '
+                         'runner; overlap alone is not a race. Cite the task id for each plan defect.')
         result = self.session(root, cwd, prompt, 'review', name)
+        if name == 'plan-review':
+            try:
+                plan_review.audit(root, result['events_path'], expected)
+            except (ValueError, OSError, TypeError, KeyError) as error:
+                raise Blocked('Invalid plan-review evidence: ' + str(error)) from None
         if not result['ok'] and not review_feedback_usable(result):
             raise Blocked('Reviewer failed: ' + result['events_path'])
         report = parse_json(result['text'])
+        if name == 'plan-review' and report.get('candidate_sha256') != expected:
+            raise Blocked('Reviewer candidate SHA256 mismatch')
         if report.get('verdict') not in ('pass', 'changes', 'blocked') or not isinstance(report.get('findings'), list):
             raise Blocked('Malformed reviewer verdict')
         coverage = report.get('coverage')
