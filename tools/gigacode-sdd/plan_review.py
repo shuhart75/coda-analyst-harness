@@ -52,7 +52,9 @@ def audit(root, events, expected):
                     raise ValueError('Invalid review path')
                 path = (root / value).resolve()
                 if not path.is_relative_to(root):
-                    raise ValueError('Plan review read outside its pinned workspace')
+                    raise ValueError('Plan review read outside its pinned workspace: '
+                                     + str(name) + ' call=' + str(item.get('id', 'unknown'))
+                                     + ' ' + key + '=' + value)
                 if name == 'read_file' and key == 'file_path' and path == candidate:
                     read_candidate = True
             if name == 'read_file' and 'file_path' not in args:

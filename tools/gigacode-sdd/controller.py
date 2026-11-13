@@ -23,6 +23,7 @@ from workspace import git, snapshot, clone_snapshot, export_patch, apply_patch, 
 from service_inventory import inspect_services, assess_handoff, detect_new_services, services_in_group
 from prior_context import prepare_prior_context, verify_prior_context, redact
 import plan_review
+import diagnostics
 from progress import Progress
 
 class Blocked(RuntimeError):
@@ -236,14 +237,21 @@ class Runner:
             if threading.current_thread() is threading.main_thread():
                 for sig in (signal.SIGINT, signal.SIGTERM):
                     old[sig] = signal.signal(sig, lambda *_: self.stop.set())
+            failure = None
             try:
                 self.guard()
                 self.check_preserved_processes()
                 yield
+            except BaseException as exc:
+                failure = exc
+                raise
             finally:
-                self.persist()
-                for sig, handler in old.items():
-                    signal.signal(sig, handler)
+                try:
+                    self.persist()
+                finally:
+                    for sig, handler in old.items():
+                        signal.signal(sig, handler)
+                    diagnostics.report(self.config_path, error=failure)
         finally:
             lock.__exit__(None, None, None)
 
