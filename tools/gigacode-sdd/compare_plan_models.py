@@ -27,13 +27,14 @@ from transport import run_session
 from workspace import clone_snapshot, snapshot, git
 
 
-PRINT_LOCK = threading.Lock()
+from progress import Progress
+
+DISPLAY = Progress()
 MODELS = ('DeepSeek-V4.1-Flash-1017', 'GLM-5.3-Flash')
 
 
 def say(label, text):
-    with PRINT_LOCK:
-        print(time.strftime('[%H:%M:%S] ') + label + ': ' + text, flush=True)
+    DISPLAY.message(label + ': ' + text)
 
 
 def fingerprint(value):
@@ -143,27 +144,22 @@ class Activity:
 @contextmanager
 def progress(label, description, log=None, interval=30):
     done = threading.Event()
-    started = time.monotonic()
     activity = Activity(log) if log else None
-    say(label, description)
-    def watch():
-        next_notice = time.monotonic() + interval
-        while not done.wait(1):
+    with DISPLAY.activity(label + ': ' + description, interval) as token:
+        def watch():
+            while not done.wait(1):
+                if activity:
+                    activity.poll()
+                    DISPLAY.detail(token, activity.summary())
+        thread = threading.Thread(target=watch, daemon=True)
+        thread.start()
+        try:
+            yield activity
+        finally:
+            done.set()
+            thread.join()
             if activity:
                 activity.poll()
-            if time.monotonic() >= next_notice:
-                detail = activity.summary() if activity else 'этап ещё выполняется; реальный прогресс неизвестен'
-                say(label, f'ожидание {int(time.monotonic() - started)} с; ' + detail)
-                next_notice = time.monotonic() + interval
-    thread = threading.Thread(target=watch, daemon=True)
-    thread.start()
-    try:
-        yield activity
-    finally:
-        done.set()
-        thread.join()
-        if activity:
-            activity.poll()
 
 
 def review_prompt(requirements, nexus_hosts, input_id):

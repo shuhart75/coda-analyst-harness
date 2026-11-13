@@ -23,6 +23,7 @@ from workspace import git, snapshot, clone_snapshot, export_patch, apply_patch, 
 from service_inventory import inspect_services, assess_handoff, detect_new_services, services_in_group
 from prior_context import prepare_prior_context, verify_prior_context, redact
 import plan_review
+from progress import Progress
 
 class Blocked(RuntimeError):
     pass
@@ -206,37 +207,19 @@ class Runner:
         self._probed = set()
         self._preflight_reports = []
         self._report_lock = threading.Lock()
-        self._output_lock = threading.Lock()
+        self._display = Progress()
         self._config_digest = digest(self.config_path)
 
     def persist(self):
         save(self.state_path, self.state)
 
     def progress(self, message):
-        with self._output_lock:
-            print(time.strftime('[%H:%M:%S] ') + message, flush=True)
+        self._display.message(message)
 
     @contextmanager
     def activity(self, label):
-        started = time.monotonic()
-        finished = threading.Event()
-        self.progress(label + ': начало')
-        def heartbeat():
-            while not finished.wait(30):
-                self.progress(label + ': ожидание, прошло ' + str(int(time.monotonic() - started))
-                              + ' с; срок завершения пока неизвестен')
-        thread = threading.Thread(target=heartbeat, daemon=True)
-        thread.start()
-        try:
+        with self._display.activity(label):
             yield
-        except BaseException:
-            self.progress(label + ': остановка с ошибкой')
-            raise
-        else:
-            self.progress(label + ': завершено за ' + str(int(time.monotonic() - started)) + ' с')
-        finally:
-            finished.set()
-            thread.join()
 
     @contextmanager
     def locked(self):
@@ -752,19 +735,22 @@ executed test names/counts, not just a successful command or test compilation.
                                       env=self.env, stdin=subprocess.DEVNULL, stdout=output,
                                       stderr=subprocess.STDOUT)
                 deadline = time.monotonic() + check.get('timeout', 600)
-                next_update = time.monotonic() + 30
                 timed_out = False
+                token = self._display.start('Проверка ' + name + ' ' + str(len(reports)+1) + '/' + str(len(checks)))
+                outcome = 'остановка с ошибкой'
                 try:
                     while proc.poll() is None and not self.stop.is_set():
-                        if time.monotonic() >= next_update:
-                            self.progress('Проверка ' + name + ': процесс ещё работает')
-                            next_update = time.monotonic() + 30
                         if time.monotonic() >= deadline:
                             timed_out = True
                             break
                         time.sleep(.05)
+                    outcome = ('тайм-аут' if timed_out else 'прервано' if self.stop.is_set()
+                               else 'завершено' if proc.returncode == 0 else 'ошибка проверки')
                 finally:
-                    cleanup = finish_process(proc, self.cleanup_guard)
+                    try:
+                        cleanup = finish_process(proc, self.cleanup_guard)
+                    finally:
+                        self._display.finish(token, outcome)
             if cleanup['preserved']:
                 raise Blocked('Check process group preserved to avoid stopping an unregistered service')
             self.service_audit(services_before, root, name)
