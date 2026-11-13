@@ -429,6 +429,31 @@ for name in sys.argv[1:]:
         self.assertEqual(resumed.state['status'], 'planned')
         self.assertNotIn('plan_candidate', resumed.state)
 
+    def test_planner_read_error_reaches_independent_review(self):
+        self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
+        result = {'ok': False, 'returncode': 0, 'terminal_result': True,
+                  'errors': ['Tool list_directory (call_a) returned an error'],
+                  'read_tool_errors': ['Tool list_directory (call_a) returned an error'],
+                  'tool_calls': {'call_a': 'list_directory'},
+                  'tool_results': [{'tool_use_id': 'call_a', 'is_error': True}],
+                  'text': json.dumps(self.plan)}
+        with patch.object(self.runner, 'session', return_value=result), \
+                patch.object(self.runner, 'review', return_value={'verdict': 'pass', 'findings': []}) as review:
+            self.runner.plan()
+        review.assert_called_once()
+        self.assertIn('list_directory', review.call_args.args[2])
+        self.assertEqual(self.runner.state['status'], 'planned')
+
+    def test_planner_repeated_errors_ignore_changing_call_ids(self):
+        self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
+        results = [{'ok': False, 'returncode': 1,
+                    'errors': [f'Tool list_directory (call_{i}) returned an error']} for i in range(3)]
+        with patch.object(self.runner, 'session', side_effect=results) as session:
+            with self.assertRaisesRegex(Blocked, 'repeatedly produced'):
+                self.runner.plan()
+        self.assertEqual(session.call_count, 3)
+        self.assertEqual(self.runner.state['plan_failure_repeats'], 2)
+
     def test_recovered_shell_syntax_does_not_fail_capability_probe(self):
         self.runner.env['FAKE_RECOVERED_SYNTAX'] = '1'
         self.runner.preflight()

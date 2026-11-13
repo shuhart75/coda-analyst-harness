@@ -21,7 +21,7 @@ from platform_support import (FileLock, launch_process, process_exists,
                               process_scope_exists, process_scope_pids)
 from workspace import git, snapshot, clone_snapshot, export_patch, apply_patch, commit_changes
 from service_inventory import inspect_services, assess_handoff, detect_new_services, services_in_group
-from prior_context import prepare_prior_context, verify_prior_context
+from prior_context import prepare_prior_context, verify_prior_context, redact
 
 class Blocked(RuntimeError):
     pass
@@ -154,6 +154,8 @@ def stable_feedback(value):
                 if k not in {'log', 'events_path', 'session_id'}}
     if isinstance(value, list):
         return [stable_feedback(v) for v in value]
+    if isinstance(value, str):
+        return re.sub(r'(Tool \S+ )\([^()]+\)( returned an error)', r'\1(call)\2', value)
     return value
 
 
@@ -555,9 +557,15 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
         candidate_path = self.root / 'plan-candidate.json'
         candidate_scope = hashlib.sha256(json.dumps({'config': digest(self.config_path),
             'workspace': snapshot(self.main)}, sort_keys=True).encode()).hexdigest()
-        previous = None
-        repeats = 0
+        previous = self.state.get('plan_failure_fingerprint')
+        repeats = self.state.get('plan_failure_repeats', 0)
         while not self.stop.is_set():
+            self.state['plan_attempt'] = self.state.get('plan_attempt', 0) + 1
+            self.persist()
+            self.progress('Проход планирования №' + str(self.state['plan_attempt']))
+            if feedback:
+                self.progress('Причина повтора: ' + redact(feedback)[0][:2400])
+                self.progress('Следующее действие: исправить перечисленные замечания и повторно проверить план')
             planner = self.root / 'planners' / uuid.uuid4().hex
             clone_snapshot(self.main, planner)
             candidate = self.state.get('plan_candidate', {})
@@ -565,12 +573,13 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                 if (candidate.get('scope') != candidate_scope or not candidate_path.is_file()
                         or digest(candidate_path) != candidate.get('sha256')):
                     raise Blocked('Saved plan candidate changed or no longer matches the input')
-                result = {'ok': True, 'text': json.dumps(read(candidate_path))}
+                result = {'ok': True, 'text': json.dumps(read(candidate_path)),
+                          'errors': candidate.get('read_errors', [])}
                 self.progress('Кандидат плана сохранён; продолжается его независимая проверка')
             else:
                 result = self.session(planner, '.', prompt + '\nCorrect previous review findings:\n' + feedback,
                                       'review', 'plan')
-            if not result['ok']:
+            if not result['ok'] and not review_feedback_usable(result):
                 feedback = json.dumps({'errors': result['errors']})
             else:
                 try:
@@ -578,12 +587,17 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                 except (Blocked, ValueError, TypeError, AttributeError) as error:
                     feedback = 'Correct invalid plan: ' + str(error)
                 else:
+                    if not result['ok']:
+                        self.progress('План сформирован с ошибками чтения/поиска; передаю на независимую проверку')
                     save(candidate_path, plan)
-                    self.state['plan_candidate'] = {'scope': candidate_scope, 'sha256': digest(candidate_path)}
+                    self.state['plan_candidate'] = {'scope': candidate_scope, 'sha256': digest(candidate_path),
+                                                    'read_errors': result.get('errors', [])}
                     self.persist()
                     verdict = self.review(planner, '.', 'Review proposed plan, coverage, SDD prerequisites '
                         'and executable checks against the complete input. A pass here validates the plan, '
-                        'not completed implementation.\n' + json.dumps(plan, ensure_ascii=False),
+                        'not completed implementation.\n' + json.dumps(plan, ensure_ascii=False)
+                        + '\nPlanner read/search limitations (verify affected evidence independently):\n'
+                        + json.dumps(result.get('errors', [])),
                         self.cfg['requirements'], 'plan-review')
                     if verdict['verdict'] == 'pass':
                         save(self.root / 'plan.json', plan)
@@ -605,9 +619,16 @@ Every requirement must have an owner. Cross-contour work depends on contract/SDD
                         self.persist()
                         raise Blocked('Plan needs external input: ' + feedback)
             self.state['plan_feedback'] = feedback
+            try:
+                fingerprint = json.dumps(stable_feedback(json.loads(feedback)), sort_keys=True)
+            except ValueError:
+                fingerprint = stable_feedback(feedback)
+            repeats = repeats + 1 if fingerprint == previous else 0
+            previous = fingerprint
+            self.state.update(plan_failure_fingerprint=fingerprint, plan_failure_repeats=repeats)
             self.persist()
-            repeats = repeats + 1 if feedback == previous else 0
-            previous = feedback
+            self.progress('Результат прохода: ' + redact(feedback)[0][:2400])
+            self.progress('Подряд одинаковых причин: ' + str(repeats + 1))
             if repeats >= 2:
                 raise Blocked('Planner repeatedly produced the same failure: ' + feedback)
         raise Blocked('Interrupted while planning; feedback preserved')
