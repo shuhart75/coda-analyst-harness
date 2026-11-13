@@ -444,6 +444,23 @@ for name in sys.argv[1:]:
         self.assertIn('list_directory', review.call_args.args[2])
         self.assertEqual(self.runner.state['status'], 'planned')
 
+    def test_invalid_ownership_reports_task_and_repairs_existing_plan(self):
+        self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
+        invalid = json.loads(json.dumps(self.plan))
+        invalid['tasks'][0]['writes'] = []
+        protected = json.loads(json.dumps(self.plan))
+        protected['tasks'][0]['writes'] = ['backend/GIGACODE.md']
+        replies = [{'ok': True, 'text': json.dumps(p)} for p in (invalid, protected, self.plan)]
+        with patch.object(self.runner, 'session', side_effect=replies) as session, \
+                patch.object(self.runner, 'review', return_value={'verdict': 'pass', 'findings': []}):
+            self.runner.plan()
+        prompts = [c.args[2] for c in session.call_args_list]
+        self.assertIn('Task be: writes must be a nonempty list', prompts[1])
+        self.assertIn(json.dumps(invalid, ensure_ascii=False), prompts[1])
+        self.assertIn("Task be: writes path 'backend/GIGACODE.md' is protected", prompts[2])
+        self.assertIn(json.dumps(protected, ensure_ascii=False), prompts[2])
+        self.assertEqual(self.runner.state['status'], 'planned')
+
     def test_planner_repeated_errors_ignore_changing_call_ids(self):
         self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
         results = [{'ok': False, 'returncode': 1,
