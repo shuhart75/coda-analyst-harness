@@ -26,12 +26,9 @@ def emit(value):
 from contextlib import contextmanager
 @contextmanager
 def trace_lock():
-    with open(os.environ['FAKE_TRACE']+'.lock', 'a+b') as lock:
+    with open(os.environ['FAKE_TRACE']+'.lock', 'r+b') as lock:
         if os.name=='nt':
             import msvcrt
-            lock.seek(0,2)
-            if lock.tell()==0:
-                lock.write(b'0'); lock.flush()
             lock.seek(0)
             msvcrt.locking(lock.fileno(),msvcrt.LK_LOCK,1)
         else:
@@ -195,6 +192,7 @@ for name in sys.argv[1:]:
         self.fake.write_text(FAKE, encoding="utf-8")
         self.fake.chmod(0o700)
         self.trace = self.root / 'trace.jsonl'
+        Path(str(self.trace)+'.lock').write_bytes(b'0')
         self.env = patch.dict(os.environ, {'FAKE_TRACE': str(self.trace), 'PIP_INDEX_URL': 'https://nexus.test/pypi/simple',
                                           'NPM_CONFIG_REGISTRY': 'https://nexus.test/npm/'})
         self.env.start()
