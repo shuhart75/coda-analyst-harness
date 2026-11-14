@@ -23,9 +23,34 @@ prompt = sys.stdin.read()
 root = pathlib.Path(subprocess.check_output(['git','rev-parse','--show-toplevel'], text=True).strip())
 def emit(value):
     print(json.dumps(value), flush=True)
+from contextlib import contextmanager
+@contextmanager
+def trace_lock():
+    with open(os.environ['FAKE_TRACE']+'.lock', 'a+b') as lock:
+        if os.name=='nt':
+            import msvcrt
+            lock.seek(0,2)
+            if lock.tell()==0:
+                lock.write(b'0'); lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(),msvcrt.LK_LOCK,1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name=='nt':
+                lock.seek(0); msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1)
+            else:
+                fcntl.flock(lock.fileno(),fcntl.LOCK_UN)
 def event(kind, task=''):
-    with open(os.environ['FAKE_TRACE'], 'a') as f:
-        f.write(json.dumps({'kind':kind,'task':task,'time':time.monotonic(),'pid':os.getpid(),'cwd':str(root)})+'\n')
+    line=(json.dumps({'kind':kind,'task':task,'time':time.monotonic(),'pid':os.getpid(),'cwd':str(root)})+'\n').encode('utf-8')
+    with trace_lock(), open(os.environ['FAKE_TRACE'],'ab',buffering=0) as f:
+        f.write(line)
+def trace_events():
+    with trace_lock():
+        return [json.loads(line) for line in pathlib.Path(os.environ['FAKE_TRACE']).read_text(encoding='utf-8').splitlines()]
 def result(value):
     emit({'type':'result','subtype':'success','is_error':False,'result':json.dumps(value) if isinstance(value,dict) else value})
 def call(name):
@@ -67,7 +92,7 @@ elif 'EXECUTE_TASK\n' in prompt:
     if task['id'] == 'be':
         dest=root/'backend/value.txt'
         if os.environ.get('FAKE_CHECK_FAILURE'):
-            starts=[json.loads(l) for l in pathlib.Path(os.environ['FAKE_TRACE']).read_text().splitlines()]
+            starts=trace_events()
             attempt=sum(e['kind']=='start' and e['task']=='be' and e['cwd']==str(root) for e in starts)
             dest.write_text('0' if attempt==1 else '2')
         else:
