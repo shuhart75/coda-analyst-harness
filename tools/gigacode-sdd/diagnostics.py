@@ -27,7 +27,7 @@ def collect(config, destination=None, error=None):
                'mode': 'local UTF-8 diagnostic report', 'omitted': [], 'files': {}}
     # Never traverse workspaces, credentials, .git or links supplied by agents.
     files = list(root.glob('*.json')) + list(root.glob('*.md'))
-    for name in ('logs', 'input', 'plan-imports', 'preserved-services', 'review-cycles'):
+    for name in ('logs', 'input', 'plan-imports', 'preserved-services', 'review-cycles', 'planning-cycles', 'execution-cycles', 'operator-instructions'):
         directory = root / name
         if directory.is_symlink():
             summary['omitted'].append(str(directory))
@@ -55,6 +55,10 @@ def collect(config, destination=None, error=None):
                     continue
                 metadata = {'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
                 summary['files'][name] = metadata
+                if path.suffix == '.patch':
+                    metadata['included'] = False
+                    summary['omitted'].append({'path':name,'reason':'Implementation patch omitted; checkpoint retains its hash'})
+                    continue
                 try:
                     text = data.decode('utf-8')
                     if any(ord(c) < 32 and c not in '\t\r\n' for c in text) or '\x7f' in text:

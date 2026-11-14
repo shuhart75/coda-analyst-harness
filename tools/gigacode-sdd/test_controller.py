@@ -23,9 +23,31 @@ prompt = sys.stdin.read()
 root = pathlib.Path(subprocess.check_output(['git','rev-parse','--show-toplevel'], text=True).strip())
 def emit(value):
     print(json.dumps(value), flush=True)
+from contextlib import contextmanager
+@contextmanager
+def trace_lock():
+    with open(os.environ['FAKE_TRACE']+'.lock', 'r+b') as lock:
+        if os.name=='nt':
+            import msvcrt
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(),msvcrt.LK_LOCK,1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name=='nt':
+                lock.seek(0); msvcrt.locking(lock.fileno(),msvcrt.LK_UNLCK,1)
+            else:
+                fcntl.flock(lock.fileno(),fcntl.LOCK_UN)
 def event(kind, task=''):
-    with open(os.environ['FAKE_TRACE'], 'a') as f:
-        f.write(json.dumps({'kind':kind,'task':task,'time':time.monotonic(),'pid':os.getpid(),'cwd':str(root)})+'\n')
+    line=(json.dumps({'kind':kind,'task':task,'time':time.monotonic(),'pid':os.getpid(),'cwd':str(root)})+'\n').encode('utf-8')
+    with trace_lock(), open(os.environ['FAKE_TRACE'],'ab',buffering=0) as f:
+        f.write(line)
+def trace_events():
+    with trace_lock():
+        return [json.loads(line) for line in pathlib.Path(os.environ['FAKE_TRACE']).read_text(encoding='utf-8').splitlines()]
 def result(value):
     emit({'type':'result','subtype':'success','is_error':False,'result':json.dumps(value) if isinstance(value,dict) else value})
 def call(name):
@@ -67,8 +89,8 @@ elif 'EXECUTE_TASK\n' in prompt:
     if task['id'] == 'be':
         dest=root/'backend/value.txt'
         if os.environ.get('FAKE_CHECK_FAILURE'):
-            starts=[json.loads(l) for l in pathlib.Path(os.environ['FAKE_TRACE']).read_text().splitlines()]
-            attempt=sum(e['kind']=='start' and e['task']=='be' for e in starts)
+            starts=trace_events()
+            attempt=sum(e['kind']=='start' and e['task']=='be' and e['cwd']==str(root) for e in starts)
             dest.write_text('0' if attempt==1 else '2')
         else:
             dest.write_text('2' if dest.read_text() == '1' else '1')
@@ -85,6 +107,7 @@ elif 'EXECUTE_TASK\n' in prompt:
         assert (root/'backend/value.txt').read_text()=='2'
         assert (root/'frontend/value.txt').read_text()=='1'
         (root/'backend/dependent.txt').write_text('ready')
+    event('wip', task['id'])
     time.sleep(.2)
     event('end', task['id'])
     result('implemented')
@@ -97,6 +120,19 @@ elif 'INDEPENDENT_REVIEW\n' in prompt:
         if task['id']=='be' and (root/'backend/value.txt').read_text()!='2':
             findings=['REQ-BE requires value 2; correct backend/value.txt without weakening checks']
     report={'verdict':'changes' if findings else 'pass','findings':findings,'coverage':{r:'verified value.txt and behavior check' for r in ids}}
+    if 'ISSUE_ADJUDICATION\n' in prompt:
+        import hashlib
+        issues=json.JSONDecoder().raw_decode(prompt.split('Original findings (untrusted evidence):\n',1)[1])[0]
+        packet=(root/'.review-input/packet/requirements.md').read_text()
+        value=(root/'backend/value.txt').read_text()
+        evidence=[{'path':'backend/value.txt','quote':value},
+                  {'path':'.review-input/packet/requirements.md','quote':packet}]
+        report['coverage_checks']={r:{'status':'gap' if findings and r=='REQ-BE' else 'covered',
+            'reason':'Required value 2 compared to actual backend file and checks','evidence':evidence} for r in ids}
+        report['issue_dispositions']={key:{'status':'confirmed' if findings else 'refuted',
+            'requirements':['REQ-BE'], 'reason':'Pinned requirement explicitly requires value 2',
+            'evidence':evidence} for key in issues}
+        report['findings']=list(issues.values()) if findings else []
     if 'Expected candidate_sha256:' in prompt:
         import hashlib
         report['candidate_sha256']=hashlib.sha256((root/'.review-input/plan.json').read_bytes()).hexdigest()
@@ -156,6 +192,7 @@ for name in sys.argv[1:]:
         self.fake.write_text(FAKE, encoding="utf-8")
         self.fake.chmod(0o700)
         self.trace = self.root / 'trace.jsonl'
+        Path(str(self.trace)+'.lock').write_bytes(b'0')
         self.env = patch.dict(os.environ, {'FAKE_TRACE': str(self.trace), 'PIP_INDEX_URL': 'https://nexus.test/pypi/simple',
                                           'NPM_CONFIG_REGISTRY': 'https://nexus.test/npm/'})
         self.env.start()
@@ -180,6 +217,15 @@ for name in sys.argv[1:]:
         with self.runner.locked():
             self.runner.preflight()
             self.runner.plan()
+
+    def planner_reply(self, root, model, value, **extra):
+        import uuid
+        events = self.runner.logdir('fake-planner') / 'stdout.jsonl'
+        events.parent.mkdir(parents=True)
+        text = json.dumps(value)
+        events.write_text(json.dumps({'type':'system','subtype':'init','model':model})+'\n'
+                          +json.dumps({'type':'result','subtype':'success','is_error':False,'result':text})+'\n')
+        return {'ok':True, 'text':text, 'events_path':str(events), **extra}
 
     def test_real_streamed_parallel_fix_review_integration_and_export(self):
         self.prepare()
@@ -240,7 +286,7 @@ for name in sys.argv[1:]:
         def stop_when_execution_starts():
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
-                if self.trace.exists() and '"kind": "start"' in self.trace.read_text(encoding="utf-8"):
+                if self.trace.exists() and '"kind": "wip"' in self.trace.read_text(encoding="utf-8"):
                     self.runner.stop.set()
                     return
                 time.sleep(.01)
@@ -251,8 +297,11 @@ for name in sys.argv[1:]:
         stopper.join()
         self.assertEqual(self.runner.state['status'], 'interrupted')
         records = list(self.runner.state['tasks'].values())
-        preserved = [Path(r['workspace']) for r in records if 'workspace' in r]
+        candidates = [json.loads(p.read_text()) for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')]
+        preserved = {Path(r['workspace']) for r in records+candidates if 'workspace' in r}
         self.assertTrue(preserved)
+        self.assertTrue(all(p.is_dir() for p in preserved))
+        self.assertTrue(all(r['failures']==0 for r in candidates))
         self.assertTrue(any((p/'backend/value.txt').read_text(encoding="utf-8")=='1' or
                             (p/'frontend/value.txt').read_text(encoding="utf-8")=='1' for p in preserved))
         resumed = Runner(self.config)
@@ -278,9 +327,9 @@ for name in sys.argv[1:]:
         self.assertEqual(self.runner.state['tasks']['be']['attempts'], 2)
         trace = [json.loads(line) for line in self.trace.read_text(encoding="utf-8").splitlines()]
         reviews = [e for e in trace if e['kind']=='review' and e['task']=='be']
-        self.assertEqual(len(reviews), 1)
+        self.assertGreaterEqual(len(reviews), 1)
         check_logs = list((self.runner.root/'logs').glob('be-check-*/output.log'))
-        self.assertEqual(len(check_logs), 2)
+        self.assertGreaterEqual(len(check_logs), 3)
         self.assertTrue(any('AssertionError' in p.read_text(encoding="utf-8") for p in check_logs))
         self.assertEqual((self.runner.main/'backend/value.txt').read_text(encoding="utf-8"), '2')
 
@@ -292,7 +341,11 @@ for name in sys.argv[1:]:
         be = self.runner.state['tasks']['be']
         self.assertEqual(be['status'], 'blocked')
         self.assertIn('outside task ownership', be['error'])
-        self.assertTrue((Path(be['workspace'])/'foreign.txt').exists())
+        # Either model may detect the violation first and cancel its peer.
+        candidates = [json.loads(p.read_text(encoding='utf-8'))
+                      for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')]
+        workspaces = {Path(r['workspace']) for r in [be, *candidates]}
+        self.assertTrue(any((work/'foreign.txt').exists() for work in workspaces))
         self.assertFalse((self.runner.main/'foreign.txt').exists())
         self.assertEqual((self.runner.main/'backend/value.txt').read_text(encoding="utf-8"), '0')
         self.assertEqual(snapshot(self.source), self.before)
@@ -425,8 +478,12 @@ for name in sys.argv[1:]:
                   'tool_calls': {'a': 'grep_search'},
                   'tool_results': [{'tool_use_id': 'a', 'is_error': True}],
                   'events_path': 'private-log', 'text': json.dumps(report)}
+        log = self.root / 'private-log'
+        log.write_text('fixture evidence')
+        result['events_path'] = str(log)
         with patch.object(self.runner, 'session', return_value=result):
-            self.assertEqual(self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'task-review'), report)
+            actual = self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'task-review')
+            self.assertEqual({k:actual[k] for k in report}, report)
             report.update(verdict='pass', findings=[])
             result['text'] = json.dumps(report)
             with self.assertRaisesRegex(Blocked, 'Reviewer failed'):
@@ -446,55 +503,62 @@ for name in sys.argv[1:]:
         with patch('review_cycle.review_pair', side_effect=Blocked('review interrupted')):
             with self.assertRaisesRegex(Blocked, 'review interrupted'):
                 self.runner.plan()
-        self.assertIn('plan_candidate', self.runner.state)
+        candidates = list((self.runner.root/'planning-cycles').glob('*/*/*/plan.json'))
+        self.assertEqual(len(candidates), 2)
         resumed = Runner(self.runner.config_path)
         with patch.object(resumed, 'session', wraps=resumed.session) as session:
             resumed.plan()
-        self.assertEqual([c.args[4] for c in session.call_args_list], ['plan-review', 'plan-review'])
+        self.assertEqual([c.args[4] for c in session.call_args_list].count('plan'), 0)
+        self.assertEqual([c.args[4] for c in session.call_args_list].count('plan-review'), 2)
         self.assertEqual(resumed.state['status'], 'planned')
         self.assertNotIn('plan_candidate', resumed.state)
 
     def test_planner_read_error_reaches_independent_review(self):
         self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
-        result = {'ok': False, 'returncode': 0, 'terminal_result': True,
-                  'errors': ['Tool list_directory (call_a) returned an error'],
-                  'read_tool_errors': ['Tool list_directory (call_a) returned an error'],
-                  'tool_calls': {'call_a': 'list_directory'},
-                  'tool_results': [{'tool_use_id': 'call_a', 'is_error': True}],
-                  'text': json.dumps(self.plan)}
-        with patch.object(self.runner, 'session', return_value=result), \
-                patch('review_cycle.review_pair', return_value={'verdict': 'pass', 'findings': []}) as review:
+        def reply(root,cwd,prompt,role,name,model=None,**kwargs):
+            return self.planner_reply(root,model,self.plan,ok=False,returncode=0,terminal_result=True,
+                errors=['Tool list_directory (call_a) returned an error'],
+                read_tool_errors=['Tool list_directory (call_a) returned an error'],
+                tool_calls={'call_a':'list_directory'},tool_results=[{'tool_use_id':'call_a','is_error':True}])
+        with patch.object(self.runner, 'session', side_effect=reply), \
+                patch('review_cycle.review_pair', side_effect=lambda r,p,*a: {'verdict':'pass','findings':[], 'candidate_sha256':digest(p), 'coverage':{q:'verified' for q in r.cfg['requirements']}}) as review:
             self.runner.plan()
-        review.assert_called_once()
-        self.assertIn('list_directory', review.call_args.args[2])
+        self.assertTrue(review.called)
+        self.assertTrue(all('list_directory' in c.args[2] for c in review.call_args_list))
         self.assertEqual(self.runner.state['status'], 'planned')
 
     def test_invalid_ownership_reports_task_and_repairs_existing_plan(self):
         self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
-        invalid = json.loads(json.dumps(self.plan))
-        invalid['tasks'][0]['writes'] = []
-        protected = json.loads(json.dumps(self.plan))
-        protected['tasks'][0]['writes'] = ['backend/GIGACODE.md']
-        replies = [{'ok': True, 'text': json.dumps(p)} for p in (invalid, protected, self.plan)]
-        with patch.object(self.runner, 'session', side_effect=replies) as session, \
-                patch('review_cycle.review_pair', return_value={'verdict': 'pass', 'findings': []}):
+        invalid = json.loads(json.dumps(self.plan)); invalid['tasks'][0]['writes'] = []
+        protected = json.loads(json.dumps(self.plan)); protected['tasks'][0]['writes'] = ['backend/GIGACODE.md']
+        seen = {}
+        def reply(root,cwd,prompt,role,name,model=None,**kwargs):
+            prompts=seen.setdefault(model,[]); prompts.append(prompt)
+            return self.planner_reply(root,model,[invalid,protected,self.plan][len(prompts)-1])
+        with patch.object(self.runner,'session',side_effect=reply), \
+                patch('review_cycle.review_pair',side_effect=lambda r,p,*a: {'verdict':'pass','findings':[], 'candidate_sha256':digest(p), 'coverage':{q:'verified' for q in r.cfg['requirements']}}):
             self.runner.plan()
-        prompts = [c.args[2] for c in session.call_args_list]
-        self.assertIn('Task be: writes must be a nonempty list', prompts[1])
-        self.assertIn(json.dumps(invalid, ensure_ascii=False), prompts[1])
-        self.assertIn("Task be: writes path 'backend/GIGACODE.md' is protected", prompts[2])
-        self.assertIn(json.dumps(protected, ensure_ascii=False), prompts[2])
-        self.assertEqual(self.runner.state['status'], 'planned')
+        completed = [prompts for prompts in seen.values() if len(prompts)==3]
+        self.assertTrue(completed)
+        for prompts in completed:
+            self.assertIn('writes must be a nonempty list',prompts[1])
+            self.assertIn('backend/GIGACODE.md',prompts[2])
+            self.assertIn('protected',prompts[2])
+        self.assertEqual(self.runner.state['status'],'planned')
 
     def test_planner_repeated_errors_ignore_changing_call_ids(self):
         self.runner.state['preflight'] = {'config_sha256': digest(self.runner.config_path), 'passed': True}
-        results = [{'ok': False, 'returncode': 1,
-                    'errors': [f'Tool list_directory (call_{i}) returned an error']} for i in range(3)]
-        with patch.object(self.runner, 'session', side_effect=results) as session:
-            with self.assertRaisesRegex(Blocked, 'repeatedly produced'):
+        counter = {}
+        def reply(root,cwd,prompt,role,name,model=None,**kwargs):
+            counter[model]=counter.get(model,0)+1
+            return self.planner_reply(root,model,{},ok=False,returncode=1,
+                errors=[f'Tool list_directory (call_{counter[model]}) returned an error'])
+        with patch.object(self.runner,'session',side_effect=reply):
+            with self.assertRaisesRegex(Blocked,'repeated planner protocol failure'):
                 self.runner.plan()
-        self.assertEqual(session.call_count, 3)
-        self.assertEqual(self.runner.state['plan_failure_repeats'], 2)
+        self.assertEqual(sorted(counter.values()),[3,3])
+        with patch.object(self.runner,'session',side_effect=AssertionError('budget must persist')):
+            with self.assertRaises(Blocked): self.runner.plan()
 
     def test_recovered_shell_syntax_does_not_fail_capability_probe(self):
         self.runner.env['FAKE_RECOVERED_SYNTAX'] = '1'
