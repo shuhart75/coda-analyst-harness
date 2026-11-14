@@ -341,7 +341,11 @@ for name in sys.argv[1:]:
         be = self.runner.state['tasks']['be']
         self.assertEqual(be['status'], 'blocked')
         self.assertIn('outside task ownership', be['error'])
-        self.assertTrue((Path(be['workspace'])/'foreign.txt').exists())
+        # Either model may detect the violation first and cancel its peer.
+        candidates = [json.loads(p.read_text(encoding='utf-8'))
+                      for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')]
+        workspaces = {Path(r['workspace']) for r in [be, *candidates]}
+        self.assertTrue(any((work/'foreign.txt').exists() for work in workspaces))
         self.assertFalse((self.runner.main/'foreign.txt').exists())
         self.assertEqual((self.runner.main/'backend/value.txt').read_text(encoding="utf-8"), '0')
         self.assertEqual(snapshot(self.source), self.before)
