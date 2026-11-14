@@ -274,8 +274,11 @@ for name in sys.argv[1:]:
         stopper.join()
         self.assertEqual(self.runner.state['status'], 'interrupted')
         records = list(self.runner.state['tasks'].values())
-        preserved = [Path(r['workspace']) for r in records if 'workspace' in r]
+        candidates = [json.loads(p.read_text()) for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')]
+        preserved = {Path(r['workspace']) for r in records+candidates if 'workspace' in r}
         self.assertTrue(preserved)
+        self.assertTrue(all(p.is_dir() for p in preserved))
+        self.assertTrue(all(r['failures']==0 for r in candidates))
         self.assertTrue(any((p/'backend/value.txt').read_text(encoding="utf-8")=='1' or
                             (p/'frontend/value.txt').read_text(encoding="utf-8")=='1' for p in preserved))
         resumed = Runner(self.config)
