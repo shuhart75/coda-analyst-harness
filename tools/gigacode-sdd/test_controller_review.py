@@ -90,19 +90,23 @@ class ControllerReviewTests(unittest.TestCase):
 
     def test_plan_review_changes_retries_automatically_with_feedback(self):
         self.runner.state['preflight'] = {'config_sha256': controller.digest(self.config), 'passed': True}
-        calls = []
-        def session(root, cwd, prompt, role, name):
-            calls.append((str(root), prompt, role))
-            return {'ok': True, 'text': json.dumps(self.plan)}
-        reviews = [
-            {'verdict': 'changes', 'findings': ['Clarify SDD prerequisites'], 'coverage': {'REQ-BE': 'gap', 'REQ-FE': 'covered'}},
-            {'verdict': 'pass', 'findings': [], 'coverage': {'REQ-BE': 'covered', 'REQ-FE': 'covered'}}]
-        with patch.object(self.runner, 'session', side_effect=session), patch('review_cycle.review_pair', side_effect=reviews):
+        calls=[]
+        real_session=self.runner.session
+        def session(root,cwd,prompt,role,name,**kwargs):
+            calls.append((str(root),prompt,role))
+            return real_session(root,cwd,prompt,role,name,**kwargs)
+        reviews=[]
+        def review(*args):
+            reviews.append(args)
+            return {'candidate_sha256':controller.digest(args[1]), 'verdict':'changes' if len(reviews)<=2 else 'pass',
+                    'findings':['Clarify SDD prerequisites'] if len(reviews)<=2 else [],
+                    'coverage':{'REQ-BE':'covered','REQ-FE':'covered'}}
+        with patch.object(self.runner,'session',side_effect=session), patch('review_cycle.review_pair',side_effect=review):
             self.runner.plan()
-        self.assertEqual(self.runner.state['status'], 'planned')
-        self.assertEqual(len(calls), 2)
-        self.assertNotEqual(calls[0][0], calls[1][0])
-        self.assertIn('Clarify SDD prerequisites', calls[1][1])
+        self.assertEqual(self.runner.state['status'],'planned')
+        self.assertGreaterEqual(len(calls),3)
+        self.assertTrue(any('Clarify SDD prerequisites' in c[1] for c in calls[2:]))
+        self.assertEqual(len(set(c[0] for c in calls)),len(calls))
 
     def test_check_cannot_change_git_hook_configuration(self):
         check = {'cwd': '.', 'argv': ['git', 'config', 'core.hooksPath', '.disabled-hooks']}

@@ -139,26 +139,37 @@ class ReviewCycleTests(unittest.TestCase):
         report['prior_findings']={'issue':{'status':'resolved','evidence':'task be checks now run the missing behavior test'}}
         self.assertEqual(review_cycle.validate_result(root,self.result(root,'model',report=report),sha,self.runner.cfg['requirements'],prior=prior)[0]['verdict'],'pass')
 
-    def test_changes_go_to_planner_but_unchanged_output_has_finite_budget(self):
+    def test_changes_change_strategy_and_no_progress_survives_restart(self):
         self.runner.state['preflight']={'config_sha256':digest(self.fixture.config),'passed':True}
         report={'verdict':'changes','findings':['task be lacks a behavior test'], 'coverage':{'REQ-BE':'gap','REQ-FE':'covered'}}
-        with patch('review_cycle.review_pair',return_value=report), patch.object(self.runner,'session',return_value={'ok':True,'text':json.dumps(self.fixture.plan)}) as planner:
-            with self.assertRaises(Blocked):self.runner.plan()
-            count=planner.call_count
-            self.assertLessEqual(count,review_cycle.MAX_REPAIRS)
-            self.assertIn('task be lacks a behavior test',planner.call_args.args[2])
+        calls = []
+        def generate(runner, model, prompt, previous, feedback, folder):
+            calls.append((prompt, feedback))
+            return self.candidate
+        with patch('review_cycle.review_pair',return_value=report), patch('planning_cycle.generate',side_effect=generate):
+            with self.assertRaisesRegex(Blocked, 'three different strategies'):
+                self.runner.plan()
+        portfolio=json.loads((self.runner.root/'planning-portfolio.json').read_text())
+        cycle=next(iter(portfolio['scopes'].values()))
+        self.assertEqual(cycle['strategy'],3)
+        self.assertEqual(len(calls), 2 * len(cycle['rounds']))
+        self.assertEqual(len({prompt.split('REPAIR STRATEGY: ')[-1] for prompt, _ in calls}),3)
+        self.assertTrue(any(isinstance(feedback,dict) and feedback['findings']==report['findings'] for _,feedback in calls))
         resumed=Runner(self.fixture.config)
-        with patch.object(resumed,'session',side_effect=AssertionError('no budget reset')):
-            with self.assertRaisesRegex(Blocked,'budget exhausted'):resumed.plan()
+        with patch('planning_cycle.generate',side_effect=AssertionError('no reset of diagnosed stagnation')):
+            with self.assertRaisesRegex(Blocked,'three different strategies'):
+                resumed.plan()
 
     def test_external_blocker_does_not_trigger_plan_rewrites(self):
         self.runner.state['preflight']={'config_sha256':digest(self.fixture.config),'passed':True}
         report={'verdict':'blocked','findings':['Business choice required'], 'coverage':{'REQ-BE':'gap','REQ-FE':'covered'}}
-        with patch('review_cycle.review_pair',return_value=report), patch.object(self.runner,'session',return_value={'ok':True,'text':json.dumps(self.fixture.plan)}) as planner:
-            with self.assertRaisesRegex(Blocked,'analyst decision'):self.runner.plan()
-            self.assertEqual(planner.call_count,1)
-        with patch.object(self.runner,'session',side_effect=AssertionError('no model calls')):
-            with self.assertRaisesRegex(Blocked,'analyst decision'):self.runner.plan()
+        with patch('review_cycle.review_pair',return_value=report), patch('planning_cycle.generate',return_value=self.candidate) as planner:
+            with self.assertRaisesRegex(Blocked,'analyst decision'):
+                self.runner.plan()
+            self.assertEqual(planner.call_count,2)
+        with patch('planning_cycle.generate',side_effect=AssertionError('no model calls without new decision')):
+            with self.assertRaisesRegex(Blocked,'analyst decision'):
+                self.runner.plan()
 
     def test_input_changed_during_review_is_not_accepted(self):
         changed = threading.Event()
