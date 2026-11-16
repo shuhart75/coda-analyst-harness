@@ -86,6 +86,54 @@ class ExecutionCollaborationTests(unittest.TestCase):
         lines = import_module('expand-plantuml-includes').expand_file(self.gantt / 'actual-progress.puml', [])
         (self.gantt / 'actual-progress-confluence.puml').write_text('\n'.join(lines).rstrip() + '\n')
 
+    def test_release_plan_saved_only_in_confirmed_quarter(self):
+        self.scope('registry')
+        path = 'planning/2026-Q3/release-plan.md'
+        self.change(path, '# План релизов\n')
+        from release_plan_review import review_marker
+        self.change(path, '# План релизов\n' + review_marker(self.gantt.parent) + '\n')
+        preview = self.collaboration(self.workspace, self.environment, 'save-preview')
+        self.assertIn({'path': path, 'kind': 'quarter-release-plan'}, preview['paths'])
+        other = 'planning/2026-Q4/release-plan.md'
+        self.change(other, '# Другой квартал\n')
+        rejected = self.raw('save-preview')
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('outside confirmed execution scope', rejected.stdout)
+
+    def test_stale_release_plan_blocks_save_after_include_change(self):
+        self.scope('registry')
+        from release_plan_review import review_marker
+        path = 'planning/2026-Q3/release-plan.md'
+        self.change(path, '# План релизов\n')
+        self.assertIn('review is missing or stale', self.raw('save-preview').stdout)
+        self.change(path, '# План релизов\n' + review_marker(self.gantt.parent) + '\n')
+        self.collaboration(self.workspace, self.environment, 'save-preview')
+        include = self.gantt / 'includes/actual-progress/FEATURE-registry.puml'
+        include.write_text('[registry] happens at 2026/09/03\n')
+        self.expand()
+        result = self.raw('save-preview')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('review is missing or stale', result.stdout)
+        self.change(path, '# План релизов\n' + review_marker(self.gantt.parent) + '\n')
+        self.collaboration(self.workspace, self.environment, 'save-preview')
+        plan = self.project / path
+        plan.write_text(plan.read_text().replace('# План релизов', '# Изменённый план'))
+        self.assertIn('review is missing or stale', self.raw('save-preview').stdout)
+
+    def test_release_plan_path_does_not_allow_other_quarter_documents(self):
+        from execution_collaboration import path_kind
+        from project_layout import logical_path
+        scope = {'features': ['registry'], 'quarters': ['2026-Q3']}
+        (self.project / 'delivery-index.json').write_text(json.dumps(
+            {'schema_version': 1, 'deliveries': {}}))
+        resolved = logical_path(self.project, 'quarters/2026-Q3/release-plan.md')
+        self.assertEqual(path_kind(resolved, scope), 'quarter-release-plan')
+        for path in ('planning/2026-Q4/release-plan.md',
+                     'planning/2026-Q3/requirements.md',
+                     'planning/2026-Q3/release-plan.json',
+                     'planning/2026-Q3/release-plan.md/extra'):
+            self.assertIsNone(path_kind(path, scope))
+
     def scope(self, *features):
         args = ['set-execution-scope', '--quarter', '2026-Q3', '--reason', 'Confirmed execution update', '--analyst-confirmed']
         for feature in features or ('registry',):

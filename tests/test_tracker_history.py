@@ -118,7 +118,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
         self.run_tool(self.state, 'history-review', '--run-id', run_id,
                       '--project-root', str(self.project), '--manifest', str(manifest_path), expected=2)
 
-    def test_empty_status_filter_never_proves_not_started(self):
+    def test_current_todo_status_proves_state_but_not_history_completeness(self):
         raw = {'key': 'SBER-1', 'status': {'name': 'todo'}, 'assignee': {'key': None},
                'changelogs': [], 'start': 0, 'total': 0}
         entry = self.manifest()['responses'][0]
@@ -133,7 +133,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
                 self.assertFalse(history.complete)
                 self.assertIn('history-field-coverage-not-proven', limits)
                 result = calculate_task(history, {'dev': 'BE'}, StatusRules(not_started=frozenset({'todo'})))
-                self.assertEqual(result['development']['state'], 'unknown')
+                self.assertEqual(result['development']['state'], 'not-started')
 
     def test_field_selection_uses_real_arguments_without_equating_developer_and_assignee(self):
         entry = self.manifest()['responses'][0]
@@ -174,7 +174,7 @@ class AdaptiveHistoryTests(unittest.TestCase):
                 self.assertFalse(history.complete)
                 self.assertIn('history-field-coverage-not-proven', limits)
                 result = calculate_task(history, {}, StatusRules(not_started=frozenset({'todo'})))
-                self.assertEqual(result['development']['state'], 'unknown')
+                self.assertEqual(result['development']['state'], 'not-started')
         entry['mapping']['request_fields'] = '/filter_attributes'
         for selected, expected in ((['status'], {'status'}), (['assigned_to'], {'assignment'}),
                                    (['developer'], set()), (['assigned_to', 'status'], {'assignment', 'status'})):
@@ -649,6 +649,30 @@ class AdaptiveHistoryTests(unittest.TestCase):
         history, limits = decode_history(source, entry, observed)
         self.assertFalse(history.complete)
         self.assertIn('snapshot-assignee-not-returned', limits)
+
+    def test_null_assignment_relation_is_known_unassigned(self):
+        entry = {'key': 'SBER-1', 'role': 'BE', 'provider': 'sbertrek',
+                 'mapping': {**HISTORY_MAPPING, 'total': '/total', 'start': '/start',
+                             'assignee': '/attributes/0/value/externalId'},
+                 'call': self.call('sbertrek')}
+        source = {'key': 'SBER-1', 'status': {'name': 'todo'},
+                  'attributes': [{'code': 'assignee', 'value': None}],
+                  'changelogs': [], 'start': 0, 'total': 0}
+        observed = datetime.fromisoformat(entry['call']['captured_at'])
+        history, limits = decode_history(source, entry, observed)
+        self.assertTrue(history.complete)
+        self.assertIsNone(history.current_assignee)
+        self.assertEqual(limits, [])
+        source['attributes'][0]['value'] = {}
+        history, limits = decode_history(source, entry, observed)
+        self.assertFalse(history.complete)
+        self.assertIn('snapshot-assignee-not-returned', limits)
+        del source['attributes'][0]['value']
+        history, limits = decode_history(source, entry, observed)
+        self.assertFalse(history.complete)
+        source['attributes'][0]['code'] = 'developer'
+        with self.assertRaisesRegex(ValueError, 'assignment field is absent'):
+            decode_history(source, entry, observed)
 
     def test_credentials_mutation_and_future_capture_are_rejected(self):
         for changes in ({'operation': 'write'}, {'arguments': {'headers': {'Authorization': 'secret'}}},

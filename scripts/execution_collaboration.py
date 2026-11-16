@@ -169,6 +169,9 @@ def path_kind(path: str, scope: dict) -> str | None:
                 or re.fullmatch(r'gantt/preamble/(?:common|quarter-plan|commander-plan)\.puml', relative)
                 or re.fullmatch(r'gantt/includes/(?:quarter-plan|commander-plan)/FEATURE-[a-z0-9-]+\.puml', relative)):
             return 'draft-quarter-planning'
+    if (len(parts) == 3 and parts[0] == 'planning' and parts[1] in scope['quarters']
+            and parts[2] in {'release-plan.md', 'README.md'}):
+        return 'quarter-release-plan' if parts[2] == 'release-plan.md' else 'quarter-navigation'
     if len(parts) >= 4 and parts[0] == 'planning' and parts[1] in scope['quarters'] and parts[2] == 'gantt':
         relative = '/'.join(parts[3:])
         if relative in {'actual-progress.puml', 'actual-progress-confluence.puml',
@@ -290,6 +293,11 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
                 raise ValueError('Gantt dependency is outside analytics or export is linked')
             if export.read_text() != expanded:
                 raise ValueError(f'Confluence export differs from {view}: {quarter}; expand the selected source')
+        plan = gantt.parent / 'release-plan.md'
+        previous_plan = api.git(analytics, 'cat-file', '-e', f'HEAD:{plan.relative_to(analytics).as_posix()}')
+        if plan.exists() or previous_plan.returncode == 0:
+            from release_plan_review import check_review
+            check_review(gantt.parent)
         verified_quarters.append(quarter)
     baseline_candidates = __import__('baseline_releases').scan(analytics)
     return {'paths': classified, 'confluence_verified': verified_quarters,

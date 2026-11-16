@@ -43,7 +43,8 @@ class ProductivityForecastTests(unittest.TestCase):
         original = self.schedule({'t': t}, {})['t']
         result = self.schedule({'t': t}, {'B1': .5})['t']
         self.assertEqual((result.start, result.finish), (original.start, original.finish))
-        self.assertIn('остаток неизвестен', result.resource_note)
+        self.assertIsNone(result.finish)
+        self.assertIn('срок завершения неизвестны', result.resource_note)
 
     def test_auto_assignment_compares_candidate_specific_finishes(self):
         t = task('future/BE', 'BE', 3, '', 'TBD_B')

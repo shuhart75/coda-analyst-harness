@@ -5,6 +5,9 @@ from datetime import date, timedelta
 def resource_report(tasks, schedules, team, closed, unavailable, today,
                     candidates, needs_forecast):
     horizon = max([today, *(item.finish for item in schedules.values() if item.finish)])
+    unresolved = [{'task': key, 'reason': item.resource_note,
+                   'resources': candidates(tasks[key], team)[0]}
+                  for key, item in schedules.items() if item.finish is None]
     days = []
     current = today
     resources = sorted({resource for group in team.values() for resource in group})
@@ -17,7 +20,7 @@ def resource_report(tasks, schedules, team, closed, unavailable, today,
                     continue
                 load, work, future = 0.0, [], []
                 for key, scheduled in schedules.items():
-                    if scheduled.assignee == resource:
+                    if scheduled.finish is not None and scheduled.assignee == resource:
                         amount = (sum(value for day, value in scheduled.allocations if day == current)
                                   if scheduled.allocations else
                                   float(scheduled.start <= current <= (scheduled.finish or scheduled.start)))
@@ -39,14 +42,17 @@ def resource_report(tasks, schedules, team, closed, unavailable, today,
                         dep = local if local in tasks else ref
                         end = (schedules[dep].finish if dep in schedules else
                                date.fromisoformat(tasks[dep].actual_finish or tasks[dep].completed_by))
-                        if end >= current:
+                        if end is None or end >= current:
                             reasons.append('dependency:' + dep)
                     future.append({'task': key, 'scheduled_start': str(scheduled.start),
                                    'reasons': reasons or ['requires-contiguous-slot-or-other-resource-selected']})
+                pending = [item['task'] for item in unresolved if resource in item['resources']]
                 days.append({'date': str(current), 'resource': resource, 'available': 1,
-                             'load': round(load, 6), 'free': round(max(0, 1 - load), 6),
+                             'load': round(load, 6), 'free': None if pending else round(max(0, 1 - load), 6),
+                             'capacity_complete': not pending, 'unresolved_tasks': pending,
                              'tasks': work, 'waiting': future,
-                             'reason': 'allocated' if load >= 1 else 'waiting-work' if future else 'no-ready-work'})
+                             'reason': 'unresolved-workload' if pending else 'allocated' if load >= 1 else 'waiting-work' if future else 'no-ready-work'})
         current += timedelta(days=1)
     return {'schema_version': 1, 'as_of': str(today), 'through': str(horizon),
-            'scope': 'generated-execution-tasks; preserved forecast blocks are not recalculated', 'days': days}
+            'scope': 'generated-execution-tasks; preserved forecast blocks are not recalculated',
+            'forecast_complete': not unresolved, 'unresolved_tasks': unresolved, 'days': days}

@@ -206,23 +206,17 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.quarter(success=False)
         self.assertEqual(self.target.read_bytes(), generated)
 
-    def test_unknown_progress_is_not_inferred_from_status_and_export_preserves_it(self) -> None:
+    def test_unknown_development_remainder_blocks_qa_without_partial_generation(self) -> None:
         self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |"), encoding="utf-8")
         before = self.registry.read_bytes()
         tasks = OVERLAY.load_tasks(self.feature)
         self.assertIsNone(tasks["ITEM-100/FE"].progress)
         self.assertIsNone(OVERLAY.story_progress(OVERLAY.load_story_map(self.feature)[0], tasks))
-        self.quarter()
-        content = self.target.read_text()
-        self.assertIn("прогресс неизвестен", content)
-        self.assertIn("[TASK_ITEM_100_FE] is colored in transparent/LightCoral", content)
-        self.assertIn("[STORY_STORY_COHORT] is colored in transparent/Gainsboro", content)
-        self.assertNotRegex(content, r"\[TASK_ITEM_100_FE\] is \d+% completed")
-        self.assertNotRegex(content, r"\[STORY_STORY_COHORT\] is \d+% completed")
-        self.assertIn("[TASK_QA_COHORT] is 30% completed", content)
+        outputs = {p.relative_to(self.gantt): p.read_bytes() for p in self.gantt.rglob('*') if p.is_file()}
+        result = self.quarter(success=False)
+        self.assertIn('неизвестно окончание', result.stderr)
+        self.assertEqual({p.relative_to(self.gantt): p.read_bytes() for p in self.gantt.rglob('*') if p.is_file()}, outputs)
         self.assertEqual(self.registry.read_bytes(), before)
-        expanded = "\n".join(EXPANDER.expand_file(self.gantt / "actual-progress.puml", [])).rstrip() + "\n"
-        self.assertEqual((self.gantt / "actual-progress-confluence.puml").read_text(), expanded)
 
     def test_explicit_unknown_progress_supported_in_legacy_registry(self) -> None:
         legacy = self.feature / "slices/demo/execution/tasks.md"

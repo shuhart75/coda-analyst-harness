@@ -24,6 +24,18 @@ def pointer(value, path: str):
         raise ValueError(f"JSON pointer not found: {path}") from error
 
 
+def snapshot_assignee(payload, path: str):
+    """A null assignment relation is known unassigned, not a missing identity."""
+    if not isinstance(path, str) or not path.startswith('/'):
+        raise ValueError('Snapshot assignee requires a JSON pointer')
+    parts = path.split('/')[1:]
+    for end in range(1, len(parts) + 1):
+        value = pointer(payload, '/' + '/'.join(parts[:end]))
+        if value is None:
+            return None
+    return value
+
+
 def optional(value, path):
     try:
         return pointer(value, path)
@@ -285,7 +297,7 @@ def decode_history(payload, entry: dict, observed: datetime, snapshot=None, *, c
     status = pointer(snapshot_payload, snapshot_mapping["status"])
     validate_snapshot_assignment(snapshot_payload, snapshot_mapping, entry.get('mapping', {}), entry['provider'])
     try:
-        assignee = pointer(snapshot_payload, snapshot_mapping["assignee"])
+        assignee = snapshot_assignee(snapshot_payload, snapshot_mapping["assignee"])
     except (KeyError, ValueError):
         assignee = None
         complete = False
