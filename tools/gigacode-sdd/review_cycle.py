@@ -96,7 +96,7 @@ def legacy_draft(runner, expected, model):
                 continue
             return {'result': {'text': terminal.get('result', '')}, 'source': str(events),
                     'error': 'Old review is a draft, not an accepted result. Verify its evidence against '
-                             'this pinned copy, use relative paths and correct output structure. '
+                             'this pinned copy, use local tool paths and correct output structure. '
                              'The controller computes the candidate identity; do not transcribe hashes.'}
         except (OSError, ValueError, KeyError, TypeError, StopIteration):
             continue
@@ -115,12 +115,14 @@ def correction(error, strategy=0):
                        'evidence; preserve unknowns. Include every required JSON field.')
     elif 'outside' in text or 'path' in text or 'disallowed tool' in text or 'candidate' in text:
         cause = 'workspace-boundary'
-        instruction = ('Read .review-input/plan.json first. Use paths relative to this workspace only. '
+        instruction = ('Read .review-input/plan.json first. Use paths inside this workspace only; '
+                       'if a tool requires absolute paths, join the supplied exact workspace root and relative path. '
                        'List a directory before searching it. Use only the permitted read tools.')
     elif 'transport' in text or 'timeout' in text or 'session' in text:
         cause = 'transport'
         instruction = ('Reuse supported previous analysis as a draft. Inspect only the pinned input and '
-                       'files needed for missing evidence, then return the complete requested JSON.')
+                       'files needed for missing evidence, then return the complete requested JSON. '
+                       'Complete the tool calls and report in this session; a promise to start is not a review.')
     else:
         cause = 'output-schema'
         instruction = ('Return one complete JSON object, without markdown or surrounding prose. '
@@ -176,15 +178,21 @@ def _checked_session(runner, candidate, scope, folder, model, prompt, requiremen
     slot.mkdir(parents=True, exist_ok=True)
     failures = []
     serial = 0
-    for path in sorted(slot.glob('attempt-*.json'), key=lambda p: int(p.stem.split('-')[-1])):
-        record = read(path)
+    records = [(path, read(path)) for path in sorted(slot.glob('attempt-*.json'),
+                                                    key=lambda p: int(p.stem.split('-')[-1]))]
+    # An earlier recoverable result must never hide a later safety violation.
+    for _, record in records:
+        if record.get('status') == 'safety-error':
+            raise Blocked(record['error'])
+    for path, record in records:
         serial = max(serial, record['attempt'])
         if record.get('status') in ('running', 'interrupted') and 'result' not in record:
             recovered = _recover_receipt(runner, record)
             if recovered:
                 record = recovered
-        if record.get('status') == 'complete' or (record.get('status') in ('running', 'interrupted')
-                                                  and record.get('result') and record.get('events_sha256')):
+        if record.get('status') == 'complete' or (record.get('status') in ('running', 'interrupted', 'protocol-error')
+                                                  and record.get('result') and record.get('events_sha256')
+                                                  and record.get('workspace_snapshot')):
             try:
                 report, evidence = _receipt(runner, record, expected, requirements, validator, model)
             except plan_review.ProtocolError:
@@ -192,6 +200,9 @@ def _checked_session(runner, candidate, scope, folder, model, prompt, requiremen
                     raise
                 # A partial/cancelled stream remains a draft, not a failed completed attempt.
             else:
+                if record.get('status') == 'protocol-error':
+                    record['recovery'] = {'from_status': 'protocol-error', 'previous_error': record.get('error'),
+                                          'method': 'revalidated original receipt, stream and workspace'}
                 record.update(status='complete', review=report, evidence=evidence)
                 save(path, record)
                 runner.progress(model + ': сохранённый результат ' + label + ' использован без повторного вызова')
@@ -439,7 +450,7 @@ def _review_pair(runner, candidate, detail, requirements):
 
     def one(model):
         prompt = ('INDEPENDENT_REVIEW\n' + detail + '\nRead .review-input/plan.json explicitly. '
-                  'Use repository-relative paths only; never guess absolute paths or search parents. '
+                  'Use tool paths inside this workspace only; follow the supplied workspace path instructions. '
                   'Review feasibility, ownership, prerequisites and executable checks for ALL requirements. '
                   'Find defects in the plan, not implementation which its tasks already assign. '
                   'Return ONLY JSON {"verdict":"pass|changes|blocked","findings":["task id, concrete defect, '
