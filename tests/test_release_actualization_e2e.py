@@ -309,8 +309,10 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
             self.assertIn('History evidence changed', self.qa_check(review, expected=2)['error'])
         finally:
             source.write_bytes(original)
-        self.generate()
-        self.assertEqual(self.collab('save-preview', '--review-file', review['review_file'])['qa_verified_runs'], [self.run_id])
+        # Applying the start fixes the factual mismatch, but cannot establish
+        # a completion date for dependent QA while the remainder is unknown.
+        self.assertIn('неизвестно окончание', self.generate(expected=1).stderr)
+        self.assertEqual(self.snapshot(self.gantt), before)
 
     def test_fresh_cancellation_outside_release_blocks_stale_gantt(self):
         self.collect(remainder_status='cancelled')
