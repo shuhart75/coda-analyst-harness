@@ -54,6 +54,7 @@ class Export:
         self.sources = {}
         self.sessions = []
         self.error_sessions = []
+        self.failure_records = set()
         self.packet_refs = set()
         self.omitted = []
         self.omitted_count = 0
@@ -151,6 +152,17 @@ class Export:
                         path = Path(match.group())
                         if self.safe(path) and path.parent not in self.error_sessions:
                             self.error_sessions.append(path.parent)
+                    pattern = (re.escape(str(self.root))
+                               + r'[\\/]execution-cycles[\\/][a-f0-9]{64}[\\/]fatal\.json')
+                    for match in re.finditer(pattern, item):
+                        path = Path(match.group())
+                        if path in self.failure_records or len(self.failure_records) >= 8 or not self.safe(path):
+                            continue
+                        self.failure_records.add(path)
+                        try:
+                            self.failure_sessions(json.loads(self.read(path) or '{}'))
+                        except ValueError:
+                            pass
                 elif isinstance(item, (list, dict)):
                     self.failure_sessions(item)
         elif isinstance(value, list):

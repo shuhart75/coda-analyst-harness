@@ -134,6 +134,35 @@ def parse_events(path: Path) -> dict:
             "read_tool_errors": read_tool_errors}
 
 
+def execution_result_usable(result):
+    """Completed work may enter checks despite failed tools; never authorize a denied call.
+
+    This is not acceptance and does not apply to capability probes or reviews.
+    Reparse original events so a receipt's summary cannot hide transport failure.
+    """
+    if (result.get('returncode') != 0 or result.get('timed_out') or result.get('cancelled')
+            or not result.get('terminal_result') or (result.get('cleanup') or {}).get('preserved')):
+        return False
+    try:
+        evidence = parse_events(Path(result['events_path']))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    calls, returned = evidence['tool_calls'], evidence['tool_results']
+    failed = {item['tool_use_id'] for item in returned if item['is_error'] is True}
+    if set(calls) - {item['tool_use_id'] for item in returned}:
+        return False
+    for denial in evidence['permission_denials']:
+        key = denial.get('tool_use_id')
+        if (key not in failed or key not in calls
+                or denial.get('tool_name') != calls[key]):
+            return False
+    allowed = {'Tool ' + calls.get(key, 'unknown') + ' (' + key + ') returned an error' for key in failed}
+    if evidence['permission_denials']:
+        allowed.add('CLI reported denied permissions; interactive approval is unavailable')
+    return (evidence['terminal_result'] and not (set(evidence['errors']) - allowed)
+            and not (set(result.get('errors', [])) - allowed))
+
+
 def review_feedback_usable(result):
     """Read/search failures may inform rejection, never successful acceptance."""
     return (result.get('returncode') == 0 and result.get('terminal_result')

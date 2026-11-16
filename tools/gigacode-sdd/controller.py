@@ -16,7 +16,7 @@ import time
 import uuid
 
 from policy import prepare_permissions, nexus_environment, audit_dependency_sources, make_policy_prompt
-from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable
+from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, execution_result_usable
 from platform_support import (FileLock, launch_process, process_exists,
                               process_scope_exists, process_scope_pids)
 from workspace import git, snapshot, clone_snapshot, export_patch, apply_patch, commit_changes
@@ -455,6 +455,13 @@ class Runner:
                         'External environment availability is unknown unless evidenced in this copy.\n')
         if role == 'review':
             context += '\n' + plan_review.path_instructions(root) + '\n'
+        elif name != 'preflight':
+            context += ('\nPrefer dedicated file tools and simple workspace-local commands. '
+                        'Avoid heredocs, inline interpreters, command substitutions and scripts outside this workspace. '
+                        'Use only declared ownership paths for any temporary files. '
+                        'Respect tool denials: do not repeat a denied operation through another tool or wrapper. '
+                        'Continue independent permitted work and report missing evidence honestly. '
+                        'The controller inspects Git controls and performs commits; do not probe or change Git configuration.\n')
         session_log = self.logdir(name)
         full_prompt = context + '\n' + prompt
         decision_sha = digest(self.root / 'decision.md') if (self.root / 'decision.md').is_file() else None
@@ -497,7 +504,8 @@ class Runner:
             'decision_sha256': decision_sha})
         if result['cancelled']:
             raise Interrupted(result=result)
-        if result['permission_denials']:
+        if result['permission_denials'] and not (role == 'execute' and name != 'preflight'
+                                                 and execution_result_usable(result)):
             raise Blocked('Permission preflight/runtime denial; inspect ' + result['events_path'])
         return result
 

@@ -51,7 +51,10 @@ class BundleTests(unittest.TestCase):
                           'permission_denials': [{'tool_use_id': 'denied', 'tool_name': 'run_shell_command'}]}]
                 events.write_text('\n'.join(map(json.dumps, rows)))
                 os.utime(log, (100,100))
-                tasks[name] = {'status': 'blocked', 'error': 'Permission denial; inspect ' + str(events)}
+                fatal = root/'execution-cycles'/('a' * 64 if name == 'backend' else 'b' * 64)/'fatal.json'
+                fatal.parent.mkdir(parents=True)
+                fatal.write_text(json.dumps({'error': 'Permission denial; inspect ' + str(events)}))
+                tasks[name] = {'status': 'blocked', 'error': 'Preserved safety failure; inspect ' + str(fatal)}
             for i in range(12):
                 log = root/'logs'/('irrelevant-' + str(i)); log.mkdir(parents=True)
                 (log/'stdout.jsonl').write_text('{"type":"result","result":"old review"}\n')
