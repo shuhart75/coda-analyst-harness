@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unicodedata
 from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path, PurePosixPath
 
 from commit_message_policy import require_valid_commit_message, keys_for_paths, staged_keys, validate_binding, delivery_analysis_task, git_output
@@ -926,9 +927,8 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
     if changed.returncode:
         raise ValueError("Не удалось определить материалы импорта")
     paths = [path for path in changed.stdout.split("\0") if path] + list(files)
-    def read(path):
-        if path in files:
-            return json.dumps(files[path], ensure_ascii=False)
+    @cache
+    def read_original(path):
         # Bindings come from the same prospective snapshot as the path diff.
         # Deleted material can retain its previous ownership, as in postflight.
         for revision in (tree, base):
@@ -936,8 +936,14 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
             if not result.returncode:
                 return result.stdout
         return None
-    from receiver_tasks import requests_for_paths
+    @cache
+    def read(path):
+        return json.dumps(files[path], ensure_ascii=False) if path in files else read_original(path)
+    from receiver_tasks import requests_for_paths, binding_targets_for_paths, work_targets_for_paths
     state['task_requests'] = requests_for_paths(paths, read)
+    state['task_binding_targets'] = binding_targets_for_paths(paths, read_original)
+    state['task_work_targets'] = work_targets_for_paths(paths, read)
+    state['task_work_registry'] = json.loads(read('work-task-bindings.json') or '{}')
     keys = keys_for_paths(paths, read)
     if not keys:
         binding = decisions.get("analysis_task")
@@ -951,19 +957,29 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
 
 
 def pause_import_for_task(state_path: Path, state: dict, question: str) -> dict:
+    state.pop('task_work_registry', None)  # Rebuilt from the exact snapshot by bind-import-task.
     state.update({"status": "awaiting-analysis-task", "resolution_reason": question, "next_action": "resolve-commit-task",
                   "message": question, "task_decisions_file": str(Path(state["checkout"]).parent / "task-decisions.json")})
     state.pop('bind_task_command', None)
-    if state.get('task_requests'):
+    if state.get('task_requests') or state.get('task_binding_targets') or state.get('task_work_targets'):
         state['bind_task_command'] = ['python3', 'scripts/repository-exchange.py', 'bind-import-task',
                                       '--task-state', 'STATE', '--expected-source', state['source_commit'],
                                       '--expected-base', state['base_commit']]
+        for target in state.get('task_binding_targets', []):
+            if target['status'] in ('missing', 'legacy'):
+                target['bind_task_command'] = list(state['bind_task_command'])
+                if target['status'] == 'legacy':
+                    target['bind_task_command'] += ['--expected-binding-sha256', target['binding_sha256'],
+                                                    '--confirmation', 'ANALYST_CONFIRMATION']
+        for target in state.get('task_work_targets', []):
+            target['bind_task_command'] = state['bind_task_command'] + [
+                '--path', target['path'], '--confirmation', 'ANALYST_CONFIRMATION']
     atomic_write(state_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
     return dict(state)
 
 
 def bind_import_task_command(args):
-    """Export a resolved receiver request into the pending isolated import."""
+    """Bind an affected delivery; explicitly migrate legacy metadata in isolation."""
     from commit_tasks import validate_task
     root = root_path(args.root)
     handle = lock(root)
@@ -978,6 +994,7 @@ def bind_import_task_command(args):
                 or checkout.resolve() != checkout.absolute()
                 or git(checkout, 'rev-parse', 'HEAD').stdout.strip() != args.expected_base):
             raise ValueError('Изолированный checkout не соответствует ожидающему импорту')
+        require_clean(checkout, 'Изолированный импорт перед привязкой задачи')
         task_path = Path(args.task_state)
         with task_path.with_suffix('.lock').open('a') as task_lock:
             fcntl.flock(task_lock, fcntl.LOCK_EX)
@@ -987,22 +1004,30 @@ def bind_import_task_command(args):
         for evidence in task['evidence']:
             if hashlib.sha256(Path(evidence['path']).read_bytes()).hexdigest() != evidence['sha256']:
                 raise ValueError('Контрольная сумма ответа MCP не совпала')
-        binding = validate_task(task['binding'], 'delivery')
+        binding = validate_task(task['binding'])
         if any(binding.get(key) != task['spec'].get(key) for key in ('owner', 'epic', 'kind')):
             raise ValueError('Связь не соответствует запросу задачи')
-        # Re-read requests from the prospective merge, not a stale saved report.
+        # Re-read owners and paths from the prospective merge, not a stale report.
         state.pop('task_requests', None)
+        state.pop('task_binding_targets', None)
+        state.pop('task_work_targets', None)
         try:
             import_task_context(checkout, state)
         except ValueError:
             # Missing bindings are the expected reason this import is paused.
             # Request parsing occurs before binding validation.
-            if not state.get('task_requests'):
+            if not state.get('task_binding_targets') and not state.get('task_work_targets'):
                 raise
-        matches = [item for item in state['task_requests'] if item['owner'] == binding['owner']]
+        if binding['kind'] in ('baseline', 'context'):
+            return bind_import_work_task(checkout, state, task, task_path, args)
+        validate_task(binding, 'delivery')
+        if args.path:
+            raise ValueError('--path применяется только к baseline/context')
+        matches = [item for item in state['task_binding_targets'] if item['owner'] == binding['owner']]
         if len(matches) != 1:
-            raise ValueError('Нет единственного запроса этой поставки в ожидающем импорте')
-        relative = str(Path(matches[0]['path']).with_name('analysis-task.json'))
+            raise ValueError('Нет единственной затронутой поставки в ожидающем импорте')
+        target = matches[0]
+        relative = target['path']
         if Path(relative).is_absolute() or '..' in Path(relative).parts:
             raise ValueError('Некорректный путь связи поставки')
         destination = checkout.parent / 'task-decisions.json'
@@ -1016,10 +1041,27 @@ def bind_import_task_command(args):
         files = decisions.setdefault('files', {})
         if not isinstance(files, dict) or (relative in files and files[relative] != binding):
             raise ValueError('Для этой поставки уже сохранено другое решение')
+        migration = None
+        if target['status'] == 'legacy':
+            if (args.expected_binding_sha256 != target['binding_sha256']
+                    or not args.confirmation or not args.confirmation.strip()
+                    or args.confirmation == 'ANALYST_CONFIRMATION'):
+                raise ValueError('Для замены старой связи нужны её точный SHA256 и явное решение аналитика (--confirmation)')
+            migration = dict(previous_binding=target['previous_binding'],
+                             previous_sha256=target['binding_sha256'], confirmation=args.confirmation,
+                             task_state=str(task_path.resolve()), evidence=task['evidence'])
+        elif args.expected_binding_sha256 or args.confirmation:
+            raise ValueError('Подтверждение замены относится только к старой связи схемы 1')
         for revision in (args.expected_source, args.expected_base):
             carried = git(checkout, 'show', revision + ':' + relative)
             if not carried.returncode and json.loads(carried.stdout) != binding:
-                raise ValueError('В импорте уже есть другая связь задачи')
+                if not migration or json.loads(carried.stdout) != target['previous_binding']:
+                    raise ValueError('В импорте уже есть другая связь задачи; автоматическая замена запрещена')
+        migrations = decisions.setdefault('binding_migrations', {})
+        if migration:
+            if relative in migrations and migrations[relative] != migration:
+                raise ValueError('Для старой связи уже сохранено другое решение о замене')
+            migrations[relative] = migration
         files[relative] = binding
         atomic_write(destination, (json.dumps(decisions, ensure_ascii=False, indent=2) + '\n').encode())
         print(json.dumps(dict(status='import-task-bound', path=str(destination),
@@ -1028,6 +1070,68 @@ def bind_import_task_command(args):
         return 0
     finally:
         handle.close()
+
+
+def bind_import_work_task(checkout, state, task, task_path, args):
+    """Record exact shared paths and a verified owner in the isolated import."""
+    from commit_tasks import require_owner_epic
+    binding = task['binding']
+    if (not args.path or not args.confirmation or not args.confirmation.strip()
+            or args.confirmation == 'ANALYST_CONFIRMATION' or args.expected_binding_sha256):
+        raise ValueError('Для baseline/context нужны точные --path и решение об их владельце (--confirmation)')
+    destination = checkout.parent / 'task-decisions.json'
+    if destination.is_symlink():
+        raise ValueError('Файл решений не должен быть символической ссылкой')
+    decisions = (json.loads(destination.read_text()) if destination.exists() else
+                 dict(source_commit=args.expected_source, base_commit=args.expected_base, files={}))
+    if (decisions.get('source_commit') != args.expected_source or decisions.get('base_commit') != args.expected_base):
+        raise ValueError('Решение относится к другой версии импорта')
+    paths = sorted(set(args.path))
+    receipt = dict(paths=paths, binding=binding, confirmation=args.confirmation,
+                   task_state=str(task_path.resolve()), evidence=task['evidence'])
+    receipts = decisions.setdefault('work_bindings', [])
+    registry = state['task_work_registry'] or dict(schema_version=1, tasks={}, paths={})
+    task_id = binding['owner']['type'] + ':' + binding['owner']['id'] + ':' + binding['kind']
+    # A completed binding no longer appears among unresolved paths. Retry only
+    # the identical recorded decision, with its registry entries still intact.
+    if receipt in receipts:
+        if (registry['tasks'].get(task_id) != binding
+                or any(registry['paths'].get(path) != [task_id] for path in paths)):
+            raise ValueError('Сохранённое решение не соответствует реестру импорта')
+    else:
+        allowed = {item['path'] for item in state['task_work_targets'] if item['kind'] == binding['kind']}
+        if not set(paths) <= allowed:
+            raise ValueError('Выбери только непривязанные пути этого вида работы из task_work_targets')
+        # Verify an already-known owner epic against the same prospective tree
+        # and prior import decisions, without writing into the checkout.
+        merged = git(checkout, 'merge-tree', '--write-tree', 'HEAD', args.expected_source)
+        if merged.returncode != 0:
+            raise ValueError('Сначала разреши конфликт импорта')
+        tree = merged.stdout.splitlines()[0]
+        def read(path):
+            if path in decisions.get('files', {}):
+                return json.dumps(decisions['files'][path])
+            result = git(checkout, 'show', tree + ':' + path)
+            return result.stdout if not result.returncode else None
+        if binding['owner']['type'] == 'delivery':
+            index = read('delivery-index.json')
+            if index and binding['owner']['id'] not in json.loads(index)['deliveries']:
+                raise ValueError('Поставка владельца не зарегистрирована в импорте')
+            if not index and read('features/' + binding['owner']['id'] + '/requirements.md') is None:
+                raise ValueError('Поставка владельца не найдена в импорте')
+        require_owner_epic(binding, read)
+        if task_id in registry['tasks'] and registry['tasks'][task_id] != binding:
+            raise ValueError('У владельца уже есть другая задача этого вида')
+        registry['tasks'][task_id] = binding
+        for path in paths:
+            registry['paths'][path] = [task_id]
+        receipts.append(receipt)
+    decisions.setdefault('files', {})['work-task-bindings.json'] = registry
+    atomic_write(destination, (json.dumps(decisions, ensure_ascii=False, indent=2) + '\n').encode())
+    print(json.dumps(dict(status='import-task-bound', path=str(destination),
+                         binding_path='work-task-bindings.json', key=binding['key'],
+                         next_action='workspace.py sync'), ensure_ascii=False, indent=2))
+    return 0
 
 
 def preflight_import_tree(root: Path, source: Path, checkout: Path, incoming: str) -> None:
@@ -2654,6 +2758,9 @@ def parser() -> argparse.ArgumentParser:
     bind_task.add_argument("--task-state", required=True)
     bind_task.add_argument("--expected-source", required=True)
     bind_task.add_argument("--expected-base", required=True)
+    bind_task.add_argument("--expected-binding-sha256")
+    bind_task.add_argument("--confirmation")
+    bind_task.add_argument("--path", action="append", default=[])
     bind_task.set_defaults(handler=bind_import_task_command)
     defer_import = commands.add_parser("defer-source-import")
     defer_import.add_argument("--analyst-confirmed", action="store_true")
