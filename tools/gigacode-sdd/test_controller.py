@@ -18,7 +18,8 @@ from controller import Runner, Blocked, initialize, digest, save, validate_plan,
 from workspace import git, snapshot
 
 FAKE = r'''#!/usr/bin/env python3
-import json, os, pathlib, re, subprocess, sys, time
+import json, os, pathlib, re, subprocess, sys, time, uuid
+invocation_id = uuid.uuid4().hex
 prompt = sys.stdin.read()
 root = pathlib.Path(subprocess.check_output(['git','rev-parse','--show-toplevel'], text=True).strip())
 def emit(value):
@@ -42,7 +43,7 @@ def trace_lock():
             else:
                 fcntl.flock(lock.fileno(),fcntl.LOCK_UN)
 def event(kind, task=''):
-    line=(json.dumps({'kind':kind,'task':task,'time':time.monotonic(),'pid':os.getpid(),'cwd':str(root)})+'\n').encode('utf-8')
+    line=(json.dumps({'kind':kind,'task':task,'time':time.monotonic(),'pid':os.getpid(),'invocation_id':invocation_id,'cwd':str(root)})+'\n').encode('utf-8')
     with trace_lock(), open(os.environ['FAKE_TRACE'],'ab',buffering=0) as f:
         f.write(line)
 def trace_events():
@@ -53,7 +54,7 @@ def result(value):
 def call(name):
     emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':name,'name':name,'input':{}}]}})
     emit({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':name,'is_error':False,'content':'verified'}]}})
-emit({'type':'system','subtype':'init','session_id':str(os.getpid()),
+emit({'type':'system','subtype':'init','session_id':invocation_id,
       'model':sys.argv[sys.argv.index('--model')+1] if '--model' in sys.argv else 'fixture'})
 if 'PERMISSION_PREFLIGHT\n' in prompt:
     if os.environ.get('FAKE_RECOVERED_SYNTAX'):
@@ -246,7 +247,8 @@ for name in sys.argv[1:]:
         self.assertLess(max(e['time'] for e in starts.values()), min(e['time'] for e in ends.values()))
         reviewers = [e for e in trace if e['kind']=='review']
         executors = [e for e in trace if e['kind']=='start']
-        self.assertFalse({e['pid'] for e in reviewers} & {e['pid'] for e in executors})
+        # Windows can reuse a terminated executor's PID for a fresh reviewer.
+        self.assertFalse({e['invocation_id'] for e in reviewers} & {e['invocation_id'] for e in executors})
         self.assertTrue(all('reviews' in Path(e['cwd']).parts for e in reviewers))
         output = self.root / 'result.patch'
         self.runner.export(output)
