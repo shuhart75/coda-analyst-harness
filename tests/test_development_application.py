@@ -73,6 +73,19 @@ class DevelopmentApplicationTests(unittest.TestCase):
         self.assertEqual(fields['Completed By'], '')
         self.assertEqual(fields['Progress %'], '100')
 
+    def test_accepting_active_work_clears_stale_completion_but_keeps_unknown_start(self):
+        self.row['current'].update({'Actual Start': '2026-09-20', 'Actual Finish': '2026-09-21',
+                                    'Completed By': '2026-09-22', 'Status': 'completed', 'Progress %': '100'})
+        self.row['history'].pop('started_at')
+        fields = self.review()['development_application'][0]['expected_registry_fields']
+        self.assertEqual(fields['Status'], 'in-progress')
+        self.assertEqual(fields['Actual Start'], '2026-09-20')
+        self.assertEqual(fields['Actual Finish'], '')
+        self.assertEqual(fields['Completed By'], '')
+        self.decision['kind'] = 'accept-dates'
+        fields = self.review()['development_application'][0]['expected_registry_fields']
+        self.assertEqual(fields['Actual Finish'], '2026-09-21')
+
     def test_custom_decision_requires_exact_scope_and_unchanged_evidence(self):
         self.decision['kind'] = 'custom'
         with self.assertRaisesRegex(ValueError, 'every shown'):

@@ -89,6 +89,10 @@ def development_updates(comparison: dict, decision: dict | None) -> list[dict]:
                     # of development under the status-based contract. The comparison
                     # and analyst decision still gate application of this correction.
                     expected.update({'Actual Start': '', 'Actual Finish': '', 'Completed By': ''})
+                elif history['state'] == 'in-progress':
+                    # Accepted current work contradicts an old completion, even
+                    # when the new history cannot supply exact dates.
+                    expected.update({'Actual Finish': '', 'Completed By': ''})
         expected.update(overrides.get((row['feature'], row['task_id']), {}))
         observed = row.get('observed_state')
         explicit_status = overrides.get((row['feature'], row['task_id']), {}).get('Status')

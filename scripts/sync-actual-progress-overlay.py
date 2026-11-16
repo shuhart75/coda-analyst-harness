@@ -466,15 +466,17 @@ def load_story_map(feature_dir: Path) -> list[StoryMap]:
     return result
 
 
-def progress_from_status(status: str) -> int:
-    status = status.lower()
-    if status in DONE_STATUSES:
-        return 100
-    if status in {"planned", "todo", "open", "backlog"} | EXCLUDED_STATUSES:
-        return 0
-    if status in {"in_progress", "in progress", "doing"}:
-        return 50
-    return 0
+def execution_number(value: str, path: Path, task_id: str, *, progress: bool = False) -> float | None:
+    text = clean_cell(value).replace(',', '.')
+    if text in {'', '-', '—', 'unknown'}:
+        return None
+    try:
+        number = float(text)
+    except ValueError as error:
+        raise ValueError(f"{path}: {task_id}: требуется числовая оценка или прогресс") from error
+    if not math.isfinite(number) or (not 0 <= number <= 100 if progress else number <= 0):
+        raise ValueError(f"{path}: {task_id}: оценка или прогресс вне допустимого диапазона")
+    return number
 
 
 def normalized_token(value: str) -> str:
@@ -709,8 +711,7 @@ def load_tasks(feature_dir: Path, project_root: Path | None = None) -> dict[str,
                 validate_task_row(row, path)
             status = clean_cell(row.get("Status", "planned"))
             progress_value = row.get("Progress %", "")
-            progress = (None if clean_cell(progress_value) == "unknown" else
-                        parse_number(progress_value, progress_from_status(status)) if progress_value else progress_from_status(status))
+            progress = execution_number(progress_value, path, explicit_id or tracker_key, progress=True)
             kind = clean_cell(row.get("Kind", "virtual")).lower()
             role = clean_cell(row.get("Role", ""))
             normalized_role = normalize_role(role)
@@ -733,7 +734,7 @@ def load_tasks(feature_dir: Path, project_root: Path | None = None) -> dict[str,
                 summary=clean_cell(row.get("Summary", tracker_key)),
                 kind=kind,
                 role=role,
-                estimate=None if unestimated_actual(row) or unestimated_bug(row) else parse_number(row.get("Estimate (дн)", ""), 1.0),
+                estimate=execution_number(row.get("Estimate (дн)", ""), path, task_id),
                 executor=clean_cell(row.get("Executor", "")),
                 planned_start=date_cell(row.get("Planned Start", "")),
                 planned_finish=date_cell(row.get("Planned Finish", "")),
@@ -1013,9 +1014,14 @@ def schedule_not_started_task(
     closed_days: set[date],
     team_resources: dict[str, list[str]],
     resource_coefficients: dict[str, float] | None = None,
+    blocked_resources: set[str] | None = None,
 ) -> ScheduledTask:
     duration = task_duration(task)
     resources, note_source = candidate_resources(task, team_resources)
+    if resources and blocked_resources:
+        resources = [resource for resource in resources if resource not in blocked_resources]
+        if not resources:
+            raise ValueError(f"{task.task_id}: доступность исполнителей неизвестна из-за незавершённой работы")
     if not resources:
         finish = add_open_days(earliest, duration, closed_days)
         return ScheduledTask(earliest, finish, "", shifted)
@@ -1076,6 +1082,10 @@ def task_schedules(
     def forecast_qa(task: Task) -> bool:
         return (role_for_task(task) == "QA" and not task.actual_finish
                 and task.status.lower() not in DONE_STATUSES and task.progress != 100)
+    for task in scope_tasks.values():
+        if (task.status.lower() in DONE_STATUSES or task.progress == 100) and not (
+                task.actual_finish or task.completed_by):
+            raise ValueError(f"{task.task_id}: завершение подтверждено без даты; нужны Actual Finish или Completed By, не плановая дата")
     schedules: dict[str, ScheduledTask] = {}
     occupied: dict[str, set[date]] = {
         resource: set(days) for resource, days in (resource_closed_days or {}).items()
@@ -1087,54 +1097,53 @@ def task_schedules(
     def priority(task_key: str) -> int:
         return (feature_priorities or {}).get(task_scope(task_key), len(feature_priorities or {}))
 
+    active = {}
     for task_id, task in tasks.items():
         if needs_forecast_schedule(task) or forecast_qa(task):
+            continue
+        if (task.actual_start and not task.actual_finish and task.progress != 100
+                and task.status.lower() not in DONE_STATUSES
+                and task.progress is not None and task.estimate is not None):
+            active[task_id] = task
             continue
         scheduled = fixed_task_schedule(task, closed_days, today, team_resources)
         if scheduled:
             schedules[task_id] = scheduled
-            reserve_resource(
-                occupied,
-                scheduled.assignee if scheduled.finish else "",
-                scheduled.start,
-                scheduled.finish,
-                task_duration(task) if task.estimate is not None else None,
-                closed_days,
-            )
+            if scheduled.finish:
+                reserve_resource(occupied, scheduled.assignee, scheduled.start, scheduled.finish,
+                                 task_duration(task) if task.estimate is not None else None, closed_days)
 
-    for task_id, task in tasks.items():
-        scheduled = schedules.get(task_id)
-        if (not scheduled or not scheduled.finish or task.actual_finish or task.status.lower() in DONE_STATUSES
-                or task.progress == 100 or scheduled.assignee not in (resource_coefficients or {})):
-            continue
-        if task.progress is None or task.estimate is None or not task.actual_start:
-            scheduled.resource_note = "Коэффициент не применён: подтверждённый остаток неизвестен"
-            continue
-        # Replace only this task's forecast occupancy; retain historical days and other tasks.
-        resource = scheduled.assignee
-        occupied[resource] = set((resource_closed_days or {}).get(resource, set()))
-        for other_id, other in schedules.items():
-            if other.assignee != resource:
-                continue
-            end = min(other.finish, today - timedelta(days=1)) if other_id == task_id else other.finish
-            if end and end >= other.start:
-                reserve_resource(occupied, resource, other.start, end, None, closed_days)
+    # Unknown remaining work cannot supply capacity to another forecast.
+    blocked = {resource for key, scheduled in schedules.items() if scheduled.finish is None
+               for resource in candidate_resources(tasks[key], team_resources)[0]}
+    for task_id, task in sorted(active.items(), key=lambda item: (priority(item[0]), item[0])):
+        resources, note = candidate_resources(task, team_resources)
+        if resources:
+            resources = [resource for resource in resources if resource not in blocked]
+            if not resources:
+                raise ValueError(f"{task.task_id}: доступность исполнителей неизвестна из-за незавершённой работы")
         remaining = task.estimate * (1 - task.progress / 100)
-        duration = forecast_duration(remaining, resource_coefficients[resource])
-        remaining_days = []
-        current = max(today, scheduled.start)
-        for _ in range(36500):
-            if is_open_day(current, closed_days) and current not in occupied.get(resource, set()):
-                remaining_days.append(current)
-                if len(remaining_days) == duration:
-                    break
-            current += timedelta(days=1)
-        else:
-            raise ValueError(f"{task.task_id}: cannot schedule remaining work")
-        future_start, finish = remaining_days[0], remaining_days[-1]
-        scheduled.finish = finish
-        scheduled.resource_note = f"Прогноз остатка {remaining:g} оценочных дней; коэффициент {resource_coefficients[resource]:g}"
-        reserve_resource(occupied, resource, future_start, finish, None, closed_days)
+        options = []
+        for resource in resources or [""]:
+            coefficient = (resource_coefficients or {}).get(resource, 1.0)
+            duration = forecast_duration(remaining, coefficient)
+            days = []
+            current = max(today, parse_date(task.actual_start))
+            for _ in range(36500):
+                if is_open_day(current, closed_days) and current not in occupied.get(resource, set()):
+                    days.append(current)
+                    if len(days) == duration:
+                        break
+                current += timedelta(days=1)
+            else:
+                raise ValueError(f"{task.task_id}: cannot schedule remaining work")
+            options.append((days[-1], resource, coefficient, days))
+        finish, resource, coefficient, days = min(options)
+        if resource:
+            occupied.setdefault(resource, set()).update(days)
+        schedules[task_id] = ScheduledTask(parse_date(task.actual_start), finish, resource, False,
+            f"Прогноз остатка {remaining:g} оценочных дней; коэффициент {coefficient:g}" +
+            (f"; {note}" if note else ""), tuple((day, 1.0) for day in days))
 
     not_started = [
         (task_id, task, *earliest_task_start(task, closed_days, today))
@@ -1175,7 +1184,7 @@ def task_schedules(
         key, task, start, shifted = min(ready, key=lambda item: (
             priority(item[0]), item[2], ROLE_ORDER.get(role_for_task(item[1]), 90), item[0]))
         schedules[key] = schedule_not_started_task(
-            task, start, shifted, occupied, closed_days, team_resources, resource_coefficients)
+            task, start, shifted, occupied, closed_days, team_resources, resource_coefficients, blocked)
         if dependencies[key]:
             schedules[key].resource_note += "; зависимости: " + ", ".join(dependencies[key])
         if task.not_before:
@@ -1224,6 +1233,10 @@ def task_schedules(
         options = []
         preferred = explicit_executor(task, team_resources)
         resources = list(dict.fromkeys([*resources, *team_resources.get("QA", [])]))
+        if resources:
+            resources = [resource for resource in resources if resource not in blocked]
+            if not resources:
+                raise ValueError(f"{task.task_id}: доступность исполнителей QA неизвестна")
         for resource in resources or [""]:
             allocation, left = [], remaining
             current = start

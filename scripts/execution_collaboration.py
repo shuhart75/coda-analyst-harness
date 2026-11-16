@@ -199,6 +199,16 @@ def passport_path_kind(analytics: Path, path: str, scope: dict) -> str | None:
     return None
 
 
+def verify_generation(gantt: Path, review_files: list[str]) -> None:
+    command = [sys.executable, str(Path(__file__).with_name('sync-quarter-gantt.py')),
+               str(gantt), '--actual-only', '--check']
+    for filename in review_files:
+        command.extend(['--review-file', str(filename)])
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError('Execution generation verification failed: ' + result.stdout + result.stderr)
+
+
 def check_save(root, analytics, work, paths, review_files, api) -> dict:
     require_execution_work(root, analytics, work, api)
     scope = work.get('execution_scope')
@@ -271,6 +281,7 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
     if reviewed_runs != set(scope.get('run_ids', [])):
         raise ValueError('Pass --review-file for every registered tracker run; QA verification is mandatory')
     verified_quarters = []
+    generated_quarters = []
     expander = import_module('expand-plantuml-includes')
     for quarter in scope['quarters']:
         gantt = quarter_root(analytics, quarter) / 'gantt'
@@ -293,6 +304,11 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
                 raise ValueError('Gantt dependency is outside analytics or export is linked')
             if export.read_text() != expanded:
                 raise ValueError(f'Confluence export differs from {view}: {quarter}; expand the selected source')
+        report = gantt / 'actual-progress-resources.json'
+        previous_report = api.git(analytics, 'cat-file', '-e', f'HEAD:{report.relative_to(analytics).as_posix()}')
+        if scope.get('run_ids') or report.exists() or previous_report.returncode == 0:
+            verify_generation(gantt, review_files)
+            generated_quarters.append(quarter)
         plan = gantt.parent / 'release-plan.md'
         previous_plan = api.git(analytics, 'cat-file', '-e', f'HEAD:{plan.relative_to(analytics).as_posix()}')
         if plan.exists() or previous_plan.returncode == 0:
@@ -301,7 +317,7 @@ def check_save(root, analytics, work, paths, review_files, api) -> dict:
         verified_quarters.append(quarter)
     baseline_candidates = __import__('baseline_releases').scan(analytics)
     return {'paths': classified, 'confluence_verified': verified_quarters,
-            'qa_verified_runs': sorted(reviewed_runs), 'generation_proven': False,
+            'qa_verified_runs': sorted(reviewed_runs), 'generation_proven': generated_quarters == verified_quarters,
             'baseline_release_candidates': baseline_candidates,
             'baseline_review_required': bool(baseline_candidates)}
 

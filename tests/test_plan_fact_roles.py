@@ -16,8 +16,8 @@ PLANNING = importlib.import_module("sync-planning-gantt")
 
 def task(identifier, role, estimate, start, progress=0, executor=""):
     return OVERLAY.Task(identifier, identifier.split("/")[0], role + " work", "real", role,
-                        estimate, executor, start, "", start if progress else "", "",
-                        "in-progress" if progress else "planned", progress, [])
+                        estimate, executor, start, "", start if progress else "", start if progress == 100 else "",
+                        "completed" if progress == 100 else "in-progress" if progress else "planned", progress, [])
 
 
 def story(role, duration=5):

@@ -61,7 +61,8 @@ class UncertainScheduleTests(unittest.TestCase):
         known.actual_start, known.planned_finish = "2026-09-11", "2026-09-14"
         unknown = self.task()
         schedules = OVERLAY.task_schedules({task.task_id: task for task in (known, unknown)}, set(), date(2026, 9, 11), OVERLAY.DEFAULT_TEAM_RESOURCES)
-        self.assertEqual(schedules[unknown.task_id].start, date(2026, 9, 15))
+        self.assertEqual(schedules[known.task_id].finish, date(2026, 9, 11))
+        self.assertEqual(schedules[unknown.task_id].start, date(2026, 9, 14))
 
 
 class RoleStartSourceTests(unittest.TestCase):

@@ -127,12 +127,13 @@ class PriorityScheduleTests(unittest.TestCase):
         self.assertEqual(schedule["low/LOW/FE"].finish, date(2026, 9, 8))
         self.assertEqual(schedule["high/HIGH/FE"].start, date(2026, 9, 9))
 
-    def test_confirmed_lower_priority_actual_dates_remain_fixed(self):
+    def test_confirmed_start_is_fixed_but_only_remaining_work_reserves_capacity(self):
         high = self.task("HIGH", 2, "2026-09-07")
         low = self.task("LOW", 5, "2026-09-07", actual=True)
         schedule = self.schedule(high, low)
         self.assertEqual(schedule["low/LOW/FE"].start, date(2026, 9, 7))
-        self.assertEqual(schedule["high/HIGH/FE"].start, date(2026, 9, 14))
+        self.assertEqual(schedule["low/LOW/FE"].finish, date(2026, 9, 9))
+        self.assertEqual(schedule["high/HIGH/FE"].start, date(2026, 9, 10))
 
 
 if __name__ == "__main__":
