@@ -77,6 +77,27 @@ class ReviewCycleTests(unittest.TestCase):
         with self.assertRaisesRegex(plan_review.ProtocolError, 'contradicts findings'):
             review_cycle.validate_result(root, result, sha, self.runner.cfg['requirements'], review_cycle.MODELS[0])
 
+    def test_explicit_unexecuted_probe_preserves_plan_review(self):
+        root = self.fixture.root/'review'; root.mkdir()
+        sha = plan_review.prepare(root, self.runner.root/'input', self.candidate, root/'missing')
+        extra = [
+            {'message': {'content': [{'type':'tool_use', 'id':'probe', 'name':'run_shell_command',
+                                     'input':{'command':'git status --porcelain'}}]}},
+            {'message': {'content': [{'type':'tool_result', 'tool_use_id':'probe', 'is_error':True,
+                'content':'Plan mode could not determine read-only status. The command was not run; no approval surface.'}]}}]
+        result = self.result(root, review_cycle.MODELS[0], extra=extra)
+        events = Path(result['events_path'])
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        rows[-1]['permission_denials'] = [{'tool_use_id':'probe', 'tool_name':'run_shell_command'}]
+        events.write_text('\n'.join(map(json.dumps, rows)))
+        result = parse_events(events); result['returncode'] = 0
+        report, _ = review_cycle.validate_result(root, result, sha, self.runner.cfg['requirements'], review_cycle.MODELS[0])
+        self.assertEqual(report['verdict'], 'pass')
+        events.write_text('\n'.join(map(json.dumps, [rows[0]] + rows[3:])))
+        result = parse_events(events); result['returncode'] = 0
+        with self.assertRaisesRegex(plan_review.ProtocolError, 'did not read'):
+            review_cycle.validate_result(root, result, sha, self.runner.cfg['requirements'], review_cycle.MODELS[0])
+
     def test_parallel_reviews_cached_on_restart_and_bound_by_controller(self):
         barrier = threading.Barrier(2)
         def simultaneous(*args, **kwargs):

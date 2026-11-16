@@ -117,7 +117,8 @@ def audit(root, events, expected):
                         raise ProtocolError('Plan review tool has an outside workspace path: ' + key + '=' + str(value))
                 if returned[0].get('is_error') is True:
                     body = '\n'.join(output_texts(returned[0].get('content'))).lower()
-                    if any(token in body for token in ('denied', 'permission', 'approval', 'confirmation', 'forbidden')):
+                    from transport import tool_was_not_run
+                    if any(token in body for token in ('denied', 'permission', 'approval', 'confirmation', 'forbidden')) and not tool_was_not_run(returned[0]):
                         raise ProtocolError('Reviewer tool reported a permission/guard denial')
                     recoverable_errors.append(item.get('id'))
                 elif returned[0].get('is_error') is False and candidate_text and any(
