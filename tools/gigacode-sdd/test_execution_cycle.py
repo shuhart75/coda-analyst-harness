@@ -182,9 +182,11 @@ class ExecutionPortfolioTests(unittest.TestCase):
         release = threading.Event()
         def session(*args, **kwargs):
             result = self.session(*args, **kwargs)
-            barrier.wait(timeout=5)
+            barrier.wait(timeout=30)
             if kwargs['model'] == MODELS[1]:
-                self.assertTrue(release.wait(5))
+                # The peer creates a real Git review copy before releasing us.
+                # Its Windows filesystem latency is not part of this assertion.
+                self.assertTrue(release.wait(30))
                 raise Blocked('Agent changed permission settings')
             return result
         def review(*args, **kwargs):
