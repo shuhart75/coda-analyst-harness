@@ -18,6 +18,90 @@ class ReviewRecoveryTests(unittest.TestCase):
     fake = fixtures.ReviewCycleTests.fake
     pair = fixtures.ReviewCycleTests.pair
 
+    def test_new_runtime_budget_preserves_history_and_successful_peer(self):
+        victim = review_cycle.MODELS[1]
+        def broken(root, cwd, prompt, role, name, model=None):
+            self.fake(root, cwd, prompt, role, name, model)
+            return self.result(root, model, model_reported='wrong-model' if model == victim else model)
+        with patch('review_cycle.runtime_revision', return_value='old'), patch.object(self.runner, 'session', side_effect=broken):
+            with self.assertRaisesRegex(Blocked, 'budget exhausted'):
+                self.pair()
+        with patch('review_cycle.runtime_revision', return_value='old'), patch.object(self.runner, 'session', side_effect=AssertionError('same budget')):
+            with self.assertRaisesRegex(Blocked, 'budget exhausted'):
+                self.pair()
+        before = dict(self.counts)
+        with patch('review_cycle.runtime_revision', return_value='new'), patch.object(self.runner, 'session', side_effect=self.fake):
+            self.assertEqual(self.pair()['verdict'], 'pass')
+        self.assertEqual(self.counts[victim], before[victim] + 1)
+        self.assertEqual(self.counts[review_cycle.MODELS[0]], before[review_cycle.MODELS[0]])
+        records = [json.loads(p.read_text()) for p in (self.runner.root/'review-cycles').glob('*/*/attempt-*.json')]
+        self.assertEqual(sum(r['runtime_revision'] == 'old' for r in records), 3)
+        self.assertEqual(sum(r['runtime_revision'] == 'new' for r in records), 1)
+
+    def test_complete_adjudication_draft_survives_later_promise_and_restart(self):
+        attempts = []
+        def answer(root, cwd, prompt, role, name, model=None):
+            if 'TARGETED_ADJUDICATION' not in prompt:
+                return self.result(root, model, report={'verdict': 'changes' if model == review_cycle.MODELS[0] else 'pass',
+                    'findings': ['Required behavior'] if model == review_cycle.MODELS[0] else [],
+                    'coverage': {r: 'evidence' for r in self.runner.cfg['requirements']}})
+            attempts.append(root)
+            issue = json.loads((root/'.review-input/disputed-findings.json').read_text())[0]
+            report = self.adjudicated(root, model, 'confirmed', issue)
+            if len(attempts) == 1:
+                report['coverage_checks']['REQ-BE']['evidence'][0]['path'] = 'missing-plan.json'
+                return self.result(root, model, report=report)
+            if len(attempts) == 2:
+                result = self.result(root, model)
+                events = Path(result['events_path'])
+                rows = [json.loads(line) for line in events.read_text().splitlines()]
+                rows = [rows[0], {**rows[-1], 'result': 'I will start the review.'}]
+                events.write_text('\n'.join(map(json.dumps, rows))+'\n')
+                from transport import parse_events
+                result = parse_events(events); result['returncode'] = 0
+                return result
+            if len(attempts) == 3:
+                from controller import Interrupted
+                raise Interrupted()
+            draft = json.loads((root/'.review-input/previous-review.json').read_text())
+            self.assertEqual(parse_json(draft)['verdict'], 'changes')
+            error = json.loads((root/'.review-input/previous-review-error.json').read_text())
+            self.assertIn('missing-plan.json', error['error'])
+            self.assertIn('did not read', error['latest_attempt_error'])
+            self.assertIn('Perform the review NOW', prompt)
+            return self.result(root, model, report=report)
+        with patch.object(self.runner, 'session', side_effect=answer):
+            with self.assertRaises(Exception):
+                self.pair()
+            self.assertEqual(self.pair()['verdict'], 'changes')
+        self.assertEqual(len(attempts), 4)
+
+    def test_missing_candidate_read_is_not_reported_as_workspace_escape(self):
+        self.assertEqual(review_cycle.correction('Reviewer did not read the pinned candidate')['cause'], 'incomplete-review')
+
+    def test_legacy_adjudication_reuses_semantic_answer_after_exhaustion(self):
+        def answer(root, cwd, prompt, role, name, model=None):
+            if 'TARGETED_ADJUDICATION' not in prompt:
+                return self.result(root, model, report={'verdict': 'changes' if model == review_cycle.MODELS[0] else 'pass',
+                    'findings': ['Required behavior'] if model == review_cycle.MODELS[0] else [],
+                    'coverage': {r: 'evidence' for r in self.runner.cfg['requirements']}})
+            issue = json.loads((root/'.review-input/disputed-findings.json').read_text())[0]
+            report = self.adjudicated(root, model, 'confirmed', issue)
+            report['coverage_checks']['REQ-BE']['evidence'][0]['quote'] = 'Backend task covers the required value.'
+            return self.result(root, model, report=report)
+        def literal_only(path, citation):
+            return citation['quote'] in Path(path).read_text()
+        with patch('review_cycle.bind_quote', side_effect=literal_only), patch.object(self.runner, 'session', side_effect=answer):
+            with self.assertRaisesRegex(Blocked, 'budget exhausted'):
+                self.pair()
+        paths = list((self.runner.root/'review-cycles').glob('*/adjudication-*/attempt-*.json'))
+        self.assertEqual(len(paths), 4)
+        original = {p: Path(json.loads(p.read_text())['result']['events_path']).read_bytes() for p in paths}
+        with patch.object(self.runner, 'session', side_effect=AssertionError('reuse complete answer')):
+            self.assertEqual(self.pair()['verdict'], 'changes')
+        for p, stream in original.items():
+            self.assertEqual(Path(json.loads(p.read_text())['result']['events_path']).read_bytes(), stream)
+
     def exhausted_wrapped_review(self):
         victim = review_cycle.MODELS[1]
         def wrapped(root, cwd, prompt, role, name, model=None):
@@ -185,21 +269,22 @@ class ReviewRecoveryTests(unittest.TestCase):
     def test_confirmed_defect_goes_to_plan_repair(self):
         self.assertEqual(self.dispute('confirmed')['verdict'], 'changes')
 
-    def test_adjudication_recovers_emphasis_without_changing_terminal_evidence(self):
+    def test_adjudication_accepts_semantic_references_without_changing_terminal_evidence(self):
         root = self.fixture.root/'formatted-adjudication'; root.mkdir()
         expected = plan_review.prepare(root, self.runner.root/'input', self.candidate, root/'missing')
         packet = root/'.review-input/packet/requirements.md'
         packet.write_text(packet.read_text().replace('REQ-BE: value 2', '**REQ-BE:** value 2'))
         issue = {'id': 'issue', 'text': 'Required check is assigned to the wrong task'}
         report = self.adjudicated(root, review_cycle.MODELS[1], 'confirmed', issue)
+        report['coverage_checks']['REQ-BE']['evidence'][0]['quote'] = 'The backend task covers the required value.'
         result = self.result(root, review_cycle.MODELS[1], report=report)
         original = Path(result['events_path']).read_bytes()
         checked, evidence = review_cycle.validate_adjudication(root, result, expected,
             self.runner.cfg['requirements'], review_cycle.MODELS[1], [issue])
         self.assertEqual(checked['verdict'], 'changes')
         citation = checked['decisions']['issue']['evidence'][1]
-        self.assertEqual(citation['quote'], '**REQ-BE:** value 2')
-        self.assertEqual(citation['reported_quote'], 'REQ-BE: value 2')
+        self.assertEqual(citation['quote'], 'REQ-BE: value 2')
+        self.assertEqual(citation['evidence_kind'], 'semantic-reference')
         self.assertEqual(Path(result['events_path']).read_bytes(), original)
 
     def test_optional_issue_keeps_pass_and_explicit_scope_evidence(self):
@@ -207,7 +292,7 @@ class ReviewRecoveryTests(unittest.TestCase):
         self.assertEqual(report['verdict'], 'pass')
         self.assertTrue(report['optional_findings'][0]['outside_required_scope'])
 
-    def test_optional_cannot_hide_required_issue_or_invent_file_quote(self):
+    def test_optional_cannot_hide_required_issue_or_reference_missing_file(self):
         root = self.fixture.root/'adjudication'
         root.mkdir()
         sha = plan_review.prepare(root, self.runner.root/'input', self.candidate, root/'missing')
@@ -218,8 +303,8 @@ class ReviewRecoveryTests(unittest.TestCase):
             review_cycle.validate_adjudication(root, self.result(root, review_cycle.MODELS[0], report=report),
                                               sha, self.runner.cfg['requirements'], review_cycle.MODELS[0], [issue])
         report['decisions']['issue']['requirements'] = []
-        report['decisions']['issue']['evidence'][0]['quote'] = 'fabricated quotation'
-        with self.assertRaisesRegex(plan_review.ProtocolError, 'does not match'):
+        report['decisions']['issue']['evidence'][0]['path'] = '.review-input/missing.json'
+        with self.assertRaisesRegex(plan_review.ProtocolError, 'reference is missing'):
             review_cycle.validate_adjudication(root, self.result(root, review_cycle.MODELS[0], report=report),
                                               sha, self.runner.cfg['requirements'], review_cycle.MODELS[0], [issue])
 
@@ -310,7 +395,7 @@ class ReviewRecoveryTests(unittest.TestCase):
         def missing_packet(report):
             report['new_findings'][0]['evidence'] = report['new_findings'][0]['evidence'][:1]
         def invented(report):
-            report['new_findings'][0]['evidence'][0]['quote'] = 'Invented candidate quotation'
+            report['new_findings'][0]['evidence'][0]['path'] = 'missing-candidate.json'
         def optional(report):
             report['new_findings'][0]['status'] = 'optional'
         def unknown_requirement(report):

@@ -8,6 +8,7 @@ import uuid
 
 from workspace import clone_snapshot, snapshot, git
 import review_cycle
+from retry_budget import renew, runtime_revision
 
 
 class StopAny:
@@ -92,6 +93,9 @@ def generate(runner, model, prompt, previous, feedback, folder):
             raise Blocked('Saved planner workspace changed')
         verify_model(result, model)
         return path
+    if renew(state, {'failures': 0}, runtime_revision()):
+        save(checkpoint, state)
+        runner.progress(model + ': лимит подготовки плана привязан к текущей версии обвязки')
     recovered_result = None
     if state.get('status') in ('running', 'interrupted') and state.get('workspace'):
         for receipt_path in (runner.root / 'logs').glob('plan-*/session-receipt.json'):
@@ -212,6 +216,7 @@ def run_plan(runner, prompt):
     ledger_path = runner.root / 'planning-portfolio.json'
     ledger = read(ledger_path) if ledger_path.exists() else {'scopes': {}}
     cycle = ledger['scopes'].setdefault(scope, {'rounds': [], 'strategy': 0, 'stagnant': 0, 'best_defects': None})
+    renew(cycle, {'strategy': 0, 'stagnant': 0}, runtime_revision())
     save(ledger_path, ledger)
     previous = None
     feedback = runner.state.get('plan_feedback', '')
