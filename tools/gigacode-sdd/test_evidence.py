@@ -4,33 +4,26 @@ import unittest
 from evidence import bind_quote
 
 
-class QuoteTests(unittest.TestCase):
-    def test_markdown_emphasis_binds_to_literal_source_without_changing_words(self):
+class ReferenceTests(unittest.TestCase):
+    def test_wording_is_not_a_literal_matching_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'requirements.md'
-            original = '**Then** the record is in `draft`.\n'
-            path.write_text(original)
-            citation = {'quote': 'Then the record is in `draft`.'}
-            self.assertTrue(bind_quote(path, citation))
-            self.assertEqual(citation['quote'], original.strip())
-            self.assertEqual(citation['reported_quote'], 'Then the record is in `draft`.')
-            self.assertEqual(path.read_text(), original)
-            for changed in ('Then the record is not in `draft`.', 'Then the record is in `ready`.',
-                            'Then  the record is in `draft`.'):
-                self.assertFalse(bind_quote(path, {'quote': changed}))
+            source = '**Then** apply the page model to the current revision.\n'
+            path.write_text(source)
+            for quote in ('Then apply the page model to the current revision.',
+                          'Applyy the page model to the current revision.',
+                          'Only the response for the current revision is applied.'):
+                with self.subTest(quote=quote):
+                    citation = {'quote': quote}
+                    self.assertTrue(bind_quote(path, citation))
+                    self.assertEqual(citation['quote'], quote)
+                    self.assertEqual(citation['evidence_kind'], 'semantic-reference')
+            self.assertEqual(path.read_text(), source)
 
-    def test_code_nonmarkdown_escaped_and_ambiguous_text_stay_literal(self):
+    def test_missing_files_and_empty_references_are_not_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
-            for name, source, quote in (
-                ('source.py', '**Then** ready', 'Then ready'),
-                ('source.md', '```python\n**Then** ready\n```', 'Then ready'),
-                ('source.md', '`**Then** ready`', 'Then ready'),
-                ('source.md', '``code\n**Then** ready\ncode``', 'Then ready'),
-                ('source.md', '> ```python\n> **Then** ready\n> ```', 'Then ready'),
-                ('source.md', '    **Then** ready', 'Then ready'),
-                ('source.md', r'\**Then** ready', 'Then ready'),
-                ('source.md', '**Then** ready\n**Then** ready', 'Then ready'),
-            ):
-                with self.subTest(source=source):
-                    path = Path(tmp)/name; path.write_text(source)
-                    self.assertFalse(bind_quote(path, {'quote': quote}))
+            path = Path(tmp)/'missing.md'
+            self.assertFalse(bind_quote(path, {'quote': 'supporting reference'}))
+            path.write_text('source')
+            for citation in ({}, {'quote': ''}, {'quote': '  '}, {'quote': 3}):
+                self.assertFalse(bind_quote(path, citation))

@@ -26,6 +26,20 @@ class PlanningCycleTests(unittest.TestCase):
     def generate(self):
         return planning_cycle.generate(self.runner,self.model,'PLAN_SDD_WORK\n',None,'',self.folder)
 
+    def test_generation_budget_renews_only_after_runtime_update(self):
+        with patch('planning_cycle.runtime_revision', return_value='old'), patch.object(
+                self.runner, 'session', side_effect=controller.RetryableSessionError('transport failure')):
+            with self.assertRaisesRegex(controller.Blocked, 'repeated planner'):
+                self.generate()
+        with patch('planning_cycle.runtime_revision', return_value='old'), patch.object(
+                self.runner, 'session', side_effect=AssertionError('no budget reset')):
+            with self.assertRaisesRegex(controller.Blocked, 'repeated planner'):
+                self.generate()
+        with patch('planning_cycle.runtime_revision', return_value='new'):
+            self.assertEqual(controller.read(self.generate()), self.fixture.plan)
+        record = controller.read(next(self.folder.glob('*/generation.json')))
+        self.assertEqual(record['budget_history'][0]['counters']['failures'], 3)
+
     def test_three_interruptions_do_not_exhaust_generation(self):
         for _ in range(3):
             with patch.object(self.runner,'session',side_effect=controller.Interrupted()):

@@ -210,6 +210,24 @@ class ExecutionPortfolioTests(unittest.TestCase):
         first = next(v for v in self.records() if v['model'] == MODELS[0])
         self.assertTrue(all(h['kind'] == 'model' for h in first['history']))
 
+    def test_stalled_execution_renews_budget_after_update_preserving_work(self):
+        self.task['resources'] = ['database']
+        def failed_checks(*args, **kwargs):
+            results = self.checks(*args, **kwargs)
+            results[0]['ok'] = False
+            return results
+        with patch('execution_cycle.runtime_revision', return_value='old'):
+            with self.assertRaisesRegex(Blocked, 'No verified execution candidate'):
+                self.run_task(checks=failed_checks)
+            with self.assertRaisesRegex(Blocked, 'No verified execution candidate'):
+                self.run_task(session=lambda *a, **k: self.fail('must not execute again'))
+        before = {r['model']: r['workspace'] for r in self.records()}
+        with patch('execution_cycle.runtime_revision', return_value='new'):
+            accepted = self.run_task()
+        self.assertEqual(accepted['workspace'], before[accepted['model']])
+        self.assertEqual(accepted['budget_history'][0]['counters']['failures'], 6)
+        self.assertGreaterEqual(len(accepted['history']), 6)
+
     def test_false_review_finding_is_refuted_without_repeating_executor(self):
         self.task['resources'] = ['database']
         issue = 'Required backend behavior is absent'
@@ -244,7 +262,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
                 count += 1
                 report['issue_dispositions'] = {fingerprint(issue)[:16]: {
                     'status': 'refuted', 'requirements': ['REQ-BE'], 'reason': 'Existing implementation covers it.',
-                    'evidence': [{'path': 'backend/value.txt', 'quote': 'invented' if count == 1 else '2'},
+                    'evidence': [{'path': 'backend/missing.txt' if count == 1 else 'backend/value.txt', 'quote': '2'},
                                  {'path':'.review-input/packet/requirements.md','quote':'REQ-BE: value 2'}]}}
                 if count == 2:
                     self.assertIn('Previous protocol error', detail)

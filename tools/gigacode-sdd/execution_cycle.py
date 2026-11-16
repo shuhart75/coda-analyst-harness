@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 from evidence import bind_quote
+from retry_budget import renew, runtime_revision
 from pathlib import Path
 import re
 import shutil
@@ -151,8 +152,8 @@ def adjudicated_report(root, task, original, report):
                 or not isinstance(check.get('reason'), str) or not check['reason'].strip()):
             raise RetryableSessionError('Adjudication coverage status or reason is invalid')
         packet, code, quotes = citations(check.get('evidence'))
-        if not packet or not code or req not in quotes:
-            raise RetryableSessionError('Coverage needs actual code and pinned requirement quotations')
+        if not packet or not code:
+            raise RetryableSessionError('Coverage needs actual code and pinned requirement references')
         if check['status'] == 'gap':
             gaps.add(req)
     findings, optional, external, affected = [], [], False, set()
@@ -292,6 +293,7 @@ def execute_task(runner, task, record):
     # Prepare both copies before either model changes its source. Preserve a
     # legacy in-progress workspace as the first candidate, including its WIP.
     candidates = []
+    revision = runtime_revision()
     for index, model in enumerate(models):
         slot = folder / fingerprint(model)[:16]
         slot.mkdir(exist_ok=True)
@@ -309,6 +311,12 @@ def execute_task(runner, task, record):
                      'failures': 0, 'strategy': 0, 'stagnation': 0, 'status': 'pending',
                      'stage': 'execute', 'history': [], 'evidence_files': {},
                      'origin_workspace': str(origin), 'portfolio_scope': scope}
+            save(path, value)
+        if value.get('status') not in ('accepted', 'external-blocker') and renew(
+                value, {'failures': 0, 'strategy': 0, 'stagnation': 0}, revision):
+            if value.get('status') == 'stalled':
+                value['status'] = 'pending'
+                runner.progress(task['id'] + ' / ' + model + ': обновлена обвязка; новый лимит, рабочие файлы сохранены')
             save(path, value)
         candidates.append((path, value))
     def select(value, failures):
@@ -488,7 +496,7 @@ def execute_task(runner, task, record):
                               'Do not repeat the implementation. Return the normal review schema and additionally '
                               'issue_dispositions: {"issue-id":{"status":"confirmed|refuted|optional|external",'
                               '"requirements":["REQ-id"],"reason":"specific explanation",'
-                              '"evidence":[{"path":"repository-relative file","quote":"exact nonempty substring"}],'
+                              '"evidence":[{"path":"existing repository-relative file","quote":"supporting excerpt or paraphrase"}],'
                               '"outside_required_scope":false}}. Account for exactly every supplied id. '
                               'Confirmed/external defects must identify assigned requirements. Optional means strictly '
                               'outside all pinned requirements and acceptance checks: requirements=[] and '
@@ -498,17 +506,18 @@ def execute_task(runner, task, record):
                               'For changes/blocked, findings contains the original confirmed/external issue texts. '
                               'Also return coverage_checks for EXACTLY every assigned requirement: '
                               '{"REQ-id":{"status":"covered|gap","reason":"specific evidence or gap",'
-                              '"evidence":[{"path":"actual code path","quote":"exact code"},'
-                              '{"path":".review-input/packet/actual-file","quote":"exact requirement with REQ id"}]}}. '
-                              'Every refuted/optional disposition also needs both packet and actual code quotations. '
+                              '"evidence":[{"path":"actual code path","quote":"supporting code reference"},'
+                              '{"path":".review-input/packet/actual-file","quote":"supporting requirement reference"}]}}. '
+                              'Judge semantic support, not spelling, formatting or literal string equality. '
+                              'Every refuted/optional disposition also needs both packet and actual code references. '
                               'A coverage gap must remain confirmed/external, never optional or refuted. '
                               'If coverage inspection discovers a NEW required gap, do not force it into an unrelated '
                               'original issue. Return new_findings:[{"id":"unique-safe-id",'
                               '"text":"concrete new defect","status":"confirmed|external",'
                               '"requirements":["REQ-id"],"reason":"specific explanation",'
-                              '"evidence":[{"path":"actual code path","quote":"exact code"},'
-                              '{"path":".review-input/packet/actual-file","quote":"exact requirement"}]}]. '
-                              'New findings need unique ids/text, assigned requirements, packet and code quotations. '
+                              '"evidence":[{"path":"actual code path","quote":"supporting code reference"},'
+                              '{"path":".review-input/packet/actual-file","quote":"supporting requirement reference"}]}]. '
+                              'New findings need unique ids/text, assigned requirements, packet and code references. '
                               'Include their exact text in findings as well as original confirmed/external issues. '
                               'Never use new_findings to invent optional work or bypass original issue dispositions. '
                               'Read .review-input/packet/ for pinned requirements and use its actual file paths.')
