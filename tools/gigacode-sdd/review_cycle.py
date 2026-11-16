@@ -33,7 +33,9 @@ def validate_result(root, result, expected, requirements, model=None, prior=None
     if model and reported != {model}:
         raise plan_review.ProtocolError('Requested reviewer model was not confirmed by CLI metadata')
     allowed = {'Tool ' + result.get('tool_calls', {}).get(call, 'unknown') + ' (' + call + ') returned an error'
-               for call in audit['no_data_calls']}
+               for call in audit['no_data_calls'] + audit.get('recoverable_error_calls', [])}
+    if result.get('permission_denials'):
+        raise plan_review.ProtocolError('Reviewer permission denial remains unresolved')
     if not result.get('ok'):
         complete = (result.get('returncode') == 0 and result.get('terminal_result')
                     and not result.get('cancelled') and not result.get('timed_out')
@@ -120,11 +122,11 @@ def correction(error, strategy=0):
         instruction = ('Account for every requested requirement and issue identifier. Use exact local file '
                        'references assessed by meaning; preserve unknowns. Include every required JSON field. '
                        'Paraphrases and typos are not defects; verify the underlying assertion against the source.')
-    elif 'outside' in text or 'path' in text or 'disallowed tool' in text or 'candidate' in text:
+    elif 'outside' in text or 'path' in text or 'candidate' in text:
         cause = 'workspace-boundary'
         instruction = ('Read .review-input/plan.json first. Use paths inside this workspace only; '
                        'if a tool requires absolute paths, join the supplied exact workspace root and relative path. '
-                       'List a directory before searching it. Use only the permitted read tools.')
+                       'List a directory before searching it. Prefer dedicated read tools.')
     elif 'transport' in text or 'timeout' in text or 'session' in text:
         cause = 'transport'
         instruction = ('Reuse supported previous analysis as a draft. Inspect only the pinned input and '
@@ -499,7 +501,8 @@ def _review_pair(runner, candidate, detail, requirements):
                   'Read .review-input/previous-findings.json. For EVERY prior issue id return prior_findings: '
                   '{"id":{"status":"resolved|open","evidence":"specific candidate task/file change or remaining gap"}}. '
                   'A pass requires all prior issues resolved with evidence. Include still-open defects in findings. '
-                  'Do not copy a SHA: the controller binds the input. No writes, shell, skills or subagents. '
+                  'Do not copy a SHA: the controller binds the input. No writes. Prefer dedicated read tools '
+                  'over shell or other general-purpose tools. Keep the review in this model session. '
                   'changes means actionable plan defects; blocked is only a necessary external dependency '
                   'or business decision. Mention missing optional evidence without inventing a blocker. '
                   'Do not infer approval or silently drop requirements. Shared writes are serialized. '
@@ -575,7 +578,8 @@ def _review_pair(runner, candidate, detail, requirements):
                   'Use new_findings: [] when there are none. pass requires all requirements covered and all assigned '
                   'findings refuted or optional with evidence; changes means '
                   'confirmed defects remain; blocked means an external issue remains. '
-                  'Use permitted read tools only; no shell, writes, skills or subagents. '
+                  'Prefer dedicated read tools over shell or other general-purpose tools. No writes. '
+                  'Keep the review in this model session and obey actual CLI permission denials. '
                   'Required identifiers: ' + json.dumps(requirements))
             return _checked_session(runner, candidate, scope, folder, model, prompt, requirements,
                 lambda root, result, sha, reqs, selected: validate_adjudication(root, result, sha, reqs, selected, assigned),

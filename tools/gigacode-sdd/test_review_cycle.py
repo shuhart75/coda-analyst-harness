@@ -48,6 +48,35 @@ class ReviewCycleTests(unittest.TestCase):
     def pair(self):
         return review_cycle.review_pair(self.runner, self.candidate, 'test plan', self.runner.cfg['requirements'])
 
+    def test_nonpreferred_tool_failure_does_not_discard_complete_review(self):
+        root = self.fixture.root/'review'; root.mkdir()
+        sha = plan_review.prepare(root, self.runner.root/'input', self.candidate, root/'missing')
+        extra = [
+            {'message': {'content': [{'type': 'tool_use', 'id': 'shell', 'name': 'run_shell_command',
+                                     'input': {'command': 'rg optional-note README.md'}}]}},
+            {'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'shell',
+                                     'is_error': True, 'content': 'No matches; exit code 1'}]}}]
+        result = self.result(root, review_cycle.MODELS[0], extra=extra)
+        self.assertFalse(result['ok'])
+        report, evidence = review_cycle.validate_result(root, result, sha, self.runner.cfg['requirements'], review_cycle.MODELS[0])
+        self.assertEqual(report['verdict'], 'pass')
+        self.assertEqual(evidence['notices'], [])
+        result['permission_denials'] = [{'tool_use_id': 'shell'}]
+        with self.assertRaisesRegex(plan_review.ProtocolError, 'permission denial'):
+            review_cycle.validate_result(root, result, sha, self.runner.cfg['requirements'], review_cycle.MODELS[0])
+
+    def test_nonpreferred_tool_does_not_excuse_invalid_verdict(self):
+        root = self.fixture.root/'review'; root.mkdir()
+        sha = plan_review.prepare(root, self.runner.root/'input', self.candidate, root/'missing')
+        extra = [{'message': {'content': [
+            {'type': 'tool_use', 'id': 'shell', 'name': 'run_shell_command', 'input': {'command': 'pwd'}},
+            {'type': 'tool_result', 'tool_use_id': 'shell', 'is_error': False, 'content': str(root)}]}}]
+        result = self.result(root, review_cycle.MODELS[0], extra=extra,
+            report={'verdict': 'pass', 'findings': ['Unresolved required defect'],
+                    'coverage': {r: 'evidence' for r in self.runner.cfg['requirements']}})
+        with self.assertRaisesRegex(plan_review.ProtocolError, 'contradicts findings'):
+            review_cycle.validate_result(root, result, sha, self.runner.cfg['requirements'], review_cycle.MODELS[0])
+
     def test_parallel_reviews_cached_on_restart_and_bound_by_controller(self):
         barrier = threading.Barrier(2)
         def simultaneous(*args, **kwargs):
