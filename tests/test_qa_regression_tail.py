@@ -74,6 +74,29 @@ class QaRegressionTailTests(unittest.TestCase):
         self.assertEqual(result['q'].finish, date(2026, 10, 29))
         self.assertEqual(dev.actual_finish, '')
 
+    def test_started_unknown_remainder_cannot_supply_qa_completion(self):
+        dev = replace(task('8190', 'FE', 1, '', ''), actual_start='2026-11-13',
+                      status='in-progress', progress=None)
+        for planned_finish in ('', '2026-11-13'):
+            with self.subTest(planned_finish=planned_finish):
+                dev = replace(dev, planned_finish=planned_finish)
+                with self.assertRaisesRegex(ValueError, 'неизвестно окончание'):
+                    self.schedule({'8190': dev, 'q': task('q', 'QA', 3, '', 'Q1')},
+                                  today=date(2026, 11, 16))
+        scheduled = self.schedule({'8190': dev}, today=date(2026, 11, 16))
+        self.assertIsNone(scheduled['8190'].finish)
+        rendered = '\n'.join(tool.render_task(dev, scheduled))
+        self.assertIn('окончание и остаток неизвестны', rendered)
+        self.assertNotIn(' ends ', rendered)
+        self.assertNotIn(' lasts ', rendered)
+        from schedule_diagnostics import resource_report
+        report = resource_report({'8190': dev}, scheduled, self.resources, set(), {},
+                                 date(2026, 11, 16), tool.candidate_resources, tool.needs_forecast_schedule)
+        self.assertFalse(report['forecast_complete'])
+        row = next(row for row in report['days'] if row['resource'] == 'F1')
+        self.assertIsNone(row['free'])
+        self.assertEqual(row['reason'], 'unresolved-workload')
+
     def test_busy_qa_moves_to_next_available_window(self):
         qa = task('q', 'QA', 3, '', 'Q1')
         unavailable = {'Q1': {date(2026, 10, 28)}, 'Q2': {date(2026, 10, 28)}}

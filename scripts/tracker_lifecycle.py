@@ -224,7 +224,9 @@ def calculate_task(history: TaskHistory, participants: Mapping[str, str], rules:
         return value.isoformat() if value else None
 
     cancelled = current_status in codes["cancelled"]
-    not_started = exact and current_status in codes["not_started"] and development_start is None
+    # Current status establishes current work state even when assignment/history
+    # is incomplete. Exact dates still require complete, consistent history.
+    not_started = current_status in codes["not_started"] and development_start is None
     development_state = ("completed" if development_closed else "in-progress"
                          if development_start or current_status in codes["development_started"]
                          else "not-started" if not_started else "unknown")

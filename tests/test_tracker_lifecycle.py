@@ -349,7 +349,7 @@ class TrackerLifecycleTests(unittest.TestCase):
                                      moment(2).isoformat() if status == 'development' else None)
 
     def test_snapshot_status_proves_state_without_inventing_dates(self):
-        for status, state in [('created', 'unknown'), ('development', 'in-progress'), ('review', 'completed')]:
+        for status, state in [('created', 'not-started'), ('development', 'in-progress'), ('review', 'completed')]:
             result = self.task(self.history(current_assignee='developer', current_status=status, complete=False))
             self.assertEqual(result['development']['state'], state)
             self.assertIsNone(result['development']['started_at'])

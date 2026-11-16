@@ -977,6 +977,11 @@ def fixed_task_schedule(
     start, shifted = earliest_task_start(task, closed_days, today)
     if not start:
         return None
+    if (task.actual_start and not task.actual_finish and task.progress != 100
+            and task.status.lower() not in DONE_STATUSES | EXCLUDED_STATUSES
+            and (task.progress is None or task.estimate is None)):
+        return ScheduledTask(start, None, explicit_executor(task, team_resources), shifted,
+                             "Работа начата; остаток и срок завершения неизвестны")
     finish = parse_date(task.actual_finish) or parse_date(task.planned_finish)
     if not finish or finish < start:
         finish = add_open_days(start, task_duration(task), closed_days)
@@ -1090,7 +1095,7 @@ def task_schedules(
             schedules[task_id] = scheduled
             reserve_resource(
                 occupied,
-                scheduled.assignee,
+                scheduled.assignee if scheduled.finish else "",
                 scheduled.start,
                 scheduled.finish,
                 task_duration(task) if task.estimate is not None else None,
@@ -1099,7 +1104,7 @@ def task_schedules(
 
     for task_id, task in tasks.items():
         scheduled = schedules.get(task_id)
-        if (not scheduled or task.actual_finish or task.status.lower() in DONE_STATUSES
+        if (not scheduled or not scheduled.finish or task.actual_finish or task.status.lower() in DONE_STATUSES
                 or task.progress == 100 or scheduled.assignee not in (resource_coefficients or {})):
             continue
         if task.progress is None or task.estimate is None or not task.actual_start:
@@ -1353,6 +1358,11 @@ def render_task(task: Task, schedules: dict[str, ScheduledTask]) -> list[str]:
     scheduled = schedules.get(task.task_id)
     if not scheduled:
         return [f"' Skip task without start date: {task.task_id}"]
+    if scheduled.finish is None:
+        label = plantuml_label(f"{role_prefixed_summary(task)} (начата; окончание и остаток неизвестны)")
+        return [f"[{label}] as [{alias}] happens at {fmt_date(scheduled.start)}",
+                f"[{alias}] is colored in {role_color(role_for_task(task))}",
+                f"' Unresolved future workload: {task.task_id}; {scheduled.resource_note}"]
     assignee = scheduled.assignee
     assignee_part = f" on {{{assignee}}}" if assignee else ""
     label = role_prefixed_summary(task)

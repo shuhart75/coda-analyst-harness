@@ -232,3 +232,6 @@ Do not change quarter-plan or commander-plan baselines while only updating real 
 и проверенные ретроспективы `quarters/<quarter>/reports/*.{md,json}` согласно
 core/customer-accounting.md. Область работы должна включать затронутые поставки и кварталы.
 Отчёт не актуализирует статусы задач и не требует изменения утверждённых планов.
+
+После успешной генерации проверь и обнови бизнес-план релизов затронутых
+кварталов по `core/release-plan.md`, включая отметку сверки перед сохранением.
