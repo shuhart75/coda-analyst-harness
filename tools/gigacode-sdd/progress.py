@@ -1,11 +1,23 @@
 """Thread-safe terminal status lines; plain periodic messages for redirected output."""
 from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 import shutil
 import sys
 import threading
 import time
 import unicodedata
+
+SESSION_IDENTITY = ContextVar('sdd_session_identity', default='')
+
+
+@contextmanager
+def session_identity(value):
+    token = SESSION_IDENTITY.set(value)
+    try:
+        yield
+    finally:
+        SESSION_IDENTITY.reset(token)
 
 
 def elapsed(seconds):

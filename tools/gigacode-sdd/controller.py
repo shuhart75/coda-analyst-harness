@@ -26,7 +26,7 @@ import plan_review
 import review_cycle
 import diagnostics
 import operator_input
-from progress import Progress
+from progress import Progress, SESSION_IDENTITY
 
 class Blocked(RuntimeError):
     pass
@@ -458,7 +458,12 @@ class Runner:
         session_log = self.logdir(name)
         full_prompt = context + '\n' + prompt
         decision_sha = digest(self.root / 'decision.md') if (self.root / 'decision.md').is_file() else None
-        with self.activity('Сессия ' + name + ' / ' + cwd + ' / ' + role + (' / ' + model if model else '')):
+        identity = SESSION_IDENTITY.get()
+        activity = (identity + ' / ' + model if identity and model else identity)
+        activity = (activity + ' / ' if activity else '') + 'Сессия ' + name + ' / ' + cwd + ' / ' + role
+        if model and not identity:
+            activity += ' / ' + model
+        with self.activity(activity):
             cli = [*self.cfg['cli'], '--model', model] if model else self.cfg['cli']
             result = run_session(cli, under(root, cwd), full_prompt,
                              session_log, approval_mode='plan' if role == 'review' else self.cfg['approval_mode'],
