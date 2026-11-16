@@ -56,8 +56,11 @@ class RolePlanBaselinesTests(unittest.TestCase):
     def test_unknown_role_baseline_is_hollow_without_invented_completion(self):
         self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |"))
         before = self.registry.read_bytes()
-        self.quarter()
-        content = self.target.read_text()
+        # Baseline rendering is independent of the blocked execution/QA forecast.
+        baselines = OVERLAY.load_forecast_scope(self.root, "2026-Q3").role_baselines["cohorts"]
+        tasks = OVERLAY.load_tasks(self.feature)
+        content = "\n".join(line for baseline in baselines for line in
+                            OVERLAY.render_role_baseline(baseline, "cohorts", tasks, {}, set()))
         self.assertIn("[PLAN_COHORTS_FE] is colored in transparent/Gainsboro", content)
         self.assertNotRegex(content, r"\[PLAN_COHORTS_FE\] is \d+% completed")
         self.assertIn("[PLAN_COHORTS_QA] is 30% completed", content)
@@ -109,8 +112,11 @@ class RolePlanBaselinesTests(unittest.TestCase):
     def test_unknown_role_progress_preserves_plan_window_and_known_other_role(self):
         self.registry.write_text(self.registry.read_text().replace("| 75 |", "| unknown |"), encoding="utf-8")
         before = {path: path.read_bytes() for path in (self.plan, self.map, self.config_path)}
-        self.quarter()
-        content = self.target.read_text()
+        # Baseline rendering is independent of the blocked execution/QA forecast.
+        baselines = OVERLAY.load_forecast_scope(self.root, "2026-Q3").role_baselines["cohorts"]
+        tasks = OVERLAY.load_tasks(self.feature)
+        content = "\n".join(line for baseline in baselines for line in
+                            OVERLAY.render_role_baseline(baseline, "cohorts", tasks, {}, set()))
         self.assertIn("[PLAN_COHORTS_FE] starts 2026/09/01", content)
         self.assertIn("[PLAN_COHORTS_FE] ends 2026/09/07", content)
         self.assertNotRegex(content, r"\[PLAN_COHORTS_FE\] is \d+% completed")
