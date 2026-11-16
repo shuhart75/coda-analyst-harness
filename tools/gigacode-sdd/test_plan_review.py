@@ -29,7 +29,7 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'outside'):
                 plan_review.audit(root, events, sha)
             write('.review-input/plan.json', 'agent')
-            with self.assertRaisesRegex(ValueError, 'disallowed'):
+            with self.assertRaisesRegex(ValueError, 'did not read'):
                 plan_review.audit(root, events, sha)
             write('backend/missing.txt')
             with self.assertRaisesRegex(ValueError, 'did not read'):
@@ -38,16 +38,30 @@ class BoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'changed'):
                 plan_review.audit(root, events, sha)
 
-    def test_only_exact_noops_are_tolerated(self):
-        for command in ('true', 'echo no'):
-            self.assertTrue(plan_review.harmless_shell_call({'name':'run_shell_command',
-                'input':{'command':command,'description':'no-op'}}))
-        for command in ('true; touch x', 'echo no > x', 'true && pwd', '$(true)',
-                        'echo `pwd`', 'true\npwd', ' true', 'echo no ', 'pwd', 'cat secret'):
-            self.assertFalse(plan_review.harmless_shell_call({'name':'run_shell_command',
-                'input':{'command':command}}))
-        self.assertFalse(plan_review.harmless_shell_call({'name':'run_shell_command',
-            'input':{'command':'true','cwd':'..'}}))
+    def test_shell_candidate_output_is_bound_without_executing_command_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root/'.review-input').mkdir()
+            candidate = root/'.review-input/plan.json'
+            candidate.write_text('{"tasks": [{"id": "be"}]}\n')
+            from controller import digest
+            events = root/'events.jsonl'
+            def write(body, error=False, **args):
+                events.write_text(json.dumps({'message': {'content': [
+                    {'type': 'tool_use', 'name': 'run_shell_command', 'id': 'shell',
+                     'input': {'command': 'cat .review-input/plan.json', **args}},
+                    {'type': 'tool_result', 'tool_use_id': 'shell', 'is_error': error, 'content': body}]}})+'\n')
+            write([{'type': 'text', 'text': 'stdout:\n'+candidate.read_text()}])
+            self.assertEqual(plan_review.audit(root, events, digest(candidate))['notices'], [])
+            write('{"tasks": []}')
+            with self.assertRaisesRegex(ValueError, 'did not read'):
+                plan_review.audit(root, events, digest(candidate))
+            write(candidate.read_text(), cwd='..')
+            with self.assertRaisesRegex(ValueError, 'outside'):
+                plan_review.audit(root, events, digest(candidate))
+            write('Filesystem Guard denied read', error=True)
+            with self.assertRaisesRegex(ValueError, 'denial'):
+                plan_review.audit(root, events, digest(candidate))
 
     def test_review_binds_candidate_without_trusting_model_sha(self):
         f = fixtures.ImportTests('test_import_preserves_checkpoint_and_requires_review')
@@ -78,9 +92,8 @@ class BoundaryTests(unittest.TestCase):
             self.assertNotIn('protocol_warnings', accepted)
             self.assertFalse((root/'review-audit.json').exists())
         with events.open('a') as stream:
-            stream.write(json.dumps({'message':{'content':[{'type':'tool_use','id':'bad','name':'run_shell_command',
-                'input':{'command':'true; touch x'}},
-                {'type':'tool_result','tool_use_id':'bad','is_error':False,'content':'ok'}]}})+'\n')
+            stream.write(json.dumps({'message':{'content':[{'type':'tool_use','id':'shell','name':'run_shell_command',
+                'input':{'command':'git status --short'}},
+                {'type':'tool_result','tool_use_id':'shell','is_error':False,'content':''}]}})+'\n')
         with patch.object(f.runner,'session',return_value=result):
-            with self.assertRaisesRegex(Blocked,'disallowed tool'):
-                f.runner.review(root,'.','review',['REQ-BE','REQ-FE'],'plan-review')
+            self.assertEqual(f.runner.review(root,'.','review',['REQ-BE','REQ-FE'],'plan-review')['verdict'], 'pass')

@@ -14,6 +14,17 @@ class ControllerReviewTests(unittest.TestCase):
     setUp = fixtures.ControllerE2E.setUp
     task = fixtures.ControllerE2E.task
 
+    def test_review_tool_preferences_do_not_allow_workspace_mutation(self):
+        context = self.runner.context('review')
+        self.assertIn('discouraged, not forbidden by tool name', context)
+        self.assertNotIn('do not invoke Bash', context)
+        def mutated(*args, **kwargs):
+            (self.runner.main/'backend/value.txt').write_text('changed by review tool')
+            return {'cleanup': {}}
+        with patch('controller.run_session', side_effect=mutated):
+            with self.assertRaisesRegex(controller.Blocked, 'Read-only session modified its workspace'):
+                self.runner.session(self.runner.main, '.', 'review', 'review', 'plan-review')
+
     def test_foreign_absolute_and_drive_relative_ownership_is_rejected(self):
         for value in ('C:/outside', 'C:outside', '\\\\server\\share\\file', 'backend\\file'):
             with self.subTest(value=value), self.assertRaises(controller.Blocked):

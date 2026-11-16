@@ -18,6 +18,28 @@ class ReviewRecoveryTests(unittest.TestCase):
     fake = fixtures.ReviewCycleTests.fake
     pair = fixtures.ReviewCycleTests.pair
 
+    def test_saved_shell_review_revalidated_without_fresh_model_call(self):
+        original = plan_review.audit
+        def old_gate(root, events, expected):
+            audit = original(root, events, expected)
+            if 'run_shell_command' in Path(events).read_text():
+                raise plan_review.ProtocolError('Plan review used a disallowed tool: run_shell_command')
+            return audit
+        def answer(root, cwd, prompt, role, name, model=None):
+            extra = [{'message': {'content': [
+                {'type': 'tool_use', 'id': 'shell', 'name': 'run_shell_command', 'input': {'command': 'git status --short'}},
+                {'type': 'tool_result', 'tool_use_id': 'shell', 'is_error': False, 'content': ''}]}}]
+            return self.result(root, model, extra=extra if model == review_cycle.MODELS[1] else None)
+        with patch('plan_review.audit', side_effect=old_gate), patch.object(self.runner, 'session', side_effect=answer):
+            with self.assertRaisesRegex(Blocked, 'budget exhausted'):
+                self.pair()
+        paths = list((self.runner.root/'review-cycles').glob('*/*/attempt-*.json'))
+        streams = {p: Path(json.loads(p.read_text())['result']['events_path']).read_bytes() for p in paths}
+        with patch.object(self.runner, 'session', side_effect=AssertionError('do not rerun usable shell review')):
+            self.assertEqual(self.pair()['verdict'], 'pass')
+        for p, data in streams.items():
+            self.assertEqual(Path(json.loads(p.read_text())['result']['events_path']).read_bytes(), data)
+
     def test_new_runtime_budget_preserves_history_and_successful_peer(self):
         victim = review_cycle.MODELS[1]
         def broken(root, cwd, prompt, role, name, model=None):

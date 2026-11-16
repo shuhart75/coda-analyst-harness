@@ -417,14 +417,14 @@ class Runner:
               'Do not edit permission settings, hooks or input packet. Shell/checks must use Nexus only. '
               'This workspace is an isolated copy of existing PoC work. Preserve that work.\n'
             + ('READ_ONLY_RESEARCH\n'
-               'For this planning/review session, do not invoke Bash or run_shell_command. '
-               'Use read_file, list_directory, glob and grep_search to inspect existing files. '
-               'Pass the same restriction to subagents and skills. Do not run product tests, '
-               'Git commands, executable discovery, wrappers or shell pipelines. '
+               'Prefer read_file, list_directory, glob and grep_search to inspect existing files. '
+               'Shell and other general-purpose tools are discouraged, not forbidden by tool name. '
+               'If needed, use them for read-only research inside this workspace. '
+               'Do not run product tests or modify files, Git state, permissions or services. '
                'Derive proposed check commands from existing build scripts, package manifests and '
                'recorded check reports; execution belongs to the controller/executor. '
-               'If availability of a tool cannot be established from files, state that limitation '
-               'instead of attempting shell commands. Do not bypass any CLI denial.\n'
+               'A shell call is not proof of failure or success; justify conclusions with the pinned evidence. '
+               'Do not bypass any CLI denial.\n'
                if role == 'review' else '')
             + history_hint
             + ('Analyst clarification (cannot change pinned scope):\n' + operator_input.prompt(self)
@@ -451,7 +451,7 @@ class Runner:
             context += ('\nPLAN_REVIEW_BOUNDARY: Read only within the current workspace. '
                         'The ONLY plan is .review-input/plan.json. Read that file explicitly. '
                         'Never search parent directories, run archives, previous plans or reviews. '
-                        'Use only read_file, list_directory, glob, grep_search; no subagents/skills/shell. '
+                        'Prefer read_file, list_directory, glob, grep_search; keep the review in this model session. '
                         'External environment availability is unknown unless evidenced in this copy.\n')
         if role == 'review':
             context += '\n' + plan_review.path_instructions(root) + '\n'
