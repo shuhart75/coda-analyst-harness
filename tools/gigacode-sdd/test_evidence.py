@@ -25,6 +25,8 @@ class QuoteTests(unittest.TestCase):
                 ('source.py', '**Then** ready', 'Then ready'),
                 ('source.md', '```python\n**Then** ready\n```', 'Then ready'),
                 ('source.md', '`**Then** ready`', 'Then ready'),
+                ('source.md', '``code\n**Then** ready\ncode``', 'Then ready'),
+                ('source.md', '> ```python\n> **Then** ready\n> ```', 'Then ready'),
                 ('source.md', '    **Then** ready', 'Then ready'),
                 ('source.md', r'\**Then** ready', 'Then ready'),
                 ('source.md', '**Then** ready\n**Then** ready', 'Then ready'),

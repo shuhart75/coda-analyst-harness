@@ -7,6 +7,9 @@ def _emphasis_view(text):
     removed = set()
     offset = 0
     fence = None
+    # Markdown code spans may cross line boundaries. Match whole delimiter
+    # runs so double backticks are not mistaken for two empty single spans.
+    code = list(re.finditer(r'(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)', text, re.DOTALL))
     for line in text.splitlines(keepends=True):
         marker = re.match(r' {0,3}(`{3,}|~{3,})', line)
         if marker:
@@ -21,10 +24,9 @@ def _emphasis_view(text):
             offset += len(line)
             continue
         # Code spans are literal, including emphasis characters inside them.
-        code = list(re.finditer(r'(`+).*?\1', line))
         for match in re.finditer(r'(?<![\w\\*])(?P<mark>\*\*|__)(?P<body>[^*_`\n]+)(?P=mark)(?![\w*])', line):
             if match['body'] != match['body'].strip() or any(
-                    match.start() < part.end() and match.end() > part.start() for part in code):
+                    offset + match.start() < part.end() and offset + match.end() > part.start() for part in code):
                 continue
             removed.update(range(offset + match.start(), offset + match.start('body')))
             removed.update(range(offset + match.end('body'), offset + match.end()))
