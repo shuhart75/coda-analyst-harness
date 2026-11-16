@@ -123,6 +123,39 @@ class ReviewCycleTests(unittest.TestCase):
         with patch.object(self.runner,'session',side_effect=AssertionError('no rerun')):
             with self.assertRaisesRegex(Blocked,'evidence changed'):self.pair()
 
+    def test_local_absolute_path_argument_rejection_does_not_discard_report(self):
+        root = self.fixture.root/'review'; root.mkdir()
+        sha = plan_review.prepare(root, self.runner.root/'input', self.candidate, root/'missing')
+        def extra(path, body):
+            return [{'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 'listing',
+                     'name': 'list_directory', 'input': {'path': path}}]}},
+                    {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'listing',
+                     'is_error': True, 'content': body}]}}]
+        result = self.result(root, review_cycle.MODELS[0], extra=extra('frontend', 'Path must be absolute: frontend'))
+        report, evidence = review_cycle.validate_result(root, result, sha, self.runner.cfg['requirements'])
+        self.assertEqual(report['verdict'], 'pass')
+        self.assertIn('listing', evidence['no_data_calls'])
+        for path, body in [('frontend', 'Path must be absolute: frontend\npartial data'),
+                           ('frontend', 'Permission denied'),
+                           ('frontend', 'Path must be absolute: different'),
+                           ('../foreign', 'Path must be absolute: ../foreign')]:
+            with self.subTest(body=body), self.assertRaises(plan_review.ProtocolError):
+                review_cycle.validate_result(root, self.result(root, review_cycle.MODELS[0], extra=extra(path, body)),
+                                             sha, self.runner.cfg['requirements'])
+
+    def test_absolute_path_rejection_is_not_a_successful_candidate_read(self):
+        root = self.fixture.root/'review'; root.mkdir()
+        sha = plan_review.prepare(root, self.runner.root/'input', self.candidate, root/'missing')
+        result = self.result(root, review_cycle.MODELS[0])
+        events = Path(result['events_path'])
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        item = rows[2]['message']['content'][0]
+        item.update(is_error=True, content='Path must be absolute: .review-input/plan.json')
+        events.write_text('\n'.join(map(json.dumps, rows)) + '\n')
+        result = parse_events(events); result['returncode'] = 0
+        with self.assertRaisesRegex(plan_review.ProtocolError, 'did not read'):
+            review_cycle.validate_result(root, result, sha, self.runner.cfg['requirements'])
+
     def test_new_candidate_does_not_reuse_old_pass(self):
         with patch.object(self.runner,'session',side_effect=self.fake):self.pair()
         value=json.loads(self.candidate.read_text());value['tasks'][0]['prompt']+=' More detail.';save(self.candidate,value)

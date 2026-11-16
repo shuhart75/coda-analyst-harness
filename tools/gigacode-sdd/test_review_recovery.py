@@ -6,7 +6,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from controller import Blocked, Runner, save
+from controller import Blocked, Runner, save, parse_json
 import plan_review
 import review_cycle
 import test_review_cycle as fixtures
@@ -17,6 +17,57 @@ class ReviewRecoveryTests(unittest.TestCase):
     result = fixtures.ReviewCycleTests.result
     fake = fixtures.ReviewCycleTests.fake
     pair = fixtures.ReviewCycleTests.pair
+
+    def exhausted_wrapped_review(self):
+        victim = review_cycle.MODELS[1]
+        def wrapped(root, cwd, prompt, role, name, model=None):
+            result = self.fake(root, cwd, prompt, role, name, model)
+            if model == victim:
+                result['text'] = 'Все проверки завершены. Итог ревью:\n\n```json\n' + result['text'] + '\n```'
+                events = Path(result['events_path'])
+                rows = [json.loads(line) for line in events.read_text().splitlines()]
+                rows[-1]['result'] = result['text']
+                events.write_text('\n'.join(map(json.dumps, rows)) + '\n', encoding='utf-8')
+            return result
+        def old_parser(text):
+            if text.startswith('Все проверки'):
+                raise ValueError('Expecting value: line 1 column 1 (char 0)')
+            return parse_json(text)
+        with patch('controller.parse_json', side_effect=old_parser), patch.object(self.runner, 'session', side_effect=wrapped):
+            with self.assertRaisesRegex(Blocked, 'budget exhausted'):
+                self.pair()
+        paths = sorted((self.runner.root/'review-cycles').glob('*/review-*/attempt-*.json'))
+        return [p for p in paths if json.loads(p.read_text())['model'] == victim]
+
+    def test_revalidates_old_protocol_error_even_after_exhausted_budget(self):
+        paths = self.exhausted_wrapped_review()
+        counts = dict(self.counts)
+        self.assertEqual(len(paths), 4)
+        self.runner = Runner(self.fixture.config)
+        with patch.object(self.runner, 'session', side_effect=AssertionError('no repeated models')):
+            self.assertEqual(self.pair()['verdict'], 'pass')
+        self.assertEqual(self.counts, counts)
+        record = json.loads(paths[0].read_text())
+        self.assertEqual(record['status'], 'complete')
+        self.assertEqual(record['recovery']['from_status'], 'protocol-error')
+
+    def test_changed_failed_receipt_still_blocks_recovery(self):
+        paths = self.exhausted_wrapped_review()
+        record = json.loads(paths[0].read_text())
+        events = Path(record['result']['events_path'])
+        events.write_text(events.read_text() + '\n')
+        with patch.object(self.runner, 'session', side_effect=AssertionError('no repeated models')):
+            with self.assertRaisesRegex(Blocked, 'evidence changed'):
+                self.pair()
+
+    def test_later_safety_error_cannot_be_hidden_by_earlier_recovery(self):
+        paths = self.exhausted_wrapped_review()
+        record = json.loads(paths[-1].read_text())
+        record.update(status='safety-error', error='Protected input changed')
+        save(paths[-1], record)
+        with patch.object(self.runner, 'session', side_effect=AssertionError('no repeated models')):
+            with self.assertRaisesRegex(Blocked, 'Protected input changed'):
+                self.pair()
 
     def test_three_interruptions_do_not_exhaust_budget_or_repeat_peer(self):
         class Interrupted(Exception):

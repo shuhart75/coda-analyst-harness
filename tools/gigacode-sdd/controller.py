@@ -101,10 +101,27 @@ def file_manifest(root):
 
 def parse_json(text):
     text = text.strip()
-    if text.startswith('```'):
-        text = re.sub(r'^```(?:json)?\s*', '', text)
-        text = re.sub(r'\s*```$', '', text)
-    value = json.loads(text)
+    try:
+        value = json.loads(text)
+    except ValueError:
+        # Decode exactly one whole object. Never scan past a broken object to
+        # find a nested fragment, or choose between contradictory reports.
+        if '```' in text:
+            match = re.fullmatch(r'(?P<before>.*?)^```(?:json)?[^\S\n]*\n'
+                                 r'(?P<body>.*?)^```[^\S\n]*(?:\n(?P<after>.*))?',
+                                 text, re.MULTILINE | re.DOTALL)
+            if not match or '```' in match['body']:
+                raise Blocked('Agent result must contain one unambiguous JSON object')
+            value = json.loads(match['body'])
+            surrounding = match['before'] + (match['after'] or '')
+        else:
+            start = re.search(r'[\[{]', text)
+            if not start or start[0] != '{':
+                raise Blocked('Agent result must contain one unambiguous JSON object')
+            value, end = json.JSONDecoder().raw_decode(text[start.start():])
+            surrounding = text[:start.start()] + text[start.start() + end:]
+        if any(c in surrounding for c in ('```', '{', '}', '[', ']')):
+            raise Blocked('Agent result must contain one unambiguous JSON object')
     if not isinstance(value, dict):
         raise Blocked('Agent result must be a JSON object')
     return value
@@ -427,7 +444,7 @@ class Runner:
                    if name == 'preflight' else self.context(role, name in ('plan', 'plan-review')))
         if role == 'review' and (Path(root) / '.review-input/packet').is_dir():
             context = context.replace(str(self.root / 'input'), str(Path(root) / '.review-input/packet'))
-            context += '\nRead evidence only inside this review copy. The pinned packet is .review-input/packet. Use repository-relative paths.\n'
+            context += '\nRead evidence only inside this review copy. The pinned packet is .review-input/packet.\n'
         if name == 'plan-review':
             context = self.context(role, False).replace(str(self.root / 'input'),
                                                        str(Path(root) / '.review-input/packet'))
@@ -436,6 +453,8 @@ class Runner:
                         'Never search parent directories, run archives, previous plans or reviews. '
                         'Use only read_file, list_directory, glob, grep_search; no subagents/skills/shell. '
                         'External environment availability is unknown unless evidenced in this copy.\n')
+        if role == 'review':
+            context += '\n' + plan_review.path_instructions(root) + '\n'
         session_log = self.logdir(name)
         full_prompt = context + '\n' + prompt
         decision_sha = digest(self.root / 'decision.md') if (self.root / 'decision.md').is_file() else None

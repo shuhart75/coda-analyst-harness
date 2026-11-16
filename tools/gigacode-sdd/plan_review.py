@@ -27,6 +27,24 @@ class ProtocolError(ValueError):
     """Review evidence cannot be used; a fresh reviewer attempt may repair it."""
 
 
+def path_instructions(root):
+    return ('Tool paths must stay inside this exact workspace root: ' + json.dumps(str(Path(root).resolve()))
+            + '. Use relative paths where supported. If a tool requires an absolute path, '
+            'join this exact root with the relative path; never guess another root or search parents. '
+            'Paths in the returned JSON evidence remain repository-relative.')
+
+
+def path_argument_rejected(item, args, name):
+    """A known local argument rejection occurs before any filesystem read."""
+    key = {'read_file': 'file_path', 'list_directory': 'path'}.get(name)
+    if name == 'list_directory' and 'path' not in args:
+        key = 'directory_path'
+    value = args.get(key)
+    return (isinstance(value, str) and bool(value) and not Path(value).is_absolute()
+            and item.get('is_error') is True
+            and item.get('content') == 'Path must be absolute: ' + value)
+
+
 def no_data(item):
     """Recognize exact tool outcomes, never infer no disclosure from is_error alone."""
     if not isinstance(item, dict):
@@ -82,6 +100,11 @@ def audit(root, events, expected):
             args = item.get('input')
             if not isinstance(args, dict):
                 raise ProtocolError('Plan review tool arguments unavailable')
+            argument_rejected = path_argument_rejected(returned[0], args, name)
+            if argument_rejected:
+                harmless_failures.append(item.get('id'))
+                notices.append({'call': item.get('id'), 'tool': name,
+                                'outcome': 'local path argument rejected before read'})
             for key in keys[name]:
                 value = args.get(key)
                 if value is None:
@@ -98,7 +121,7 @@ def audit(root, events, expected):
                                      + str(name) + ' call=' + str(item.get('id', 'unknown'))
                                      + ' ' + key + '=' + value)
                 if (name == 'read_file' and key == 'file_path' and path == candidate
-                        and not empty and len(returned) == 1 and returned[0].get('is_error') is False
+                        and not empty and not argument_rejected and len(returned) == 1 and returned[0].get('is_error') is False
                         and bool(returned[0].get('content'))):
                     read_candidate = True
             if name == 'read_file' and 'file_path' not in args:
