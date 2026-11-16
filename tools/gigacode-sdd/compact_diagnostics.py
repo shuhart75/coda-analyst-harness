@@ -254,6 +254,9 @@ def collect_compact(config, destination=None, error=None):
     out.json_file(config)
     state = out.json_file(root / 'state.json', raw=True) if (root/'state.json').exists() else {}
     state = state if isinstance(state, dict) else {}
+    for name in ('planning-portfolio.json', 'review-ledger.json'):
+        if (root/name).exists():
+            out.json_file(root/name)
     candidate_record = state.get('plan_candidate')
     candidate = candidate_record.get('file', 'plan-candidate.json') if isinstance(candidate_record, dict) else 'plan-candidate.json'
     if isinstance(candidate, str) and re.fullmatch(r'plan-candidate(?:-[a-f0-9]{32})?\.json', candidate):
@@ -282,9 +285,17 @@ def collect_compact(config, destination=None, error=None):
                 groups.append(group)
         # Errors naming a particular cycle take precedence over unrelated recent work.
         groups.sort(key=lambda group: (0 if group in str(error) else 1))
-        selected_groups = groups[:MAX_CYCLES if dirname == 'execution-cycles' else 1]
-        selected = [p for p in ordered if p.relative_to(base).parts[0] in selected_groups
-                    and (p.name.startswith('attempt-') or p.name in ('candidate.json', 'fatal.json', 'selection.json'))]
+        selected_groups = groups[:MAX_CYCLES]
+        queues = [[p for p in ordered if p.relative_to(base).parts[0] == group
+                   and (p.name.startswith('attempt-') or p.name in
+                        ('candidate.json', 'fatal.json', 'selection.json', 'generation.json', 'plan.json',
+                         'failure.json', 'comparison.json'))] for group in selected_groups]
+        # Round-robin prevents a busy candidate from hiding its parallel peers.
+        selected = []
+        while any(queues):
+            for queue in queues:
+                if queue:
+                    selected.append(queue.pop(0))
         inventory[dirname] = {'json_files_total': len(records), 'selected_attempts': min(len(selected), MAX_ATTEMPTS),
                               'cycles_selected': selected_groups, 'old_history': 'retained locally'}
         for path in selected[:MAX_ATTEMPTS]:

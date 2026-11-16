@@ -28,6 +28,26 @@ def read_sections(path):
 
 
 class BundleTests(unittest.TestCase):
+    def test_compact_includes_parallel_reviews_and_planner_records(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)/'runs/id'; root.mkdir(parents=True)
+            config = root/'config.json'; config.write_text('{}')
+            for cycle in ('candidate-a', 'candidate-b'):
+                slot = root/'review-cycles'/cycle/'model'; slot.mkdir(parents=True)
+                for attempt in range(15):
+                    (slot/('attempt-' + str(attempt) + '.json')).write_text(json.dumps(
+                        {'candidate_sha256': cycle, 'attempt': attempt}))
+            slot = root/'planning-cycles/portfolio/model'; slot.mkdir(parents=True)
+            for name in ('generation', 'plan', 'failure'):
+                (slot/(name + '.json')).write_text(json.dumps({'kind': name}))
+            output = diagnostics.collect(config, error='interrupted')
+            sections = read_sections(output)
+            for cycle in ('candidate-a', 'candidate-b'):
+                self.assertEqual(sum('/' + cycle + '/' in key for key in sections), 12)
+            for name in ('generation', 'plan', 'failure'):
+                self.assertIn('compact/planning-cycles/portfolio/model/' + name + '.json', sections)
+            self.assertLessEqual(output.stat().st_size, compact_diagnostics.MAX_REPORT_BYTES)
+
     def test_complete_atomic_bundle_excludes_workspaces_and_links(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder) / 'runs/id'
