@@ -116,6 +116,7 @@ class QuarterDeliveryIntegrationTests(unittest.TestCase):
         self.assertNotEqual(changed.returncode, 0)
         self.assertIn('approved plan was modified', changed.stdout + changed.stderr)
 
+    @patch.dict(os.environ, {"HARNESS_TODAY": "2026-09-09"})
     def test_execution_save_checks_physical_paths_against_delivery_scope(self):
         self.generate()
         workspace = self.root / 'test-harness'

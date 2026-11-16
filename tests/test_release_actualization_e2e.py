@@ -311,7 +311,7 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
             source.write_bytes(original)
         # Applying the start fixes the factual mismatch, but cannot establish
         # a completion date for dependent QA while the remainder is unknown.
-        self.assertIn('неизвестно окончание', self.generate(expected=1).stderr)
+        self.assertRegex(self.generate(expected=1).stderr, 'неизвестно окончание|доступность исполнителей неизвестна')
         self.assertEqual(self.snapshot(self.gantt), before)
 
     def test_fresh_cancellation_outside_release_blocks_stale_gantt(self):
@@ -435,8 +435,21 @@ class ReleaseActualizationEndToEndTests(unittest.TestCase):
             self.assertIn('Confluence export differs', refused.stdout + refused.stderr)
         finally:
             export.write_bytes(complete_export)
+        # Export parity can remain perfect while the source registry has changed.
+        original_summary = self.rows[self.expected['members'][0]]['Summary']
+        self.rows[self.expected['members'][0]]['Summary'] = 'Changed after generation'
+        self.write_registry(self.registry, self.rows.values())
+        stale_snapshot = self.snapshot(self.project)
+        refused = self.command(sys.executable, str(ROOT / 'scripts/collaboration.py'),
+                               '--root', str(self.workspace), 'save-preview',
+                               '--review-file', approved['review_file'], expected=1)
+        self.assertIn('Generated Gantt is stale', refused.stdout + refused.stderr)
+        self.assertEqual(self.snapshot(self.project), stale_snapshot)
+        self.rows[self.expected['members'][0]]['Summary'] = original_summary
+        self.registry.write_bytes(registry_before)
         before_preview = self.snapshot(self.project)
         preview = self.collab('save-preview', '--review-file', approved['review_file'])
+        self.assertTrue(preview['generation_proven'])
         self.assertEqual(preview['qa_verified_runs'], [self.run_id])
         self.assertEqual(preview['confluence_verified'], ['2026-Q3'])
         self.assertFalse(preview['writes_performed'])

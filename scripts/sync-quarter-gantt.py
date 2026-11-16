@@ -302,6 +302,7 @@ def main() -> int:
     parser.add_argument("gantt_dir")
     parser.add_argument("--actual-only", action="store_true", help="Не изменять quarter-plan и commander-plan")
     parser.add_argument('--review-file', action='append', default=[], help='Saved application review; repeat for each tracker run')
+    parser.add_argument('--check', action='store_true', help='Compare regenerated outputs without writing files')
     args = parser.parse_args()
     gantt_dir = Path(args.gantt_dir).resolve()
     from tracker_development_application import check_generation
@@ -455,6 +456,13 @@ def main() -> int:
             raise ValueError("Ролевой PLAN изменился во время генерации")
     from focused_gantt import prepare_focus
     prepare_focus(gantt_dir, overlay, outputs, focus_sections, header_lines, closed_days, order)
+    if args.check:
+        stale = [str(path) for path, content in outputs.items()
+                 if not path.is_file() or path.read_text(encoding='utf-8') != content]
+        if stale:
+            raise ValueError('Generated Gantt is stale; regenerate before saving: ' + ', '.join(stale))
+        print('Verified regenerated Gantt and resource reports; no files written')
+        return 0
     overlay.publish_outputs(outputs)
     for path in outputs:
         print(f"Wrote {path}", flush=True)

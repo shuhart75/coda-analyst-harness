@@ -373,12 +373,28 @@ class ExecutionCollaborationTests(unittest.TestCase):
         with patch.dict(os.environ, self.environment), patch('tracker_qa_application.check_qa_application', return_value=2):
             with self.assertRaisesRegex(ValueError, 'QA application check failed'):
                 check_save(self.workspace, self.project, work, set(), [str(review)], collaboration)
-        with patch.dict(os.environ, self.environment), patch('tracker_qa_application.check_qa_application', return_value=0):
+        with patch.dict(os.environ, self.environment), patch('tracker_qa_application.check_qa_application', return_value=0), patch('execution_collaboration.verify_generation') as generated:
             checked = check_save(self.workspace, self.project, work, set(), [str(review)], collaboration)
             self.assertEqual(checked['qa_verified_runs'], ['20260922T085505Z-12345678'])
+            generated.assert_called_once_with(self.gantt, [str(review)])
+            self.assertTrue(checked['generation_proven'])
         review.write_text(json.dumps({'run_id': '20260922T085505Z-12345678', 'status': 'history-collection-incomplete'}))
         with patch.dict(os.environ, self.environment), self.assertRaisesRegex(ValueError, 'Complete history review'):
             check_save(self.workspace, self.project, work, set(), [str(review)], collaboration)
+
+    def test_deleting_resource_report_does_not_skip_generation_verification(self):
+        self.scope()
+        report = self.gantt / 'actual-progress-resources.json'
+        report.write_text('{}\n')
+        relative = report.relative_to(self.project).as_posix()
+        self.git(self.project, 'add', '--', relative)
+        self.git(self.project, 'commit', '-m', 'RSCON-123: Record generated view')
+        report.unlink()
+        work = json.loads(self.state_path.read_text())['active_work']
+        with patch('execution_collaboration.verify_generation', side_effect=ValueError('regeneration required')) as verify:
+            with self.assertRaisesRegex(ValueError, 'regeneration required'):
+                check_save(self.workspace, self.project, work, {relative}, [], collaboration)
+            verify.assert_called_once_with(self.gantt, [])
 
     def test_pending_operation_wrong_branch_and_linked_source_are_blocked(self):
         self.scope()

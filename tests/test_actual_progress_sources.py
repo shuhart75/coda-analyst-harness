@@ -218,6 +218,25 @@ class ActualProgressSourcesTests(unittest.TestCase):
         self.assertEqual({p.relative_to(self.gantt): p.read_bytes() for p in self.gantt.rglob('*') if p.is_file()}, outputs)
         self.assertEqual(self.registry.read_bytes(), before)
 
+    def test_legacy_missing_numbers_are_unknown_not_defaults(self):
+        legacy = self.feature / 'slices/demo/execution/tasks.md'
+        legacy.parent.mkdir(parents=True)
+        header = '| SberTrek | Summary | Kind | Role | Estimate (дн) | Planned Start | Status | Progress % |\n'
+        header += '|---|---|---|---|---|---|---|---|\n'
+        for empty in ('', '-', 'unknown'):
+            legacy.write_text(header + f'| ITEM-200 | FE extra | real | FE | {empty} | 2026-09-07 | in_progress | {empty} |\n')
+            loaded = OVERLAY.load_tasks(self.feature)['ITEM-200/FE']
+            self.assertIsNone(loaded.estimate)
+            self.assertIsNone(loaded.progress)
+        for invalid in ('-5', 'NaN', 'invalid', 'Infinity'):
+            legacy.write_text(header + f'| ITEM-200 | FE extra | real | FE | {invalid} | 2026-09-07 | in_progress | 50 |\n')
+            with self.assertRaises(ValueError):
+                OVERLAY.load_tasks(self.feature)
+        for invalid in ('-5', 'NaN', 'invalid', '101'):
+            legacy.write_text(header + f'| ITEM-200 | FE extra | real | FE | 2 | 2026-09-07 | in_progress | {invalid} |\n')
+            with self.assertRaises(ValueError):
+                OVERLAY.load_tasks(self.feature)
+
     def test_explicit_unknown_progress_supported_in_legacy_registry(self) -> None:
         legacy = self.feature / "slices/demo/execution/tasks.md"
         legacy.parent.mkdir(parents=True)
