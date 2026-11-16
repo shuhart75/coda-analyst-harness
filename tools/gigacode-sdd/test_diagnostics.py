@@ -28,6 +28,52 @@ def read_sections(path):
 
 
 class BundleTests(unittest.TestCase):
+    def test_current_denials_survive_large_history_and_newer_unrelated_logs(self):
+        import os
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)/'runs/id'; root.mkdir(parents=True)
+            config = root/'config.json'; config.write_text('{}')
+            tasks = {}
+            for name in ('backend', 'frontend'):
+                log = root/'logs'/name; log.mkdir(parents=True)
+                events = log/'stdout.jsonl'
+                rows = [{'type': 'assistant', 'message': {'content': [
+                    {'type': 'tool_use', 'id': 'denied', 'name': 'run_shell_command',
+                     'input': {'command': 'git config --get core.hooksPath'}}]}},
+                    {'type': 'user', 'message': {'content': [
+                        {'type': 'tool_result', 'tool_use_id': 'denied', 'is_error': True,
+                         'content': 'Permission denied: shell policy'}]}}]
+                rows += [{'type': 'assistant', 'message': {'content': [
+                    {'type': 'tool_use', 'id': str(i), 'name': 'write_file',
+                     'input': {'file_path': 'tasks.md', 'content': 'large body ' * 500}}]}}
+                    for i in range(600)]
+                rows += [{'type': 'result', 'is_error': False, 'result': 'finished',
+                          'permission_denials': [{'tool_use_id': 'denied', 'tool_name': 'run_shell_command'}]}]
+                events.write_text('\n'.join(map(json.dumps, rows)))
+                os.utime(log, (100,100))
+                tasks[name] = {'status': 'blocked', 'error': 'Permission denial; inspect ' + str(events)}
+            for i in range(12):
+                log = root/'logs'/('irrelevant-' + str(i)); log.mkdir(parents=True)
+                (log/'stdout.jsonl').write_text('{"type":"result","result":"old review"}\n')
+            plan = root/'planning-cycles/accepted/plan.json'; plan.parent.mkdir(parents=True)
+            plan.write_text('{"selected":true}')
+            (root/'plan-candidate.json').write_text('{"stale":true}')
+            (root/'state.json').write_text(json.dumps({'tasks': tasks, 'plan_selection': {'candidate': str(plan)}}))
+            for i in range(24):
+                path = root/'review-cycles/old/model'/('attempt-' + str(i) + '.json')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({'result': {'text': str(i) + 'history ' * 25000}}))
+            output = diagnostics.collect(config)
+            sections = read_sections(output)
+            for name in tasks:
+                value = json.loads(sections['compact/logs/' + name + '/failure-summary.json'])
+                self.assertEqual(value['failed_tools'][0]['tool_use_id'], 'denied')
+                self.assertEqual(value['related_calls'][0]['input']['command'], 'git config --get core.hooksPath')
+                self.assertTrue(value['denial_events'])
+            self.assertIn('run/planning-cycles/accepted/plan.json', sections)
+            self.assertNotIn('run/plan-candidate.json', sections)
+            self.assertLessEqual(output.stat().st_size, compact_diagnostics.MAX_REPORT_BYTES)
+
     def test_compact_includes_parallel_reviews_and_planner_records(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)/'runs/id'; root.mkdir(parents=True)
