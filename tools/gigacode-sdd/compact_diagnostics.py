@@ -53,6 +53,7 @@ class Export:
         self.contents = {}
         self.sources = {}
         self.sessions = []
+        self.error_sessions = []
         self.packet_refs = set()
         self.omitted = []
         self.omitted_count = 0
@@ -68,6 +69,8 @@ class Export:
         try:
             rel = path.relative_to(self.root)
         except ValueError:
+            return False
+        if '..' in rel.parts:
             return False
         return (not any((self.root / Path(*rel.parts[:i])).is_symlink()
                         for i in range(1, len(rel.parts) + 1)) and path.is_file())
@@ -138,6 +141,29 @@ class Export:
             if folder not in self.sessions:
                 self.sessions.append(folder)
 
+    def failure_sessions(self, value):
+        """Follow only exact log references in controller errors, never arbitrary paths."""
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in ('error', 'last_error') and isinstance(item, str):
+                    pattern = re.escape(str(self.root)) + r'[\\/]logs[\\/][^\\/\r\n]+[\\/]stdout\.jsonl'
+                    for match in re.finditer(pattern, item):
+                        path = Path(match.group())
+                        if self.safe(path) and path.parent not in self.error_sessions:
+                            self.error_sessions.append(path.parent)
+                elif isinstance(item, (list, dict)):
+                    self.failure_sessions(item)
+        elif isinstance(value, list):
+            for item in value:
+                self.failure_sessions(item)
+
+    def arguments(self, value):
+        text = encoded(value)
+        if len(text.encode('utf-8')) <= 2048:
+            return value
+        return {'truncated': True, 'bytes': len(text.encode('utf-8')),
+                'sha256': sha(text.encode('utf-8')), 'excerpt': clip(text, 2048)}
+
     def thin(self, value, depth=0):
         if depth > 12:
             return {'omitted': 'nesting limit'}
@@ -178,14 +204,16 @@ class Export:
         except ValueError:
             self.add('compact/' + rel + '.malformed.txt', clip(text))
             return None
+        self.failure_sessions(value)
         self.add(('run/' if raw else 'compact/') + rel, text if raw else encoded(self.thin(value)))
         return value
 
-    def session(self, folder, include_prompt=False):
+    def session(self, folder, include_prompt=False, summary_only=False):
         path = folder / 'stdout.jsonl'
         text = self.read(path) if path.exists() else None
         if text is not None:
             rows, counts, messages = [], {}, []
+            calls, failures, terminals, denial_events, denied_ids = {}, [], [], [], set()
             for number, line in enumerate(text.splitlines(), 1):
                 if not line.strip():
                     continue
@@ -201,12 +229,21 @@ class Export:
                     rows.append({'line': number, 'malformed_event': clip(line)})
                     continue
                 counts[kind] = counts.get(kind, 0) + 1
+                denials = event.get('permission_denials')
+                if denials:
+                    denial_events.append({'line': number, 'type': kind, 'denials': self.arguments(denials)})
+                    if isinstance(denials, list):
+                        denied_ids.update(d.get('tool_use_id') for d in denials if isinstance(d, dict)
+                                          and isinstance(d.get('tool_use_id'), str))
                 if kind == 'system' and event.get('subtype') == 'init':
                     rows.append({'line': number, **{k: event.get(k) for k in
                                  ('type', 'subtype', 'model', 'session_id', 'cwd')}})
                 elif kind == 'result':
                     result = {k: event.get(k) for k in ('type', 'subtype', 'is_error', 'duration_ms',
                               'num_turns', 'permission_denials', 'session_id', 'parent_tool_use_id')}
+                    terminals.append({k: self.arguments(v) for k, v in result.items()})
+                    if summary_only:
+                        continue
                     result['result'] = self.payload(event['result']) if isinstance(event.get('result'), str) else None
                     rows.append({'line': number, **result})
                 content = event.get('message', {}).get('content', []) if isinstance(event.get('message'), dict) else []
@@ -214,17 +251,35 @@ class Export:
                     if not isinstance(item, dict):
                         continue
                     if item.get('type') == 'tool_use':
+                        call = {'id': item.get('id'), 'name': item.get('name'),
+                                'input': self.arguments(item.get('input'))}
+                        if isinstance(item.get('id'), str):
+                            calls[item['id']] = call
                         rows.append({'line': number, 'parent_tool_use_id': event.get('parent_tool_use_id'),
-                                     **self.thin(item)})
+                                     'type': 'tool_use', **call})
                     elif item.get('type') == 'tool_result':
                         body = item.get('content')
                         body_text = body if isinstance(body, str) else encoded(body)
+                        if item.get('is_error'):
+                            failures.append({'line': number, 'tool_use_id': item.get('tool_use_id'),
+                                             'error': clip(body_text, 2048)})
                         rows.append({'line': number, 'type': 'tool_result',
                                      'tool_use_id': item.get('tool_use_id'), 'is_error': item.get('is_error'),
                                      'content_bytes': len(body_text.encode('utf-8')), 'content_sha256': sha(body_text.encode('utf-8')),
                                      **({'error_content': clip(body_text)} if item.get('is_error') else {})})
                     elif item.get('type') == 'text':
                         messages.append(clip(item.get('text', ''), 1000))
+            if summary_only:
+                selected = failures if len(failures) <= 12 else failures[:6] + failures[-6:]
+                ids = {item['tool_use_id'] for item in selected if isinstance(item.get('tool_use_id'), str)} | denied_ids
+                self.add('compact/logs/' + folder.name + '/failure-summary.json', encoded({
+                    'source': 'run/logs/' + folder.name + '/stdout.jsonl', 'event_counts': counts,
+                    'terminal_results': terminals[-2:], 'failed_tools_total': len(failures),
+                    'denial_events': denial_events[-12:], 'denial_events_omitted': max(0, len(denial_events)-12),
+                    'failures_omitted': max(0, len(failures)-len(selected)), 'failed_tools': selected,
+                    'related_calls': [value for key, value in calls.items() if key in ids][:24],
+                    'last_messages': messages[-3:]}))
+                return
             if len(rows) > 500:
                 self.skip(str(path), 'event projection shortened to first 30 and last 470 relevant events')
                 rows = rows[:30] + rows[-470:]
@@ -232,6 +287,8 @@ class Export:
                 {'projection': True, 'source': 'run/logs/' + folder.name + '/stdout.jsonl',
                  'event_counts': counts, 'last_messages': messages[-3:], 'events': rows,
                  'excluded': 'thinking and successful read contents; full originals remain local'}))
+        if summary_only:
+            return
         for filename in (('prompt.txt', 'stderr.log', 'output.log') if include_prompt else ('stderr.log', 'output.log')):
             path = folder / filename
             if path.exists():
@@ -251,15 +308,36 @@ def collect_compact(config, destination=None, error=None):
     destination = Path(destination) if destination else home / 'diagnostics/latest-diagnostics.txt'
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     out = Export(root, error)
-    out.json_file(config)
-    state = out.json_file(root / 'state.json', raw=True) if (root/'state.json').exists() else {}
+    try:
+        state = json.loads(out.read(root/'state.json') or '{}') if (root/'state.json').exists() else {}
+    except ValueError:
+        state = {}
     state = state if isinstance(state, dict) else {}
+    out.failure_sessions(state)
+    out.failure_sessions({'error': str(error)})
+    logs = root/'logs'
+    recent = []
+    folders = []
+    if logs.is_dir() and not logs.is_symlink():
+        folders = [p for p in logs.iterdir() if p.is_dir() and not p.is_symlink()]
+        recent = newest([p for p in folders if (p/'stdout.jsonl').is_file() or (p/'output.log').is_file()])
+    # Current failure evidence gets space before historical reviews and plan bodies.
+    priority_sessions = list(dict.fromkeys(out.error_sessions + recent[:2]))[:MAX_SESSIONS]
+    for folder in priority_sessions:
+        out.session(folder, summary_only=True)
+    if (root/'state.json').exists():
+        out.json_file(root/'state.json', raw=True)
+    out.json_file(config)
     for name in ('planning-portfolio.json', 'review-ledger.json'):
         if (root/name).exists():
             out.json_file(root/name)
     candidate_record = state.get('plan_candidate')
     candidate = candidate_record.get('file', 'plan-candidate.json') if isinstance(candidate_record, dict) else 'plan-candidate.json'
-    if isinstance(candidate, str) and re.fullmatch(r'plan-candidate(?:-[a-f0-9]{32})?\.json', candidate):
+    selection = state.get('plan_selection') or {}
+    selected_candidate = selection.get('candidate') if isinstance(selection, dict) else None
+    if isinstance(selected_candidate, str) and out.safe(Path(selected_candidate)):
+        out.json_file(Path(selected_candidate), raw=True)
+    elif isinstance(candidate, str) and re.fullmatch(r'plan-candidate(?:-[a-f0-9]{32})?\.json', candidate):
         if (root/candidate).exists():
             out.json_file(root/candidate, raw=True)
     for name in ('decision.md', 'input/requirements.md', 'readiness.json'):
@@ -300,12 +378,9 @@ def collect_compact(config, destination=None, error=None):
                               'cycles_selected': selected_groups, 'old_history': 'retained locally'}
         for path in selected[:MAX_ATTEMPTS]:
             out.json_file(path)
-    logs = root/'logs'
-    if logs.is_dir() and not logs.is_symlink():
-        folders = [p for p in logs.iterdir() if p.is_dir() and not p.is_symlink()]
-        recent = newest([p for p in folders if (p/'stdout.jsonl').is_file() or (p/'output.log').is_file()])
+    if folders:
         # Always include the newest interrupted session, even before its receipt is saved.
-        sessions = list(dict.fromkeys(recent[:2] + out.sessions))
+        sessions = list(dict.fromkeys(priority_sessions + out.error_sessions + out.sessions))
         inventory['logs'] = {'sessions_total': len(folders), 'selected': len(sessions[:MAX_SESSIONS]),
                              'older_sessions': 'retained locally, not exported'}
         for index, folder in enumerate(sessions[:MAX_SESSIONS]):
