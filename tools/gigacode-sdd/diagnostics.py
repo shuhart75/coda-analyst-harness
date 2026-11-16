@@ -15,11 +15,14 @@ def write_section(stream, name, text):
     stream.write('\n=== END FILE ===\n\n')
 
 
-def collect(config, destination=None, error=None):
+def collect(config, destination=None, error=None, *, full=False):
+    if not full:
+        from compact_diagnostics import collect_compact
+        return collect_compact(config, destination, error)
     config = Path(config).absolute()
     root = config.parent
     home = root.parent.parent if root.parent.name == 'runs' else root
-    destination = Path(destination) if destination else home / 'diagnostics/latest-diagnostics.txt'
+    destination = Path(destination) if destination else home / 'diagnostics/full-diagnostics.txt'
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     summary = {'run': root.name, 'config': str(config),
                'created_at': datetime.now(timezone.utc).isoformat(),
@@ -85,10 +88,10 @@ def collect(config, destination=None, error=None):
     return destination
 
 
-def report(config, error=None):
+def report(config, error=None, *, full=False):
     """A diagnostic failure must not hide the original runner result."""
     try:
-        output = collect(config, error=error)
+        output = collect(config, error=error, full=full)
     except Exception as exc:
         print('Не удалось собрать диагностику: ' + str(exc))
         return None

@@ -185,6 +185,23 @@ class ReviewRecoveryTests(unittest.TestCase):
     def test_confirmed_defect_goes_to_plan_repair(self):
         self.assertEqual(self.dispute('confirmed')['verdict'], 'changes')
 
+    def test_adjudication_recovers_emphasis_without_changing_terminal_evidence(self):
+        root = self.fixture.root/'formatted-adjudication'; root.mkdir()
+        expected = plan_review.prepare(root, self.runner.root/'input', self.candidate, root/'missing')
+        packet = root/'.review-input/packet/requirements.md'
+        packet.write_text(packet.read_text().replace('REQ-BE: value 2', '**REQ-BE:** value 2'))
+        issue = {'id': 'issue', 'text': 'Required check is assigned to the wrong task'}
+        report = self.adjudicated(root, review_cycle.MODELS[1], 'confirmed', issue)
+        result = self.result(root, review_cycle.MODELS[1], report=report)
+        original = Path(result['events_path']).read_bytes()
+        checked, evidence = review_cycle.validate_adjudication(root, result, expected,
+            self.runner.cfg['requirements'], review_cycle.MODELS[1], [issue])
+        self.assertEqual(checked['verdict'], 'changes')
+        citation = checked['decisions']['issue']['evidence'][1]
+        self.assertEqual(citation['quote'], '**REQ-BE:** value 2')
+        self.assertEqual(citation['reported_quote'], 'REQ-BE: value 2')
+        self.assertEqual(Path(result['events_path']).read_bytes(), original)
+
     def test_optional_issue_keeps_pass_and_explicit_scope_evidence(self):
         report = self.dispute('optional')
         self.assertEqual(report['verdict'], 'pass')

@@ -520,16 +520,19 @@ def main(argv=None):
             stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--diagnostics-config', type=Path, help='Collect one local UTF-8 text report for a stopped run; no agent launch')
+    parser.add_argument('--diagnostics-full', action='store_true', help='With --diagnostics-config only: collect full-diagnostics.txt instead of the compact report')
     parser.add_argument('--diagnose', action='store_true', help='Read-only process/service inventory; no GUI or agent launch')
     parser.add_argument('--repo', help='Optional exact source root for diagnosis/advanced use')
     parser.add_argument('--dry-run', action='store_true', help='Select and validate without initializing or starting agents')
     args = parser.parse_args(argv)
+    if args.diagnostics_full and not args.diagnostics_config:
+        parser.error('--diagnostics-full requires --diagnostics-config')
     try:
         if args.diagnostics_config:
             with FileLock(args.diagnostics_config.parent / 'run.lock'):
                 if not args.diagnostics_config.is_file():
                     raise Blocked('Configuration file not found')
-                return 0 if diagnostics.report(args.diagnostics_config) else 2
+                return 0 if diagnostics.report(args.diagnostics_config, full=args.diagnostics_full) else 2
         return launch(diagnose_only=args.diagnose, repo_arg=args.repo, dry_run=args.dry_run)
     except (Blocked, OSError, ValueError, RuntimeError) as exc:
         message = 'Запуск остановлен. ' + str(exc)

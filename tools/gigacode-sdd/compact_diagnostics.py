@@ -1,0 +1,335 @@
+"""Bounded text export of a current failure, not an archive of all run history."""
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+from datetime import datetime, timezone
+
+MAX_REPORT_BYTES = 2 * 1024 * 1024
+MAX_SOURCE_BYTES = 8 * 1024 * 1024
+MAX_TEXT_BYTES = 192 * 1024
+MAX_SESSIONS = 8
+MAX_CYCLES = 3
+MAX_ATTEMPTS = 24
+HEADER = ('GigaCode SDD compact diagnostics (UTF-8)\n'
+          'Компактный отчёт: текущий сбой и связанные попытки. Это не полный архив.\n'
+          'Проекции, сокращения и пропуски отмечены явно; исходные журналы сохранены локально.\n'
+          'Бинарные файлы, патчи, снимки рабочих копий и исходники обвязки не включены.\n'
+          'Текст не обезличен; автоматической отправки нет.\n\n')
+OMIT_KEYS = {'workspace_snapshot', 'protected_snapshots', 'protected_git_controls',
+             'clone_report', 'packet_files', 'snapshot', 'evidence_files'}
+
+
+def encoded(value):
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def clip(text, limit=4096):
+    raw = str(text).encode('utf-8')
+    if len(raw) <= limit:
+        return str(text)
+    return raw[:limit].decode('utf-8', 'ignore') + '\n[truncated]'
+
+
+def section(name, text):
+    from diagnostics import write_section
+    stream = io.StringIO()
+    write_section(stream, name, text)
+    return stream.getvalue()
+
+
+class Export:
+    def __init__(self, root, error):
+        self.root = root
+        self.parts = []
+        self.size = len(HEADER.encode('utf-8'))
+        self.contents = {}
+        self.sources = {}
+        self.sessions = []
+        self.packet_refs = set()
+        self.omitted = []
+        self.omitted_count = 0
+        self.error = clip(error, 12000) if error is not None else None
+
+    def skip(self, name, reason):
+        self.omitted_count += 1
+        if len(self.omitted) < 40:
+            self.omitted.append({'path': clip(name, 500), 'reason': reason})
+
+    def safe(self, path):
+        path = Path(path)
+        try:
+            rel = path.relative_to(self.root)
+        except ValueError:
+            return False
+        return (not any((self.root / Path(*rel.parts[:i])).is_symlink()
+                        for i in range(1, len(rel.parts) + 1)) and path.is_file())
+
+    def read(self, path):
+        path = Path(path)
+        name = 'run/' + path.relative_to(self.root).as_posix()
+        if not self.safe(path) or path.suffix == '.patch':
+            self.skip(name, 'not an allowed regular text source')
+            return None
+        try:
+            if path.stat().st_size > MAX_SOURCE_BYTES:
+                self.skip(name, 'source exceeds read limit; retained locally')
+                return None
+            data = path.read_bytes()
+        except OSError as exc:
+            self.skip(name, 'read failed: ' + type(exc).__name__)
+            return None
+        self.sources[name] = {'bytes': len(data), 'sha256': sha(data)}
+        try:
+            text = data.decode('utf-8')
+            if any(ord(c) < 32 and c not in '\t\r\n' for c in text) or '\x7f' in text:
+                raise ValueError('control characters')
+        except (ValueError, UnicodeError):
+            self.skip(name, 'not plain UTF-8 text')
+            return None
+        return text
+
+    def add(self, name, text):
+        data = text.encode('utf-8')
+        identity = sha(data)
+        if identity in self.contents:
+            return {'section': self.contents[identity], 'sha256': identity, 'deduplicated': True}
+        if len(data) > MAX_TEXT_BYTES:
+            self.skip(name, 'section shortened; original retained locally')
+            text = encoded({'truncated': True, 'original_bytes': len(data), 'original_sha256': identity,
+                            'head': clip(text, MAX_TEXT_BYTES // 2),
+                            'tail': data[-MAX_TEXT_BYTES // 2:].decode('utf-8', 'ignore')})
+            name += '.excerpt.json'
+        block = section(name, text)
+        # Reserve a fixed allowance for the bounded manifest and header.
+        if self.size + len(block.encode('utf-8')) > MAX_REPORT_BYTES - 256 * 1024:
+            self.skip(name, 'report size limit; original retained locally')
+            return {'omitted': True, 'sha256': identity, 'bytes': len(data)}
+        self.parts.append(block)
+        self.size += len(block.encode('utf-8'))
+        self.contents[identity] = name
+        return {'section': name, 'sha256': identity}
+
+    def payload(self, text):
+        # Report bodies occur in attempts, receipts and terminal events. Store once.
+        self.packet_refs.update(re.findall(r'\.review-input/packet/([A-Za-z0-9_./-]+)', text))
+        return self.add('payloads/' + sha(text.encode('utf-8')) + '.txt', text)
+
+    def local_session(self, value):
+        if not isinstance(value, str):
+            return
+        # Accept only a log reference owned by this run; never follow another root.
+        path = Path(value)
+        if not path.is_absolute():
+            path = self.root / path
+        try:
+            rel = path.relative_to(self.root / 'logs')
+        except ValueError:
+            return
+        if len(rel.parts) == 2 and '..' not in rel.parts and self.safe(path):
+            folder = path.parent
+            if folder not in self.sessions:
+                self.sessions.append(folder)
+
+    def thin(self, value, depth=0):
+        if depth > 12:
+            return {'omitted': 'nesting limit'}
+        if isinstance(value, dict):
+            result = {}
+            for key, item in list(value.items())[:160]:
+                if key in OMIT_KEYS:
+                    result[key] = {'omitted': 'local integrity snapshot or file inventory'}
+                elif key == 'events_path':
+                    self.local_session(item)
+                    result[key] = item
+                elif key in ('text', 'result') and isinstance(item, str) and item:
+                    result[key] = self.payload(item)
+                elif key in ('tool_calls', 'tool_results'):
+                    result[key] = {'count': len(item) if isinstance(item, (list, dict)) else None,
+                                   'details': 'selected session event projections'}
+                elif key in ('review', 'original_review', 'report') and isinstance(item, dict):
+                    result[key] = self.payload(encoded(item))
+                else:
+                    result[key] = self.thin(item, depth + 1)
+            if len(value) > 160:
+                result['_omitted_keys'] = len(value) - 160
+            return result
+        if isinstance(value, list):
+            result = [self.thin(x, depth + 1) for x in value[:80]]
+            if len(value) > 80:
+                result.append({'omitted_items': len(value) - 80})
+            return result
+        return clip(value, 12000) if isinstance(value, str) else value
+
+    def json_file(self, path, *, raw=False):
+        text = self.read(path)
+        if text is None:
+            return None
+        rel = path.relative_to(self.root).as_posix()
+        try:
+            value = json.loads(text)
+        except ValueError:
+            self.add('compact/' + rel + '.malformed.txt', clip(text))
+            return None
+        self.add(('run/' if raw else 'compact/') + rel, text if raw else encoded(self.thin(value)))
+        return value
+
+    def session(self, folder, include_prompt=False):
+        path = folder / 'stdout.jsonl'
+        text = self.read(path) if path.exists() else None
+        if text is not None:
+            rows, counts, messages = [], {}, []
+            for number, line in enumerate(text.splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        raise ValueError('non-object event')
+                except ValueError:
+                    rows.append({'line': number, 'malformed_event': clip(line)})
+                    continue
+                kind = event.get('type', 'unknown')
+                if not isinstance(kind, str):
+                    rows.append({'line': number, 'malformed_event': clip(line)})
+                    continue
+                counts[kind] = counts.get(kind, 0) + 1
+                if kind == 'system' and event.get('subtype') == 'init':
+                    rows.append({'line': number, **{k: event.get(k) for k in
+                                 ('type', 'subtype', 'model', 'session_id', 'cwd')}})
+                elif kind == 'result':
+                    result = {k: event.get(k) for k in ('type', 'subtype', 'is_error', 'duration_ms',
+                              'num_turns', 'permission_denials', 'session_id', 'parent_tool_use_id')}
+                    result['result'] = self.payload(event['result']) if isinstance(event.get('result'), str) else None
+                    rows.append({'line': number, **result})
+                content = event.get('message', {}).get('content', []) if isinstance(event.get('message'), dict) else []
+                for item in content if isinstance(content, list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get('type') == 'tool_use':
+                        rows.append({'line': number, 'parent_tool_use_id': event.get('parent_tool_use_id'),
+                                     **self.thin(item)})
+                    elif item.get('type') == 'tool_result':
+                        body = item.get('content')
+                        body_text = body if isinstance(body, str) else encoded(body)
+                        rows.append({'line': number, 'type': 'tool_result',
+                                     'tool_use_id': item.get('tool_use_id'), 'is_error': item.get('is_error'),
+                                     'content_bytes': len(body_text.encode('utf-8')), 'content_sha256': sha(body_text.encode('utf-8')),
+                                     **({'error_content': clip(body_text)} if item.get('is_error') else {})})
+                    elif item.get('type') == 'text':
+                        messages.append(clip(item.get('text', ''), 1000))
+            if len(rows) > 500:
+                self.skip(str(path), 'event projection shortened to first 30 and last 470 relevant events')
+                rows = rows[:30] + rows[-470:]
+            self.add('compact/logs/' + folder.name + '/events.json', encoded(
+                {'projection': True, 'source': 'run/logs/' + folder.name + '/stdout.jsonl',
+                 'event_counts': counts, 'last_messages': messages[-3:], 'events': rows,
+                 'excluded': 'thinking and successful read contents; full originals remain local'}))
+        for filename in (('prompt.txt', 'stderr.log', 'output.log') if include_prompt else ('stderr.log', 'output.log')):
+            path = folder / filename
+            if path.exists():
+                content = self.read(path)
+                if content:
+                    self.add('run/logs/' + folder.name + '/' + filename, content)
+
+
+def newest(paths):
+    return sorted(paths, key=lambda p: (p.stat().st_mtime_ns, p.as_posix()), reverse=True)
+
+
+def collect_compact(config, destination=None, error=None):
+    config = Path(config).absolute()
+    root = config.parent
+    home = root.parent.parent if root.parent.name == 'runs' else root
+    destination = Path(destination) if destination else home / 'diagnostics/latest-diagnostics.txt'
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    out = Export(root, error)
+    out.json_file(config)
+    state = out.json_file(root / 'state.json', raw=True) if (root/'state.json').exists() else {}
+    state = state if isinstance(state, dict) else {}
+    candidate_record = state.get('plan_candidate')
+    candidate = candidate_record.get('file', 'plan-candidate.json') if isinstance(candidate_record, dict) else 'plan-candidate.json'
+    if isinstance(candidate, str) and re.fullmatch(r'plan-candidate(?:-[a-f0-9]{32})?\.json', candidate):
+        if (root/candidate).exists():
+            out.json_file(root/candidate, raw=True)
+    for name in ('decision.md', 'input/requirements.md', 'readiness.json'):
+        path = root/name
+        if path.exists():
+            text = out.read(path)
+            if text is not None:
+                out.add('run/' + name, text)
+    inventory = {}
+    for dirname in ('review-cycles', 'planning-cycles', 'execution-cycles'):
+        base = root/dirname
+        if not base.is_dir() or base.is_symlink():
+            continue
+        records = []
+        for folder, dirs, names in os.walk(base, followlinks=False):
+            dirs[:] = [d for d in dirs if not (Path(folder)/d).is_symlink()]
+            records.extend(Path(folder)/n for n in names if n.endswith('.json') and out.safe(Path(folder)/n))
+        ordered = newest(records)
+        groups = []
+        for path in ordered:
+            group = path.relative_to(base).parts[0]
+            if group not in groups:
+                groups.append(group)
+        # Errors naming a particular cycle take precedence over unrelated recent work.
+        groups.sort(key=lambda group: (0 if group in str(error) else 1))
+        selected_groups = groups[:MAX_CYCLES if dirname == 'execution-cycles' else 1]
+        selected = [p for p in ordered if p.relative_to(base).parts[0] in selected_groups
+                    and (p.name.startswith('attempt-') or p.name in ('candidate.json', 'fatal.json', 'selection.json'))]
+        inventory[dirname] = {'json_files_total': len(records), 'selected_attempts': min(len(selected), MAX_ATTEMPTS),
+                              'cycles_selected': selected_groups, 'old_history': 'retained locally'}
+        for path in selected[:MAX_ATTEMPTS]:
+            out.json_file(path)
+    logs = root/'logs'
+    if logs.is_dir() and not logs.is_symlink():
+        folders = [p for p in logs.iterdir() if p.is_dir() and not p.is_symlink()]
+        recent = newest([p for p in folders if (p/'stdout.jsonl').is_file() or (p/'output.log').is_file()])
+        # Always include the newest interrupted session, even before its receipt is saved.
+        sessions = list(dict.fromkeys(recent[:2] + out.sessions))
+        inventory['logs'] = {'sessions_total': len(folders), 'selected': len(sessions[:MAX_SESSIONS]),
+                             'older_sessions': 'retained locally, not exported'}
+        for index, folder in enumerate(sessions[:MAX_SESSIONS]):
+            out.session(folder, include_prompt=index == 0)
+    for rel in sorted(out.packet_refs)[:16]:
+        if '..' in Path(rel).parts or Path(rel).is_absolute():
+            continue
+        path = root/'input'/rel
+        if path.exists():
+            text = out.read(path)
+            if text is not None:
+                out.add('run/input/' + rel, text)
+    # Code identity suffices for matching the installed runner; never embed all tests/source.
+    runner = {p.name: sha(p.read_bytes()) for p in Path(__file__).parent.glob('*.py') if not p.is_symlink()}
+    summary = {'format': 'compact-v1', 'run': root.name, 'created_at': datetime.now(timezone.utc).isoformat(),
+               'error': out.error, 'max_report_bytes': MAX_REPORT_BYTES, 'inventory': inventory,
+               'sources': dict(list(out.sources.items())[:140]), 'runner_sha256': runner,
+               'omitted_count': out.omitted_count, 'omitted_examples': out.omitted,
+               'note': 'Projection for support, not replayable evidence. Full originals and checkpoints remain local.'}
+    report = HEADER + section('summary.json', encoded(summary)) + ''.join(out.parts)
+    data = report.encode('utf-8')
+    if len(data) > MAX_REPORT_BYTES:
+        # Metadata is bounded too; keep the current error and explicit limit rather than fail.
+        summary.pop('sources', None)
+        summary['metadata_shortened'] = True
+        report = HEADER + section('summary.json', encoded(summary)) + ''.join(out.parts)
+        data = report.encode('utf-8')
+    if len(data) > MAX_REPORT_BYTES:
+        raise ValueError('Compact diagnostic size invariant exceeded')
+    fd, temp = tempfile.mkstemp(prefix='.latest-', suffix='.txt', dir=destination.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+        os.replace(temp, destination)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+    return destination

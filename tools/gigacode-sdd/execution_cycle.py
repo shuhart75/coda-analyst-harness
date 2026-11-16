@@ -6,6 +6,7 @@ execution. Only a verified winner is returned to the integration journal.
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
+from evidence import bind_quote
 from pathlib import Path
 import re
 import shutil
@@ -127,7 +128,8 @@ def adjudicated_report(root, task, original, report):
             try:
                 path = under(root, fact['path'])
                 quote = fact['quote']
-                valid = isinstance(quote, str) and bool(quote.strip()) and quote in path.read_text(encoding='utf-8')
+                valid = bind_quote(path, fact)
+                quote = fact.get('quote', '')
             except (KeyError, TypeError, ValueError, OSError, UnicodeError, RuntimeError):
                 valid = False
             if not valid:
