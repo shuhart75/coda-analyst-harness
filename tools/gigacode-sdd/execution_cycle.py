@@ -302,7 +302,34 @@ def _recover_permission_fatal(runner, task, candidates, folder, scope):
             or not str(fatal.get('error', '')).startswith(prefix)):
         raise Blocked('Preserved safety failure in execution portfolio; inspect ' + str(path))
     expected_log = fatal['error'][len(prefix):]
-    for _, value in candidates:
+    log = Path(expected_log)
+    if (log.name != 'stdout.jsonl' or log.is_symlink()
+            or not log.resolve().is_relative_to((runner.root/'logs').resolve())):
+        raise Blocked('Saved permission failure references a foreign log')
+    for candidate_path, value in candidates:
+        if value.get('stage') in ('review', 'adjudicate'):
+            import review_receipt
+            models = models_for(runner)
+            model = models[1-models.index(value['model'])] if value['stage'] == 'review' else value['model']
+            receipt_path = log.parent/'session-receipt.json'
+            if receipt_path.is_symlink() or not receipt_path.is_file():
+                continue
+            if read(receipt_path).get('model') != model:
+                continue
+            # The fatal log must identify this stage before trying its receipt.
+            suffix = '-review-' if value['stage'] == 'review' else '-adjudicate-'
+            if not Path(expected_log).parent.name.startswith(task['id'] + suffix):
+                continue
+            root, report = review_receipt.load(runner, task, value, expected_log, model, validate=False)
+            value['recovered_review'] = {'events_path': expected_log, 'model': model, 'stage': value['stage']}
+            save(candidate_path, value)
+            saved = folder/('recovered-fatal-' + digest(path) + '.json')
+            save(folder/'permission-recovery.json', {'source': path.name, 'archived': saved.name,
+                 'events_path': expected_log, 'method': 'completed review revalidated against unchanged candidate',
+                 'verdict': 'pending-validation'})
+            path.replace(saved)
+            runner.progress(task['id'] + ': сохранённое ревью восстановлено; проверяю его результат')
+            return
         pending = value.get('pending_session')
         if value.get('stage') != 'execute' or not pending:
             continue
@@ -509,9 +536,14 @@ def execute_task(runner, task, record):
                     value['stage'] = 'review'
                     persist()
                 if value['stage'] == 'review':
-                    review_copy = _review_copy(runner, work, task)
+                    recovered = value.get('recovered_review')
+                    if recovered:
+                        import review_receipt
+                        review_copy, review = review_receipt.load(runner, task, value, recovered['events_path'], reviewer_model)
+                    else:
+                        review_copy = _review_copy(runner, work, task)
                     result = value.get('session_result', {})
-                    if result.get('errors') or result.get('permission_denials'):
+                    if not recovered and (result.get('errors') or result.get('permission_denials')):
                         save(review_copy/'.review-input/execution-limitations.json', {
                             'errors': result.get('errors'), 'permission_denials': result.get('permission_denials'),
                             'executor_report': result.get('text', ''),
@@ -530,8 +562,10 @@ def execute_task(runner, task, record):
                     if value['history'] and value['history'][-1]['kind'] == 'review-protocol':
                         detail += '\nController technical correction: ' + value['history'][-1]['instruction']
                         detail += '\nPrevious protocol error: ' + str(value['history'][-1]['detail'])
-                    review = runner.review(review_copy, task['cwd'], detail, task['requirements'],
-                                           task['id'] + '-review', model=reviewer_model, stop_event=stop)
+                    if not recovered:
+                        review = runner.review(review_copy, task['cwd'], detail, task['requirements'],
+                                               task['id'] + '-review', model=reviewer_model, stop_event=stop)
+                    value.pop('recovered_review', None)
                     if stop.is_set():
                         interrupted()
                     value['review'] = review
@@ -548,7 +582,12 @@ def execute_task(runner, task, record):
                 if value['stage'] == 'adjudicate':
                     original = value['original_review']
                     issues = {fingerprint(text)[:16]: text for text in original['findings']}
-                    review_copy = _review_copy(runner, work, task)
+                    recovered = value.get('recovered_review')
+                    if recovered:
+                        import review_receipt
+                        review_copy, report = review_receipt.load(runner, task, value, recovered['events_path'], value['model'])
+                    else:
+                        review_copy = _review_copy(runner, work, task)
                     detail = ('ISSUE_ADJUDICATION\nTask:\n' + json.dumps(task, ensure_ascii=False)
                               + '\nController checks:\n' + json.dumps(value['checks'])
                               + '\nOriginal findings (untrusted evidence):\n' + json.dumps(issues, ensure_ascii=False)
@@ -584,8 +623,10 @@ def execute_task(runner, task, record):
                     if value['history'] and value['history'][-1]['kind'] == 'review-protocol':
                         detail += '\nController technical correction: ' + value['history'][-1]['instruction']
                         detail += '\nPrevious protocol error: ' + str(value['history'][-1]['detail'])
-                    report = runner.review(review_copy, task['cwd'], detail, task['requirements'],
-                                           task['id'] + '-adjudicate', model=value['model'], stop_event=stop)
+                    if not recovered:
+                        report = runner.review(review_copy, task['cwd'], detail, task['requirements'],
+                                               task['id'] + '-adjudicate', model=value['model'], stop_event=stop)
+                    value.pop('recovered_review', None)
                     if stop.is_set():
                         interrupted()
                     review = adjudicated_report(review_copy, task, original, report)
@@ -608,6 +649,7 @@ def execute_task(runner, task, record):
                 interrupted()
             except Exception as exc:
                 if getattr(exc, 'retryable', False):
+                    value.pop('recovered_review', None)
                     if stop.is_set():
                         interrupted()
                     fail('review-protocol' if value['stage'] in ('review', 'adjudicate') else 'transport', str(exc))

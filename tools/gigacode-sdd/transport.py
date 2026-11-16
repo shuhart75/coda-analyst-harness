@@ -163,6 +163,40 @@ def execution_result_usable(result):
             and not (set(result.get('errors', [])) - allowed))
 
 
+def tool_was_not_run(item):
+    body = _text(item.get('content', '')).lower()
+    return item.get('is_error') is True and any(marker in body for marker in (
+        'the command was not run', 'the command was not started',
+        'shell security policy denied this command:'))
+
+
+def review_denial_errors(result):
+    """Account for explicit non-execution, never authorize the rejected command."""
+    if not result.get('permission_denials') or not execution_result_usable(result):
+        return None
+    evidence = parse_events(Path(result['events_path']))
+    if evidence['permission_denials'] != result.get('permission_denials'):
+        return None
+    returned = {}
+    for line in Path(result['events_path']).read_text(encoding='utf-8').splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        message = row.get('message', {})
+        content = message.get('content', []) if isinstance(message, dict) else []
+        for item in content if isinstance(content, list) else []:
+            if isinstance(item, dict) and item.get('type') == 'tool_result':
+                returned.setdefault(item.get('tool_use_id'), []).append(item)
+    errors = {'CLI reported denied permissions; interactive approval is unavailable'}
+    for denial in evidence['permission_denials']:
+        key = denial['tool_use_id']
+        items = returned.get(key, [])
+        if len(items) != 1 or not tool_was_not_run(items[0]):
+            return None
+        errors.add('Tool ' + evidence['tool_calls'][key] + ' (' + key + ') returned an error')
+    return errors
+
+
 def review_feedback_usable(result):
     """Read/search failures may inform rejection, never successful acceptance."""
     return (result.get('returncode') == 0 and result.get('terminal_result')

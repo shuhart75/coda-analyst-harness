@@ -16,7 +16,8 @@ import time
 import uuid
 
 from policy import prepare_permissions, nexus_environment, audit_dependency_sources, make_policy_prompt
-from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, execution_result_usable
+from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, execution_result_usable, review_denial_errors
+from evidence import bind_quote
 from platform_support import (FileLock, launch_process, process_exists,
                               process_scope_exists, process_scope_pids)
 from workspace import git, snapshot, clone_snapshot, export_patch, apply_patch, commit_changes
@@ -504,8 +505,9 @@ class Runner:
             'decision_sha256': decision_sha})
         if result['cancelled']:
             raise Interrupted(result=result)
-        if result['permission_denials'] and not (role == 'execute' and name != 'preflight'
-                                                 and execution_result_usable(result)):
+        if result['permission_denials'] and not (name != 'preflight' and (
+                (role == 'execute' and execution_result_usable(result))
+                or (role == 'review' and review_denial_errors(result) is not None))):
             raise Blocked('Permission preflight/runtime denial; inspect ' + result['events_path'])
         return result
 
@@ -671,6 +673,11 @@ executed test names/counts, not just a successful command or test compilation.
                          'its tasks already explicitly assign. Shared writes are serialized by the '
                          'runner; overlap alone is not a race. Cite the task id for each plan defect.')
         result = self.session(root, cwd, prompt, 'review', name, model=model, stop_event=stop_event)
+        return self.validate_review_result(root, result, requirements, name, model,
+                                           expected if name == 'plan-review' else None)
+
+    def validate_review_result(self, root, result, requirements, name, model=None, expected=None):
+        """Use identical verdict checks for fresh and receipt-recovered review evidence."""
         if model:
             from planning_cycle import verify_model
             verify_model(result, model)
@@ -681,7 +688,8 @@ executed test names/counts, not just a successful command or test compilation.
                 return report
             except (ValueError, OSError, TypeError, KeyError) as error:
                 raise Blocked('Invalid plan-review evidence: ' + str(error)) from None
-        if not result['ok'] and not review_feedback_usable(result):
+        denial_errors = review_denial_errors(result)
+        if not result['ok'] and not review_feedback_usable(result) and denial_errors is None:
             raise RetryableSessionError('Reviewer failed: ' + result['events_path'])
         try:
             report = parse_json(result['text'])
@@ -701,7 +709,8 @@ executed test names/counts, not just a successful command or test compilation.
         if report['verdict'] != 'pass' and not report['findings']:
             raise RetryableSessionError('Reviewer rejected without actionable findings', result)
         if not result['ok']:
-            if report['verdict'] != 'changes':
+            if report['verdict'] != 'changes' and (denial_errors is None
+                    or not set(result['errors']) <= denial_errors):
                 raise RetryableSessionError('Reviewer failed: ' + result['events_path'])
             self.progress('Замечания проверяющего сохранены с диагностикой ошибок чтения/поиска')
             save(self.logdir(name + '-feedback').with_suffix('.json'),
@@ -709,18 +718,21 @@ executed test names/counts, not just a successful command or test compilation.
         if report.get('optional_findings'):
             try:
                 operator_input._optional(report['optional_findings'])
+            except (Blocked, ValueError, TypeError, KeyError) as exc:
+                raise RetryableSessionError('Invalid optional finding scope: ' + str(exc), result) from exc
+            try:
                 for issue in report['optional_findings']:
                     packet, code = False, False
                     for cite in issue['evidence']:
                         path = under(root, cite['path'])
-                        if cite['quote'] not in path.read_text(encoding='utf-8'):
-                            raise ValueError('Optional evidence quote does not match')
+                        if not bind_quote(path, cite):
+                            raise ValueError('Optional evidence reference is missing or unreadable')
                         packet |= cite['path'].startswith('.review-input/packet/')
                         code |= not cite['path'].startswith('.review-input/')
                     if not packet or not code:
                         raise ValueError('Optional finding needs packet and actual code evidence')
             except (Blocked, ValueError, OSError, KeyError, TypeError) as exc:
-                raise RetryableSessionError('Invalid optional finding evidence: ' + str(exc), result) from exc
+                report['unverified_optional_findings'] = {'items': report.pop('optional_findings'), 'error': str(exc)}
         report['events_path'] = result['events_path']
         report['events_sha256'] = digest(result['events_path'])
         report['model_reported'] = model

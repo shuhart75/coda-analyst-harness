@@ -11,6 +11,7 @@ _REVIEW_LOCKS = {}
 
 import plan_review
 import review_research
+from transport import review_denial_errors
 from progress import session_identity
 from evidence import bind_quote
 from retry_budget import runtime_revision
@@ -36,12 +37,14 @@ def validate_result(root, result, expected, requirements, model=None, prior=None
         raise plan_review.ProtocolError('Requested reviewer model was not confirmed by CLI metadata')
     allowed = {'Tool ' + result.get('tool_calls', {}).get(call, 'unknown') + ' (' + call + ') returned an error'
                for call in audit['no_data_calls'] + audit.get('recoverable_error_calls', [])}
-    if result.get('permission_denials'):
+    denial_errors = review_denial_errors(result)
+    if result.get('permission_denials') and denial_errors is None:
         raise plan_review.ProtocolError('Reviewer permission denial remains unresolved')
+    allowed.update(denial_errors or ())
     if not result.get('ok'):
         complete = (result.get('returncode') == 0 and result.get('terminal_result')
                     and not result.get('cancelled') and not result.get('timed_out')
-                    and not result.get('permission_denials')
+                    and (not result.get('permission_denials') or denial_errors is not None)
                     and not (result.get('cleanup') or {}).get('preserved')
                     and not (set(result.get('tool_calls', {})) -
                              {r['tool_use_id'] for r in result.get('tool_results', [])}))

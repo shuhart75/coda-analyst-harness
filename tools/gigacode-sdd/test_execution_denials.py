@@ -79,12 +79,13 @@ class ExecutionDenialTests(unittest.TestCase):
         self.assertGreater(self.check_count, 0)
         self.assertEqual(self.review_count, 0)
 
-    def test_controller_exception_applies_only_to_completed_execution(self):
+    def test_controller_allows_completed_review_but_not_preflight(self):
         result = self.denied_session(self.work, '.', 'task', 'execute', 'be-execute', model=MODELS[0])
         with patch('controller.run_session', return_value=result):
             returned = self.runner.session(self.work, '.', 'task', 'execute', 'be-execute', model=MODELS[0])
             self.assertEqual(returned['permission_denials'], result['permission_denials'])
-            for role, name in [('review', 'be-review'), ('execute', 'preflight')]:
+            self.runner.session(self.work, '.', 'task', 'review', 'be-review', model=MODELS[0])
+            for role, name in [('review', 'preflight'), ('execute', 'preflight')]:
                 with self.assertRaisesRegex(Blocked, 'Permission preflight/runtime denial'):
                     self.runner.session(self.work, '.', 'task', role, name, model=MODELS[0])
 
