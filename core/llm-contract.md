@@ -267,13 +267,13 @@ Store story/task links in markdown, not as visual PlantUML dependencies.
 For new OpenSpec handoffs, follow `core/sdd-input.md`: prepare derived `sdd/` in the owning requirements branch before accepted-main audit, select `begin-preparation --input-profile openspec-spec-driven-v1`, and audit the full input. Receiver helpers must never be run with --apply in the analyst code clone. Root requirements and derived proposal/spec form one immutable revision; design/tasks remain developer-owned. SDD-only edits require record-change, renewed audit and confirmation.
 
 - Requirements are living markdown artifacts until release fixation.
-- `core/requirements-profile.md` is the compact business-specification contract. It uses stable `REQ-*` headings and nested Russian scenarios without the repeated passports and mandatory empty sections of the former profile.
+- `core/requirements-profile.md` routes new documents to the readable system specification in `core/requirements-system-profile.md`: stable REQ headings or tables and shared acceptance criteria. Preserve the legacy compact profile for existing inputs.
 - `core/requirements-wording.md` is the controlled-Russian contract. Apply its isolated-reader test while writing, not only at delivery: quantities, referents, events and observable outcomes must be explicit.
 - `core/requirements-audit.md` is the mandatory three-level semantic audit: individual rules, cross-requirement system reasoning, and delivery readiness. A format validator never substitutes for it.
 - Write requirements by the harness template in `templates/requirements/`, not freeform.
 - Start from `features/<feature>/requirements.md` as the primary feature-level requirement page and only place where feature requirements are authored from scratch.
-- Use `templates/requirements/feature-requirements.template.md` for new or consciously migrated documents. Existing older documents remain readable history, but the live root must use the compact profile before its next exchange revision.
-- Do not add a `Статус` field to compact `requirements.md`. Read authoring and audit state from `requirements-state.json`, and the immutable delivery revision state from its exchange `manifest.json`.
+- Use `templates/requirements/feature-requirements.template.md` for new or consciously migrated documents. Existing older documents remain readable history, but existing compact roots keep their profile until an explicitly requested rewrite.
+- Do not add a `Статус` field to `requirements.md`. Read authoring and audit state from `requirements-state.json`, and the immutable delivery revision state from its exchange `manifest.json`.
 - Requirement diagrams must be PlantUML; do not introduce Mermaid blocks.
 - Keep `requirements.md` as the authored business contract; derive OpenSpec proposal/spec only under `core/sdd-input.md`. Do not create exchange revisions after each change.
 - After changing the root document, record the change origin in `features/<feature>/requirements-state.json` through `scripts/requirementsctl.py record-change`.

@@ -44,7 +44,7 @@ A failed check does not advance the run. Repeated failure reaches the configured
 
 - Cross-feature work caused by the current feature is part of the initiating feature scope and HLE.
 - Current requirements contain the mandatory `Влияние на соседние функциональности` section.
-- Every required neighboring change is covered by root `REQ-*` and nested scenarios, or the section explicitly states that no neighboring functionality is affected.
+- Every required neighboring change is covered by root `REQ-*` and acceptance coverage under the selected requirements profile, or the section explicitly states that no neighboring functionality is affected.
 - Local stale tails block completion. Cross-mode propagation may be deferred only through a concrete consistency backlog record.
 - When requirements depend on current implementation, analyst research is bounded to one registered `coda` contour, records the exact commit, and verifies that the code worktree is unchanged.
 - Analyst code evidence improves the input but never replaces developer-side reconciliation against the implementation branch used for delivery.

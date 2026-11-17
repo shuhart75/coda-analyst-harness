@@ -57,7 +57,7 @@ def build_bundle(root: Path, requirements_text: str, code_root: Path) -> dict:
                    "repository": git(code_root, "remote", "get-url", "origin"), "code_commit": git(code_root, "rev-parse", "HEAD"),
                    "context_files": context, "base_specs": {"results": None},
                    "coverage": [{"req_id": req_id, "capability": "results", "requirement": "Show result", "scenarios": ["Existing result"]}
-                                for req_id in sorted(set(bundle.REQS.findall(requirements_text)))]}]}
+                                for req_id in sorted(set(bundle.authored_requirement_ids(requirements_text)))]}]}
     (root / "package.json").write_text(json.dumps(package, ensure_ascii=False), encoding="utf-8")
     return package
 

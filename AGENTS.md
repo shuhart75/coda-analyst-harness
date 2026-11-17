@@ -232,7 +232,7 @@ Requirement templates live in `templates/requirements/`. Use them as the active 
 - Before editing an existing feature, run `requirementsctl.py status`. If it reports an unrecorded divergence from the last published revision, do not guess its origin: ask whether it came from analyst initiative or a registered developer result and record that answer first.
 - After every root requirement change, record its origin with `scripts/requirementsctl.py record-change`: `analyst` for an analyst-initiated change or `developer-result` with the stable `return_id` for accepted developer feedback.
 - A `developer-result` change never creates or offers an exchange revision. An analyst-initiated change after an existing publication may produce one offer to prepare a new revision. Record the offer before asking; if declined, persist the refusal and do not ask again until an explicit preparation command.
-- New root documents follow the compact specification contract in `core/requirements-profile.md`; the ISO-shaped and former sequential profiles are no longer used for new delivery revisions.
+- New root documents follow the readable system specification contract in `core/requirements-profile.md`; the ISO-shaped and former sequential profiles are no longer used for new delivery revisions.
 - Compact `requirements.md` must not contain `Статус`. Use `requirements-state.json` for authoring and audit state and exchange `manifest.json` for delivery state.
 - Requirement prose follows `core/requirements-wording.md`. Use explicit quantities and named referents; every scenario must identify a concrete state, event and observable result. Run `validate-requirements-wording.py` after substantive edits and before showing the document as checked.
 - Keep the authored business contract in requirements.md with stable REQ identifiers and Russian scenarios. For OpenSpec delivery follow core/sdd-input.md: the analyst derives proposal and delta specs in the selected delivery's sdd/ from requirements and verified code/main specs; developers own design/tasks. Never write into working code OpenSpec roots from the analyst workspace.
@@ -335,7 +335,7 @@ Context summaries, checkpoints and research files are internal harness operation
 - Prefer a Russian explanation before an unavoidable special term.
 - Run `python3 scripts/validate-language.py "$PROJECT_ROOT"` for changed requirements before completion.
 - Run `python3 scripts/validate-requirements-profile.py "$PROJECT_ROOT"` for changed root documents that use the profile marker.
-- Run `python3 scripts/validate-requirements-wording.py "$PROJECT_ROOT"` for changed compact requirements. A successful script result never replaces the isolated-reader review from `core/requirements-wording.md`.
+- Run `python3 scripts/validate-requirements-wording.py "$PROJECT_ROOT"` for changed profiled requirements. A successful script result never replaces the isolated-reader review from `core/requirements-wording.md`.
 
 ## Передача по явному решению аналитика
 
