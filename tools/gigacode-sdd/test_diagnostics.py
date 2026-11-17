@@ -28,6 +28,24 @@ def read_sections(path):
 
 
 class BundleTests(unittest.TestCase):
+    def test_recovery_binding_failure_is_included_even_for_old_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)/'run'; root.mkdir()
+            config = root/'config.json'; config.write_text('{}')
+            log = root/'logs/old-review'; log.mkdir(parents=True)
+            binding = log/'recovery-binding.json'
+            data = {'head_matches':True,'task_matches':True,'packet_matches':True,
+                    'file_difference_count':1,
+                    'file_differences':[{'path':'frontend/.npmrc','fields':['content-or-readability']}]}
+            binding.write_text(json.dumps(data))
+            (root/'state.json').write_text(json.dumps({'tasks':{'task':{
+                'status':'blocked','error':'Saved review differs; inspect '+str(binding)}}}))
+            for i in range(12):
+                recent = root/'logs'/('unrelated-'+str(i)); recent.mkdir()
+                (recent/'stdout.jsonl').write_text('{"type":"result","result":"done"}')
+            sections = read_sections(diagnostics.collect(config))
+            self.assertEqual(json.loads(sections['compact/logs/old-review/recovery-binding.json']),data)
+
     def test_current_denials_survive_large_history_and_newer_unrelated_logs(self):
         import os
         with tempfile.TemporaryDirectory() as folder:

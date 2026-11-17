@@ -25,6 +25,55 @@ class WorkspacesTest(unittest.TestCase):
         ws.git(self.repo, "commit", "-qm", "initial")
         self.base = ws.git(self.repo, "rev-parse", "HEAD")
 
+    def test_review_binding_accepts_clone_timestamp_but_checks_private_bytes(self):
+        private = self.repo/'.npmrc'
+        private.write_bytes(b'fixture-value-A\n')
+        ws.git(self.repo, 'add', '--', '.npmrc')
+        ws.git(self.repo, 'commit', '-qm', 'private fixture')
+        os.utime(private, ns=(1000000000,1000000000))
+        dest = self.root/'review'
+        ws.clone_snapshot(self.repo, dest, include_dirty=True)
+        source, review = ws.snapshot(self.repo), ws.snapshot(dest)
+        self.assertNotEqual(source['files']['.npmrc']['mtime_ns'], review['files']['.npmrc']['mtime_ns'])
+        report = ws.review_copy_binding(self.repo, dest, source, review)
+        self.assertEqual(report['file_difference_count'], 0)
+        self.assertEqual(report['private_files_compared'], 1)
+        stamp = (dest/'.npmrc').stat()
+        (dest/'.npmrc').write_bytes(b'fixture-value-B\n')
+        os.utime(dest/'.npmrc', ns=(stamp.st_atime_ns,stamp.st_mtime_ns))
+        # Same size and restored timestamp cannot hide a different file.
+        self.assertEqual(ws.snapshot(dest)['files'], review['files'])
+        report = ws.review_copy_binding(self.repo, dest, source, review)
+        self.assertEqual(report['file_differences'], [{'path':'.npmrc','fields':['content-or-readability']}])
+        self.assertNotIn('fixture-value', json.dumps(report))
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file modes')
+    def test_review_binding_uses_git_executable_status_and_keeps_exact_snapshots(self):
+        path = self.repo/'backend/a.txt'
+        path.chmod(0o600)
+        source = ws.snapshot(self.repo)
+        dest = self.root/'review'
+        ws.clone_snapshot(self.repo, dest, include_dirty=True)
+        copied = dest/'backend/a.txt'
+        copied.chmod(0o644)
+        review = ws.snapshot(dest)
+        self.assertNotEqual(source['files']['backend/a.txt'], review['files']['backend/a.txt'])
+        self.assertEqual(ws.review_copy_binding(self.repo,dest,source,review)['file_difference_count'],0)
+        copied.chmod(0o755)
+        changed = ws.snapshot(dest)
+        self.assertNotEqual(changed,review)
+        self.assertEqual(ws.review_copy_binding(self.repo,dest,source,changed)['file_differences'],
+                         [{'path':'backend/a.txt','fields':['executable']}])
+
+    def test_review_binding_rejects_missing_and_changed_code(self):
+        dest = self.root/'review'
+        ws.clone_snapshot(self.repo,dest,include_dirty=True)
+        (dest/'backend/a.txt').write_text('different\n')
+        (dest/'extra.txt').write_text('unexpected\n')
+        report = ws.review_copy_binding(self.repo,dest,ws.snapshot(self.repo),ws.snapshot(dest))
+        self.assertEqual(report['file_difference_count'],2)
+        self.assertEqual({v['path'] for v in report['file_differences']}, {'backend/a.txt','extra.txt'})
+
     def test_clone_preserves_source_and_has_no_remote(self):
         (self.repo / "backend/a.txt").write_text("staged\n", encoding="utf-8")
         ws.git(self.repo, "add", "--", "backend/a.txt")

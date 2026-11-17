@@ -3,11 +3,11 @@ import json
 from pathlib import Path
 
 from transport import parse_events, review_denial_errors, execution_result_usable
-from workspace import snapshot
+from workspace import snapshot, review_copy_binding
 
 
 def load(runner, task, value, events_path, model, *, validate=True):
-    from controller import Blocked, digest, file_manifest, read, git_controls
+    from controller import Blocked, digest, file_manifest, read, git_controls, save
     from execution_cycle import _receipt_valid, fingerprint
     stage = value.get('stage')
     name = task['id'] + ('-review' if stage == 'review' else '-adjudicate')
@@ -35,14 +35,14 @@ def load(runner, task, value, events_path, model, *, validate=True):
     _receipt_valid(value)
     current = snapshot(value['workspace'], normalize_settings=True)
     captured = receipt['workspace_snapshot']
-    def code_files(data):
-        return {path: info for path, info in data['files'].items()
-                if not path.startswith('.review-input/')
-                and not ('.gigacode' in Path(path).parts and Path(path).name == 'settings.json')}
-    if (current['head'] != captured['head'] or code_files(current) != code_files(captured)
-            or read(root/'.review-input/task.json') != task
-            or file_manifest(root/'.review-input/packet') != file_manifest(runner.root/'input')):
-        raise Blocked('Saved review candidate differs from the current task or pinned packet')
+    binding = review_copy_binding(value['workspace'], root, current, captured)
+    binding['task_matches'] = read(root/'.review-input/task.json') == task
+    binding['packet_matches'] = file_manifest(root/'.review-input/packet') == file_manifest(runner.root/'input')
+    binding_path = events.parent/'recovery-binding.json'
+    save(binding_path, binding)
+    if (not binding['head_matches'] or binding['file_difference_count']
+            or not binding['task_matches'] or not binding['packet_matches']):
+        raise Blocked('Saved review candidate differs from the current task or pinned packet; inspect ' + str(binding_path))
     text = prompt.read_text(encoding='utf-8')
     checks = json.dumps(value['checks'])
     if ('INDEPENDENT_REVIEW\n' not in text or 'Task:\n' + json.dumps(task, ensure_ascii=False) not in text

@@ -35,6 +35,7 @@ def recover(runner, task, candidates, folder, scope):
     runner.guard()
     matches = []
     review_roots = []
+    rejected = []
     models = models_for(runner)
     for path, value in candidates:
         if value.get('stage') not in ('review', 'adjudicate'):
@@ -50,11 +51,14 @@ def recover(runner, task, candidates, folder, scope):
             events = receipt.parent/'stdout.jsonl'
             try:
                 root, report = review_receipt.load(runner, task, value, str(events), model)
-            except (Blocked, ValueError, OSError, KeyError, TypeError):
+            except (Blocked, ValueError, OSError, KeyError, TypeError) as exc:
+                rejected.append({'session': receipt.parent.name, 'type': type(exc).__name__, 'error': str(exc)})
                 continue  # Stale/unusable receipts never authorize recovery.
             matches.append((path, value, events, model))
             review_roots.append(root)
             break
+    save(folder/'recovery-attempts.json', {'rejected_count':len(rejected), 'rejected':rejected[:12],
+                                        'usable_reviews':[str(m[2]) for m in matches]})
     if not matches:
         raise Blocked('Operational failure has no unchanged candidate with usable audited review; inspect ' + str(fatal_path))
     # The lock entry already checked the whole run. At this point unrelated
