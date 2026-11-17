@@ -2,8 +2,9 @@
 import json
 from pathlib import Path
 
-from transport import parse_events, review_denials_accounted
+from transport import parse_events
 from workspace import snapshot, review_copy_binding
+from session_outcome import classify as session_outcome
 
 
 def load(runner, task, value, events_path, model, *, validate=True):
@@ -55,14 +56,16 @@ def load(runner, task, value, events_path, model, *, validate=True):
     parsed = parse_events(events)
     if parsed['text'] != result.get('text') or parsed['permission_denials'] != result.get('permission_denials'):
         raise Blocked('Saved review result differs from its original stream')
-    if ((result.get('cleanup') or {}).get('preserved') or
-            (result.get('permission_denials') and review_denials_accounted(result) is None)):
-        raise Blocked('Saved review has unresolved permission or cleanup failure')
+    if (result.get('cleanup') or {}).get('preserved'):
+        raise Blocked('Saved review has unresolved cleanup failure')
     # Integrity is separate from usability. A bound but incomplete review may
     # enter protocol repair, never acceptance. Reparse older receipts to detect
     # transport faults that their older parser did not recognize.
     result = dict(result)
     result['errors'] = list(dict.fromkeys(result.get('errors', []) + parsed['errors']))
     result['ok'] = not result['errors']
+    binding['session'] = {key: result.get(key) for key in ('returncode', 'timed_out', 'cancelled', 'terminal_result')}
+    binding['disposition'] = session_outcome(result, 'review')
+    save(binding_path, binding)
     report = runner.validate_review_result(root, result, task['requirements'], name, model) if validate else None
     return root, report

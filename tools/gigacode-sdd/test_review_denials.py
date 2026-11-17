@@ -82,6 +82,16 @@ class ReviewDenialTests(unittest.TestCase):
         (Path(receipt['workspace'])/'backend/value.txt').write_text('tampered')
         with self.assertRaisesRegex(Blocked, 'receipt changed'): self.run_task()
 
+    def test_old_unclassified_tool_refusal_repeats_only_review(self):
+        self.denial_message = 'Permission denied; outcome unknown'
+        with self.assertRaisesRegex(Blocked, 'Permission preflight'):
+            self.run_task(review=self.old_review)
+        counts = len(self.calls), self.check_count
+        accepted = self.run_task()
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual((len(self.calls), self.check_count), counts)
+        self.assertEqual(accepted['history'][-1]['kind'], 'review-protocol')
+
     def test_plan_mode_refusal_does_not_discard_completed_review(self):
         self.denial_message = ('Plan mode blocked this shell command because it was classified as '
                                'state-modifying. Do not retry it through wrappers or obfuscation; '

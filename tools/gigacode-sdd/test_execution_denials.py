@@ -43,6 +43,86 @@ class ExecutionDenialTests(unittest.TestCase):
         result = self.denied_session(*args, **kwargs)
         raise Blocked('Permission preflight/runtime denial; inspect ' + result['events_path'])
 
+    def timed_out_session(self, *args, **kwargs):
+        result = self.denied_session(*args, **kwargs)
+        events = Path(result['events_path'])
+        rows = [json.loads(line) for line in events.read_text().splitlines()][:-1]
+        rows[2]['message']['content'][0]['content'] = 'Shell security policy denied this command: shell.python3.wrapper'
+        events.write_text('\n'.join(map(json.dumps, rows))+'\n')
+        result = parse_events(events)
+        result.update(returncode=-15, timed_out=True, cleanup={'preserved':False})
+        result['errors'].append('Session process timeout; partial events preserved')
+        receipt = read(events.parent/'session-receipt.json')
+        receipt.update(result=result,events_sha256=digest(events))
+        save(events.parent/'session-receipt.json',receipt)
+        return result
+
+    def test_old_timeout_and_denial_recovers_work_through_checks_and_review(self):
+        self.task['resources'] = ['database']
+        def old(*args, **kwargs):
+            result = self.timed_out_session(*args, **kwargs)
+            raise Blocked('Permission preflight/runtime denial; inspect ' + result['events_path'])
+        with self.assertRaisesRegex(Blocked, 'Permission preflight'):
+            self.run_task(session=old)
+        def forbidden(*args, **kwargs): raise AssertionError('preserved implementation repeated')
+        accepted = self.run_task(session=forbidden)
+        self.assertTrue(accepted['session_result']['timed_out'])
+        self.assertFalse(accepted['session_result']['terminal_result'])
+        self.assertEqual((len(self.calls), self.check_count, self.review_count), (1, 1, 1))
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertFalse(list((self.runner.root/'execution-cycles').glob('*/fatal.json')))
+
+    def test_timeout_is_not_a_fatal_that_cancels_the_other_model(self):
+        self.primary_only = False
+        self.task['resources'] = ['database']
+        def execute(*args, **kwargs):
+            if kwargs['model'] == MODELS[0]: return self.timed_out_session(*args, **kwargs)
+            return self.session(*args, **kwargs)
+        accepted = self.run_task(session=execute)
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual({call[1] for call in self.calls}, set(MODELS))
+        self.assertFalse(list((self.runner.root/'execution-cycles').glob('*/fatal.json')))
+
+    def test_partial_candidate_cannot_bypass_failed_checks(self):
+        def checks(*args, **kwargs):
+            reports = self.checks(*args, **kwargs)
+            reports[0]['ok'] = False
+            return reports
+        with self.assertRaisesRegex(Blocked, 'No verified execution candidate'):
+            self.run_task(session=self.timed_out_session, checks=checks)
+        self.assertEqual(self.review_count, 0)
+        self.assertFalse(any(v['status']=='accepted' for v in self.records()))
+
+    def test_controller_returns_audited_incomplete_sessions_for_stage_recovery(self):
+        result = self.timed_out_session(self.work, '.', 'task', 'execute', 'be-execute', model=MODELS[0])
+        for role in ('execute', 'review'):
+            with self.subTest(role=role), patch('controller.run_session',return_value=result):
+                actual = self.runner.session(self.work, '.', 'task', role, 'be-'+role, model=MODELS[0])
+                self.assertEqual(actual['disposition']['action'], 'check' if role=='execute' else 'retry')
+
+    def test_partial_candidate_with_wrong_model_never_reaches_checks(self):
+        def execute(*args, **kwargs):
+            result = self.timed_out_session(*args, **kwargs)
+            events = Path(result['events_path'])
+            events.write_text(events.read_text().replace(kwargs['model'], 'unrequested-model'))
+            return result
+        with self.assertRaisesRegex(Blocked, 'No verified execution candidate'):
+            self.run_task(session=execute)
+        self.assertEqual((self.check_count, self.review_count), (0, 0))
+
+    def test_partial_session_safeguards_and_role_boundary(self):
+        from session_outcome import classify
+        result = self.timed_out_session(self.work, '.', 'task', 'execute', 'be-execute', model=MODELS[0])
+        self.assertEqual(classify(result, 'execute')['action'], 'check')
+        self.assertEqual(classify({**result, 'text': '{"verdict":"pass"}'}, 'review')['action'], 'retry')
+        for changes, action in [({'cleanup': {'preserved': True}}, 'stop-cleanup'),
+                                ({'cancelled': True}, 'cancel'),
+                                ({'event_count': 0}, 'retry'),
+                                ({'returncode': None}, 'retry'),
+                                ({'errors': result['errors'] + ['Malformed stream event at line 2']}, 'retry')]:
+            with self.subTest(changes=changes):
+                self.assertEqual(classify({**result, **changes}, 'execute')['action'], action)
+
     def test_saved_denial_resumes_checks_without_repeating_execution(self):
         self.task['resources'] = ['database']
         with self.assertRaisesRegex(Blocked, 'Permission preflight'):

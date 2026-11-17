@@ -71,7 +71,8 @@ def parse_events(path: Path) -> dict:
                     if item.get("type") == "tool_use":
                         tool_id = item.get("id")
                         if isinstance(tool_id, str):
-                            tool_calls[tool_id] = item.get("name", "unknown")
+                            name = item.get('name')
+                            tool_calls[tool_id] = name if isinstance(name, str) else 'unknown'
                     if item.get("type") != "tool_result":
                         continue
                     tool_id = item.get("tool_use_id", "unknown")
@@ -202,11 +203,13 @@ def review_denials_accounted(result):
         content = message.get('content', []) if isinstance(message, dict) else []
         for item in content if isinstance(content, list) else []:
             if isinstance(item, dict) and item.get('type') == 'tool_result':
-                returned.setdefault(item.get('tool_use_id'), []).append(item)
+                key = item.get('tool_use_id')
+                if isinstance(key, str):
+                    returned.setdefault(key, []).append(item)
     errors = {'CLI reported denied permissions; interactive approval is unavailable'}
     for denial in evidence['permission_denials']:
         key = denial.get('tool_use_id')
-        if key not in evidence['tool_calls'] or denial.get('tool_name') != evidence['tool_calls'][key]:
+        if not isinstance(key, str) or key not in evidence['tool_calls'] or denial.get('tool_name') != evidence['tool_calls'][key]:
             return None
         items = returned.get(key, [])
         if len(items) != 1 or not tool_was_not_run(items[0]):

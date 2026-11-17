@@ -16,7 +16,7 @@ import time
 import uuid
 
 from policy import prepare_permissions, nexus_environment, audit_dependency_sources, make_policy_prompt
-from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, execution_result_usable, review_denial_errors, review_denials_accounted
+from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, review_denial_errors
 from evidence import bind_quote
 from platform_support import (FileLock, launch_process, process_exists,
                               process_scope_exists, process_scope_pids)
@@ -28,6 +28,7 @@ import review_cycle
 import diagnostics
 import operator_input
 from progress import Progress, SESSION_IDENTITY, elapsed
+from session_outcome import classify as session_outcome
 
 class Blocked(RuntimeError):
     pass
@@ -520,6 +521,7 @@ class Runner:
         if current_decision != decision_sha:
             raise Blocked('Analyst instructions changed during session; evidence preserved, resume to revalidate')
         # Durable receipt is written only after all source/workspace/service audits.
+        result['disposition'] = session_outcome(result, role)
         save(session_log / 'session-receipt.json', {
             'result': result, 'events_sha256': digest(result['events_path']),
             'workspace_snapshot': after, 'workspace': str(Path(root).resolve()),
@@ -528,9 +530,7 @@ class Runner:
             'decision_sha256': decision_sha})
         if result['cancelled']:
             raise Interrupted(result=result)
-        if result['permission_denials'] and not (name != 'preflight' and (
-                (role == 'execute' and execution_result_usable(result))
-                or (role == 'review' and review_denials_accounted(result) is not None))):
+        if result['permission_denials'] and name == 'preflight':
             raise Blocked('Permission preflight/runtime denial; inspect ' + result['events_path'])
         return result
 
@@ -704,8 +704,11 @@ executed test names/counts, not just a successful command or test compilation.
 
     def validate_review_result(self, root, result, requirements, name, model=None, expected=None):
         """Use identical verdict checks for fresh and receipt-recovered review evidence."""
-        if 'CLI context exhausted; fresh focused review required' in result.get('errors', []):
+        disposition = session_outcome(result, 'review')
+        if disposition['cause'] == 'context-limit':
             raise RetryableSessionError('Reviewer context exhausted; retry only review with bounded excerpts', result)
+        if disposition['action'] != 'validate':
+            raise RetryableSessionError('Reviewer failed; needs repair: ' + disposition['cause'] + '; ' + result['events_path'], result)
         if model:
             from planning_cycle import verify_model
             verify_model(result, model)

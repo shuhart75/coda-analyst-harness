@@ -18,7 +18,7 @@ import time
 import uuid
 
 from workspace import clone_snapshot, export_patch, snapshot
-from transport import execution_result_usable
+from session_outcome import classify as session_outcome
 
 MODELS = ('DeepSeek-V4.1-Flash-1017', 'GLM-5.3-Flash')
 STRATEGIES = (
@@ -250,7 +250,7 @@ def _recover_execution_session(runner, task, value, prompt):
     A unique controller marker is pinned before launch. Neither timestamps nor
     a previous successful execution of the same task identify an invocation.
     """
-    from controller import Blocked, digest, read
+    from controller import Blocked, digest, read, git_controls
     pending = value.get('pending_session')
     if not pending or pending.get('prompt_sha256') != hashlib.sha256(prompt.encode()).hexdigest():
         return None
@@ -277,11 +277,11 @@ def _recover_execution_session(runner, task, value, prompt):
                 or result.get('events_path') != str(events)
                 or events.is_symlink() or not events.is_file()
                 or digest(events) != receipt.get('events_sha256')
+                or ('git_controls' in receipt and receipt['git_controls'] != git_controls(value['workspace']))
                 or snapshot(value['workspace'], normalize_settings=True) != receipt.get('workspace_snapshot')):
             raise Blocked('Saved execution session receipt changed; preserve and inspect ' + str(path))
-        if ((result.get('permission_denials') and not execution_result_usable(result))
-                or (result.get('cleanup') or {}).get('preserved')):
-            raise Blocked('Saved execution session has a permission or cleanup denial')
+        if (result.get('cleanup') or {}).get('preserved'):
+            raise Blocked('Saved execution session has a cleanup denial')
         # A cancelled invocation retains its working files, but its incomplete
         # transport result cannot be promoted to a completed execution step.
         if result.get('cancelled'):
@@ -292,8 +292,10 @@ def _recover_execution_session(runner, task, value, prompt):
     if matches:
         path, result = matches[0]
         value['recovered_receipt'] = str(path)
+        next_step = ('обязательные проверки' if session_outcome(result, 'execute')['action'] == 'check'
+                     else 'исправление сессии')
         runner.progress(task['id'] + ' / ' + value['model']
-                        + ': завершённая сессия восстановлена; повтор исполнения не требуется')
+                        + ': сессия восстановлена; следующий шаг: ' + next_step)
         return result
     return None
 
@@ -331,7 +333,10 @@ def _recover_permission_fatal(runner, task, candidates, folder, scope):
             suffix = '-review-' if value['stage'] == 'review' else '-adjudicate-'
             if not Path(expected_log).parent.name.startswith(task['id'] + suffix):
                 continue
-            root, report = review_receipt.load(runner, task, value, expected_log, model, validate=False)
+            try:
+                root, report = review_receipt.load(runner, task, value, expected_log, model, validate=False)
+            except Blocked as exc:
+                raise Blocked(str(exc) + '; inspect ' + expected_log) from exc
             value['recovered_review'] = {'events_path': expected_log, 'model': model, 'stage': value['stage']}
             save(candidate_path, value)
             saved = folder/('recovered-fatal-' + digest(path) + '.json')
@@ -346,16 +351,16 @@ def _recover_permission_fatal(runner, task, candidates, folder, scope):
             continue
         prompt = _execution_prompt(task, value) + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + pending['id']
         result = _recover_execution_session(runner, task, value, prompt)
-        if (result and result.get('events_path') == expected_log and result.get('permission_denials')
-                and execution_result_usable(result)):
+        if result and result.get('events_path') == expected_log:
             # Keep the original failure; do not delete evidence or edit operator state.
             saved = folder/('recovered-fatal-' + digest(path) + '.json')
             save(folder/'permission-recovery.json', {'source': path.name, 'archived': saved.name,
                  'events_path': expected_log, 'receipt': value['recovered_receipt'],
-                 'method': 'audited completed execution forwarded to mandatory checks and independent review'})
+                 'method': 'audited execution restored for checks or repair; no assumed completion',
+                 'disposition': session_outcome(result, 'execute')})
             path.replace(saved)
-            runner.progress(task['id'] + ': завершённая сессия восстановлена после отказов отдельных вызовов; '
-                            'проверки и независимое ревью ещё обязательны')
+            runner.progress(task['id'] + ': сохранённая сессия восстановлена; '
+                            'проверяю пригодность изменений, завершённость не предполагается')
             return
     raise Blocked('Saved permission failure has no matching usable execution receipt; inspect ' + str(path))
 
@@ -529,9 +534,13 @@ def execute_task(runner, task, record):
                         runner.audit(work)
                         value['patch'] = export_patch(work, value['base'], task['writes'], path.parent / 'candidate.patch')
                         value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
-                        if not result.get('ok') and not execution_result_usable(result):
+                        disposition = session_outcome(result, 'execute')
+                        if disposition['action'] != 'check':
                             fail('transport', {'errors': result.get('errors', []), 'log': result['events_path']})
                             continue
+                        if disposition['incomplete']:
+                            runner.progress(task['id'] + ' / ' + value['model'] +
+                                            ': сессия не завершена; проверяю сохранённый код, успех пока не подтверждён')
                         if not result.get('ok'):
                             runner.progress(task['id'] + ': часть вызовов завершилась отказом или ошибкой; '
                                             'проверяю сохранённые изменения обязательными проверками')

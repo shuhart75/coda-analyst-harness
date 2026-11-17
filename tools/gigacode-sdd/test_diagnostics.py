@@ -28,6 +28,17 @@ def read_sections(path):
 
 
 class BundleTests(unittest.TestCase):
+    def test_activity_counts_and_task_errors_survive_projection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'config.json').write_text('{}')
+            (root/'state.json').write_text(json.dumps({'tasks':{'backend':{'status':'blocked','error':'review retry'}}}))
+            log = root/'logs/current'; log.mkdir(parents=True)
+            (log/'stdout.jsonl').write_text('{"type":"system"}\n')
+            (log/'activity.json').write_text(json.dumps({'tool_calls':120,'tool_results':119}))
+            sections = read_sections(diagnostics.collect(root/'config.json'))
+            self.assertEqual(json.loads(sections['compact/logs/current/activity.json'])['tool_calls'],120)
+            self.assertEqual(json.loads(sections['compact/task-status.json'])['backend']['error'],'review retry')
     def test_recovery_binding_failure_is_included_even_for_old_session(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)/'run'; root.mkdir()
