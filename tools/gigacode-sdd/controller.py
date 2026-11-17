@@ -33,6 +33,10 @@ class Blocked(RuntimeError):
     pass
 
 
+class OperationalBlocked(Blocked):
+    """Recheck the environment on resume; this is not a persistent safety verdict."""
+
+
 class Interrupted(Blocked):
     def __init__(self, message='Interrupted; checkpoint preserved', result=None):
         super().__init__(message)
@@ -309,7 +313,7 @@ class Runner:
         if findings:
             raise Blocked('Dependency sources are not Nexus-only: ' + json.dumps(findings, ensure_ascii=False))
 
-    def check_preserved_processes(self):
+    def check_preserved_processes(self, roots=None):
         """Do not start another writer while a preserved process group is alive."""
         for path in (self.root / 'preserved-processes').glob('*.json'):
             record = read(path)
@@ -333,7 +337,8 @@ class Runner:
         inventory = inspect_services()
         if not inventory['complete']:
             raise Blocked('Cannot inspect managed processes before resume; run bootstrap --diagnose')
-        self.check_existing_workspace_processes(inventory, self.root, 'resume')
+        for root in roots if roots is not None else [self.root]:
+            self.check_existing_workspace_processes(inventory, root, 'resume')
 
     def check_existing_workspace_processes(self, inventory, root, name):
         """Block observed stale processes in this workspace, without signals.
@@ -360,6 +365,12 @@ class Runner:
             save(self.root / 'preserved-services' / (str(service['pid']) + '.json'), service)
         self.stop.set()
         raise Blocked('Existing managed agent or service requires handoff before another writer starts; inspect ' + str(report))
+
+    def preserve_cleanup(self, cleanup):
+        self.stop.set()
+        path = self.root / 'preserved-processes' / (str(cleanup['process_group']) + '.json')
+        previous = read(path) if path.is_file() else {}
+        save(path, {**previous, **cleanup})
 
     def cleanup_guard(self, group):
         # Most completed sessions have no remaining group. Avoid an expensive
@@ -480,7 +491,9 @@ class Runner:
                                              else self.cfg['session_timeout'], env=self.env, stop_event=stop_event if stop_event is not None else self.stop,
                              cleanup_guard=self.cleanup_guard)
         if (result.get('cleanup') or {}).get('preserved'):
-            raise Blocked('Service-bearing process group preserved; inspect preserved-processes before resume')
+            self.preserve_cleanup(result['cleanup'])
+            save(session_log / 'transport-result.json', result)
+            raise OperationalBlocked('Process cleanup incomplete; inspect preserved-processes before resume')
         self.service_audit(services_before, root, name)
         self.guard()
         after = snapshot(root, normalize_settings=True)
@@ -501,6 +514,7 @@ class Runner:
         save(session_log / 'session-receipt.json', {
             'result': result, 'events_sha256': digest(result['events_path']),
             'workspace_snapshot': after, 'workspace': str(Path(root).resolve()),
+            'git_controls': git_controls(root),
             'model': model, 'prompt_sha256': hashlib.sha256(full_prompt.encode()).hexdigest(),
             'decision_sha256': decision_sha})
         if result['cancelled']:
@@ -775,7 +789,9 @@ executed test names/counts, not just a successful command or test compilation.
                     finally:
                         self._display.finish(token, outcome)
             if cleanup['preserved']:
-                raise Blocked('Check process group preserved to avoid stopping an unregistered service')
+                self.preserve_cleanup(cleanup)
+                save(folder / 'cleanup.json', cleanup)
+                raise OperationalBlocked('Check process group preserved; cleanup requires inspection')
             self.service_audit(services_before, root, name)
             reports.append({'check': check, 'returncode': proc.returncode, 'timed_out': timed_out,
                             'ok': proc.returncode == 0 and not timed_out and not stopping.is_set(),

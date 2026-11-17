@@ -14,6 +14,24 @@ from transport import finish_process
 
 
 class PlatformTests(unittest.TestCase):
+    def test_cleanup_permission_failure_preserves_process_identity(self):
+        process = Mock(pid=123)
+        with patch('transport.stop_process_scope', side_effect=PermissionError(1, 'Operation not permitted')):
+            result = finish_process(process)
+        self.assertTrue(result['preserved'])
+        self.assertEqual(result['process_group'], 123)
+        self.assertEqual(result['diagnostic']['errno'], 1)
+        process.wait.assert_not_called()
+        process.kill.assert_not_called()
+
+    def test_cleanup_wait_is_bounded_and_reports_incomplete_exit(self):
+        process = Mock(pid=123)
+        process.wait.side_effect = subprocess.TimeoutExpired('fixture', 5)
+        with patch('transport.stop_process_scope'):
+            result = finish_process(process)
+        self.assertTrue(result['preserved'])
+        process.wait.assert_called_once_with(timeout=5)
+
     def test_lock_excludes_another_process_and_releases(self):
         with tempfile.TemporaryDirectory() as directory:
             lock_path = Path(directory) / 'run.lock'

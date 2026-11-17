@@ -143,6 +143,23 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(report.stat().st_mode & 0o777, 0o600)
         self.assertFalse((bootstrap.app_root(self.home) / 'runs').exists())
 
+    def test_resume_interrupted_run_also_rechecks_blocked_tasks(self):
+        root = bootstrap.app_root(self.home)
+        state = bootstrap.new_state_dir(root)
+        config = state/'config.json'
+        save(config, {'state_dir':str(state), 'source':str(self.repo), 'requirements_sha256':'a'*64})
+        save(state/'state.json', {'status':'interrupted'})
+        save(root/'last-run.json', {'config':str(config)})
+        runner = Mock()
+        runner.locked.return_value = nullcontext()
+        runner.stop.is_set.return_value = False
+        runner.state = {'status':'complete'}
+        runner.main = self.home/'result'
+        with patch.object(bootstrap, 'require_handoff'), patch.object(bootstrap, 'Runner', return_value=runner), \
+                redirect_stdout(io.StringIO()):
+            bootstrap.launch(UI([0]), self.home)
+        runner.start.assert_called_once_with(retry_blocked=True)
+
     def test_incomplete_inventory_blocks_even_without_known_service(self):
         self.safe_inventory.inspect_services.return_value = {'complete': False, 'limitations': ['lsof unavailable']}
         with patch.dict(sys.modules, {'service_inventory': self.safe_inventory}):

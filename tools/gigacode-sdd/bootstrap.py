@@ -457,7 +457,10 @@ def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False
                 return 0
             runner = Runner(saved['config'])
             with runner.locked():
-                runner.start(retry_blocked=saved['status'] == 'blocked')
+                # A run may be interrupted while another task is already
+                # blocked. Explicit resume retries both; their own guards and
+                # receipts still decide whether work can continue.
+                runner.start(retry_blocked=True)
             print('Состояние: ' + runner.state['status'] + '\nРезультат: ' + str(runner.main))
             return 130 if runner.stop.is_set() else 0
     roots = workspace_roots(home)

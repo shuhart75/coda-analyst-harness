@@ -199,6 +199,21 @@ class ExecutionPortfolioTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, 'Preserved safety failure'):
             self.run_task()
 
+    def test_cleanup_failure_cannot_replace_peer_safety_failure(self):
+        from controller import OperationalBlocked
+        barrier = threading.Barrier(2)
+        def session(*args, **kwargs):
+            barrier.wait(timeout=30)
+            if kwargs['model'] == MODELS[0]:
+                raise Blocked('Agent changed Git configuration or hooks')
+            self.assertTrue(kwargs['stop_event'].wait(30))
+            raise OperationalBlocked('Process cleanup incomplete')
+        with self.assertRaisesRegex(Blocked, 'Git configuration'):
+            self.run_task(session=session)
+        fatal = read(next((self.runner.root/'execution-cycles').glob('*/fatal.json')))
+        self.assertEqual(fatal['type'], 'Blocked')
+        self.assertEqual({v['type'] for v in fatal['related_failures']}, {'Blocked','OperationalBlocked'})
+
     def test_wrong_model_cannot_win(self):
         self.task['resources'] = ['database']
         def wrong(*args, **kwargs):
