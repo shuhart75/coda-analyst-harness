@@ -76,7 +76,8 @@ class BoundaryTests(unittest.TestCase):
             {'type':'tool_result','tool_use_id':'candidate','is_error':False,'content':'read'}]}})+'\n')
         report = {'verdict':'pass','findings':[], 'coverage':{'REQ-BE':'task be','REQ-FE':'task fe'},
                   'candidate_sha256':'wrong'}
-        result = {'ok':True,'events_path':str(events),'text':json.dumps(report)}
+        result = {'ok':True,'events_path':str(events),'text':json.dumps(report),
+                  'returncode':0,'terminal_result':True,'errors':[]}
         with patch.object(f.runner,'session',return_value=result):
             bound = f.runner.review(root,'.','review',['REQ-BE','REQ-FE'],'plan-review')
             self.assertEqual(bound['candidate_sha256'], sha)

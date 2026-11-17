@@ -189,7 +189,7 @@ class Export:
                     result[key] = item
                 elif key in ('text', 'result') and isinstance(item, str) and item:
                     result[key] = self.payload(item)
-                elif key in ('tool_calls', 'tool_results'):
+                elif key in ('tool_calls', 'tool_results') and isinstance(item, (list, dict)):
                     result[key] = {'count': len(item) if isinstance(item, (list, dict)) else None,
                                    'details': 'selected session event projections'}
                 elif key in ('review', 'original_review', 'report') and isinstance(item, dict):
@@ -332,6 +332,11 @@ def collect_compact(config, destination=None, error=None):
     state = state if isinstance(state, dict) else {}
     out.failure_sessions(state)
     out.failure_sessions({'error': str(error)})
+    tasks = state.get('tasks', {})
+    if isinstance(tasks, dict):
+        out.add('compact/task-status.json', encoded({key: {
+            'status': value.get('status'), 'error': value.get('error')}
+            for key, value in tasks.items() if isinstance(value, dict)}))
     logs = root/'logs'
     recent = []
     folders = []
