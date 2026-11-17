@@ -86,14 +86,23 @@ class ExecutionCollaborationTests(unittest.TestCase):
         lines = import_module('expand-plantuml-includes').expand_file(self.gantt / 'actual-progress.puml', [])
         (self.gantt / 'actual-progress-confluence.puml').write_text('\n'.join(lines).rstrip() + '\n')
 
+    def release_plan_body(self):
+        from release_plan_forecast import HEADERS
+        (self.gantt.parent / 'release-plan-sources.json').write_text(json.dumps({
+            'schema_version': 1, 'rows': [{'release': 'RSCON-1', 'feature': 'Registry',
+                                         'unresolved_reason': 'No confirmed release scope in fixture'}]}))
+        return ('# План релизов\n| ' + ' | '.join(HEADERS) + ' |\n|---|---|---|---|---|---|\n'
+                '| RSCON-1 | 20.09.2026 | Не определён | Registry | Function | Value |\n')
+
     def test_release_plan_saved_only_in_confirmed_quarter(self):
         self.scope('registry')
         path = 'planning/2026-Q3/release-plan.md'
-        self.change(path, '# План релизов\n')
+        self.change(path, self.release_plan_body())
         from release_plan_review import review_marker
-        self.change(path, '# План релизов\n' + review_marker(self.gantt.parent) + '\n')
+        self.change(path, self.release_plan_body() + review_marker(self.gantt.parent) + '\n')
         preview = self.collaboration(self.workspace, self.environment, 'save-preview')
         self.assertIn({'path': path, 'kind': 'quarter-release-plan'}, preview['paths'])
+        self.assertIn({'path': 'planning/2026-Q3/release-plan-sources.json', 'kind': 'quarter-release-plan'}, preview['paths'])
         other = 'planning/2026-Q4/release-plan.md'
         self.change(other, '# Другой квартал\n')
         rejected = self.raw('save-preview')
@@ -104,9 +113,9 @@ class ExecutionCollaborationTests(unittest.TestCase):
         self.scope('registry')
         from release_plan_review import review_marker
         path = 'planning/2026-Q3/release-plan.md'
-        self.change(path, '# План релизов\n')
+        self.change(path, self.release_plan_body())
         self.assertIn('review is missing or stale', self.raw('save-preview').stdout)
-        self.change(path, '# План релизов\n' + review_marker(self.gantt.parent) + '\n')
+        self.change(path, self.release_plan_body() + review_marker(self.gantt.parent) + '\n')
         self.collaboration(self.workspace, self.environment, 'save-preview')
         include = self.gantt / 'includes/actual-progress/FEATURE-registry.puml'
         include.write_text('[registry] happens at 2026/09/03\n')
@@ -114,7 +123,7 @@ class ExecutionCollaborationTests(unittest.TestCase):
         result = self.raw('save-preview')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('review is missing or stale', result.stdout)
-        self.change(path, '# План релизов\n' + review_marker(self.gantt.parent) + '\n')
+        self.change(path, self.release_plan_body() + review_marker(self.gantt.parent) + '\n')
         self.collaboration(self.workspace, self.environment, 'save-preview')
         plan = self.project / path
         plan.write_text(plan.read_text().replace('# План релизов', '# Изменённый план'))

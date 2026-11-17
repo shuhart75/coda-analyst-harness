@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "rows": [
+    {
+      "release": "{{release}}",
+      "feature": "{{feature_name}}",
+      "deliveries": ["{{delivery_key}}"],
+      "evidence": [
+        {"path": "{{existing_scope_source}}", "quote": "{{verbatim_scope_quote}}"}
+      ]
+    }
+  ]
+}
