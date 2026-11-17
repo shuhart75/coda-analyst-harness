@@ -1569,6 +1569,14 @@ def execution_preview_command(args: argparse.Namespace) -> int:
                         "--run-id", args.run_id, "--project-root", args.project_root,
                         "--manifest", "<history-manifest-json>"],
         }
+        missing_cards = sorted({key for proposal in payload['feature_qa_proposals']
+                                if not proposal.get('qa_not_applicable')
+                                for key in proposal.get('missing_card_keys', [])})
+        if missing_cards:
+            payload['next_action'].update(
+                type='collect-feature-cards', keys=missing_cards,
+                history_manifest_field='supplemental_responses', run_id=args.run_id,
+                preserve_application_scope=True)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 

@@ -287,8 +287,12 @@ def preview_execution(
                              "existing_targets": targets,
                              "action": "consolidate" if len(targets) > 1 else "update" if targets else "create",
                              "requires_analyst_review": True})
-        application_issues = [issue for issue in owned if result.get('scope', {}).get('kind') != 'release'
-                              or issue.get(provider_field) in result.get('release_member_keys', [])]
+        scope_kind = result.get('scope', {}).get('kind')
+        application_keys = (result.get('release_member_keys', []) if scope_kind == 'release'
+                            else result['scope'].get('ids', []) if scope_kind == 'tasks'
+                            else result.get('application_member_keys'))
+        application_issues = [issue for issue in owned
+                              if application_keys is None or issue.get(provider_field) in application_keys]
         if application_issues and all(issue.get('issue_type') == 'bug' for issue in application_issues):
             qa_proposals[-1].update(action='not-applicable', qa_not_applicable=True)
             continue
@@ -346,6 +350,21 @@ def preview_execution(
             application_scope["protected_rows"].extend(
                 {**row, "allowed_fields": ["Estimate", "Estimate (дн)"]}
                 for row in proposal["existing_targets"] if row["task_id"] in remainder_ids)
+    elif scope.get("kind") == "tasks" or "application_member_keys" in result:
+        # Supplemental cards establish full QA evidence, never broaden the
+        # analyst's selected development tasks.
+        development_keys = set(scope.get("ids", []) if scope.get("kind") == "tasks"
+                               else result["application_member_keys"])
+        for item in items:
+            if item.get(str(provider) + "_key") not in development_keys:
+                item["proposed_action"] = "reference-only"
+        application_scope = {
+            "kind": "selected-tasks-only", "provider": provider,
+            "development_keys": sorted(development_keys),
+            "protected_rows": [row for row in rows
+                               if row["feature"] not in selected or
+                               (row["role"] != "QA" and row.get(str(provider) + "_key") not in development_keys)],
+        }
     returned = {issue.get(str(provider) + "_key") for issue in result["issues"]}
     returned.update(issue.get(str(provider) + "_key") for issue in result.get("skipped", []))
     returned.update(issue.get(str(provider) + "_key") for issue in result["excluded"]
