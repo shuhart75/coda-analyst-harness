@@ -4,6 +4,7 @@ from __future__ import annotations
 from project_layout import feature_root as layout_feature_root, artifact_glob
 
 import argparse
+import readable_requirements as readable
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,30 +91,42 @@ def current_requirement(line_number: int, headings: list[tuple[int, str]]) -> st
 
 def validate(path: Path) -> list[tuple[int, str, str, str | None]]:
     text = path.read_text(encoding="utf-8", errors="ignore")
-    if FORMAT_MARKER not in text:
+    if not readable.supported(text):
         return []
     prose = without_fenced_code(text)
+    criteria = {}
     headings = [
         (prose.count("\n", 0, match.start()) + 1, match.group(1))
         for match in REQ_HEADING_RE.finditer(prose)
     ]
+    if readable.is_readable(text):
+        prose = readable.prose(text)
+        definitions, checks, _ = readable.parse(text)
+        headings = [(d['line'], d['id']) for d in definitions]
+        criteria = {c['line']: c for c in checks}
     findings: list[tuple[int, str, str, str | None]] = []
     for line_number, raw_line in enumerate(prose.splitlines(), start=1):
         line = INLINE_CODE_RE.sub("", raw_line)
         if not line.strip():
             continue
         requirement = current_requirement(line_number, headings)
+        criterion = criteria.get(line_number)
+        when_line, then_line = line, line
+        if criterion:
+            requirement = criterion['id']
+            when_line = '**Когда** ' + INLINE_CODE_RE.sub('', criterion['when'])
+            then_line = '**Тогда** ' + INLINE_CODE_RE.sub('', criterion['then'])
         for rule in RULES:
             if rule.pattern.search(line):
                 findings.append((line_number, rule.code, rule.message, requirement))
-        if WHEN_PLACEHOLDER_RE.search(line):
+        if WHEN_PLACEHOLDER_RE.search(when_line):
             findings.append((
                 line_number,
                 "непроверяемое-условие",
                 "в Когда укажи конкретное начальное состояние и событие",
                 requirement,
             ))
-        if THEN_NORMATIVE_RE.search(line):
+        if THEN_NORMATIVE_RE.search(then_line):
             findings.append((
                 line_number,
                 "нормативный-результат",
@@ -134,7 +147,7 @@ def main() -> int:
     findings: list[tuple[Path, int, str, str, str | None]] = []
     for path in files:
         text = path.read_text(encoding="utf-8", errors="ignore")
-        if FORMAT_MARKER not in text:
+        if not readable.supported(text):
             continue
         checked += 1
         findings.extend(

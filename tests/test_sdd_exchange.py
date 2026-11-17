@@ -146,6 +146,32 @@ class SddExchangeTests(unittest.TestCase):
         receipt_path.write_text(json.dumps(receipt))
         self.assertIn("sdd_sha256", self.validate(success=False))
 
+    def test_readable_tables_survive_audit_and_immutable_exchange(self):
+        text = (legacy.ROOT / 'tests/fixtures/readable-requirements.md').read_text(encoding='utf-8')
+        text = text.replace('Название этапа: Поиск документов', 'Название этапа: Первый результат')
+        text = text.replace('Цель этапа: Выбрать документ по номеру', 'Цель этапа: Показать результат пользователю')
+        (self.feature / 'requirements.md').write_text(text, encoding='utf-8')
+        self.state('record-change', '--origin', 'analyst')
+        self.bundle()
+        self.authorize()
+        result = self.prepare()
+        self.assertEqual(Path(result['requirements']).read_text(encoding='utf-8'), text)
+        coverage = self.package['changes'][0]['coverage']
+        self.assertEqual({x['req_id'] for x in coverage}, {'REQ-DEMO-001', 'REQ-DEMO-002'})
+        self.assertTrue((self.project / 'requirements-exchange/readable_requirements.py').exists())
+        self.validate()
+        receipt_path = self.write_receipt(result)
+        entry = self.manifest(result)['revisions'][0]
+        receipt = json.loads(receipt_path.read_text())
+        receipt.update(schema_version=2, sdd_sha256=entry['sdd_input']['sha256'])
+        receipt_path.write_text(json.dumps(receipt))
+        (receipt_path.parent / 'tasks.md').write_text('# Задачи\n')
+        summary = receipt_path.parent / 'summary.md'
+        summary.write_text('REQ-DEMO-002 выполнено\n')
+        self.assertIn('summary.md не покрывает требования: REQ-DEMO-001', self.validate(success=False))
+        summary.write_text('REQ-DEMO-001 выполнено\nREQ-DEMO-002 выполнено\n')
+        self.validate()
+
     def test_sdd_only_change_creates_new_revision_and_preserves_history(self):
         self.authorize()
         first = self.prepare()

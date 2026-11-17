@@ -25,6 +25,7 @@ from workspace import install_commit_message_hook
 import delivery_stages as stages
 import sdd_audit
 import sdd_bundle
+from readable_requirements import authored_ids, is_readable, validate as validate_readable
 
 
 EXCHANGE_DIR = "requirements-exchange"
@@ -210,7 +211,7 @@ def install_root_contract(exchange: Path) -> None:
         if current.startswith(managed_headings[target_name]) and target.read_bytes() != source.read_bytes():
             target.write_bytes(source.read_bytes())
 
-    for name in ("sdd-receive.py", "sdd_bundle.py", "grooming.py"):
+    for name in ("sdd-receive.py", "sdd_bundle.py", "grooming.py", "readable_requirements.py"):
         source = harness_root() / "scripts" / name
         target = exchange / name
         marker = b"analyst-sdd-receiver:v1"
@@ -228,6 +229,8 @@ def title_from_requirements(text: str, feature: str) -> str:
 
 
 def validate_requirements_text(text: str) -> list[str]:
+    if is_readable(text):
+        return validate_readable(text)
     errors: list[str] = []
     identifiers = REQ_DEFINITION_RE.findall(text)
     duplicates = sorted({item for item in identifiers if identifiers.count(item) > 1})
@@ -491,7 +494,7 @@ def revision_processing_status(feature_root: Path, entry: dict[str, Any]) -> dic
         errors.append("итоговый summary.md создан до согласованного returns/tasks.md")
     if summary_present:
         requirements_path = feature_root / entry["requirements_path"]
-        requirement_ids = set(REQ_DEFINITION_RE.findall(requirements_path.read_text(encoding="utf-8")))
+        requirement_ids = set(authored_ids(requirements_path.read_text(encoding="utf-8")))
         summary_ids = set(REQ_RE.findall(summary_path.read_text(encoding="utf-8")))
         missing = sorted(requirement_ids - summary_ids)
         if missing:
@@ -1500,7 +1503,7 @@ def validate_result_review(project: Path, feature: str, return_id: str, review: 
         processing = revision_processing_status(root, entry)
         if processing["errors"]:
             raise ValueError("; ".join(processing["errors"]))
-        requirement_ids = set(REQ_DEFINITION_RE.findall((root / entry["requirements_path"]).read_text(encoding="utf-8")))
+        requirement_ids = set(authored_ids((root / entry["requirements_path"]).read_text(encoding="utf-8")))
         found = True
     if not found or not requirement_ids:
         raise ValueError("Точный итоговый отчёт с переданными REQ-* не найден; повтори scan")

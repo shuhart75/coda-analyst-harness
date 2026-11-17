@@ -47,6 +47,9 @@ def confirm(value, name):
 
 def requirement_blocks(text):
     """Keep authored wording, splitting only at actual Markdown headings."""
+    if "Формат: **системная спецификация функциональности**" in text.splitlines():
+        from readable_requirements import requirement_blocks as readable_blocks
+        return readable_blocks(text)
     matches = list(re.finditer(r'^### (REQ-[A-Z0-9-]+)\.\s+(.+)$', text, re.M))
     result = {}
     for match in matches:

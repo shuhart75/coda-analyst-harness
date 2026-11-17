@@ -25,6 +25,14 @@ REQS = re.compile(r"^### (REQ-[A-Z0-9-]+)\.\s+.+$", re.MULTILINE)
 SECTIONS = {"ADDED", "MODIFIED", "REMOVED", "RENAMED"}
 
 
+def authored_requirement_ids(text):
+    # Legacy copied receivers do not need the new helper for their old inputs.
+    if "Формат: **системная спецификация функциональности**" in text.splitlines():
+        from readable_requirements import authored_ids
+        return authored_ids(text)
+    return REQS.findall(text)
+
+
 def _fail(message):
     raise ValueError("SDD: " + message)
 
@@ -291,7 +299,7 @@ def inspect(root: Path, requirements_text: str) -> dict:
         _fail("materials requires package schema_version 2; update sender and receiver")
     if package.get("requirements_sha256") != _hash(requirements_text.encode("utf-8")):
         _fail("requirements checksum mismatch")
-    req_ids = set(REQS.findall(requirements_text))
+    req_ids = set(authored_requirement_ids(requirements_text))
     if not req_ids:
         _fail("no authored REQ definitions")
     changes = package.get("changes")

@@ -4,6 +4,7 @@ from __future__ import annotations
 from project_layout import feature_root as layout_feature_root, artifact_glob
 
 import argparse
+import readable_requirements as readable
 import re
 from pathlib import Path
 
@@ -87,6 +88,8 @@ def metadata_value(text: str, prefix: str) -> str:
 
 def validate(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8", errors="ignore")
+    if readable.is_readable(text):
+        return readable.validate(text)
     prose = without_fenced_code(text)
     errors: list[str] = []
 
@@ -169,7 +172,7 @@ def main() -> int:
     failed = False
     for path in files:
         text = path.read_text(encoding="utf-8", errors="ignore")
-        if FORMAT_MARKER not in text:
+        if not readable.supported(text):
             skipped += 1
             continue
         checked += 1
