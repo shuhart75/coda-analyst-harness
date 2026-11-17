@@ -10,7 +10,9 @@ import test_execution_cycle as fixtures
 
 
 class ExecutionDenialTests(unittest.TestCase):
-    setUp = fixtures.ExecutionPortfolioTests.setUp
+    def setUp(self):
+        fixtures.ExecutionPortfolioTests.setUp(self)
+        self.primary_only = True
     result = fixtures.ExecutionPortfolioTests.result
     session = fixtures.ExecutionPortfolioTests.session
     checks = fixtures.ExecutionPortfolioTests.checks

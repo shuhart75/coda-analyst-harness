@@ -1,9 +1,11 @@
 """Durable alternative implementations, independently checked before selection.
 
-All candidates own separate Git copies. Shared external resources force serial
-execution. Only a verified winner is returned to the integration journal.
+All candidates own separate Git copies. Shared external resources serialize
+execution/check stages, while independent reviews may run concurrently. Only a verified winner is returned to the integration journal.
 """
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from contextlib import nullcontext
+from execution_scheduling import ResourceLane, choose, quality
 import hashlib
 import json
 from evidence import bind_quote
@@ -409,18 +411,23 @@ def execute_task(runner, task, record):
         save(folder / 'selection.json', {'winner': value['model'], 'workspace': value['workspace'],
                                         'origin_workspace': str(origin), 'base': value['base'], 'scope': scope,
                                         'patch_sha256': value['patch']['sha256'],
-                                        'rule': 'first candidate with passing controller checks and independent other-model review',
+                                        'rule': 'fewest validated optional gaps among verified candidates; configured model order breaks ties',
+                                        'compared': [{'model': v['model'], 'optional_gaps': quality(v)}
+                                                     for _, v in candidates if v['status'] == 'accepted'],
                                         'other_outcomes': failures})
         save(origin_checkpoint, value)
         return value
 
-    for _, value in candidates:
-        if value['status'] == 'accepted':
+    accepted = [value for _, value in candidates if value['status'] == 'accepted']
+    if accepted:
+        for value in accepted:
             _receipt_valid(value)
-            runner.progress(task['id'] + ': принят сохранённый проверенный вариант ' + value['model'])
-            return select(value, [])
+        value = choose(accepted, models)
+        runner.progress(task['id'] + ': принят сохранённый проверенный вариант ' + value['model'])
+        return select(value, [])
 
     stops = [StopScope(runner.stop) for _ in candidates]
+    lane = ResourceLane() if task.get('resources') else None
 
     def one(index):
         path, value = candidates[index]
@@ -483,64 +490,69 @@ def execute_task(runner, task, record):
             value['status'] = 'running'
             persist()
             try:
-                if value['stage'] == 'execute':
-                    prompt = _execution_prompt(task, value)
-                    pending = value.get('pending_session')
-                    marker = pending['id'] if pending else uuid.uuid4().hex
-                    invocation_prompt = prompt + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + marker
-                    result = _recover_execution_session(runner, task, value, invocation_prompt)
-                    if result is None:
-                        # A cancelled or unaudited partial invocation resumes its
-                        # files through a new, separately identifiable session.
-                        if pending:
-                            value.setdefault('interrupted_sessions', []).append(pending)
-                            marker = uuid.uuid4().hex
-                            invocation_prompt = prompt + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + marker
-                        value['pending_session'] = {'id': marker,
-                            'prompt_sha256': hashlib.sha256(invocation_prompt.encode()).hexdigest()}
+                lease = lane.enter(stop) if lane and value['stage'] in ('execute', 'checks') else nullcontext()
+                if lane and value['stage'] in ('execute', 'checks'):
+                    runner.progress(task['id'] + ' / ' + value['model'] + ': ожидание ресурсов для исполнения и проверок: '
+                                    + ', '.join(task['resources']))
+                with lease:
+                    if value['stage'] == 'execute':
+                        prompt = _execution_prompt(task, value)
+                        pending = value.get('pending_session')
+                        marker = pending['id'] if pending else uuid.uuid4().hex
+                        invocation_prompt = prompt + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + marker
+                        result = _recover_execution_session(runner, task, value, invocation_prompt)
+                        if result is None:
+                            # A cancelled or unaudited partial invocation resumes its
+                            # files through a new, separately identifiable session.
+                            if pending:
+                                value.setdefault('interrupted_sessions', []).append(pending)
+                                marker = uuid.uuid4().hex
+                                invocation_prompt = prompt + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + marker
+                            value['pending_session'] = {'id': marker,
+                                'prompt_sha256': hashlib.sha256(invocation_prompt.encode()).hexdigest()}
+                            persist()
+                            result = runner.session(work, task['cwd'], invocation_prompt, 'execute', task['id'] + '-execute',
+                                                    model=value['model'], stop_event=stop)
+                        if stop.is_set() or result.get('cancelled'):
+                            value['draft_result'] = result
+                            interrupted()
+                        value.pop('pending_session', None)
+                        value['attempts'] += 1
+                        value['session_result'] = result
+                        value['evidence_files'][result['events_path']] = digest(result['events_path'])
+                        runner.audit(work)
+                        value['patch'] = export_patch(work, value['base'], task['writes'], path.parent / 'candidate.patch')
+                        value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
+                        if not result.get('ok') and not execution_result_usable(result):
+                            fail('transport', {'errors': result.get('errors', []), 'log': result['events_path']})
+                            continue
+                        if not result.get('ok'):
+                            runner.progress(task['id'] + ': часть вызовов завершилась отказом или ошибкой; '
+                                            'проверяю сохранённые изменения обязательными проверками')
+                        try:
+                            value['model_reported'] = confirm_model(result, value['model'])
+                        except (ValueError, KeyError, TypeError) as exc:
+                            fail('model', str(exc))
+                            continue
+                        value['stage'] = 'checks'
                         persist()
-                        result = runner.session(work, task['cwd'], invocation_prompt, 'execute', task['id'] + '-execute',
-                                                model=value['model'], stop_event=stop)
-                    if stop.is_set() or result.get('cancelled'):
-                        value['draft_result'] = result
-                        interrupted()
-                    value.pop('pending_session', None)
-                    value['attempts'] += 1
-                    value['session_result'] = result
-                    value['evidence_files'][result['events_path']] = digest(result['events_path'])
-                    runner.audit(work)
-                    value['patch'] = export_patch(work, value['base'], task['writes'], path.parent / 'candidate.patch')
-                    value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
-                    if not result.get('ok') and not execution_result_usable(result):
-                        fail('transport', {'errors': result.get('errors', []), 'log': result['events_path']})
-                        continue
-                    if not result.get('ok'):
-                        runner.progress(task['id'] + ': часть вызовов завершилась отказом или ошибкой; '
-                                        'проверяю сохранённые изменения обязательными проверками')
-                    try:
-                        value['model_reported'] = confirm_model(result, value['model'])
-                    except (ValueError, KeyError, TypeError) as exc:
-                        fail('model', str(exc))
-                        continue
-                    value['stage'] = 'checks'
-                    persist()
-                if value['stage'] == 'checks':
-                    checks = runner.checks(work, task['checks'], task['id'] + '-check', stop_event=stop)
-                    if stop.is_set():
-                        interrupted()
-                    runner.audit(work)
-                    value['patch'] = export_patch(work, value['base'], task['writes'], path.parent / 'candidate.patch')
-                    value['checks'] = checks
-                    value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
-                    for check in checks:
-                        value['evidence_files'][check['log']] = digest(check['log'])
-                    failed = [c for c in checks if not c['ok']]
-                    if failed:
-                        value['stage'] = 'execute'
-                        fail('checks', failed, len(failed))
-                        continue
-                    value['stage'] = 'review'
-                    persist()
+                    if value['stage'] == 'checks':
+                        checks = runner.checks(work, task['checks'], task['id'] + '-check', stop_event=stop)
+                        if stop.is_set():
+                            interrupted()
+                        runner.audit(work)
+                        value['patch'] = export_patch(work, value['base'], task['writes'], path.parent / 'candidate.patch')
+                        value['checks'] = checks
+                        value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
+                        for check in checks:
+                            value['evidence_files'][check['log']] = digest(check['log'])
+                        failed = [c for c in checks if not c['ok']]
+                        if failed:
+                            value['stage'] = 'execute'
+                            fail('checks', failed, len(failed))
+                            continue
+                        value['stage'] = 'review'
+                        persist()
                 if value['stage'] == 'review':
                     recovered = value.get('recovered_review')
                     if recovered:
@@ -676,21 +688,29 @@ def execute_task(runner, task, record):
                              'stage': candidates[index][1].get('stage')})
         if fatal is None or priority(exc) > priority(fatal):
             fatal = exc
-    # A resource label means a mutable environment, database or port. Different
-    # candidate checkouts alone cannot isolate it, so never speculate there.
-    parallel = not task.get('resources')
-    runner.progress(task['id'] + ': ' + ('параллельные варианты ' if parallel else
-                    'варианты последовательно из-за общих ресурсов: ') + ', '.join(models))
-    if parallel:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = {pool.submit(one, index): index for index in range(2)}
-            for future in as_completed(futures):
-                index = futures[future]
+    # Reviews do not hold the mutable-environment lease. The first verified
+    # result starts a bounded comparison window, preserving slower alternatives.
+    grace = runner.cfg.get('execution_comparison_seconds', 120)
+    if not isinstance(grace, (int, float)) or grace < 0:
+        raise Blocked('execution_comparison_seconds must be nonnegative')
+    runner.progress(task['id'] + ': две модели; ' +
+                    ('исполнение и проверки разделяют ресурсы: ' + ', '.join(task['resources'])
+                     if lane else 'независимое параллельное исполнение') + '; ' + ', '.join(models))
+    verified = []
+    deadline = None
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = {pool.submit(one, index): index for index in range(2)}
+        while pending:
+            ready, _ = wait(pending, timeout=.2, return_when=FIRST_COMPLETED)
+            for future in ready:
+                index = pending.pop(future)
                 try:
                     candidate = future.result()
-                    if winner is None:
-                        winner = candidate
-                        stops[1-index].set()
+                    verified.append(candidate)
+                    if deadline is None:
+                        deadline = time.monotonic() + grace
+                        runner.progress(task['id'] + ': обязательная задача решена проверенным вариантом; '
+                                        'сравниваю со вторым, ожидание не более ' + str(grace) + ' с')
                 except CandidateStalled as exc:
                     failures.append(str(exc))
                 except Interrupted:
@@ -699,18 +719,18 @@ def execute_task(runner, task, record):
                     record_fatal(exc, index)
                     for stop in stops:
                         stop.set()
-    else:
-        for index in range(2):
-            try:
-                winner = one(index)
-                break
-            except CandidateStalled as exc:
-                failures.append(str(exc))
-            except Interrupted:
-                break
-            except Exception as exc:
-                record_fatal(exc, index)
-                break
+                except BaseException:
+                    for stop in stops:
+                        stop.set()
+                    raise
+            if deadline is not None and time.monotonic() >= deadline:
+                for index in pending.values():
+                    stops[index].set()
+            if runner.stop.is_set():
+                for stop in stops:
+                    stop.set()
+    if verified:
+        winner = choose(verified, models)
     if fatal:
         from controller import OperationalBlocked
         from operational_recovery import failure_record

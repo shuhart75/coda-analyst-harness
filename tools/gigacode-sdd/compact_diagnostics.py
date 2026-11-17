@@ -221,6 +221,8 @@ class Export:
         return value
 
     def session(self, folder, include_prompt=False, summary_only=False):
+        if (folder/'activity.json').exists():
+            self.json_file(folder/'activity.json')
         binding = folder/'recovery-binding.json'
         if binding.exists():
             self.json_file(binding)

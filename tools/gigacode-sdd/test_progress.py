@@ -83,3 +83,14 @@ class ProgressTests(unittest.TestCase):
             self.assertTrue(stream.getvalue().startswith('00:00:00'))
         finally:
             p.finish(a)
+
+    def test_activity_is_visible_before_a_long_session_label(self):
+        stream = Terminal()
+        p = self.display(stream, 60)
+        token = p.start('long session label ' * 20)
+        try:
+            p.detail(token, 'events 12; idle 00:00:30')
+            p.tick()
+            self.assertIn('00:00:00  events 12; idle 00:00:30', stream.getvalue())
+        finally:
+            p.finish(token)

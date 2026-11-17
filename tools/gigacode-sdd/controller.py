@@ -27,7 +27,7 @@ import plan_review
 import review_cycle
 import diagnostics
 import operator_input
-from progress import Progress, SESSION_IDENTITY
+from progress import Progress, SESSION_IDENTITY, elapsed
 
 class Blocked(RuntimeError):
     pass
@@ -258,8 +258,8 @@ class Runner:
 
     @contextmanager
     def activity(self, label):
-        with self._display.activity(label):
-            yield
+        with self._display.activity(label) as token:
+            yield token
 
     @contextmanager
     def locked(self):
@@ -467,6 +467,10 @@ class Runner:
                         'External environment availability is unknown unless evidenced in this copy.\n')
         if role == 'review':
             context += '\n' + plan_review.path_instructions(root) + '\n'
+            context += ('\nReview the pinned files and controller check evidence only. '
+                        'Do not rerun builds/tests or access mutable shared caches, databases, ports or services: '
+                        'another candidate may be using them. Report any missing check evidence for the controller '
+                        'to run under its resource lease.\n')
         elif name != 'preflight':
             context += ('\nPrefer dedicated file tools and simple workspace-local commands. '
                         'Avoid heredocs, inline interpreters, command substitutions and scripts outside this workspace. '
@@ -482,14 +486,19 @@ class Runner:
         activity = (activity + ' / ' if activity else '') + 'Сессия ' + name + ' / ' + cwd + ' / ' + role
         if model and not identity:
             activity += ' / ' + model
-        with self.activity(activity):
+        with self.activity(activity) as activity_token:
             cli = [*self.cfg['cli'], '--model', model] if model else self.cfg['cli']
             result = run_session(cli, under(root, cwd), full_prompt,
                              session_log, approval_mode='plan' if role == 'review' else self.cfg['approval_mode'],
                              timeout_seconds=min(300, self.cfg['session_timeout']) if name == 'preflight'
                                              else min(900, self.cfg['session_timeout']) if name == 'plan-review'
-                                             else self.cfg['session_timeout'], env=self.env, stop_event=stop_event if stop_event is not None else self.stop,
-                             cleanup_guard=self.cleanup_guard)
+                                             else self.cfg['session_timeout'],
+                             env=self.env, stop_event=stop_event if stop_event is not None else self.stop,
+                             cleanup_guard=self.cleanup_guard,
+                             idle_timeout_seconds=self.cfg.get('session_idle_timeout', 900),
+                             activity_callback=lambda data: self._display.detail(activity_token,
+                                 'событий ' + str(data['events']) + '; без записи ' +
+                                 elapsed(data['idle_seconds']) + '; ждут ' + str(data['pending_calls'])))
         if (result.get('cleanup') or {}).get('preserved'):
             self.preserve_cleanup(result['cleanup'])
             save(session_log / 'transport-result.json', result)

@@ -48,6 +48,16 @@ print(json.dumps({"type":"result", "subtype":"success", "is_error":False,
             for name in ("prompt.txt", "stdout.jsonl", "stderr.log"):
                 self.assertEqual(stat.S_IMODE((self.root / "logs" / name).stat().st_mode), 0o600)
 
+    def test_silent_session_stops_with_preserved_activity(self):
+        updates = []
+        result = self.run_cli('time.sleep(30)', timeout_seconds=10,
+                              idle_timeout_seconds=1, activity_callback=updates.append)
+        self.assertTrue(result['idle_timeout'])
+        self.assertTrue(result['timed_out'])
+        self.assertFalse(result['ok'])
+        self.assertTrue(updates)
+        self.assertTrue((self.root/'logs/activity.json').is_file())
+
     def test_preflight_accepts_only_recovered_substitution_rejection(self):
         def call(identifier):
             return {'type': 'assistant', 'message': {'content': [
