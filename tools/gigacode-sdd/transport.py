@@ -33,6 +33,7 @@ def parse_events(path: Path) -> dict:
     read_tool_errors = []
     session_id, final_text, terminal = None, "", None
     event_count = 0
+    context_failure = False
     if not path.exists():
         errors.append("Missing stdout.jsonl")
     else:
@@ -117,6 +118,12 @@ def parse_events(path: Path) -> dict:
                         final_text = text
                 if root and event.get("type") == "error":
                     errors.append("CLI emitted a root error event")
+                if root and event.get('type') in ('assistant', 'result', 'error'):
+                    body = (_text(content) + '\n' + _text(event.get('result', ''))).lower()
+                    if ('compression_failed_api_error' in body or
+                            ('[api error:' in body and any(marker in body for marker in
+                             ('context is too large', 'maximum context length', 'context length exceeded')))):
+                        context_failure = True
     if terminal is None:
         errors.append("Missing terminal root result event")
     elif terminal.get("is_error") is True or terminal.get("subtype", "success") != "success":
@@ -125,6 +132,8 @@ def parse_events(path: Path) -> dict:
         errors.append("Terminal root result does not explicitly confirm success")
     if denials:
         errors.append("CLI reported denied permissions; interactive approval is unavailable")
+    if context_failure:
+        errors.append('CLI context exhausted; fresh focused review required')
     return {"ok": not errors, "returncode": None, "timed_out": False,
             "cancelled": False, "permission_denials": denials,
             "session_id": session_id, "text": final_text,
@@ -168,12 +177,13 @@ def tool_was_not_run(item):
     body = _text(item.get('content', '')).lower()
     return item.get('is_error') is True and any(marker in body for marker in (
         'the command was not run', 'the command was not started',
-        'shell security policy denied this command:'))
+        'shell security policy denied this command:',
+        'plan mode blocked this shell command because'))
 
 
-def review_denial_errors(result):
-    """Account for explicit non-execution, never authorize the rejected command."""
-    if not result.get('permission_denials') or not execution_result_usable(result):
+def review_denials_accounted(result):
+    """Account for denied calls separately from terminal/transport success."""
+    if not result.get('permission_denials'):
         return None
     evidence = parse_events(Path(result['events_path']))
     if evidence['permission_denials'] != result.get('permission_denials'):
@@ -182,7 +192,12 @@ def review_denial_errors(result):
     for line in Path(result['events_path']).read_text(encoding='utf-8').splitlines():
         if not line.strip():
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue  # Other transport defects are classified separately.
+        if not isinstance(row, dict):
+            continue
         message = row.get('message', {})
         content = message.get('content', []) if isinstance(message, dict) else []
         for item in content if isinstance(content, list) else []:
@@ -190,12 +205,19 @@ def review_denial_errors(result):
                 returned.setdefault(item.get('tool_use_id'), []).append(item)
     errors = {'CLI reported denied permissions; interactive approval is unavailable'}
     for denial in evidence['permission_denials']:
-        key = denial['tool_use_id']
+        key = denial.get('tool_use_id')
+        if key not in evidence['tool_calls'] or denial.get('tool_name') != evidence['tool_calls'][key]:
+            return None
         items = returned.get(key, [])
         if len(items) != 1 or not tool_was_not_run(items[0]):
             return None
         errors.add('Tool ' + evidence['tool_calls'][key] + ' (' + key + ') returned an error')
     return errors
+
+
+def review_denial_errors(result):
+    """Only a completed transport can supply a usable review verdict."""
+    return review_denials_accounted(result) if execution_result_usable(result) else None
 
 
 def review_feedback_usable(result):
@@ -267,7 +289,7 @@ def run_session(cli: list[str], cwd: Path, prompt: str, log_dir: Path,
                 approval_mode="auto-edit", timeout_seconds=3600,
                 env: dict | None = None,
                 stop_event: threading.Event | None = None,
-                cleanup_guard=None) -> dict:
+                cleanup_guard=None, activity_callback=None, idle_timeout_seconds=None) -> dict:
     """Run a fresh session with stdin task and stream-json output.
 
     cli is an argv prefix, normally ["gigacode"]. env is a complete environment
@@ -284,6 +306,9 @@ def run_session(cli: list[str], cwd: Path, prompt: str, log_dir: Path,
         raise ValueError("Unsupported approval mode")
     if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    if idle_timeout_seconds is not None and (not isinstance(idle_timeout_seconds, (int, float))
+                                             or idle_timeout_seconds <= 0):
+        raise ValueError('idle_timeout_seconds must be positive')
     cwd, log_dir = Path(cwd), Path(log_dir)
     if not cwd.is_dir():
         raise ValueError("Session cwd does not exist")
@@ -296,6 +321,8 @@ def run_session(cli: list[str], cwd: Path, prompt: str, log_dir: Path,
                         "--prompt", "Read the complete task from stdin and execute it."]
     timed_out, cancelled, process, launch_error = False, False, None, None
     cleanup = None
+    idle_timeout = False
+    activity = None
     with _private_file(log_dir / "prompt.txt") as task:
         task.write(prompt.encode("utf-8"))
     try:
@@ -306,8 +333,21 @@ def run_session(cli: list[str], cwd: Path, prompt: str, log_dir: Path,
             try:
                 process = launch_process(argv, cwd=cwd, stdin=task, stdout=stdout,
                                          stderr=stderr, env=environment)
+                from session_activity import SessionActivity
+                activity = SessionActivity(events_path)
                 started = time.monotonic()
+                next_poll = started
                 while process.poll() is None:
+                    now = time.monotonic()
+                    if now >= next_poll:
+                        summary = activity.poll()
+                        activity.save(summary)
+                        if activity_callback is not None:
+                            activity_callback(summary)
+                        next_poll = now + 1
+                        if idle_timeout_seconds is not None and summary['idle_seconds'] >= idle_timeout_seconds:
+                            timed_out = idle_timeout = True
+                            break
                     if stop_event is not None and stop_event.is_set():
                         cancelled = True
                         break
@@ -325,14 +365,19 @@ def run_session(cli: list[str], cwd: Path, prompt: str, log_dir: Path,
             finish_process(process, cleanup_guard)
         raise
     result = parse_events(events_path)
+    if activity is not None:
+        summary = activity.poll()
+        activity.save(summary)
+        result['activity'] = summary
     result.update(returncode=process.returncode if process is not None else None,
-                  timed_out=timed_out, cancelled=cancelled, cleanup=cleanup)
+                  timed_out=timed_out, idle_timeout=idle_timeout, cancelled=cancelled, cleanup=cleanup)
     if cleanup and cleanup['preserved']:
         result['errors'].append('Process group preserved: service cleanup requires inspection')
     if launch_error:
         result["errors"].append(launch_error)
     if timed_out:
-        result["errors"].append("Session process timeout; partial events preserved")
+        result["errors"].append("Session journal idle timeout; partial events preserved" if idle_timeout else
+                                "Session process timeout; partial events preserved")
     if cancelled:
         result["errors"].append("Session cancelled; partial events preserved")
     if process is not None and process.returncode != 0:

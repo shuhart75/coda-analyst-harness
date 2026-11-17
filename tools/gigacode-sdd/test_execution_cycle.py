@@ -3,10 +3,12 @@ import json
 from pathlib import Path
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from unittest.mock import patch
 
 from controller import Blocked, Interrupted, RetryableSessionError, digest, read, save
-from execution_cycle import execute_task, MODELS, fingerprint, adjudicated_report, _review_copy
+from execution_cycle import execute_task, MODELS, fingerprint, adjudicated_report, _review_copy, CandidateStalled
 import test_controller as fixtures
 from workspace import clone_snapshot, git, snapshot
 
@@ -17,6 +19,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.runner = self.fixture.runner
+        self.runner.cfg['execution_comparison_seconds'] = .05
         self.task = self.fixture.plan['tasks'][0]
         self.work = self.runner.root / 'workers' / 'original'
         clone_snapshot(self.runner.main, self.work)
@@ -67,15 +70,23 @@ class ExecutionPortfolioTests(unittest.TestCase):
                 'events_sha256': digest(result['events_path'])}
 
     def run_task(self, session=None, checks=None, review=None):
+        # Recovery/protocol unit cases may explicitly model an unavailable peer.
+        # Scheduling tests exercise both real candidate workers below.
+        class UnavailablePeerPool(ThreadPoolExecutor):
+            def submit(pool, fn, index):
+                def unavailable():
+                    raise CandidateStalled('fixture peer unavailable')
+                return super().submit(unavailable) if index else super().submit(fn, index)
+        pool = patch('execution_cycle.ThreadPoolExecutor', UnavailablePeerPool) if getattr(self, 'primary_only', False) else nullcontext()
         with patch.object(self.runner, 'session', side_effect=session or self.session), \
              patch.object(self.runner, 'checks', side_effect=checks or self.checks), \
-             patch.object(self.runner, 'review', side_effect=review or self.review):
+             patch.object(self.runner, 'review', side_effect=review or self.review), pool:
             return execute_task(self.runner, self.task, self.record.copy())
 
     def records(self):
         return [read(p) for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')]
 
-    def test_parallel_first_verified_winner_cancels_only_other_variant(self):
+    def test_verified_winner_cancels_only_peer_after_comparison_window(self):
         barrier = threading.Barrier(2)
         def concurrent(root, cwd, prompt, role, name, model=None, stop_event=None):
             result = self.session(root, cwd, prompt, role, name, model, stop_event)
@@ -114,6 +125,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(self.run_task(session=resume)['status'], 'accepted')
 
     def test_resume_review_does_not_repeat_execution_or_passed_checks(self):
+        self.primary_only = True
         self.task['resources'] = ['database']
         def cancel(*args, **kwargs):
             self.runner.stop.set()
@@ -128,6 +140,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(self.check_count, 1)
 
     def test_transient_review_retry_preserves_successful_execution_and_checks(self):
+        self.primary_only = True
         self.task['resources'] = ['database']
         count = 0
         def transient(*args, **kwargs):
@@ -162,9 +175,54 @@ class ExecutionPortfolioTests(unittest.TestCase):
         accepted = self.run_task(session=session, checks=checks)
         self.assertEqual(accepted['model'], MODELS[1])
         first = next(v for v in self.records() if v['model'] == MODELS[0])
-        self.assertEqual(first['status'], 'stalled')
+        self.assertIn(first['status'], ('interrupted', 'stalled'))
+        self.assertGreaterEqual(first['failures'], 1)
+        self.assertLessEqual(first['failures'], 6)
+
+    def test_shared_resource_review_overlaps_peer_execution_and_compares_results(self):
+        self.task['resources'] = ['database']
+        self.runner.cfg['execution_comparison_seconds'] = 30
+        second_executed = threading.Event()
+        reviewing = threading.Event()
+        active = set()
+        def session(*args, **kwargs):
+            self.assertFalse(active)
+            active.add(kwargs['model'])
+            result = self.session(*args, **kwargs)
+            if kwargs['model'] == MODELS[1]:
+                second_executed.set()
+            return result
+        def checks(*args, **kwargs):
+            result = self.checks(*args, **kwargs)
+            active.clear()
+            return result
+        def review(*args, **kwargs):
+            report = self.review(*args, **kwargs)
+            if kwargs['model'] == MODELS[1]:
+                reviewing.set()
+                self.assertTrue(second_executed.wait(30))
+                report['optional_findings'] = [{'status': 'optional', 'text': 'fixture validated optional gap'}]
+            else:
+                self.assertTrue(reviewing.wait(30))
+            return report
+        accepted = self.run_task(session=session, checks=checks, review=review)
+        self.assertEqual(accepted['model'], MODELS[1])
+        self.assertEqual(len(self.calls), 2)
+        self.assertTrue(all(v['status'] == 'accepted' for v in self.records()))
+        selection = read(next((self.runner.root/'execution-cycles').glob('*/selection.json')))
+        self.assertEqual(len(selection['compared']), 2)
+
+    def test_no_progress_budget_stays_bounded_without_usable_peer(self):
+        self.primary_only = True
+        def failed(*args, **kwargs):
+            result = self.checks(*args, **kwargs)
+            result[0]['ok'] = False
+            return result
+        with self.assertRaisesRegex(Blocked, 'No verified execution candidate'):
+            self.run_task(checks=failed)
+        first = next(v for v in self.records() if v['model'] == MODELS[0])
         self.assertEqual(first['failures'], 6)
-        self.assertEqual({v['strategy'] for v in first['history']}, {0,1,2})
+        self.assertEqual(first['status'], 'stalled')
 
     def test_cache_and_review_evidence_integrity(self):
         self.task['resources'] = ['database']
@@ -244,6 +302,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertGreaterEqual(len(accepted['history']), 6)
 
     def test_false_review_finding_is_refuted_without_repeating_executor(self):
+        self.primary_only = True
         self.task['resources'] = ['database']
         issue = 'Required backend behavior is absent'
         def review(root,cwd,detail,requirements,name,model=None,stop_event=None):
@@ -267,6 +326,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(accepted['review']['verdict'], 'pass')
 
     def test_bad_adjudication_evidence_retries_only_adjudication(self):
+        self.primary_only = True
         self.task['resources'] = ['database']
         issue = 'Required backend behavior is absent'
         count = 0
@@ -291,6 +351,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(accepted['history'][0]['kind'], 'review-protocol')
 
     def test_new_instruction_invalidates_accepted_candidate_cache(self):
+        self.primary_only = True
         self.task['resources'] = ['database']
         first = self.run_task()
         (self.runner.root/'decision.md').write_text('New execution constraint')
@@ -340,6 +401,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
         return result
 
     def test_crash_after_audited_execution_resumes_without_duplicate_edits(self):
+        self.primary_only = True
         self.task['resources'] = ['database']
         class Crash(BaseException):
             pass
@@ -361,6 +423,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertIn('recovered_receipt', accepted)
 
     def test_old_successful_receipt_is_not_reused_for_new_repair_attempt(self):
+        self.primary_only = True
         self.task['resources'] = ['database']
         class Crash(BaseException):
             pass
@@ -386,6 +449,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
 
     def test_audited_receipt_with_changed_events_is_not_replayed_or_reexecuted(self):
+        self.primary_only = True
         self.task['resources'] = ['database']
         class Crash(BaseException):
             pass

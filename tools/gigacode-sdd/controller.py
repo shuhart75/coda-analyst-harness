@@ -16,7 +16,7 @@ import time
 import uuid
 
 from policy import prepare_permissions, nexus_environment, audit_dependency_sources, make_policy_prompt
-from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, execution_result_usable, review_denial_errors
+from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, execution_result_usable, review_denial_errors, review_denials_accounted
 from evidence import bind_quote
 from platform_support import (FileLock, launch_process, process_exists,
                               process_scope_exists, process_scope_pids)
@@ -27,7 +27,7 @@ import plan_review
 import review_cycle
 import diagnostics
 import operator_input
-from progress import Progress, SESSION_IDENTITY
+from progress import Progress, SESSION_IDENTITY, elapsed
 
 class Blocked(RuntimeError):
     pass
@@ -258,8 +258,8 @@ class Runner:
 
     @contextmanager
     def activity(self, label):
-        with self._display.activity(label):
-            yield
+        with self._display.activity(label) as token:
+            yield token
 
     @contextmanager
     def locked(self):
@@ -467,6 +467,10 @@ class Runner:
                         'External environment availability is unknown unless evidenced in this copy.\n')
         if role == 'review':
             context += '\n' + plan_review.path_instructions(root) + '\n'
+            context += ('\nReview the pinned files and controller check evidence only. '
+                        'Do not rerun builds/tests or access mutable shared caches, databases, ports or services: '
+                        'another candidate may be using them. Report any missing check evidence for the controller '
+                        'to run under its resource lease.\n')
         elif name != 'preflight':
             context += ('\nPrefer dedicated file tools and simple workspace-local commands. '
                         'Avoid heredocs, inline interpreters, command substitutions and scripts outside this workspace. '
@@ -482,14 +486,19 @@ class Runner:
         activity = (activity + ' / ' if activity else '') + 'Сессия ' + name + ' / ' + cwd + ' / ' + role
         if model and not identity:
             activity += ' / ' + model
-        with self.activity(activity):
+        with self.activity(activity) as activity_token:
             cli = [*self.cfg['cli'], '--model', model] if model else self.cfg['cli']
             result = run_session(cli, under(root, cwd), full_prompt,
                              session_log, approval_mode='plan' if role == 'review' else self.cfg['approval_mode'],
                              timeout_seconds=min(300, self.cfg['session_timeout']) if name == 'preflight'
                                              else min(900, self.cfg['session_timeout']) if name == 'plan-review'
-                                             else self.cfg['session_timeout'], env=self.env, stop_event=stop_event if stop_event is not None else self.stop,
-                             cleanup_guard=self.cleanup_guard)
+                                             else self.cfg['session_timeout'],
+                             env=self.env, stop_event=stop_event if stop_event is not None else self.stop,
+                             cleanup_guard=self.cleanup_guard,
+                             idle_timeout_seconds=self.cfg.get('session_idle_timeout', 900),
+                             activity_callback=lambda data: self._display.detail(activity_token,
+                                 'событий ' + str(data['events']) + '; без записи ' +
+                                 elapsed(data['idle_seconds']) + '; ждут ' + str(data['pending_calls'])))
         if (result.get('cleanup') or {}).get('preserved'):
             self.preserve_cleanup(result['cleanup'])
             save(session_log / 'transport-result.json', result)
@@ -521,7 +530,7 @@ class Runner:
             raise Interrupted(result=result)
         if result['permission_denials'] and not (name != 'preflight' and (
                 (role == 'execute' and execution_result_usable(result))
-                or (role == 'review' and review_denial_errors(result) is not None))):
+                or (role == 'review' and review_denials_accounted(result) is not None))):
             raise Blocked('Permission preflight/runtime denial; inspect ' + result['events_path'])
         return result
 
@@ -671,6 +680,9 @@ executed test names/counts, not just a successful command or test compilation.
     def review(self, root, cwd, detail, requirements, name, model=None, stop_event=None):
         prompt = ('INDEPENDENT_REVIEW\n' + detail + '\nInspect actual code/specs and evidence. '
                   'Do not rely on executor claims. Do not write files or execute mutating tests. '
+                  'Locate relevant symbols first, then read short targeted excerpts. Do not dump whole '
+                  'generated files, API specifications or report trees. Keep a compact evidence matrix '
+                  'covering every assigned requirement. '
                   'Return ONLY JSON {"verdict":"pass|changes|blocked","findings":["concrete issue"],'
                   '"coverage":{"REQ-id":"specific file/test/evidence or gap"}}. '
                   + ('pass requires a complete feasible plan for every assigned requirement with SDD stages/checks. '
@@ -692,6 +704,8 @@ executed test names/counts, not just a successful command or test compilation.
 
     def validate_review_result(self, root, result, requirements, name, model=None, expected=None):
         """Use identical verdict checks for fresh and receipt-recovered review evidence."""
+        if 'CLI context exhausted; fresh focused review required' in result.get('errors', []):
+            raise RetryableSessionError('Reviewer context exhausted; retry only review with bounded excerpts', result)
         if model:
             from planning_cycle import verify_model
             verify_model(result, model)
@@ -704,7 +718,7 @@ executed test names/counts, not just a successful command or test compilation.
                 raise Blocked('Invalid plan-review evidence: ' + str(error)) from None
         denial_errors = review_denial_errors(result)
         if not result['ok'] and not review_feedback_usable(result) and denial_errors is None:
-            raise RetryableSessionError('Reviewer failed: ' + result['events_path'])
+            raise RetryableSessionError('Reviewer failed: ' + result['events_path'], result)
         try:
             report = parse_json(result['text'])
         except (ValueError, TypeError, Blocked) as exc:

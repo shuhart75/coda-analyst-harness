@@ -74,9 +74,10 @@ class Progress:
         visible = items if len(items) <= limit else items[:max(0, limit-1)]
         for entry in visible:
             # Put time first so it remains visible on narrow terminals.
-            line = elapsed(self.clock()-entry['start']) + '  ' + entry['label']
+            line = elapsed(self.clock()-entry['start']) + '  '
             if entry['detail']:
-                line += ' · ' + entry['detail']
+                line += entry['detail'] + ' · '
+            line += entry['label']
             self.output.write(clipped(line, max(1, columns-1)) + '\n')
             self.rows += 1
         if len(visible) != len(items):
