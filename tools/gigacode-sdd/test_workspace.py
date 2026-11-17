@@ -27,7 +27,8 @@ class WorkspacesTest(unittest.TestCase):
 
     def test_review_binding_accepts_clone_timestamp_but_checks_private_bytes(self):
         private = self.repo/'.npmrc'
-        private.write_bytes(b'fixture-value-A\n')
+        # No line endings: Windows Git autocrlf must not change this byte fixture.
+        private.write_bytes(b'fixture-value-A')
         ws.git(self.repo, 'add', '--', '.npmrc')
         ws.git(self.repo, 'commit', '-qm', 'private fixture')
         os.utime(private, ns=(1000000000,1000000000))
@@ -36,10 +37,10 @@ class WorkspacesTest(unittest.TestCase):
         source, review = ws.snapshot(self.repo), ws.snapshot(dest)
         self.assertNotEqual(source['files']['.npmrc']['mtime_ns'], review['files']['.npmrc']['mtime_ns'])
         report = ws.review_copy_binding(self.repo, dest, source, review)
-        self.assertEqual(report['file_difference_count'], 0)
+        self.assertEqual(report['file_difference_count'], 0, report)
         self.assertEqual(report['private_files_compared'], 1)
         stamp = (dest/'.npmrc').stat()
-        (dest/'.npmrc').write_bytes(b'fixture-value-B\n')
+        (dest/'.npmrc').write_bytes(b'fixture-value-B')
         os.utime(dest/'.npmrc', ns=(stamp.st_atime_ns,stamp.st_mtime_ns))
         # Same size and restored timestamp cannot hide a different file.
         self.assertEqual(ws.snapshot(dest)['files'], review['files'])

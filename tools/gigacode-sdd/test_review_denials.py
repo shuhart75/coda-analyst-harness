@@ -1,7 +1,6 @@
 """Completed reviews survive an explicitly unexecuted diagnostic probe."""
 import json
 import os
-import shutil
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -30,8 +29,10 @@ class ReviewDenialTests(unittest.TestCase):
         git(main, 'add', '--', 'frontend/.npmrc')
         git(main, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost',
             'commit', '-qm', 'tracked registry fixture')
-        shutil.rmtree(self.work)
+        # Keep the old temporary clone for TemporaryDirectory's portable cleanup.
+        self.work = self.work.with_name('private-fixture')
         clone_snapshot(main,self.work)
+        self.record['workspace'] = str(self.work)
         self.record['base'] = git(main,'rev-parse','HEAD')
         os.utime(self.work/'frontend/.npmrc',ns=(1000000000,1000000000))
 
