@@ -16,7 +16,7 @@ import time
 import uuid
 
 from policy import prepare_permissions, nexus_environment, audit_dependency_sources, make_policy_prompt
-from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, execution_result_usable, review_denial_errors
+from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, execution_result_usable, review_denial_errors, review_denials_accounted
 from evidence import bind_quote
 from platform_support import (FileLock, launch_process, process_exists,
                               process_scope_exists, process_scope_pids)
@@ -530,7 +530,7 @@ class Runner:
             raise Interrupted(result=result)
         if result['permission_denials'] and not (name != 'preflight' and (
                 (role == 'execute' and execution_result_usable(result))
-                or (role == 'review' and review_denial_errors(result) is not None))):
+                or (role == 'review' and review_denials_accounted(result) is not None))):
             raise Blocked('Permission preflight/runtime denial; inspect ' + result['events_path'])
         return result
 
@@ -680,6 +680,9 @@ executed test names/counts, not just a successful command or test compilation.
     def review(self, root, cwd, detail, requirements, name, model=None, stop_event=None):
         prompt = ('INDEPENDENT_REVIEW\n' + detail + '\nInspect actual code/specs and evidence. '
                   'Do not rely on executor claims. Do not write files or execute mutating tests. '
+                  'Locate relevant symbols first, then read short targeted excerpts. Do not dump whole '
+                  'generated files, API specifications or report trees. Keep a compact evidence matrix '
+                  'covering every assigned requirement. '
                   'Return ONLY JSON {"verdict":"pass|changes|blocked","findings":["concrete issue"],'
                   '"coverage":{"REQ-id":"specific file/test/evidence or gap"}}. '
                   + ('pass requires a complete feasible plan for every assigned requirement with SDD stages/checks. '
@@ -701,6 +704,8 @@ executed test names/counts, not just a successful command or test compilation.
 
     def validate_review_result(self, root, result, requirements, name, model=None, expected=None):
         """Use identical verdict checks for fresh and receipt-recovered review evidence."""
+        if 'CLI context exhausted; fresh focused review required' in result.get('errors', []):
+            raise RetryableSessionError('Reviewer context exhausted; retry only review with bounded excerpts', result)
         if model:
             from planning_cycle import verify_model
             verify_model(result, model)
@@ -713,7 +718,7 @@ executed test names/counts, not just a successful command or test compilation.
                 raise Blocked('Invalid plan-review evidence: ' + str(error)) from None
         denial_errors = review_denial_errors(result)
         if not result['ok'] and not review_feedback_usable(result) and denial_errors is None:
-            raise RetryableSessionError('Reviewer failed: ' + result['events_path'])
+            raise RetryableSessionError('Reviewer failed: ' + result['events_path'], result)
         try:
             report = parse_json(result['text'])
         except (ValueError, TypeError, Blocked) as exc:

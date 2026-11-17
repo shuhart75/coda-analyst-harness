@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from transport import parse_events, review_denial_errors, execution_result_usable
+from transport import parse_events, review_denials_accounted
 from workspace import snapshot, review_copy_binding
 
 
@@ -55,8 +55,14 @@ def load(runner, task, value, events_path, model, *, validate=True):
     parsed = parse_events(events)
     if parsed['text'] != result.get('text') or parsed['permission_denials'] != result.get('permission_denials'):
         raise Blocked('Saved review result differs from its original stream')
-    if (not execution_result_usable(result) or
-            (result.get('permission_denials') and review_denial_errors(result) is None)):
-        raise Blocked('Saved review has unresolved permission or transport failure')
+    if ((result.get('cleanup') or {}).get('preserved') or
+            (result.get('permission_denials') and review_denials_accounted(result) is None)):
+        raise Blocked('Saved review has unresolved permission or cleanup failure')
+    # Integrity is separate from usability. A bound but incomplete review may
+    # enter protocol repair, never acceptance. Reparse older receipts to detect
+    # transport faults that their older parser did not recognize.
+    result = dict(result)
+    result['errors'] = list(dict.fromkeys(result.get('errors', []) + parsed['errors']))
+    result['ok'] = not result['errors']
     report = runner.validate_review_result(root, result, task['requirements'], name, model) if validate else None
     return root, report

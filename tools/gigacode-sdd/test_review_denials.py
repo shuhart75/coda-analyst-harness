@@ -42,7 +42,9 @@ class ReviewDenialTests(unittest.TestCase):
         report.update(getattr(self, 'report_override', {}))
         events = Path(result['events_path'])
         rows = [json.loads(line) for line in events.read_text().splitlines()]
-        rows[-1]['result'] = json.dumps(report)
+        if hasattr(self, 'denial_message'):
+            rows[2]['message']['content'][0]['content'] = self.denial_message
+        rows[-1]['result'] = getattr(self, 'report_text', json.dumps(report))
         events.write_text('\n'.join(map(json.dumps, rows)) + '\n')
         result = parse_events(events)
         result.update(returncode=0, cleanup={'preserved': False})
@@ -79,6 +81,47 @@ class ReviewDenialTests(unittest.TestCase):
         receipt = read(self.saved_events.parent/'session-receipt.json')
         (Path(receipt['workspace'])/'backend/value.txt').write_text('tampered')
         with self.assertRaisesRegex(Blocked, 'receipt changed'): self.run_task()
+
+    def test_plan_mode_refusal_does_not_discard_completed_review(self):
+        self.denial_message = ('Plan mode blocked this shell command because it was classified as '
+                               'state-modifying. Do not retry it through wrappers or obfuscation; '
+                               'continue read-only investigation and include the action in the plan.')
+        result = self.review_session(self.work, '.', 'task', 'review', 'be-review', model=MODELS[1])
+        self.assertIsNotNone(review_denial_errors(result))
+        report = self.runner.validate_review_result(self.work, result, self.task['requirements'], 'be-review', MODELS[1])
+        self.assertEqual(report['verdict'], 'pass')
+
+    def test_saved_context_failure_retries_only_review_with_focused_instruction(self):
+        self.task['resources'] = ['database']
+        self.report_text = '[API Error: Context is too large to send safely; COMPRESSION_FAILED_API_ERROR.]'
+        self.denial_message = 'The command was not run; Plan mode remains active.'
+        with self.assertRaisesRegex(Blocked, 'Permission preflight'):
+            self.run_task(review=self.old_review)
+        # Reproduce a receipt from the old parser, which missed the API failure.
+        receipt_path = self.saved_events.parent/'session-receipt.json'
+        receipt = read(receipt_path)
+        receipt['result']['errors'] = [e for e in receipt['result']['errors'] if 'context exhausted' not in e]
+        save(receipt_path, receipt)
+        counts = len(self.calls), self.check_count
+        del self.report_text
+        def focused(*args, **kwargs):
+            self.assertIn('120 lines', args[2])
+            self.assertIn('EVERY', args[2])
+            return self.review(*args, **kwargs)
+        accepted = self.run_task(review=focused)
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual((len(self.calls), self.check_count), counts)
+        self.assertEqual(accepted['history'][-1]['kind'], 'review-context')
+        self.assertTrue(receipt_path.is_file())
+
+    def test_denied_probe_does_not_mask_retryable_transport_failure(self):
+        result = self.review_session(self.work, '.', 'task', 'review', 'be-review', model=MODELS[1])
+        result.update(timed_out=True, ok=False)
+        result['errors'].append('Session process timeout; partial events preserved')
+        with patch('controller.run_session', return_value=result):
+            returned = self.runner.session(self.work, '.', 'task', 'review', 'be-review', model=MODELS[1])
+        with self.assertRaises(RetryableSessionError):
+            self.runner.validate_review_result(self.work, returned, self.task['requirements'], 'be-review', MODELS[1])
 
     def test_private_file_changed_after_receipt_stays_blocked(self):
         self.seed_private_clone_fixture()

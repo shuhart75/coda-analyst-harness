@@ -109,6 +109,12 @@ def _diagnosis(kind, detail):
                   'and evidence; do not weaken the requirement or remove its check.',
         'review-protocol': 'The review output was incomplete or malformed. Return the complete required '
                            'JSON schema and evidence for every assigned requirement.',
+        'review-context': 'The previous reviewer exhausted its context. Start a fresh focused review of the '
+                          'preserved candidate and controller checks; do not rerun implementation. First list '
+                          'required identifiers and relevant symbols, then read targeted excerpts of at most '
+                          '120 lines. Do not dump whole generated files, API specifications, report trees or '
+                          'directories. Keep a compact requirement-to-evidence matrix and account for EVERY '
+                          'assigned requirement; a smaller context must not reduce review coverage.',
     }
     return {'kind': kind, 'detail': detail, 'instruction': advice[kind]}
 
@@ -577,7 +583,7 @@ def execute_task(runner, task, record):
                         detail += ('\nRead .review-input/execution-limitations.json. Assess whether any failed or denied '
                                    'operation leaves required behavior or evidence unverified. Never treat such a call as successful; '
                                    'do not retry it via another tool. A failed optional probe alone is not a product defect.')
-                    if value['history'] and value['history'][-1]['kind'] == 'review-protocol':
+                    if value['history'] and value['history'][-1]['kind'] in ('review-protocol', 'review-context'):
                         detail += '\nController technical correction: ' + value['history'][-1]['instruction']
                         detail += '\nPrevious protocol error: ' + str(value['history'][-1]['detail'])
                     if not recovered:
@@ -638,7 +644,7 @@ def execute_task(runner, task, record):
                               'Include their exact text in findings as well as original confirmed/external issues. '
                               'Never use new_findings to invent optional work or bypass original issue dispositions. '
                               'Read .review-input/packet/ for pinned requirements and use its actual file paths.')
-                    if value['history'] and value['history'][-1]['kind'] == 'review-protocol':
+                    if value['history'] and value['history'][-1]['kind'] in ('review-protocol', 'review-context'):
                         detail += '\nController technical correction: ' + value['history'][-1]['instruction']
                         detail += '\nPrevious protocol error: ' + str(value['history'][-1]['detail'])
                     if not recovered:
@@ -670,7 +676,10 @@ def execute_task(runner, task, record):
                     value.pop('recovered_review', None)
                     if stop.is_set():
                         interrupted()
-                    fail('review-protocol' if value['stage'] in ('review', 'adjudicate') else 'transport', str(exc))
+                    kind = 'review-protocol' if value['stage'] in ('review', 'adjudicate') else 'transport'
+                    if kind == 'review-protocol' and 'context exhausted' in str(exc).lower():
+                        kind = 'review-context'
+                    fail(kind, str(exc))
                     continue
                 raise
 
