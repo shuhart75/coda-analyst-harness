@@ -147,7 +147,7 @@ class Export:
         if isinstance(value, dict):
             for key, item in value.items():
                 if key in ('error', 'last_error') and isinstance(item, str):
-                    pattern = re.escape(str(self.root)) + r'[\\/]logs[\\/][^\\/\r\n]+[\\/]stdout\.jsonl'
+                    pattern = re.escape(str(self.root)) + r'[\\/]logs[\\/][^\\/\r\n]+[\\/](?:stdout\.jsonl|recovery-binding\.json)'
                     for match in re.finditer(pattern, item):
                         path = Path(match.group())
                         if self.safe(path) and path.parent not in self.error_sessions:
@@ -221,6 +221,9 @@ class Export:
         return value
 
     def session(self, folder, include_prompt=False, summary_only=False):
+        binding = folder/'recovery-binding.json'
+        if binding.exists():
+            self.json_file(binding)
         path = folder / 'stdout.jsonl'
         text = self.read(path) if path.exists() else None
         if text is not None:
@@ -382,7 +385,7 @@ def collect_compact(config, destination=None, error=None):
         selected_groups = groups[:MAX_CYCLES]
         queues = [[p for p in ordered if p.relative_to(base).parts[0] == group
                    and (p.name.startswith('attempt-') or p.name in
-                        ('candidate.json', 'fatal.json', 'operational.json', 'operational-recovery.json',
+                        ('candidate.json', 'fatal.json', 'operational.json', 'operational-recovery.json', 'recovery-attempts.json',
                          'selection.json', 'generation.json', 'plan.json',
                          'failure.json', 'comparison.json'))] for group in selected_groups]
         # Round-robin prevents a busy candidate from hiding its parallel peers.

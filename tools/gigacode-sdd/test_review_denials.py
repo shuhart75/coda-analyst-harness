@@ -1,5 +1,6 @@
 """Completed reviews survive an explicitly unexecuted diagnostic probe."""
 import json
+import os
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from unittest.mock import patch
 from controller import Runner, Blocked, OperationalBlocked, RetryableSessionError, digest, read, save
 from execution_cycle import MODELS
 from transport import parse_events, review_denial_errors
+from workspace import git, clone_snapshot
 import test_execution_denials as fixtures
 
 
@@ -20,6 +22,19 @@ class ReviewDenialTests(unittest.TestCase):
     records = fixtures.ExecutionDenialTests.records
     audited_session_result = fixtures.ExecutionDenialTests.audited_session_result
     denied_session = fixtures.ExecutionDenialTests.denied_session
+
+    def seed_private_clone_fixture(self):
+        main = self.runner.main
+        (main/'frontend/.npmrc').write_text('registry=https://nexus.test/npm/\n')
+        git(main, 'add', '--', 'frontend/.npmrc')
+        git(main, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost',
+            'commit', '-qm', 'tracked registry fixture')
+        # Keep the old temporary clone for TemporaryDirectory's portable cleanup.
+        self.work = self.work.with_name('private-fixture')
+        clone_snapshot(main,self.work)
+        self.record['workspace'] = str(self.work)
+        self.record['base'] = git(main,'rev-parse','HEAD')
+        os.utime(self.work/'frontend/.npmrc',ns=(1000000000,1000000000))
 
     def review_session(self, *args, **kwargs):
         result = self.denied_session(*args, **kwargs)
@@ -45,6 +60,7 @@ class ReviewDenialTests(unittest.TestCase):
             return Runner.review(self.runner, *args, **kwargs)
 
     def test_saved_review_recovers_without_repeating_any_completed_stage(self):
+        self.seed_private_clone_fixture()
         self.task['resources'] = ['database']
         with self.assertRaisesRegex(Blocked, 'Permission preflight'):
             self.run_task(review=self.old_review)
@@ -63,6 +79,16 @@ class ReviewDenialTests(unittest.TestCase):
         receipt = read(self.saved_events.parent/'session-receipt.json')
         (Path(receipt['workspace'])/'backend/value.txt').write_text('tampered')
         with self.assertRaisesRegex(Blocked, 'receipt changed'): self.run_task()
+
+    def test_private_file_changed_after_receipt_stays_blocked(self):
+        self.seed_private_clone_fixture()
+        self.task['resources'] = ['database']
+        with self.assertRaises(Blocked): self.run_task(review=self.old_review)
+        path = self.work/'frontend/.npmrc'
+        stamp = path.stat()
+        os.utime(path,ns=(stamp.st_atime_ns,stamp.st_mtime_ns+1000000000))
+        with self.assertRaisesRegex(Blocked, 'candidate changed'):
+            self.run_task()
 
     def test_malformed_saved_verdict_enters_bounded_protocol_repair(self):
         self.task['resources'] = ['database']
@@ -120,6 +146,7 @@ class ReviewDenialTests(unittest.TestCase):
         return next((self.runner.root/'execution-cycles').glob('*/fatal.json'))
 
     def test_os_failure_recovers_audited_review_and_quarantines_unfinished_peer(self):
+        self.seed_private_clone_fixture()
         fatal = self.save_operational_failure()
         # Reproduce the legacy marker that had lost operation and traceback.
         data = read(fatal)

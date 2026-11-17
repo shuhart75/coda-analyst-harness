@@ -190,6 +190,64 @@ def _changed(root, base):
     return sorted(names)
 
 
+def review_copy_binding(source, review, source_snapshot, review_snapshot):
+    """Compare Git-copy content, not clone timestamps or private file modes.
+
+    Both callers' per-workspace snapshot checks remain exact. Redacted files
+    have no content hash in snapshots, so compare their bytes privately here;
+    neither bytes nor derived hashes are returned or retained in diagnostics.
+    """
+    def files(state):
+        return {p: v for p, v in state['files'].items()
+                if not p.startswith('.review-input/')
+                and not ('.gigacode' in Path(p).parts and Path(p).name == 'settings.json')}
+
+    def identity(info):
+        result = dict(info)
+        if 'mode' in result:
+            result['executable'] = bool(result.pop('mode') & 0o111)
+        # Only cross-copy comparison may omit this metadata. Equal size/time
+        # alone is never content evidence for a redacted file.
+        result.pop('mtime_ns', None)
+        return result
+
+    def same_private_content(name):
+        left, right = _safe_path(source, name), _safe_path(review, name)
+        if left.is_symlink() or right.is_symlink() or not left.is_file() or not right.is_file():
+            return False
+        with left.open('rb') as a, right.open('rb') as b:
+            while True:
+                chunk = a.read(65536)
+                if chunk != b.read(65536):
+                    return False
+                if not chunk:
+                    return True
+
+    before, after = files(source_snapshot), files(review_snapshot)
+    differences, checked_private = [], 0
+    for name in sorted(before.keys() | after.keys()):
+        a, b = before.get(name), after.get(name)
+        if a is None or b is None:
+            differences.append({'path': name, 'fields': ['presence']})
+            continue
+        x, y = identity(a), identity(b)
+        fields = [key for key in sorted(x.keys() | y.keys()) if x.get(key) != y.get(key)]
+        if a.get('redacted') and b.get('redacted'):
+            checked_private += 1
+            try:
+                equal = same_private_content(name)
+            except OSError:
+                equal = False
+            if not equal:
+                fields.append('content-or-readability')
+        if fields:
+            differences.append({'path': name, 'fields': fields})
+    return {'head_matches': source_snapshot['head'] == review_snapshot['head'],
+            'file_difference_count': len(differences), 'file_differences': differences[:20],
+            'private_files_compared': checked_private,
+            'comparison': 'content, presence, symlink targets and executable status; private bytes are not exported'}
+
+
 def _allowed(relative, owners):
     return any(relative == owner.rstrip("/") or relative.startswith(owner.rstrip("/") + "/")
                for owner in owners)
