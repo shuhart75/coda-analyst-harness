@@ -339,6 +339,10 @@ def collect_compact(config, destination=None, error=None):
         out.session(folder, summary_only=True)
     if (root/'state.json').exists():
         out.json_file(root/'state.json', raw=True)
+    for dirname in ('preserved-processes', 'preserved-services'):
+        for path in newest(list((root/dirname).glob('*.json')))[:8]:
+            if out.safe(path):
+                out.json_file(path)
     out.json_file(config)
     for name in ('planning-portfolio.json', 'review-ledger.json'):
         if (root/name).exists():
@@ -378,7 +382,8 @@ def collect_compact(config, destination=None, error=None):
         selected_groups = groups[:MAX_CYCLES]
         queues = [[p for p in ordered if p.relative_to(base).parts[0] == group
                    and (p.name.startswith('attempt-') or p.name in
-                        ('candidate.json', 'fatal.json', 'selection.json', 'generation.json', 'plan.json',
+                        ('candidate.json', 'fatal.json', 'operational.json', 'operational-recovery.json',
+                         'selection.json', 'generation.json', 'plan.json',
                          'failure.json', 'comparison.json'))] for group in selected_groups]
         # Round-robin prevents a busy candidate from hiding its parallel peers.
         selected = []

@@ -297,6 +297,9 @@ def _recover_permission_fatal(runner, task, candidates, folder, scope):
     if not path.exists():
         return
     fatal = read(path)
+    import operational_recovery
+    if not path.is_symlink() and operational_recovery.eligible(fatal):
+        return operational_recovery.recover(runner, task, candidates, folder, scope)
     prefix = 'Permission preflight/runtime denial; inspect '
     if (path.is_symlink() or fatal.get('type') != 'Blocked' or fatal.get('scope') != scope
             or not str(fatal.get('error', '')).startswith(prefix)):
@@ -362,11 +365,14 @@ def execute_task(runner, task, record):
     folder.mkdir(parents=True, exist_ok=True)
     fatal_path = folder/'fatal.json'
     if fatal_path.exists():
+        import operational_recovery
         if fatal_path.is_symlink():
             raise Blocked('Preserved safety failure in execution portfolio; inspect ' + str(fatal_path))
         fatal = read(fatal_path)
-        if (fatal.get('type') != 'Blocked' or fatal.get('scope') != scope
-                or not str(fatal.get('error', '')).startswith('Permission preflight/runtime denial; inspect ')
+        if (fatal.get('scope') != scope
+                or not (operational_recovery.eligible(fatal) or
+                        (fatal.get('type') == 'Blocked' and str(fatal.get('error', '')).startswith(
+                            'Permission preflight/runtime denial; inspect ')))
                 or any(not (folder/fingerprint(model)[:16]/'candidate.json').is_file() for model in models)):
             raise Blocked('Preserved safety failure in execution portfolio; inspect ' + str(fatal_path))
     # Prepare both copies before either model changes its source. Preserve a
@@ -457,7 +463,7 @@ def execute_task(runner, task, record):
                 persist()
                 raise CandidateStalled(value['model'] + ': no measurable progress after distinct repair strategies')
 
-        if value.get('status') in ('stalled', 'external-blocker'):
+        if value.get('status') in ('stalled', 'external-blocker', 'quarantined'):
             raise CandidateStalled(value['model'] + ': preserved no-progress result; new evidence or instructions required')
         if value['stage'] != 'execute':
             _receipt_valid(value)
@@ -659,6 +665,17 @@ def execute_task(runner, task, record):
     winner = None
     failures = []
     fatal = None
+    fatal_errors = []
+    def record_fatal(exc, index):
+        nonlocal fatal
+        from controller import OperationalBlocked
+        from operational_recovery import failure_record
+        def priority(error):
+            return 0 if isinstance(error, OperationalBlocked) else 1 if isinstance(error, OSError) else 2
+        fatal_errors.append({**failure_record(exc, scope), 'model': candidates[index][1]['model'],
+                             'stage': candidates[index][1].get('stage')})
+        if fatal is None or priority(exc) > priority(fatal):
+            fatal = exc
     # A resource label means a mutable environment, database or port. Different
     # candidate checkouts alone cannot isolate it, so never speculate there.
     parallel = not task.get('resources')
@@ -679,7 +696,7 @@ def execute_task(runner, task, record):
                 except Interrupted:
                     pass
                 except Exception as exc:
-                    fatal = exc
+                    record_fatal(exc, index)
                     for stop in stops:
                         stop.set()
     else:
@@ -692,10 +709,15 @@ def execute_task(runner, task, record):
             except Interrupted:
                 break
             except Exception as exc:
-                fatal = exc
+                record_fatal(exc, index)
                 break
     if fatal:
-        save(folder / 'fatal.json', {'error': str(fatal), 'type': type(fatal).__name__, 'scope': scope})
+        from controller import OperationalBlocked
+        from operational_recovery import failure_record
+        # An incomplete cleanup is rechecked by the process guard on resume,
+        # not permanently promoted to a safety violation.
+        failure_path = 'operational.json' if isinstance(fatal, OperationalBlocked) else 'fatal.json'
+        save(folder / failure_path, {**failure_record(fatal, scope), 'related_failures': fatal_errors})
         raise fatal
     if runner.stop.is_set():
         raise Interrupted('Interrupted; all implementation variants preserved')

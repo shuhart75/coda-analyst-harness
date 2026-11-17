@@ -2,12 +2,12 @@
 import json
 from pathlib import Path
 
-from transport import parse_events, review_denial_errors
+from transport import parse_events, review_denial_errors, execution_result_usable
 from workspace import snapshot
 
 
 def load(runner, task, value, events_path, model, *, validate=True):
-    from controller import Blocked, digest, file_manifest, read
+    from controller import Blocked, digest, file_manifest, read, git_controls
     from execution_cycle import _receipt_valid, fingerprint
     stage = value.get('stage')
     name = task['id'] + ('-review' if stage == 'review' else '-adjudicate')
@@ -28,6 +28,7 @@ def load(runner, task, value, events_path, model, *, validate=True):
             or receipt.get('model') != model or result.get('events_path') != str(events)
             or receipt.get('events_sha256') != digest(events)
             or receipt.get('workspace_snapshot') != snapshot(root, normalize_settings=True)
+            or ('git_controls' in receipt and receipt['git_controls'] != git_controls(root))
             or receipt.get('decision_sha256') != (digest(decision) if decision.is_file() else None)
             or prompt.is_symlink() or not prompt.is_file() or digest(prompt) != receipt.get('prompt_sha256')):
         raise Blocked('Saved review receipt changed or belongs to different inputs')
@@ -54,7 +55,8 @@ def load(runner, task, value, events_path, model, *, validate=True):
     parsed = parse_events(events)
     if parsed['text'] != result.get('text') or parsed['permission_denials'] != result.get('permission_denials'):
         raise Blocked('Saved review result differs from its original stream')
-    if review_denial_errors(result) is None:
+    if (not execution_result_usable(result) or
+            (result.get('permission_denials') and review_denial_errors(result) is None)):
         raise Blocked('Saved review has unresolved permission or transport failure')
     report = runner.validate_review_result(root, result, task['requirements'], name, model) if validate else None
     return root, report

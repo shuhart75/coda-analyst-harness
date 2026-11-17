@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 import threading
 import time
@@ -250,8 +251,15 @@ def finish_process(process, cleanup_guard=None):
         if diagnostic:
             process.poll()
             return {"preserved": True, "process_group": process.pid, "diagnostic": diagnostic}
-    stop_process_scope(process)
-    process.wait()
+    try:
+        stop_process_scope(process)
+        process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # Preserve ownership and the partial stream instead of losing both to
+        # a cleanup exception. Do not try another signalling mechanism.
+        return {"preserved": True, "process_group": process.pid,
+                "diagnostic": {"reason": "Process cleanup failed", "operation": "stop_process_scope",
+                               "error_type": type(exc).__name__, "errno": getattr(exc, 'errno', None)}}
     return {"preserved": False, "process_group": process.pid}
 
 
