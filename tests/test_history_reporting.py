@@ -60,11 +60,19 @@ class HistoryReportingTests(unittest.TestCase):
     def test_changed_qa_meaning_requires_explicit_exception(self):
         run_id = self.reconciled()
         manifest = self.manifest()
-        manifest['status_rules']['development_completed'] = ['ready_for_uat']
+        for status in ('ready_for_uat', 'ready_for_ift', 'READY_FOR_IFT', 'Готов к ИФТ'):
+            with self.subTest(status=status):
+                manifest['status_rules']['development_completed'] = [status]
+                path = self.write(self.state / 'review.json', manifest)
+                error = self.run_tool(self.state, 'history-review', '--run-id', run_id,
+                                      '--project-root', str(self.project), '--manifest', str(path), expected=2)
+                self.assertIn('qa_completion_override', str(error))
+        manifest['status_rules']['qa_completed'].append('ready_for_ift')
+        manifest['status_rules']['development_completed'] = ['READY_FOR_IFT']
         path = self.write(self.state / 'review.json', manifest)
-        error = self.run_tool(self.state, 'history-review', '--run-id', run_id,
-                              '--project-root', str(self.project), '--manifest', str(path), expected=2)
-        self.assertIn('qa_completion_override', str(error))
+        self.run_tool(self.state, 'history-review', '--run-id', run_id,
+                      '--project-root', str(self.project), '--manifest', str(path))
+        manifest['status_rules']['qa_completed'].remove('ready_for_ift')
         manifest['qa_completion_override'] = {'analyst_confirmed': True, 'reason': 'Specific workflow',
                                                'source': 'analyst decision', 'quote': 'QA ends only at done here'}
         path = self.write(path, manifest)

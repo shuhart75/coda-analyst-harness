@@ -138,6 +138,20 @@ class TrackerLifecycleTests(unittest.TestCase):
                 self.assertEqual(result['qa']['finished_at'], moment(5).isoformat())
                 self.assertIsNone(result['development']['finished_at'])
 
+    def test_ready_for_ift_stays_completed_after_qa_and_external_assignment(self):
+        rules = replace(self.rules, qa_completed=self.rules.qa_completed | {'ready_for_ift'})
+        events = [HistoryEvent('start', moment(2), ('analyst', 'developer'), ('created', 'development')),
+                  self.status('ift', 5, 'development', 'ready_for_ift'),
+                  self.assigned('qa-after-ift', 6, 'developer', 'tester'),
+                  self.assigned('external-after-ift', 7, 'tester', 'external-reviewer')]
+        result = calculate_task(self.history(events, 'external-reviewer', 'ready_for_ift'), self.people, rules)
+        self.assertEqual(result['development']['state'], 'completed')
+        self.assertEqual(result['development']['progress_percent'], 100)
+        self.assertEqual(result['qa']['state'], 'completed')
+        self.assertIsNone(result['qa']['finished_at'])
+        self.assertEqual(result['qa']['completed_by'], moment(5).isoformat())
+        self.assertIn('participant-role-unknown:external-reviewer', result['limitations'])
+
     def test_transitions_inside_terminal_group_do_not_shift_qa_end(self):
         history = self.finished()
         history = replace(history, events=(*history.events, self.status('ift', 8, 'done', 'ift')), current_status='ift')

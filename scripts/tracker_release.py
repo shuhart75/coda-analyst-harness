@@ -203,7 +203,10 @@ def release_preview_command(args) -> int:
     return 0
 
 
-def supplement_result(run_id: str, project: Path, result: dict, responses: list[dict]) -> dict:
+def supplement_result(run_id: str, project: Path, result: dict, responses: list[dict],
+                      *, quarter: str | None = None, feature: str | None = None,
+                      reviewed: dict | None = None, expected_head: str | None = None,
+                      deliveries: list[str] | None = None) -> dict:
     from tracker_workflow import (load_run, response_file, digest_bytes, full_issue_records,
                                   compact_issue, append_cards, reconcile_data, tql_units)
     from tracker_history import validate_call, pin_history_response
@@ -211,7 +214,7 @@ def supplement_result(run_id: str, project: Path, result: dict, responses: list[
 
     if not responses:
         return result
-    preview = preview_execution(project, None, None, result)
+    preview = preview_execution(project, quarter, feature, result, reviewed, expected_head, deliveries)
     allowed = {key for proposal in preview["feature_qa_proposals"] for key in proposal["missing_card_keys"]}
     provider = result["scope"]["provider"]
     run = copy.deepcopy(load_run(run_id))
@@ -233,11 +236,15 @@ def supplement_result(run_id: str, project: Path, result: dict, responses: list[
         pin_history_response(run_id, path, raw, {"provider": provider, "keys": keys, "call": call})
         append_cards(run, provider, cards)
     supplemented = reconcile_data(run)
-    release = result["scope"]["ids"][0]
-    supplemented["release_member_keys"] = [issue.get(provider + "_key")
-                                           for issue in [*supplemented["issues"], *supplemented.get("skipped", [])]
-                                           if any(release in {item.get("key"), item.get("name")}
-                                                  for item in (issue.get("releases") or []))]
+    if result["scope"]["kind"] == "release":
+        release = result["scope"]["ids"][0]
+        supplemented["release_member_keys"] = [issue.get(provider + "_key")
+                                               for issue in [*supplemented["issues"], *supplemented.get("skipped", [])]
+                                               if any(release in {item.get("key"), item.get("name")}
+                                                      for item in (issue.get("releases") or []))]
+    else:
+        supplemented['application_member_keys'] = sorted({issue.get(provider + '_key')
+            for issue in [*result['issues'], *result['excluded']] if issue.get(provider + '_key')})
     return supplemented
 
 

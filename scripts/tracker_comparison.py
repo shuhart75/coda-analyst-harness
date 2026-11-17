@@ -110,9 +110,16 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
     choices = [f"Принять сроки {name} для всех задач", f"Принять сроки и статусы {name} для всех задач",
                "Оставить текущие сроки и статусы для всех задач", "Свой вариант"]
     fields = [["Actual Start", "Actual Finish"], ["Actual Start", "Actual Finish", "Status", "Progress %"], [], None]
+    # Reference-only development stays out of application choices, but its
+    # saved dates still contribute to QA's full-feature/group start evidence.
+    current_development = rows + [
+        {'feature': target['feature'], 'task_id': target['task_id'], 'role': target['role'],
+         'suit': item.get('suit', ''), 'current': target['saved_facts']}
+        for item in preview['items'] if item.get('proposed_action') == 'reference-only'
+        for target in item['targets'] if target['role'] in {'BE', 'FE'}]
     current_qa_starts = {
         proposal['feature']: qa_start_from_current(
-            [row for row in rows if row['feature'] == proposal['feature']], proposal.get('missing_card_keys', []))
+            [row for row in current_development if row['feature'] == proposal['feature']], proposal.get('missing_card_keys', []))
         for proposal in preview['feature_qa_proposals']
     }
     qa_checks = []
@@ -133,7 +140,7 @@ def build_comparison(preview: dict, reviews: list[dict], provider: str) -> dict:
                 continue
             if row.get('members') is not None:
                 target['start_from_current_execution'] = qa_start_from_current(
-                    [candidate for candidate in rows if candidate['feature'] == feature
+                    [candidate for candidate in current_development if candidate['feature'] == feature
                      and candidate['role'] in {'BE', 'FE'} and candidate['task_id'] in row['members']], [])
                 target['members'] = row['members']
         if any(row.get('members') is not None for row in qa_rows):

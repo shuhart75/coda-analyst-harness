@@ -418,9 +418,15 @@ def review_history(args) -> int:
         result["scope"] = {**result["scope"], "release_decisions": manifest.get("release_decisions", {})}
         from tracker_release_evidence import review_membership
         result = review_membership(args.run_id, result, manifest.get("release_membership"))
-    elif manifest.get("scope_decisions") is not None:
-        from tracker_release import apply_scope_decisions
-        result = apply_scope_decisions(project, result, manifest["scope_decisions"])
+    else:
+        from tracker_release import apply_scope_decisions, supplement_result
+        result = apply_scope_decisions(project, result, manifest.get("scope_decisions"))
+        result = supplement_result(
+            args.run_id, project, result, manifest.get("supplemental_responses", []),
+            quarter=manifest.get("quarter"), feature=manifest.get("feature"),
+            reviewed=manifest.get("reviewed_registries", {}), expected_head=manifest.get("expected_head"),
+            deliveries=manifest.get("deliveries"))
+        result = apply_scope_decisions(project, result, manifest.get("scope_decisions"))
     from tracker_execution import restore_registered_tasks
     result = restore_registered_tasks(project, result)
     development_scope = manifest.get('development_scope', 'release-members')
@@ -460,7 +466,8 @@ def review_history(args) -> int:
         targets = [target for item in preview["items"] for target in item["targets"]
                    if item.get(provider + "_key") == entry["key"] and target["role"] == entry["role"]]
         if len(targets) != 1 or entry["role"] not in {"FE", "BE"}:
-            raise ValueError("History must map to exactly one confirmed FE/BE execution work item")
+            raise ValueError("History must map to exactly one confirmed FE/BE execution work item; "
+                             "for registered remainder tasks supply full cards through supplemental_responses in this same run")
         observed = timestamp(datetime.fromisoformat(entry["call"]["captured_at"]))
         payload, source_evidence = read_history_source(args.run_id, entry, provider, entry["key"], "history")
         sources = [source_evidence]
@@ -506,12 +513,13 @@ def review_history(args) -> int:
                          "sources": sources, "limitations": limits})
         limitations.extend(f"{entry['key']}:{limit}" for limit in limits)
     # A changed QA meaning requires an explicit exception, not a generic mapping approval.
-    completion_codes = {'ready_for_uat', 'Готов к ПСИ', 'Готов к ИФТ', 'ИФТ', 'ПСИ'}
+    completion_codes = {'ready_for_ift', 'ready_for_uat', 'готов к пси', 'готов к ифт', 'ифт', 'пси'}
     observed_codes = set(rules.development_completed)
     for _, history in histories.values():
         observed_codes.add(history.current_status)
         observed_codes.update(value for event in history.events if event.status for value in event.status)
-    omitted = (completion_codes & observed_codes) - set(rules.qa_completed)
+    omitted = (completion_codes & {code.strip().casefold() for code in observed_codes}) - {
+        code.strip().casefold() for code in rules.qa_completed}
     if omitted:
         override = manifest.get('qa_completion_override', {})
         if (override.get('analyst_confirmed') is not True
@@ -520,6 +528,11 @@ def review_history(args) -> int:
             raise ValueError('QA completion semantics changed for ' + ', '.join(sorted(omitted))
                              + '; use the established QA completion meaning or record an explicit qa_completion_override with reason, source and analyst quote')
     reviews, missing_history, qa_blockers = [], [], []
+    missing_cards = sorted({key for proposal in preview['feature_qa_proposals']
+                            if not proposal.get('qa_not_applicable')
+                            for key in proposal.get('missing_card_keys', [])})
+    if missing_cards:
+        qa_blockers.append({'reason': 'collect-all-feature-cards-before-qa', 'keys': missing_cards})
     observed_states = {}
     # A narrow release review must not certify contradictory future work as fresh.
     for item in preview['items']:
@@ -668,6 +681,12 @@ def review_history(args) -> int:
                               "keys": pending_history, "dated_source_required": pending_dates,
                               "contract": str(Path(__file__).resolve().parents[1] / "core/tracker-adaptive.md"),
                               "provider": provider, "application_requires_analyst_command": True}}
+    if missing_cards:
+        output['next_action'] = {
+            'type': 'collect-feature-cards', 'provider': provider, 'keys': missing_cards,
+            'history_keys': pending_history, 'history_manifest_field': 'supplemental_responses',
+            'run_id': args.run_id, 'preserve_application_scope': True,
+            'contract': str(Path(__file__).resolve().parents[1] / 'core/tracker-adaptive.md')}
     destination = run_root(args.run_id) / "history" / (digest_object(output) + ".json")
     save_json(destination, output)
     save_json(run_root(args.run_id) / "history-current.json", {"file": str(destination)})
