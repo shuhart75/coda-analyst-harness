@@ -156,6 +156,67 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(accepted['history'][0]['kind'], 'review-protocol')
         self.assertEqual(accepted['history'][0]['result'], 'verified')
 
+    def test_check_failures_do_not_exhaust_reviewer_budget(self):
+        self.primary_only = True
+        reviews = 0
+        def checks(*args, **kwargs):
+            results = self.checks(*args, **kwargs)
+            if self.check_count <= 4:
+                results[0]['ok'] = False
+            return results
+        def review(*args, **kwargs):
+            nonlocal reviews
+            reviews += 1
+            if reviews <= 3:
+                raise RetryableSessionError('malformed review')
+            return self.review(*args, **kwargs)
+        accepted = self.run_task(checks=checks, review=review)
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual(accepted['retry_steps']['implementation:repair']['failures'], 4)
+        self.assertEqual(accepted['retry_steps']['review:protocol']['failures'], 3)
+        self.assertEqual(self.check_count, 5)
+        self.assertEqual(len(self.calls), 5)
+
+    def test_review_changes_strategy_and_reuses_draft_across_interruption(self):
+        self.primary_only = True
+        details = []
+        def review(root, cwd, detail, *args, **kwargs):
+            details.append(detail)
+            if len(details) <= 2:
+                raise RetryableSessionError('malformed review', {'text': 'partial observations'})
+            draft = read(Path(root)/'.review-input/previous-review-draft.json')
+            self.assertEqual(draft['text'], 'partial observations')
+            self.assertIn('checklist', detail)
+            self.runner.stop.set()
+            raise Interrupted('pause review')
+        with self.assertRaises(Interrupted):
+            self.run_task(review=review)
+        self.assertNotEqual(details[1], details[2])
+        self.runner.stop.clear()
+        def resumed(root, cwd, detail, *args, **kwargs):
+            self.assertEqual(read(Path(root)/'.review-input/previous-review-draft.json')['text'], 'partial observations')
+            self.assertIn('checklist', detail)
+            return self.review(root, cwd, detail, *args, **kwargs)
+        accepted = self.run_task(review=resumed)
+        self.assertEqual(accepted['retry_steps']['review:protocol']['failures'], 2)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.check_count, 1)
+
+    def test_review_budget_exhaustion_does_not_repeat_on_plain_resume(self):
+        self.primary_only = True
+        details = []
+        def review(root, cwd, detail, *args, **kwargs):
+            details.append(detail)
+            raise RetryableSessionError('malformed review')
+        with self.assertRaises(Blocked):
+            self.run_task(review=review)
+        self.assertEqual(len(details), 6)
+        self.assertIn('Reconstruct the response', details[-1])
+        with self.assertRaises(Blocked):
+            self.run_task(review=review)
+        self.assertEqual(len(details), 6)
+        self.assertEqual(self.check_count, 1)
+
     def test_shared_resources_serialize_and_no_progress_switches_model(self):
         self.task['resources'] = ['database']
         active = set()
