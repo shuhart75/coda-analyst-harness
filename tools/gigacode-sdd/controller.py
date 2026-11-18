@@ -47,9 +47,10 @@ class Interrupted(Blocked):
 class RetryableSessionError(Blocked):
     retryable = True
 
-    def __init__(self, message, result=None):
+    def __init__(self, message, result=None, *, cause=None):
         super().__init__(message)
         self.result = result
+        self.cause = cause
 
 
 def save(path, value):
@@ -706,9 +707,9 @@ executed test names/counts, not just a successful command or test compilation.
         """Use identical verdict checks for fresh and receipt-recovered review evidence."""
         disposition = session_outcome(result, 'review')
         if disposition['cause'] == 'context-limit':
-            raise RetryableSessionError('Reviewer context exhausted; retry only review with bounded excerpts', result)
+            raise RetryableSessionError('Reviewer context exhausted; retry only review with bounded excerpts', result, cause='context-limit')
         if disposition['action'] != 'validate':
-            raise RetryableSessionError('Reviewer failed; needs repair: ' + disposition['cause'] + '; ' + result['events_path'], result)
+            raise RetryableSessionError('Reviewer failed; needs repair: ' + disposition['cause'] + '; ' + result['events_path'], result, cause=disposition['cause'])
         if model:
             from planning_cycle import verify_model
             verify_model(result, model)

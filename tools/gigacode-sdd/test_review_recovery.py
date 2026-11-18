@@ -64,6 +64,31 @@ class ReviewRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, 'evidence changed'):
             review_cycle._receipt(self.runner, record, None, [], validator, record['model'])
 
+    def test_transport_deadline_survives_restart_without_instruction_repair(self):
+        victim = review_cycle.MODELS[0]
+        seen = []
+        def timeout(root, cwd, prompt, role, name, model=None):
+            result = self.fake(root, cwd, prompt, role, name, model)
+            if model == victim:
+                result.update(ok=False, timed_out=True)
+                result['errors'].append('Session process timeout; partial events preserved')
+            return result
+        with patch.object(self.runner, 'session', side_effect=timeout), patch('review_cycle.wait_until', return_value=False):
+            with self.assertRaises(Blocked): self.pair()
+        paths = list((self.runner.root/'review-cycles').glob('*/*/attempt-*.json'))
+        record = next(json.loads(p.read_text()) for p in paths if json.loads(p.read_text())['model'] == victim)
+        deadline = record['next_attempt_at']
+        self.assertFalse(record['recovery_decision']['instruction_change'])
+        def wait(deadline_arg, *args): seen.append(deadline_arg); return False
+        with patch.object(self.runner, 'session', side_effect=AssertionError('retry before deadline')), patch('review_cycle.wait_until', side_effect=wait):
+            with self.assertRaises(Blocked): self.pair()
+        self.assertIn(deadline, seen)
+        with patch.object(self.runner, 'session', side_effect=self.fake), patch('review_cycle.wait_until', return_value=True):
+            self.assertEqual(self.pair()['verdict'], 'pass')
+        newest = [json.loads(p.read_text()) for p in (self.runner.root/'review-cycles').glob('*/*/attempt-*.json')]
+        retry = next(r for r in newest if r['model'] == victim and r['attempt'] == 2)
+        self.assertIsNone(retry['correction'])
+
     def test_new_runtime_budget_preserves_history_and_successful_peer(self):
         victim = review_cycle.MODELS[1]
         def broken(root, cwd, prompt, role, name, model=None):
