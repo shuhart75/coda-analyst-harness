@@ -123,6 +123,17 @@ def _diagnosis(kind, detail):
 
 
 def adjudicated_report(root, task, original, report):
+    """Preserve rejected adjudication data for focused repair, never acceptance."""
+    from controller import RetryableSessionError
+    try:
+        return _adjudicated_report(root, task, original, report)
+    except RetryableSessionError as exc:
+        if exc.result is None:
+            exc.result = {'text': json.dumps(report, ensure_ascii=False)}
+        raise
+
+
+def _adjudicated_report(root, task, original, report):
     """Verify every adjudication's local evidence before changing a verdict."""
     from controller import RetryableSessionError, under
     for value in (original.get('findings'), report.get('findings')):
@@ -132,20 +143,31 @@ def adjudicated_report(root, task, original, report):
     dispositions = report.get('issue_dispositions')
     if not isinstance(dispositions, dict) or set(dispositions) != set(issues):
         raise RetryableSessionError('Adjudication must address every original issue id')
-    def citations(evidence):
+    def citations(evidence, location):
         if not isinstance(evidence, list) or not evidence:
-            raise RetryableSessionError('Adjudication needs concrete file evidence')
+            raise RetryableSessionError('Adjudication needs concrete file evidence at ' + location)
         packet, code, quoted_requirements = False, False, ''
-        for fact in evidence:
+        for index, fact in enumerate(evidence):
+            field = location + '[' + str(index) + ']'
+            supplied = fact.get('path') if isinstance(fact, dict) else None
+            reason = None
             try:
-                path = under(root, fact['path'])
-                quote = fact['quote']
-                valid = bind_quote(path, fact)
-                quote = fact.get('quote', '')
-            except (KeyError, TypeError, ValueError, OSError, UnicodeError, RuntimeError):
-                valid = False
-            if not valid:
-                raise RetryableSessionError('Adjudication file evidence does not match the review copy')
+                if not isinstance(supplied, str) or not supplied.strip():
+                    reason = 'path must be a nonempty string'
+                elif not isinstance(fact.get('quote'), str) or not fact['quote'].strip():
+                    reason = 'quote must be a nonempty supporting reference; paraphrases are allowed'
+                else:
+                    path = under(root, supplied)
+                    if not path.is_file():
+                        reason = 'referenced file does not exist or is not a regular file'
+                    elif not bind_quote(path, fact):
+                        reason = 'reference is not usable'
+                    quote = fact.get('quote', '')
+            except (KeyError, TypeError, ValueError, OSError, UnicodeError, RuntimeError) as exc:
+                reason = type(exc).__name__ + ': ' + str(exc)[:500]
+            if reason:
+                raise RetryableSessionError('Adjudication file evidence does not match the review copy: '
+                    + field + '; path=' + repr(supplied)[:500] + '; ' + reason)
             rel = path.relative_to(root).as_posix()
             if rel.startswith('.review-input/packet/'):
                 packet = True
@@ -162,7 +184,7 @@ def adjudicated_report(root, task, original, report):
         if (not isinstance(check, dict) or check.get('status') not in ('covered', 'gap')
                 or not isinstance(check.get('reason'), str) or not check['reason'].strip()):
             raise RetryableSessionError('Adjudication coverage status or reason is invalid')
-        packet, code, quotes = citations(check.get('evidence'))
+        packet, code, quotes = citations(check.get('evidence'), 'coverage_checks.' + req + '.evidence')
         if not packet or not code:
             raise RetryableSessionError('Coverage needs actual code and pinned requirement references')
         if check['status'] == 'gap':
@@ -172,7 +194,7 @@ def adjudicated_report(root, task, original, report):
         item = dispositions[key]
         if not isinstance(item, dict) or item.get('status') not in ('confirmed', 'refuted', 'optional', 'external'):
             raise RetryableSessionError('Adjudication disposition is invalid')
-        packet, code, _ = citations(item.get('evidence'))
+        packet, code, _ = citations(item.get('evidence'), 'issue_dispositions.' + key + '.evidence')
         if not code or (item['status'] in ('refuted', 'optional') and not packet):
             raise RetryableSessionError('Refutation/optional scope needs pinned requirements and actual code evidence')
         if not isinstance(item.get('reason'), str) or not item['reason'].strip():
@@ -206,7 +228,7 @@ def adjudicated_report(root, task, original, report):
                 or not all(isinstance(req, str) and req in task['requirements'] for req in item['requirements'])
                 or item.get('outside_required_scope') is True):
             raise RetryableSessionError('New adjudication finding must be a unique required defect with evidence')
-        packet, code, _ = citations(item.get('evidence'))
+        packet, code, _ = citations(item.get('evidence'), 'new_findings.' + item['id'] + '.evidence')
         if not packet or not code:
             raise RetryableSessionError('New adjudication finding requires packet and actual code evidence')
         known_ids.add(item['id'])
@@ -219,7 +241,9 @@ def adjudicated_report(root, task, original, report):
         raise RetryableSessionError('Mandatory coverage gap cannot be refuted or made optional')
     verdict = 'blocked' if external else 'changes' if findings else 'pass'
     if report['verdict'] != verdict or set(report['findings']) != set(findings):
-        raise RetryableSessionError('Adjudication verdict contradicts issue dispositions')
+        raise RetryableSessionError('Adjudication verdict contradicts issue dispositions: expected verdict='
+                + verdict + '; findings must contain exactly confirmed/external issue texts: '
+                + json.dumps(findings, ensure_ascii=False))
     return {**report, 'verdict': verdict, 'findings': findings, 'optional_findings': optional,
             'new_findings': canonical}
 

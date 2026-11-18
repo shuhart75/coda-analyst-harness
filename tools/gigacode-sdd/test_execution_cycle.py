@@ -394,6 +394,22 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(accepted['original_review']['verdict'], 'changes')
         self.assertEqual(accepted['review']['verdict'], 'pass')
 
+    def test_adjudication_accepts_markdown_typos_and_paraphrases(self):
+        root = _review_copy(self.runner, self.work, self.task)
+        (root/'backend/value.txt').write_text('2')
+        report = self.review(root, '.', '', ['REQ-BE'], 'be-review', model=MODELS[1])
+        issue = 'Required backend behavior is absent'
+        references = [{'path': 'backend/value.txt', 'quote': 'Реализовано значние **2**'},
+                      {'path': '.review-input/packet/requirements.md', 'quote': '**REQ-BE** требует значние 2'}]
+        report['issue_dispositions'] = {fingerprint(issue)[:16]: {
+            'status': 'refuted', 'requirements': ['REQ-BE'], 'reason': 'Existing behavior covers the requirement.',
+            'evidence': references}}
+        report['coverage_checks']['REQ-BE']['evidence'] = [dict(item) for item in references]
+        reviewed = adjudicated_report(root, self.task, {'findings': [issue]}, report)
+        self.assertEqual(reviewed['verdict'], 'pass')
+        self.assertEqual(reviewed['issue_dispositions'][fingerprint(issue)[:16]]['evidence'][0]['quote'],
+                         'Реализовано значние **2**')
+
     def test_bad_adjudication_evidence_retries_only_adjudication(self):
         self.primary_only = True
         self.task['resources'] = ['database']
@@ -410,6 +426,12 @@ class ExecutionPortfolioTests(unittest.TestCase):
                                  {'path':'.review-input/packet/requirements.md','quote':'REQ-BE: value 2'}]}}
                 if count == 2:
                     self.assertIn('Previous protocol error', detail)
+                    self.assertIn('issue_dispositions.' + fingerprint(issue)[:16] + '.evidence[0]', detail)
+                    self.assertIn('backend/missing.txt', detail)
+                    self.assertIn('does not exist', detail)
+                    draft = read(root/'.review-input/previous-review-draft.json')
+                    previous = json.loads(draft['text'])
+                    self.assertEqual(previous['issue_dispositions'][fingerprint(issue)[:16]]['evidence'][0]['path'], 'backend/missing.txt')
             else:
                 report.update(verdict='changes', findings=[issue])
             return report
