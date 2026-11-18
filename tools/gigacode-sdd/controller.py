@@ -743,7 +743,7 @@ executed test names/counts, not just a successful command or test compilation.
         if not result['ok']:
             if report['verdict'] != 'changes' and (denial_errors is None
                     or not set(result['errors']) <= denial_errors):
-                raise RetryableSessionError('Reviewer ' + report['verdict']
+                raise RetryableSessionError('Reviewer failed: verdict=' + report['verdict']
                     + ' cannot be accepted with unresolved tool errors: ' + json.dumps(result['errors'])
                     + '; inspect ' + result['events_path'], result, cause='tool-errors')
             self.progress('Замечания проверяющего сохранены с диагностикой ошибок чтения/поиска')
