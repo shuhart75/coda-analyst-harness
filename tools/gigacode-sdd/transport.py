@@ -252,6 +252,29 @@ def review_denial_errors(result):
     return review_denials_accounted(result) if execution_result_usable(result) else None
 
 
+def review_diagnostic_errors(result):
+    """Completed read failures are warnings, not a veto on the reviewed result.
+
+    The caller still validates coverage, findings, snapshot and mandatory checks.
+    Unknown shell/write errors, incomplete calls and transport failures stay fatal.
+    Explicitly unexecuted denied calls remain accounted for without rerunning them.
+    """
+    if (result.get('returncode') != 0 or not result.get('terminal_result')
+            or result.get('timed_out') or result.get('cancelled')
+            or (result.get('cleanup') or {}).get('preserved')):
+        return None
+    if set(result.get('tool_calls', {})) - {r['tool_use_id'] for r in result.get('tool_results', [])}:
+        return None
+    allowed = set(result.get('read_tool_errors', result.get('missing_path_errors', [])))
+    if result.get('permission_denials'):
+        denied = review_denial_errors(result)
+        if denied is None:
+            return None
+        allowed.update(denied)
+    errors = set(result.get('errors', []))
+    return errors if errors <= allowed else None
+
+
 def review_feedback_usable(result):
     """Read/search failures may inform rejection, never successful acceptance."""
     return (result.get('returncode') == 0 and result.get('terminal_result')

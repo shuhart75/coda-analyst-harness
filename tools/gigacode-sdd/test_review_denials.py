@@ -134,6 +134,32 @@ class ReviewDenialTests(unittest.TestCase):
         report = self.runner.validate_review_result(self.work, result, self.task['requirements'], 'be-review', MODELS[1])
         self.assertEqual(report['verdict'], 'pass')
 
+    def test_read_error_and_unexecuted_denial_allow_result_validation(self):
+        result = self.review_session(self.work, '.', 'task', 'review', 'be-review', model=MODELS[1])
+        events = Path(result['events_path'])
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        rows[-1:-1] = [
+            {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 'missing',
+                'name': 'read_file', 'input': {'file_path': 'wrong/tasks.md'}}]}},
+            {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'missing',
+                'is_error': True, 'content': 'File not found: wrong/tasks.md'}]}}]
+        events.write_text('\n'.join(map(json.dumps, rows)))
+        result = parse_events(events)
+        result.update(returncode=0, cleanup={'preserved': False})
+        report = self.runner.validate_review_result(self.work, result, self.task['requirements'], 'be-review', MODELS[1])
+        self.assertEqual(report['verdict'], 'pass')
+        self.assertIn('Tool read_file (missing) returned an error', report['tool_warnings'])
+        result['errors'].append('Unknown shell failure')
+        with self.assertRaises(RetryableSessionError):
+            self.runner.validate_review_result(self.work, result, self.task['requirements'], 'be-review', MODELS[1])
+
+    def test_object_findings_keep_text_without_protocol_retry(self):
+        self.report_override = {'verdict': 'changes', 'findings': [{'id': 'issue-1', 'text': 'Fix **значние**'}]}
+        result = self.review_session(self.work, '.', 'task', 'review', 'be-review', model=MODELS[1])
+        report = self.runner.validate_review_result(self.work, result, self.task['requirements'], 'be-review', MODELS[1])
+        self.assertEqual(report['findings'], ['Fix **значние**'])
+        self.assertEqual(report['reported_findings'][0]['id'], 'issue-1')
+
     def test_saved_context_failure_retries_only_review_with_focused_instruction(self):
         self.task['resources'] = ['database']
         self.report_text = '[API Error: Context is too large to send safely; COMPRESSION_FAILED_API_ERROR.]'

@@ -4,7 +4,7 @@ Call only after controller workspace/source/service audits or receipt integrity
 validation. Candidate ownership, model identity, mandatory checks and independent
 review remain separate gates. A tool refusal does not authorize retrying that tool.
 """
-from transport import execution_result_usable, review_denial_errors, review_feedback_usable
+from transport import execution_result_usable, review_diagnostic_errors
 
 
 def classify(result, role):
@@ -34,5 +34,5 @@ def classify(result, role):
         action = 'check' if salvage or execution_result_usable(result) else 'retry'
     else:
         action = ('validate' if not incomplete and
-                  (review_feedback_usable(result) or review_denial_errors(result) is not None) else 'retry')
+                  (review_diagnostic_errors(result) is not None) else 'retry')
     return {'action': action, 'cause': cause, 'incomplete': bool(incomplete)}

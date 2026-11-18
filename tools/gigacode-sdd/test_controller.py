@@ -472,7 +472,7 @@ for name in sys.argv[1:]:
         self.assertEqual(set(resumed.state['tasks']), {'be', 'fe'})
         run.assert_called_once()
 
-    def test_missing_search_path_preserves_changes_but_cannot_pass_review(self):
+    def test_missing_search_path_is_diagnostic_not_a_verdict_veto(self):
         report = {'verdict': 'changes', 'findings': ['Add missing restart test'],
                   'coverage': {'REQ-BE': 'restart evidence missing'}}
         result = {'ok': False, 'returncode': 0, 'terminal_result': True,
@@ -486,10 +486,16 @@ for name in sys.argv[1:]:
         with patch.object(self.runner, 'session', return_value=result):
             actual = self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'task-review')
             self.assertEqual({k:actual[k] for k in report}, report)
-            report.update(verdict='pass', findings=[])
+            report.update(verdict='pass', findings=[], coverage={'REQ-BE': 'backend/value.txt implements requirement'})
             result['text'] = json.dumps(report)
-            with self.assertRaisesRegex(Blocked, 'Reviewer failed'):
+            accepted = self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'task-review')
+            self.assertEqual(accepted['verdict'], 'pass')
+            self.assertEqual(accepted['tool_warnings'], ['missing path'])
+            report['coverage'] = {}
+            result['text'] = json.dumps(report)
+            with self.assertRaisesRegex(Blocked, 'omitted requirement evidence'):
                 self.runner.review(self.runner.main, '.', '', ['REQ-BE'], 'task-review')
+            report['coverage'] = {'REQ-BE': 'backend/value.txt'}
             report.update(verdict='changes', findings=['Fix'])
             result['text'] = json.dumps(report)
             for key, value in [('permission_denials', [{}]), ('timed_out', True),

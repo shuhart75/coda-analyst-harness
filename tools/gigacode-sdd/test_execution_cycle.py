@@ -410,6 +410,20 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(reviewed['issue_dispositions'][fingerprint(issue)[:16]]['evidence'][0]['quote'],
                          'Реализовано значние **2**')
 
+    def test_adjudication_uses_issue_ids_not_repeated_wording(self):
+        root = _review_copy(self.runner, self.work, self.task)
+        (root/'backend/value.txt').write_text('2')
+        report = self.review(root, '.', '', ['REQ-BE'], 'be-review', model=MODELS[1])
+        issue = 'Required backend behavior is absent'
+        report.update(verdict='changes', findings=['Missing **поведние** in backend'])
+        report['issue_dispositions'] = {fingerprint(issue)[:16]: {
+            'status': 'confirmed', 'requirements': ['REQ-BE'], 'reason': 'Required behavior is missing.',
+            'evidence': [{'path': 'backend/value.txt', 'quote': '2'},
+                         {'path': '.review-input/packet/requirements.md', 'quote': 'REQ-BE'}]}}
+        reviewed = adjudicated_report(root, self.task, {'findings': [issue]}, report)
+        self.assertEqual(reviewed['findings'], [issue])
+        self.assertEqual(reviewed['reported_findings'], ['Missing **поведние** in backend'])
+
     def test_bad_adjudication_evidence_retries_only_adjudication(self):
         self.primary_only = True
         self.task['resources'] = ['database']

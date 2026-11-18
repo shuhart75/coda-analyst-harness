@@ -240,11 +240,13 @@ def _adjudicated_report(root, task, original, report):
     if not gaps <= affected:
         raise RetryableSessionError('Mandatory coverage gap cannot be refuted or made optional')
     verdict = 'blocked' if external else 'changes' if findings else 'pass'
-    if report['verdict'] != verdict or set(report['findings']) != set(findings):
+    if report['verdict'] != verdict:
         raise RetryableSessionError('Adjudication verdict contradicts issue dispositions: expected verdict='
-                + verdict + '; findings must contain exactly confirmed/external issue texts: '
+                + verdict + '; confirmed/external issues: '
                 + json.dumps(findings, ensure_ascii=False))
-    return {**report, 'verdict': verdict, 'findings': findings, 'optional_findings': optional,
+    # Complete validated dispositions own issue identity; prose repetition does not.
+    return {**report, 'reported_findings': report['findings'],
+            'verdict': verdict, 'findings': findings, 'optional_findings': optional,
             'new_findings': canonical}
 
 
@@ -711,7 +713,7 @@ def execute_task(runner, task, record):
                               'outside_required_scope=true. Never downgrade a required defect to optional. '
                               'Return pass only if all issues are refuted or optional and all requirements covered; '
                               'changes for confirmed defects; blocked only for a confirmed necessary external dependency. '
-                              'For changes/blocked, findings contains the original confirmed/external issue texts. '
+                              'For changes/blocked, summarize confirmed/external issues in findings; issue_dispositions IDs are authoritative. '
                               'Also return coverage_checks for EXACTLY every assigned requirement: '
                               '{"REQ-id":{"status":"covered|gap","reason":"specific evidence or gap",'
                               '"evidence":[{"path":"actual code path","quote":"supporting code reference"},'
@@ -726,7 +728,7 @@ def execute_task(runner, task, record):
                               '"evidence":[{"path":"actual code path","quote":"supporting code reference"},'
                               '{"path":".review-input/packet/actual-file","quote":"supporting requirement reference"}]}]. '
                               'New findings need unique ids/text, assigned requirements, packet and code references. '
-                              'Include their exact text in findings as well as original confirmed/external issues. '
+                              'Summarize new findings alongside confirmed/external issues. '
                               'Never use new_findings to invent optional work or bypass original issue dispositions. '
                               'Read .review-input/packet/ for pinned requirements and use its actual file paths.')
                     detail += _review_repair(review_copy, value, value['stage'])
