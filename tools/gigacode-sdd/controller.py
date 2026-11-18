@@ -16,7 +16,7 @@ import time
 import uuid
 
 from policy import prepare_permissions, nexus_environment, audit_dependency_sources, make_policy_prompt
-from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, review_denial_errors
+from transport import run_session, finish_process, preflight_session_ok, review_feedback_usable, review_diagnostic_errors
 from evidence import bind_quote
 from platform_support import (FileLock, launch_process, process_exists,
                               process_scope_exists, process_scope_pids)
@@ -682,7 +682,12 @@ executed test names/counts, not just a successful command or test compilation.
         prompt = ('INDEPENDENT_REVIEW\n' + detail + '\nInspect actual code/specs and evidence. '
                   'Do not rely on executor claims. Do not write files or execute mutating tests. '
                   'Locate relevant symbols first, then read short targeted excerpts. Do not dump whole '
-                  'generated files, API specifications or report trees. Keep a compact evidence matrix '
+                  'generated files, API specifications or report trees. If a path is missing, use glob/list_directory '
+                  'inside this pinned review workspace to locate the filename, then grep_search for the relevant symbol. '
+                  'Resolve multiple matches by module and content; never guess the first match or search sibling runs. '
+                  'Use discovered paths in evidence. A failed exploratory read is not a requirement defect. '
+                  'If needed evidence remains unavailable, state the gap honestly. After a denied shell command '
+                  'use permitted read/search tools, never wrappers to bypass denial. Keep a compact evidence matrix '
                   'covering every assigned requirement. '
                   'Return ONLY JSON {"verdict":"pass|changes|blocked","findings":["concrete issue"],'
                   '"coverage":{"REQ-id":"specific file/test/evidence or gap"}}. '
@@ -720,8 +725,8 @@ executed test names/counts, not just a successful command or test compilation.
                 return report
             except (ValueError, OSError, TypeError, KeyError) as error:
                 raise Blocked('Invalid plan-review evidence: ' + str(error)) from None
-        denial_errors = review_denial_errors(result)
-        if not result['ok'] and not review_feedback_usable(result) and denial_errors is None:
+        diagnostic_errors = review_diagnostic_errors(result)
+        if not result['ok'] and not review_feedback_usable(result) and diagnostic_errors is None:
             raise RetryableSessionError('Reviewer failed: ' + result['events_path'], result)
         try:
             report = parse_json(result['text'])
@@ -729,6 +734,11 @@ executed test names/counts, not just a successful command or test compilation.
             raise RetryableSessionError('Malformed reviewer JSON: ' + str(exc), result) from exc
         if name == 'plan-review' and report.get('candidate_sha256') != expected:
             raise Blocked('Reviewer candidate SHA256 mismatch')
+        # Accept the equally explicit {id, text} representation without asking a
+        # model to repeat a complete investigation just to reshape its answer.
+        if isinstance(report.get('findings'), list) and any(isinstance(f, dict) for f in report['findings']):
+            report['reported_findings'] = report['findings']
+            report['findings'] = [f.get('text') if isinstance(f, dict) else f for f in report['findings']]
         if (report.get('verdict') not in ('pass', 'changes', 'blocked')
                 or not isinstance(report.get('findings'), list)
                 or not all(isinstance(f,str) and f.strip() for f in report['findings'])):
@@ -741,12 +751,12 @@ executed test names/counts, not just a successful command or test compilation.
         if report['verdict'] != 'pass' and not report['findings']:
             raise RetryableSessionError('Reviewer rejected without actionable findings', result)
         if not result['ok']:
-            if report['verdict'] != 'changes' and (denial_errors is None
-                    or not set(result['errors']) <= denial_errors):
+            if report['verdict'] != 'changes' and diagnostic_errors is None:
                 raise RetryableSessionError('Reviewer failed: verdict=' + report['verdict']
                     + ' cannot be accepted with unresolved tool errors: ' + json.dumps(result['errors'])
                     + '; inspect ' + result['events_path'], result, cause='tool-errors')
-            self.progress('Замечания проверяющего сохранены с диагностикой ошибок чтения/поиска')
+            self.progress('Ответ ревью проверен; ошибки отдельных инструментов сохранены как диагностика')
+            report['tool_warnings'] = list(result['errors'])
             save(self.logdir(name + '-feedback').with_suffix('.json'),
                  {'review': report, 'errors': result['errors'], 'events_path': result['events_path']})
         if report.get('optional_findings'):
