@@ -476,6 +476,59 @@ class ExecutionPortfolioTests(unittest.TestCase):
             'prompt_sha256':hashlib.sha256(full_prompt.encode()).hexdigest(), 'decision_sha256':None})
         return result
 
+    def test_review_transport_wait_preserves_prompt_and_completed_work(self):
+        self.primary_only = True
+        self.runner.cfg['recovery_retry_seconds'] = 0
+        prompts = []
+        def review(*args, **kwargs):
+            prompts.append(args[2])
+            if len(prompts) == 1:
+                raise RetryableSessionError('Network unavailable', cause='transport')
+            return self.review(*args, **kwargs)
+        accepted = self.run_task(review=review)
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual(prompts[0], prompts[1])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.check_count, 1)
+        self.assertEqual(accepted['retry_steps']['review:transport']['failures'], 1)
+        self.assertNotIn('review:protocol', accepted['retry_steps'])
+        self.assertFalse(accepted['history'][-1]['decision']['instruction_change'])
+
+    def test_transport_draft_is_reused_without_protocol_amendment(self):
+        self.primary_only = True
+        self.runner.cfg['recovery_retry_seconds'] = 0
+        calls = []
+        def review(*args, **kwargs):
+            calls.append(args[2])
+            if len(calls) == 1:
+                raise RetryableSessionError('Interrupted transport', {'text': 'Observed implementation evidence'}, cause='timeout')
+            draft = read(Path(args[0])/'.review-input/previous-review-draft.json')
+            self.assertEqual(draft['text'], 'Observed implementation evidence')
+            self.assertNotIn('Controller technical correction:', args[2])
+            self.assertIn('untrusted diagnostic data', args[2])
+            return self.review(*args, **kwargs)
+        self.assertEqual(self.run_task(review=review)['status'], 'accepted')
+        self.assertEqual(len(self.calls), 1)
+
+    def test_interrupted_retry_wait_resumes_without_spending_failure(self):
+        self.primary_only = True
+        self.runner.cfg['recovery_retry_seconds'] = 0
+        def broken(*args, **kwargs):
+            raise RetryableSessionError('Temporary transport', cause='transport')
+        def cancel(*args):
+            self.runner.stop.set()
+            return False
+        with patch('execution_cycle.wait_until', side_effect=cancel):
+            with self.assertRaises(Interrupted): self.run_task(review=broken)
+        self.runner.stop.clear()
+        state = next(v for v in self.records() if v['model'] == MODELS[0])
+        self.assertEqual(state['retry_steps']['review:transport']['failures'], 1)
+        self.assertIn('recovery_wait', state)
+        accepted = self.run_task()
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual(accepted['retry_steps']['review:transport']['failures'], 1)
+        self.assertEqual(len(self.calls), 1)
+
     def test_crash_after_audited_execution_resumes_without_duplicate_edits(self):
         self.primary_only = True
         self.task['resources'] = ['database']

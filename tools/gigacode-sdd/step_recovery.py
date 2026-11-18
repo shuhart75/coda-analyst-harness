@@ -21,7 +21,7 @@ def step_key(stage, kind):
         return stage + ':protocol'
     if kind in ('checks', 'review'):
         return 'implementation:repair'
-    return 'execute:' + kind
+    return stage + ':' + kind if kind == 'transport' else 'execute:' + kind
 
 
 def record_failure(state, stage, kind, count):
