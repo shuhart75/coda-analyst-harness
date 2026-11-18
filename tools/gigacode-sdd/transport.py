@@ -20,7 +20,7 @@ def _text(value):
     return ""
 
 
-def parse_events(path: Path) -> dict:
+def parse_events(path: Path, *, _legacy_denial_text=False) -> dict:
     """Retain complete JSONL events before interruption; fail closed on errors.
 
     Diagnostics contain tool identifiers rather than potentially secret arguments.
@@ -82,7 +82,7 @@ def parse_events(path: Path) -> dict:
                                          "is_error": item.get("is_error"),
                                          "has_content": bool(item.get("content"))})
                     body = _text(item.get("content", "")).lower()
-                    denied = any(pattern in body for pattern in (
+                    denied = (item.get("is_error") is True or _legacy_denial_text) and any(pattern in body for pattern in (
                         "non-interactive mode cannot prompt", "permission denied",
                         "requires approval", "requires confirmation", "not allowed by",
                         "shell.python3.wrapper", "invalid_shell_projection",
@@ -143,6 +143,35 @@ def parse_events(path: Path) -> dict:
             "tool_calls": tool_calls, "tool_results": tool_results,
             "syntax_errors": syntax_errors, "missing_path_errors": missing_path_errors,
             "read_tool_errors": read_tool_errors}
+
+
+def revalidate_saved_result(result, events):
+    """Reparse audited evidence; callers must verify stream/input hashes first.
+
+    Only the exact old text-heuristic classification can lose a denial. Keep
+    process, timeout, cancellation and all unrelated saved errors unchanged.
+    Never modify the historical receipt or its original stream.
+    """
+    parsed = parse_events(events)
+    if parsed['text'] != result.get('text'):
+        raise ValueError('Saved result differs from its original stream')
+    old_denials = result.get('permission_denials', [])
+    corrected = old_denials != parsed['permission_denials']
+    if corrected and old_denials != parse_events(events, _legacy_denial_text=True)['permission_denials']:
+        raise ValueError('Saved permission denials differ from their original stream')
+    errors = list(result.get('errors', []))
+    if corrected and not parsed['permission_denials']:
+        errors = [error for error in errors if error !=
+                  'CLI reported denied permissions; interactive approval is unavailable']
+    updated = dict(result)
+    for key in ('permission_denials', 'tool_calls', 'tool_results', 'terminal_result',
+                'syntax_errors', 'missing_path_errors', 'read_tool_errors'):
+        updated[key] = parsed[key]
+    updated['errors'] = list(dict.fromkeys(errors + parsed['errors']))
+    updated['ok'] = (not updated['errors'] and updated.get('returncode') == 0
+                     and not updated.get('timed_out') and not updated.get('cancelled')
+                     and not (updated.get('cleanup') or {}).get('preserved'))
+    return updated
 
 
 def execution_result_usable(result):

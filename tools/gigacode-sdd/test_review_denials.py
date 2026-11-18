@@ -75,6 +75,39 @@ class ReviewDenialTests(unittest.TestCase):
         self.assertEqual(accepted['review']['events_path'], str(self.saved_events))
         self.assertTrue(list((self.runner.root/'execution-cycles').glob('*/recovered-fatal-*.json')))
 
+    def test_successful_historical_error_read_recovers_old_receipt(self):
+        self.task['resources'] = ['database']
+        def legacy_review(*args, **kwargs):
+            def completed(*a, **kw):
+                result = self.review_session(*a, **kw)
+                events = Path(result['events_path'])
+                rows = [json.loads(line) for line in events.read_text().splitlines()]
+                rows[-1].pop('permission_denials', None)
+                for row in rows:
+                    for item in row.get('message', {}).get('content', []):
+                        if item.get('type') == 'tool_result':
+                            item.update(is_error=False, content='Historical error: permission denied')
+                events.write_text('\n'.join(map(json.dumps, rows)) + '\n')
+                result = parse_events(events, _legacy_denial_text=True)
+                result['returncode'] = 0
+                receipt = read(events.parent/'session-receipt.json')
+                receipt.update(result=result, events_sha256=digest(events))
+                save(events.parent/'session-receipt.json', receipt)
+                raise Blocked('Permission preflight/runtime denial; inspect ' + str(events))
+            with patch.object(self.runner, 'session', side_effect=completed):
+                return Runner.review(self.runner, *args, **kwargs)
+        with self.assertRaisesRegex(Blocked, 'Permission preflight'):
+            self.run_task(review=legacy_review)
+        original = self.saved_events.read_bytes()
+        receipt_path = self.saved_events.parent/'session-receipt.json'
+        original_receipt = receipt_path.read_bytes()
+        def forbidden(*a, **kw):
+            raise AssertionError('completed work repeated')
+        accepted = self.run_task(session=forbidden, checks=forbidden, review=forbidden)
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual(self.saved_events.read_bytes(), original)
+        self.assertEqual(receipt_path.read_bytes(), original_receipt)
+
     def test_changed_review_workspace_remains_blocked(self):
         self.task['resources'] = ['database']
         with self.assertRaises(Blocked): self.run_task(review=self.old_review)

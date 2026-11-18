@@ -310,6 +310,11 @@ def _recover_execution_session(runner, task, value, prompt):
         # transport result cannot be promoted to a completed execution step.
         if result.get('cancelled'):
             continue
+        from transport import revalidate_saved_result
+        try:
+            result = revalidate_saved_result(result, events)
+        except ValueError as exc:
+            raise Blocked(str(exc)) from exc
         matches.append((path, result))
     if len(matches) > 1:
         raise Blocked('Ambiguous audited receipts for one execution invocation')

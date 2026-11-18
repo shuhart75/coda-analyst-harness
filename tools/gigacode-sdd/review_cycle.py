@@ -159,10 +159,12 @@ def _receipt(runner, record, expected, requirements, validator, model):
             or digest(events) != record['events_sha256']
             or snapshot(root, normalize_settings=True) != record['workspace_snapshot']):
         raise Blocked('Cached reviewer evidence changed; inspect ' + str(events))
-    from transport import parse_events
-    if parse_events(events).get('text') != record['result'].get('text'):
-        raise Blocked('Cached reviewer result differs from its recorded terminal event')
-    return validator(root, record['result'], expected, requirements, model)
+    from transport import revalidate_saved_result
+    try:
+        result = revalidate_saved_result(record['result'], events)
+    except ValueError as exc:
+        raise Blocked(str(exc)) from exc
+    return validator(root, result, expected, requirements, model)
 
 
 def _recover_receipt(runner, record):
