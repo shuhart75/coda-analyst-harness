@@ -460,6 +460,13 @@ class ExecutionPortfolioTests(unittest.TestCase):
         folder = self.runner.logdir(name)
         original.rename(folder)
         result['events_path'] = str(folder/'stdout.jsonl')
+        # An audited receipt includes the real terminal event, not just a mock flag.
+        events = folder/'stdout.jsonl'
+        events.write_text(events.read_text() + json.dumps({
+            'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'}) + '\n')
+        from transport import parse_events
+        result.update(parse_events(events))
+        result['returncode'] = 0
         full_prompt = 'Fixture controller context\n' + prompt
         (folder/'prompt.txt').write_text(full_prompt, encoding='utf-8', newline='\n')
         save(folder/'session-receipt.json', {

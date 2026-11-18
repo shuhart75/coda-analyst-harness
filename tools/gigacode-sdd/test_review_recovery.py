@@ -40,6 +40,30 @@ class ReviewRecoveryTests(unittest.TestCase):
         for p, data in streams.items():
             self.assertEqual(Path(json.loads(p.read_text())['result']['events_path']).read_bytes(), data)
 
+    def test_plan_receipt_reparses_legacy_payload_denial_without_model_call(self):
+        from controller import digest
+        from transport import parse_events
+        with patch.object(self.runner, 'session', side_effect=self.fake):
+            self.assertEqual(self.pair()['verdict'], 'pass')
+        paths = list((self.runner.root/'review-cycles').glob('*/*/attempt-*.json'))
+        record = json.loads(paths[0].read_text())
+        events = Path(record['result']['events_path'])
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        rows[2]['message']['content'][0]['content'] = 'Historical permission denied'
+        events.write_text('\n'.join(map(json.dumps, rows)))
+        record['events_sha256'] = digest(events)
+        record['result'] = parse_events(events, _legacy_denial_text=True)
+        record['result']['returncode'] = 0
+        observed = []
+        def validator(root, result, *args):
+            observed.append(result)
+            self.assertTrue(result['ok'])
+        review_cycle._receipt(self.runner, record, None, [], validator, record['model'])
+        self.assertEqual(len(observed), 1)
+        events.write_text(events.read_text() + ' ')
+        with self.assertRaisesRegex(Blocked, 'evidence changed'):
+            review_cycle._receipt(self.runner, record, None, [], validator, record['model'])
+
     def test_new_runtime_budget_preserves_history_and_successful_peer(self):
         victim = review_cycle.MODELS[1]
         def broken(root, cwd, prompt, role, name, model=None):
