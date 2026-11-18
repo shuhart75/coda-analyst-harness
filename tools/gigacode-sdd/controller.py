@@ -317,13 +317,37 @@ class Runner:
 
     def check_preserved_processes(self, roots=None):
         """Do not start another writer while a preserved process group is alive."""
+        inventory = inspect_services()
+        if not inventory['complete']:
+            raise Blocked('Cannot inspect managed processes before resume; run bootstrap --diagnose')
+        processes = inventory.get('processes', [])
+        observed = processes + inventory.get('agents', []) + inventory.get('services', [])
+        by_identity = {(item.get('pid'), item.get('started'), item.get('pgid'))
+                       for item in observed}
         for path in (self.root / 'preserved-processes').glob('*.json'):
             record = read(path)
             group = record['process_group']
             if not isinstance(group, int) or group <= 1:
                 raise Blocked('Invalid preserved process record: ' + str(path))
-            if not process_scope_exists(group) and not any(
-                    process_exists(pid) for pid in record.get('member_pids', [])):
+            identities = record.get('member_identities')
+            if identities is not None:
+                if not isinstance(identities, list) or any(
+                        not isinstance(item, dict) or not isinstance(item.get('pid'), int)
+                        or not isinstance(item.get('started'), str)
+                        or not isinstance(item.get('pgid'), int) for item in identities):
+                    raise Blocked('Invalid preserved process identity: ' + str(path))
+            if identities:
+                alive = any((item['pid'], item['started'], item['pgid']) in by_identity
+                            for item in identities)
+            else:
+                # Legacy records did not bind a PGID to process start time. A
+                # recycled PGID is not evidence that the old session survived.
+                members = set(record.get('member_pids', []))
+                alive = any(item.get('pid') in members for item in processes)
+                if not members:
+                    alive = any(item.get('pgid') == group for item in
+                                inventory.get('agents', []) + inventory.get('services', []))
+            if not alive:
                 continue
             raise Blocked('A preserved agent/service group is still present; inspect ' + str(path))
         for path in (self.root / 'preserved-services').glob('*.json'):
@@ -336,9 +360,6 @@ class Runner:
         # A killed controller cannot always write a preservation record. Inspect
         # its managed directories before resuming so a surviving writer or a
         # listener that started late is not mistaken for a clean restart.
-        inventory = inspect_services()
-        if not inventory['complete']:
-            raise Blocked('Cannot inspect managed processes before resume; run bootstrap --diagnose')
         for root in roots if roots is not None else [self.root]:
             self.check_existing_workspace_processes(inventory, root, 'resume')
 
@@ -378,11 +399,23 @@ class Runner:
         # Most completed sessions have no remaining group. Avoid an expensive
         # inventory in that case; detached listeners are checked separately.
         members = None
+        identities = []
         try:
             if not process_scope_exists(group):
                 return None
             members = process_scope_pids(group)
             inventory = inspect_services()
+            observed = (inventory.get('processes', []) + inventory.get('agents', [])
+                        + inventory.get('services', []))
+            identities = []
+            seen = set()
+            for item in observed:
+                identity = (item.get('pid'), item.get('started'), item.get('pgid'))
+                if (item.get('pgid') == group and isinstance(item.get('pid'), int)
+                        and isinstance(item.get('started'), str) and identity not in seen):
+                    seen.add(identity)
+                    identities.append({'pid': identity[0], 'started': identity[1],
+                                       'pgid': identity[2]})
             services = [s for s in services_in_group(inventory, group, member_pids=members)
                         if not (s['pid'] == group and s.get('kind') == 'gigacode')]
             diagnostic = None if inventory['complete'] and not services else {
@@ -393,7 +426,8 @@ class Runner:
         if diagnostic:
             self.stop.set()
             path = self.root / 'preserved-processes' / (str(group) + '.json')
-            save(path, {'process_group': group, 'member_pids': members or [], **diagnostic})
+            save(path, {'process_group': group, 'member_pids': members or [],
+                        'member_identities': identities, **diagnostic})
             return {**diagnostic, 'report': str(path)}
         return None
 
