@@ -208,8 +208,16 @@ class ExecutionPortfolioTests(unittest.TestCase):
         def review(root, cwd, detail, *args, **kwargs):
             details.append(detail)
             raise RetryableSessionError('malformed review')
-        with self.assertRaises(Blocked):
+        exhausted_writes = []
+        def journal(path, value):
+            if (Path(path).name == 'candidate.json' and value.get('history')
+                    and value['history'][-1].get('exhausted')):
+                exhausted_writes.append(value['status'])
+            save(path, value)
+        with patch('controller.save', side_effect=journal), self.assertRaises(Blocked):
             self.run_task(review=review)
+        self.assertTrue(exhausted_writes)
+        self.assertEqual(set(exhausted_writes), {'stalled'})
         self.assertEqual(len(details), 6)
         self.assertIn('Reconstruct the response', details[-1])
         with self.assertRaises(Blocked):

@@ -490,14 +490,12 @@ def execute_task(runner, task, record):
             correction['sha256'] = fingerprint(correction)
             value['history'].append(correction)
             value['feedback'] = detail
-            value['status'] = 'pending'
+            value['status'] = 'stalled' if retry['exhausted'] else 'pending'
             persist()
             runner.progress(task['id'] + ' / ' + value['model'] + ': причина ' + kind
                             + '; шаг ' + retry['step'] + '; неудачных попыток ' + str(retry['step_failures'])
                             + '/6; стратегия ' + str(strategy+1) + '/' + str(len(STRATEGIES)))
             if retry['exhausted']:
-                value['status'] = 'stalled'
-                persist()
                 raise CandidateStalled(value['model'] + ': bounded step retry budget exhausted: ' + retry['step'])
 
         if value.get('status') in ('stalled', 'external-blocker', 'quarantined'):
