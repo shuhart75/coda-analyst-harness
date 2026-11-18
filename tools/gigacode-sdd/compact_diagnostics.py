@@ -318,6 +318,72 @@ def newest(paths):
     return sorted(paths, key=lambda p: (p.stat().st_mtime_ns, p.as_posix()), reverse=True)
 
 
+def current_candidates(out, tasks):
+    """Reserve bounded current-step evidence before optional historical payloads."""
+    base = out.root/'execution-cycles'
+    if not base.is_dir() or base.is_symlink():
+        return []
+    owners = {value.get('workspace'): key for key, value in tasks.items()
+              if isinstance(value, dict) and value.get('workspace')
+              and value.get('status') not in ('done', 'accepted', 'skipped')}
+    paths = []
+    for folder, dirs, names in os.walk(base, followlinks=False):
+        dirs[:] = [d for d in dirs if not (Path(folder)/d).is_symlink()]
+        if 'candidate.json' in names and out.safe(Path(folder)/'candidate.json'):
+            paths.append(Path(folder)/'candidate.json')
+    selected, seen, sessions = [], set(), []
+    for path in newest(paths):
+        try:
+            value = json.loads(out.read(path) or '{}')
+        except ValueError:
+            out.skip(str(path), 'candidate is not valid JSON')
+            continue
+        if not isinstance(value, dict):
+            continue
+        task = owners.get(value.get('origin_workspace')) or owners.get(value.get('workspace'))
+        if owners and task is None:
+            continue
+        if value.get('status') == 'accepted':
+            continue
+        identity = (task or path.parent.parent.name, value.get('model'))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if len(selected) >= 24:
+            out.skip(str(path), 'current candidate count limit')
+            continue
+        selected.append(path)
+        def bounded(item, limit=2048):
+            # Inline, explicitly clipped diagnostics: no payload expansion here.
+            text = encoded(item)
+            return item if len(text.encode('utf-8')) <= limit else {'truncated': True, 'excerpt': clip(text, limit)}
+        history = value.get('history', [])
+        history = history if isinstance(history, list) else []
+        history = [h for h in history if isinstance(h, dict)]
+        recent = [{key: bounded(h[key], 2048 if key == 'detail' else 256) for key in
+                   ('kind', 'detail', 'stage', 'step', 'step_failures', 'total_failures', 'result', 'decision') if key in h}
+                  for h in history[-6:]]
+        result = value.get('session_result') or {}
+        result = result if isinstance(result, dict) else {}
+        projection = {'projection': True, 'source': 'run/' + path.relative_to(out.root).as_posix(),
+            'task': task, **{key: bounded(value[key], 4096 if key in ('feedback', 'retry_steps') else 512) for key in
+                ('model', 'status', 'stage', 'attempts', 'failures', 'runtime_revision', 'retry_steps',
+                 'feedback', 'resource_wait', 'recovery_wait') if key in value},
+            'recent_failures': recent, 'history_omitted': max(0, len(history)-6),
+            'review_draft': bounded(value.get('review_draft'), 12000),
+            'session': {key: bounded(result[key]) for key in
+                ('returncode', 'timed_out', 'cancelled', 'errors', 'events_path') if key in result},
+            'note': 'Support projection only; original checkpoints remain unchanged.'}
+        name = 'compact/current-execution/' + path.parent.parent.name + '/' + path.parent.name + '.json'
+        out.add(name, encoded(projection))
+        before = len(out.error_sessions)
+        for h in history[-6:]:
+            if isinstance(h.get('detail'), str):
+                out.failure_sessions({'error': h['detail']})
+        sessions.extend(out.error_sessions[before:])
+    return list(dict.fromkeys(sessions))
+
+
 def collect_compact(config, destination=None, error=None):
     config = Path(config).absolute()
     root = config.parent
@@ -337,6 +403,7 @@ def collect_compact(config, destination=None, error=None):
         out.add('compact/task-status.json', encoded({key: {
             'status': value.get('status'), 'error': value.get('error')}
             for key, value in tasks.items() if isinstance(value, dict)}))
+    current_sessions = current_candidates(out, tasks if isinstance(tasks, dict) else {})
     logs = root/'logs'
     recent = []
     folders = []
@@ -344,7 +411,12 @@ def collect_compact(config, destination=None, error=None):
         folders = [p for p in logs.iterdir() if p.is_dir() and not p.is_symlink()]
         recent = newest([p for p in folders if (p/'stdout.jsonl').is_file() or (p/'output.log').is_file()])
     # Current failure evidence gets space before historical reviews and plan bodies.
-    priority_sessions = list(dict.fromkeys(out.error_sessions + recent[:2]))[:MAX_SESSIONS]
+    active_sessions = []
+    if isinstance(tasks, dict):
+        for task, value in tasks.items():
+            if isinstance(value, dict) and value.get('status') not in ('done', 'accepted', 'skipped', 'pending'):
+                active_sessions.extend([p for p in recent if p.name.startswith(task + '-')][:2])
+    priority_sessions = list(dict.fromkeys(current_sessions + active_sessions + out.error_sessions + recent[:2]))[:MAX_SESSIONS]
     for folder in priority_sessions:
         out.session(folder, summary_only=True)
     if (root/'state.json').exists():
@@ -373,7 +445,7 @@ def collect_compact(config, destination=None, error=None):
             if text is not None:
                 out.add('run/' + name, text)
     inventory = {}
-    for dirname in ('review-cycles', 'planning-cycles', 'execution-cycles'):
+    for dirname in ('execution-cycles', 'review-cycles', 'planning-cycles'):
         base = root/dirname
         if not base.is_dir() or base.is_symlink():
             continue

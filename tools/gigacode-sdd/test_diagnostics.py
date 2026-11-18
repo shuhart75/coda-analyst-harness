@@ -57,6 +57,47 @@ class BundleTests(unittest.TestCase):
             sections = read_sections(diagnostics.collect(config))
             self.assertEqual(json.loads(sections['compact/logs/old-review/recovery-binding.json']),data)
 
+    def test_current_candidate_errors_survive_huge_plan_history(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)/'runs/id'; root.mkdir(parents=True)
+            config = root/'config.json'; config.write_text('{}')
+            tasks = {name: {'status': 'running', 'workspace': str(root/'workers'/name)}
+                     for name in ('backend', 'frontend')}
+            (root/'state.json').write_text(json.dumps({'tasks': tasks, 'old_text': 'old ' * 100000}))
+            for number, name in enumerate(tasks):
+                for model in ('first', 'second'):
+                    path = root/'execution-cycles'/str(number)/model/'candidate.json'
+                    path.parent.mkdir(parents=True)
+                    value = {'origin_workspace': tasks[name]['workspace'], 'model': model,
+                             'stage': 'adjudicate', 'status': 'interrupted',
+                             'history': [{'kind': 'review-protocol', 'detail': 'old'}] * 90 +
+                                        [{'kind': 'review-protocol', 'detail': 'CURRENT-' + name + '-' + model}],
+                             'review_draft': {'stage': 'adjudicate', 'text': 'partial current answer'},
+                             'session_result': {'text': 'large body ' * 20000},
+                             'workspace_snapshot': {'files': 'irrelevant ' * 20000}}
+                    path.write_text(json.dumps(value))
+                    log = root/'logs'/(name + '-adjudicate-' + model)
+                    log.mkdir(parents=True)
+                    (log/'stdout.jsonl').write_text(json.dumps({'type': 'result', 'subtype': 'success', 'result': 'answer'}))
+            for i in range(10):
+                log = root/'logs'/('unrelated-' + str(i)); log.mkdir(parents=True)
+                (log/'stdout.jsonl').write_text('{"type":"result","result":"irrelevant"}')
+            for i in range(24):
+                path = root/'review-cycles/old/model'/('attempt-' + str(i) + '.json')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({'result': {'text': str(i) + 'history ' * 25000}}))
+            output = diagnostics.collect(config)
+            sections = read_sections(output)
+            current = [json.loads(text) for name, text in sections.items() if name.startswith('compact/current-execution/')]
+            self.assertEqual(len(current), 4)
+            for item in current:
+                self.assertEqual(item['recent_failures'][-1]['detail'], 'CURRENT-' + item['task'] + '-' + item['model'])
+                self.assertEqual(item['history_omitted'], 85)
+                self.assertEqual(item['review_draft']['text'], 'partial current answer')
+                self.assertNotIn('workspace_snapshot', item)
+                self.assertIn('compact/logs/' + item['task'] + '-adjudicate-' + item['model'] + '/failure-summary.json', sections)
+            self.assertLessEqual(output.stat().st_size, compact_diagnostics.MAX_REPORT_BYTES)
+
     def test_current_denials_survive_large_history_and_newer_unrelated_logs(self):
         import os
         with tempfile.TemporaryDirectory() as folder:
