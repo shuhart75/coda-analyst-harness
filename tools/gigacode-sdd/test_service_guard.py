@@ -89,6 +89,53 @@ class ControllerServiceGuardTests(unittest.TestCase):
         with patch('controller.process_scope_exists', return_value=False):
             self.runner.check_preserved_processes()
 
+    def test_legacy_empty_group_record_ignores_recycled_unmanaged_pgid(self):
+        path = self.runner.root / 'preserved-processes/78930.json'
+        controller.save(path, {'process_group': 78930, 'member_pids': [],
+            'services': [], 'limitations': ['agent-cwd-unavailable'], 'preserved': True})
+        unrelated = {'pid': 80001, 'ppid': 1, 'pgid': 78930, 'uid': 501,
+                     'started': 'Tue Nov 18 16:00:00 2026', 'kind': 'other'}
+        inventory = self.inventory()
+        inventory['processes'] = [unrelated]
+        with patch('controller.inspect_services', return_value=inventory), \
+                patch('controller.process_scope_exists', return_value=True) as old_probe:
+            self.runner.check_preserved_processes()
+        old_probe.assert_not_called()
+
+    def test_legacy_empty_group_record_still_blocks_observed_agent(self):
+        path = self.runner.root / 'preserved-processes/78930.json'
+        controller.save(path, {'process_group': 78930, 'member_pids': [],
+            'services': [], 'limitations': ['agent-cwd-unavailable'], 'preserved': True})
+        inventory = self.inventory()
+        inventory['agents'] = [{'pid': 78930, 'pgid': 78930, 'kind': 'gigacode',
+                                'cwd': None, 'started': 'Tue Nov 18 16:00:00 2026'}]
+        inventory['processes'] = list(inventory['agents'])
+        with patch('controller.inspect_services', return_value=inventory):
+            with self.assertRaisesRegex(controller.Blocked, 'still present'):
+                self.runner.check_preserved_processes()
+
+    def test_bound_identity_does_not_confuse_pid_or_pgid_reuse(self):
+        path = self.runner.root / 'preserved-processes/78930.json'
+        controller.save(path, {'process_group': 78930, 'member_pids': [],
+            'member_identities': [{'pid': 78930, 'pgid': 78930,
+                                   'started': 'Tue Nov 18 15:00:00 2026'}]})
+        inventory = self.inventory()
+        inventory['processes'] = [{'pid': 78930, 'ppid': 1, 'pgid': 78930, 'uid': 501,
+                                   'started': 'Tue Nov 18 16:00:00 2026', 'kind': 'gigacode'}]
+        with patch('controller.inspect_services', return_value=inventory):
+            self.runner.check_preserved_processes()
+
+    def test_bound_identity_blocks_same_live_process(self):
+        identity = {'pid': 78930, 'pgid': 78930, 'started': 'Tue Nov 18 15:00:00 2026'}
+        path = self.runner.root / 'preserved-processes/78930.json'
+        controller.save(path, {'process_group': 78930, 'member_pids': [78930],
+                               'member_identities': [identity]})
+        inventory = self.inventory()
+        inventory['processes'] = [{**identity, 'ppid': 1, 'uid': 501, 'kind': 'gigacode'}]
+        with patch('controller.inspect_services', return_value=inventory):
+            with self.assertRaisesRegex(controller.Blocked, 'still present'):
+                self.runner.check_preserved_processes()
+
     def test_incomplete_inventory_never_authorizes_group_termination(self):
         with patch('controller.process_scope_exists', return_value=True), \
                 patch('controller.inspect_services', return_value=self.inventory(complete=False)):
