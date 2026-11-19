@@ -122,7 +122,7 @@ python tools/gigacode-sdd/sdd-runner.py start --config "<каталог сост
 ```text
 В работе. Запросов на вмешательство нет.
 Принято: 4 из 9 задач.
-Сейчас: backend-modular-its · разработка · DeepSeek-V4.1-Flash-1017 · 00:18:19
+Сейчас: 00:18:19 · backend-modular-its · разработка · DeepSeek-V4.1-Flash-1017
 Осталось: 5 задач и итоговая проверка. Оценки времени пока нет.
 ```
 

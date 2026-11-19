@@ -172,9 +172,10 @@ def dashboard(value, include_time=True, include_command=True):
     elif operations:
         current = []
         for op in operations[:3]:
-            line = 'Сейчас: ' + op['title']
+            line = 'Сейчас: '
             if include_time:
-                line += ' · ' + elapsed(op['elapsed_seconds'])
+                line += elapsed(op['elapsed_seconds']) + ' · '
+            line += op['title']
             if op.get('timeout_seconds') and op['elapsed_seconds'] >= .8*op['timeout_seconds']:
                 line += ' (лимит ' + elapsed(op['timeout_seconds']) + ')'
             current.append(line)

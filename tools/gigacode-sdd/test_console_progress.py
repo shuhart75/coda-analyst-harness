@@ -48,13 +48,13 @@ class ConsoleTests(unittest.TestCase):
         stream = Terminal()
         with patch.dict(os.environ, {'TERM': 'xterm-256color'}):
             p = ConsoleProgress(self.root/'logs/tty.log', stream=stream,
-                                clock=lambda: self.now, dimensions=lambda: (120, 24))
+                                clock=lambda: self.now, dimensions=lambda: (80, 24))
             p.summary(self.value)
-            token = p.start('raw details', title='backend · разработка', timeout=3600)
+            token = p.start('raw details', title='backend-modular-its · разработка · DeepSeek-V4.1-Flash-1017', timeout=3600)
             try:
                 self.now = 18*60+19
                 p.tick()
-                self.assertIn('00:18:19', stream.getvalue())
+                self.assertIn('Сейчас: 00:18:19 · backend-modular-its', stream.getvalue())
                 self.assertIn('\x1b[1A', stream.getvalue())
                 command = 'python /' + 'long-path/'*30 + 'bootstrap.py --answers-config /run/config.json'
                 p.notice(command)
