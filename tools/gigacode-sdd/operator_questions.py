@@ -169,10 +169,8 @@ def interact(config, ui):
         ui.notify('Вопросов без ответа нет. Работающий контроллер не запускается повторно.')
         return
     for q in pending:
-        ui.notify('\nЗадача: ' + q['task'] + '\n' + q['question'])
-        for variant in q['requests']:
-            if variant.get('details'):
-                ui.notify(json.dumps(variant['details'], ensure_ascii=False, indent=2))
+        from operator_display import render_question
+        ui.notify(render_question(root, q))
         if q['options']:
             choices = [*q['options'], 'Свой ответ', 'Ответить позже']
             selected = ui.choose('Ваш ответ:', choices)

@@ -988,8 +988,12 @@ executed test names/counts, not just a successful command or test compilation.
         plan = validate_plan(read(plan_path), self.main, self.cfg['requirements'])
         tasks = plan['tasks']
         self.services.restore(self.stop)
+        import scope_repair
         for task in tasks:
             record = self.state['tasks'][task['id']]
+            if record['status'] == 'waiting-user' and scope_repair.needs_refresh(
+                    self.root, record.get('question_ids', [])):
+                record['status'] = 'pending'
             if record['status'] in ('running', 'accepted') or (retry_blocked and record['status'] == 'blocked'):
                 # Integration journal takes precedence over the last worker checkpoint.
                 if 'integration_base' not in record:

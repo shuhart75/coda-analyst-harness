@@ -1,4 +1,4 @@
-"""Exact-file repair grants for accepted predecessors, without rewriting plans."""
+"""Exact-file repair grants for predecessor or unassigned files, without rewriting plans."""
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
@@ -31,7 +31,7 @@ def validate_owners(runner, task, path):
     from controller import read
     plan = read(runner.root/'plan.json')
     prior = ancestors(plan, task['id'])
-    owners = []
+    owners, downstream = [], []
     for other in plan['tasks']:
         if other['id'] == task['id'] or not _allowed(path, other['writes']):
             continue
@@ -39,7 +39,9 @@ def validate_owners(runner, task, path):
             owners.append(other['id'])
         elif task['id'] not in ancestors(plan, other['id']):
             raise ValueError('Repair overlaps an unfinished or independent owner: ' + other['id'])
-    if not owners:
+        else:
+            downstream.append(other['id'])
+    if not owners and downstream:
         raise ValueError('No accepted predecessor owns the requested file: ' + path)
     return sorted(owners)
 
@@ -86,9 +88,8 @@ def prepare(runner, task, value, request):
     files = sorted({item['path']: item for item in files}.values(), key=lambda item: item['path'])
     action = {'kind': 'scope-repair-v1', 'task': task['id'], 'base': value['base'], 'files': files}
     return oq.request(runner.root, task['id'], 'scope-repair-' + oq.fingerprint(action)[:24],
-        'Разрешить текущей задаче исправить перечисленные файлы ранее принятой задачи?\n' +
-        '\n'.join(item['path'] + ' (владелец: ' + ', '.join(item['owners']) + ')' for item in files),
-        options=[APPROVE, DENY], details={'reason': request.get('reason') or request.get('question'),
+        'Разрешить исправление перечисленных файлов за пределами текущей задачи?',
+        options=[APPROVE, DENY], details={'reason': request.get('diagnosis') or request.get('reason') or request.get('question'),
             'reported_context': request.get('details'),
             'verification': 'После ремонта обязательны все проверки задачи, независимое ревью и итоговая проверка.'},
         model=value['model'], action=action)
@@ -101,10 +102,10 @@ def effective_task(runner, task, record, *, integration=False):
     known = {q['id']: q for q in oq.questions(runner.root)}
     ids = record.get('scope_grants', []) if integration else [key for key, q in known.items()
         if q['task'] == task['id'] and q.get('action', {}).get('kind') == 'scope-repair-v1'
-        and q.get('answer') and q['answer']['text'] == APPROVE]
+        and not q.get('resolved') and q.get('answer') and q['answer']['text'] == APPROVE]
     for key in ids:
         q = known.get(key)
-        if not q or not q.get('answer') or q['answer']['text'] != APPROVE:
+        if not q or q.get('resolved') or not q.get('answer') or q['answer']['text'] != APPROVE:
             raise Blocked('Repair approval is missing or stale')
         action = q.get('action', {})
         if (q['answer'].get('action_sha256') != oq.fingerprint(action)
@@ -125,9 +126,63 @@ def effective_task(runner, task, record, *, integration=False):
         grants.append({'question_id': key, 'files': action['files']})
     if grants:
         effective['approved_repairs'] = grants
-        effective['prompt'] += ('\nController-approved predecessor repair: change only the explicitly added files '
+        effective['prompt'] += ('\nController-approved exact-file repair: change only the explicitly added files '
             'as needed for the reported defect. Do not weaken assertions, requirements or check commands. '
             'Re-run all task checks and obtain independent review; prior task acceptance is not proof of this repair.')
     if not integration:
         record['scope_grants'] = [g['question_id'] for g in grants]
     return effective
+
+
+def refresh_pending(runner, task, value):
+    """Replace an obsolete unsupported-scope question, never reinterpret an answer."""
+    from controller import save
+    import time
+    if value.get('status') != 'waiting-user':
+        return False
+    known = {q['id']: q for q in oq.questions(runner.root)}
+    old = known.get(value.get('question_id'))
+    replacement = (old or {}).get('resolved') or {}
+    if replacement.get('replacement') in known:
+        value['question_id'] = replacement['replacement']
+        return True
+    if old and (old.get('answer') or old.get('resolved')):
+        return False
+    if not old or not old['topic'].startswith('scope-unavailable-'):
+        return False
+    for variant in old['requests']:
+        details = variant.get('details')
+        if not isinstance(details, dict) or not str(details.get('reason', '')).startswith('No accepted predecessor owns'):
+            continue
+        request = details.get('model_request')
+        if not isinstance(request, dict):
+            continue
+        try:
+            key = prepare(runner, task, value, request)
+        except ValueError:
+            return False
+        with oq.locked(runner.root) as folder:
+            if (folder/(old['id'] + '-answer.json')).exists():
+                save(folder/(key + '-resolved.json'), {'reason': 'Prior question answered during migration', 'resolved_at': time.time()})
+                return False
+            save(folder/(old['id'] + '-resolved.json'), {'reason': 'Replaced by exact-file approval question',
+                 'replacement': key, 'resolved_at': time.time()})
+            value['question_id'] = key
+        return True
+    return False
+
+
+def needs_refresh(root, question_ids):
+    """Wake a saved waiting portfolio once on resume to migrate its question."""
+    for q in oq.questions(root):
+        if q['id'] not in question_ids or q.get('answer'):
+            continue
+        if (q.get('resolved') or {}).get('replacement'):
+            return True
+        if q.get('resolved') or not q['topic'].startswith('scope-unavailable-'):
+            continue
+        if any(isinstance(r.get('details'), dict) and
+               str(r['details'].get('reason', '')).startswith('No accepted predecessor owns')
+               for r in q['requests']):
+            return True
+    return False

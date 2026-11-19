@@ -19,6 +19,11 @@ class ConsoleProgress(Progress):
         self.last_save = float('-inf')
         self.runtime_error = False
 
+    def interactive(self):
+        # A pending answer command is copyable text, not a clipped live row.
+        # Plain updates retain it on screen without redrawing wrapped commands.
+        return super().interactive() and not (getattr(self, 'value', None) or {}).get('questions')
+
     def message(self, message):
         with self.lock:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,10 +77,11 @@ class ConsoleProgress(Progress):
         if self.interactive():
             self.draw()
             return
+        self.clear()
         value = self._value()
-        signature = dashboard(value, include_time=False, include_command=False)
+        signature = dashboard(value, include_time=False)
         if force or signature != self.last_plain or self.clock()-self.last_notice >= 60:
-            self.output.write(dashboard(value, include_command=False) + '\n\n')
+            self.output.write(dashboard(value) + '\n\n')
             self.output.flush()
             self.last_notice = self.clock()
             self.last_plain = signature
@@ -126,7 +132,7 @@ class ConsoleProgress(Progress):
             if self.interactive():
                 from run_status import dashboard
                 self.clear()
-                self.output.write(dashboard(self._value(), include_command=False) + '\n')
+                self.output.write(dashboard(self._value()) + '\n')
                 self.output.flush()
             else:
                 self._emit(force=True)

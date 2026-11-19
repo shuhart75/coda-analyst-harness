@@ -193,6 +193,26 @@ class SchedulerQuestionTests(unittest.TestCase):
     setUp = fixtures.ControllerE2E.setUp
     task = fixtures.ControllerE2E.task
 
+    def test_saved_scope_question_reaches_migration_without_a_user_answer(self):
+        runner = self.runner
+        save(runner.root/'plan.json', self.plan)
+        runner.state.update(plan_sha256=digest(runner.root/'plan.json'),
+                            tasks={t['id']: {'status': 'pending'} for t in self.plan['tasks']})
+        key = oq.request(runner.root, 'be', 'scope-unavailable-old', 'Old question',
+            details={'reason': 'No accepted predecessor owns the requested file: backend/value.txt',
+                     'model_request': {'paths': ['backend/value.txt']}})
+        runner.state['tasks']['be'].update(status='waiting-user', question_ids=[key])
+        called = []
+        def worker(task, record):
+            called.append(task['id'])
+            runner.stop.set()
+            raise Interrupted('Observed migration entry')
+        with patch.object(runner, 'require_preflight'), patch.object(runner, 'worker', side_effect=worker), \
+             patch.object(runner, 'progress'):
+            runner.run()
+        self.assertIn('be', called)
+        self.assertIsNone(oq.response(runner.root, key))
+
     def test_waiting_task_releases_worker_and_independent_task_unblocks_it(self):
         runner = self.runner
         runner.cfg['jobs'] = 1

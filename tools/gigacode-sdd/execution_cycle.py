@@ -507,6 +507,12 @@ def execute_task(runner, task, record):
         candidates.append((path, value))
     _recover_permission_fatal(runner, task, candidates, folder, scope)
     for path, value in candidates:
+        if value.get('status') == 'waiting-user':
+            _receipt_valid(value)
+            if scope_repair.refresh_pending(runner, task, value):
+                save(path, value)
+                run_status.candidate(runner, task, value)
+    for path, value in candidates:
         result = value.get('session_result', {})
         if (value.get('status') in ('accepted', 'waiting-user') or value.get('pending_session')
                 or not result.get('terminal_result') or result.get('cancelled') or result.get('timed_out')
