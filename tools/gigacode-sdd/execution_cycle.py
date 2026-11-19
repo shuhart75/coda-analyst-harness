@@ -441,6 +441,7 @@ def execute_task(runner, task, record):
     import operator_questions as questions
     import task_acceptance
     import run_status
+    import scope_repair
     models = models_for(runner)
     origin = Path(record['workspace'])
     origin_checkpoint = origin.parent / (origin.name + '-checkpoint.json')
@@ -505,6 +506,34 @@ def execute_task(runner, task, record):
             save(path, value)
         candidates.append((path, value))
     _recover_permission_fatal(runner, task, candidates, folder, scope)
+    for path, value in candidates:
+        result = value.get('session_result', {})
+        if (value.get('status') in ('accepted', 'waiting-user') or value.get('pending_session')
+                or not result.get('terminal_result') or result.get('cancelled') or result.get('timed_out')
+                or (result.get('cleanup') or {}).get('preserved')):
+            continue
+        control = questions.control_or_question(result.get('text', ''))
+        if not control or control[0] not in ('operator_question', 'scope_request'):
+            continue
+        identity = fingerprint([result.get('events_path'), result.get('text')])
+        if value.get('handled_question_result') == identity:
+            continue
+        _receipt_valid(value)
+        if result.get('events_path') not in value.get('evidence_files', {}):
+            raise Blocked('Saved question stream has no audited receipt')
+        from transport import revalidate_saved_result
+        restored = revalidate_saved_result(result, Path(result['events_path']))
+        if not restored.get('terminal_result'):
+            raise Blocked('Saved question has no terminal event')
+        confirm_model(restored, value['model'])
+        if restored.get('text') != result.get('text'):
+            raise Blocked('Saved question text does not match terminal events')
+        key = questions.register(runner, task, value, control)
+        value.update(status='waiting-user', stage='execute', question_id=key,
+                     resource_wait=None, handled_question_result=identity)
+        save(path, value)
+        run_status.candidate(runner, task, value)
+        runner.progress(task['id'] + ': восстановлен вопрос из сохранённого результата; повтор исполнения не нужен')
     def select(value, failures):
         save(folder / 'selection.json', {'winner': value['model'], 'workspace': value['workspace'],
                                         'origin_workspace': str(origin), 'base': value['base'], 'scope': scope,
@@ -531,7 +560,10 @@ def execute_task(runner, task, record):
                          if v['stage'] in ('execute', 'checks')
                          and v.get('status') not in ('stalled', 'external-blocker', 'quarantined')]) if task.get('resources') else None
 
+    base_task = task
+
     def one(index):
+        task = base_task
         path, value = candidates[index]
         work = Path(value['workspace'])
         stop = stops[index]
@@ -621,6 +653,7 @@ def execute_task(runner, task, record):
                 persist()
             if stop.is_set():
                 interrupted()
+            task = scope_repair.effective_task(runner, base_task, value)
             value['status'] = 'running'
             persist()
             try:
@@ -685,7 +718,11 @@ def execute_task(runner, task, record):
                         runner.audit(work)
                         value['patch'] = export_patch(work, value['base'], task['writes'], path.parent / 'candidate.patch')
                         value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
-                        control = questions.control_result(result.get('text', '')) if result.get('ok') else None
+                        control = (questions.control_or_question(result.get('text', ''))
+                                   if result.get('terminal_result') and not result.get('timed_out')
+                                   and not (result.get('cleanup') or {}).get('preserved') else None)
+                        if control and control[0] in ('service_request', 'service_action') and not result.get('ok'):
+                            control = None
                         if control:
                             confirm_model(result, value['model'])
                             kind, request = control
@@ -710,9 +747,7 @@ def execute_task(runner, task, record):
                                     value['service_pending'] = service['identity']
                                     value['question_id'] = service['question_id']
                                 else:
-                                    value['question_id'] = questions.request(runner.root, task['id'],
-                                        request.get('topic'), request.get('question'), options=request.get('options'),
-                                        details=request.get('details'), generation=value.get('answer_generation', ''), model=value['model'])
+                                    value['question_id'] = questions.register(runner, base_task, value, control)
                             except (ValueError, KeyError, TypeError) as exc:
                                 # Repair just the request envelope; malformed formatting is
                                 # never a permanent product/safety failure.
@@ -720,6 +755,7 @@ def execute_task(runner, task, record):
                                 value['feedback'] = str(exc)
                                 persist()
                                 continue
+                            value['handled_question_result'] = fingerprint([result.get('events_path'), result.get('text')])
                             value['status'] = 'waiting-user'
                             persist()
                             runner.progress(task['id'] + ': нужен ответ. В другом окне выполните:\n' + questions.command(runner.root))

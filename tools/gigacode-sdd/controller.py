@@ -927,6 +927,8 @@ executed test names/counts, not just a successful command or test compilation.
     def integrate(self, task, record):
         """Journal apply+commit so an interruption never requires discarding WIP."""
         self.guard()
+        import scope_repair
+        task = scope_repair.effective_task(self, task, record, integration=True)
         patch = Path(record['patch']['patch'])
         if not patch.is_file() or digest(patch) != record['patch']['sha256']:
             raise Blocked('Accepted patch changed before integration')
