@@ -10,6 +10,9 @@ STATUSES = {'pending': 'ожидает запуска', 'done': 'принято'
             'blocked': 'заблокировано', 'waiting-user': 'нужен ответ', 'interrupted': 'остановлено',
             'waiting-retry': 'пауза перед повтором', 'complete': 'завершено'}
 
+SERVICE_STATUSES = {'awaiting-approval': 'нужно разрешение на запуск', 'starting': 'запускается',
+                    'ready': 'готов', 'failed': 'ошибка запуска', 'stopped': 'остановлен',
+                    'released': 'остановлен и освобождён'}
 
 def candidate_label(value):
     phase = STAGES.get(value['stage'], value['stage'])
@@ -38,7 +41,7 @@ def snapshot(root, state=None):
     for task in plan['tasks']:
         rec = state.get('tasks', {}).get(task['id'], {})
         rows.append({'id': task['id'], 'status': rec.get('status', 'pending'),
-            'goal': task.get('acceptance', {}).get('deliverables') or [task['prompt']],
+            'goal': task.get('acceptance', {}).get('deliverables') or [],
             'waiting_for': [d for d in task['depends_on'] if state.get('tasks', {}).get(d, {}).get('status') != 'done'],
             'error': rec.get('error'), 'result': rec.get('workspace'),
             'deferred_evidence': rec.get('review', {}).get('deferred_evidence', []),
@@ -57,43 +60,64 @@ def snapshot(root, state=None):
             'ready': readiness.get('required_complete') is True and state.get('status') == 'complete'}
 
 
-def render(value):
-    lines = ['План: принято ' + str(value['done']) + '/' + str(value['total']) +
-             '; состояние: ' + STATUSES.get(value['status'], str(value['status'])) +
-             '; итоговая приёмка: ' + ('пройдена' if value['ready'] else 'ещё не пройдена')]
+def _sections(value):
+    """Only visible facts participate in updates, never timestamps or prompts."""
+    sections = {}
     for row in value['tasks']:
         line = row['id'] + ': ' + STATUSES.get(row['status'], row['status'])
-        if row['status'] == 'pending' and row['waiting_for']:
-            line += '; после ' + ', '.join(row['waiting_for'])
-        if row['status'] == 'running':
-            line += '; ' + '; '.join(candidate_label(p) +
-                (' (ждёт ресурс)' if (p.get('resource_wait') or {}).get('state') == 'waiting' else '')
-                for p in row['candidates'])
+        if row['status'] == 'pending':
+            line += ('; после ' + ', '.join(row['waiting_for'])) if row['waiting_for'] else '; готова к запуску'
+        lines = [line]
+        if row['status'] in ('running', 'waiting-user'):
+            for p in row['candidates']:
+                label = candidate_label(p)
+                wait = p.get('resource_wait') or {}
+                if wait.get('state') == 'waiting':
+                    label += '; ждёт освобождения ресурса'
+                lines.append('  Вариант ' + label)
         if row['status'] in ('blocked', 'waiting-user') and row['error']:
-            line += '; ' + str(row['error']).replace('\n', ' ')[:500]
-        lines.append(line)
-        goal = '; '.join(row['goal']).replace('\n', ' ')
-        lines.append('  Результат задачи: ' + goal[:240] + ('…' if len(goal) > 240 else ''))
+            lines.append('  Причина: ' + str(row['error']).replace('\n', ' ')[:500])
         for item in row['deferred_evidence']:
             lines.append('  Проверка впереди: ' + item['requirement'] + ' → ' + item['owner'] + ': ' + item['evidence'])
+        sections['task:' + row['id']] = '\n'.join(lines)
     for service in value['services']:
-        lines.append('Стенд ' + service['id'] + ': ' + service['status'] + '; ' + str(service['health']))
+        sections['service:' + service['id']] = 'Стенд ' + service['id'] + ': ' + SERVICE_STATUSES.get(service['status'], service['status'])
     if value.get('integration'):
-        lines.append('Итоговая проверка всех требований: ' + STATUSES.get(value['integration'], value['integration']))
+        sections['integration'] = 'Итоговая проверка всех требований: ' + STATUSES.get(value['integration'], value['integration'])
+    questions = ['Нужны ответы: ' + str(len(value['questions']))]
+    for q in value['questions']:
+        questions.append(q['task'] + ': ' + q['question'])
     if value['questions']:
-        lines.append('Нужны ответы: ' + str(len(value['questions'])))
-        for q in value['questions']:
-            lines.append(q['task'] + ': ' + q['question'])
-        lines.append('Для ответа выполните в другом окне:\n' + value['answer_command'])
-    return '\n'.join(lines)
+        questions.append('Для ответа выполните в другом окне:\n' + value['answer_command'])
+    sections['questions'] = '\n'.join(questions) if value['questions'] else ''
+    return sections
+
+
+def _heading(value):
+    return ('Прогресс: принято ' + str(value['done']) + '/' + str(value['total']) +
+            '; состояние: ' + STATUSES.get(value['status'], str(value['status'])) +
+            '; итоговая приёмка: ' + ('пройдена' if value['ready'] else 'ещё не пройдена'))
+
+
+def render(value, previous=None):
+    """Full map on request/start; subsequent output contains only changes."""
+    sections = _sections(value)
+    before = _sections(previous) if previous is not None else {}
+    changed = [text for key, text in sections.items() if text and before.get(key) != text]
+    if previous is not None and before.get('questions') and not sections['questions']:
+        changed.append('Открытых вопросов пользователю больше нет.')
+    if previous is not None and not changed and _heading(previous) == _heading(value):
+        return ''
+    return '\n'.join([_heading(value)] + changed)
 
 
 def publish(runner, force=False):
     from controller import save
     value = snapshot(runner.root, runner.state)
-    rendered = render(value)
+    previous = None if force else getattr(runner, '_last_progress_snapshot', None)
+    rendered = render(value, previous)
     save(runner.root / 'progress.json', value)
-    if force or getattr(runner, '_last_progress_text', None) != rendered:
+    if rendered:
         runner.progress(rendered)
-        runner._last_progress_text = rendered
+    runner._last_progress_snapshot = value
     return value
