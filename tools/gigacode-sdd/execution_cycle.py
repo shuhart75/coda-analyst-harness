@@ -975,9 +975,12 @@ def execute_task(runner, task, record):
     verified = []
     deadline = None
     def guarded_one(index):
+        from progress import CANDIDATE_MODEL
+        token = CANDIDATE_MODEL.set(candidates[index][1]['model'])
         try:
             return one(index)
         finally:
+            CANDIDATE_MODEL.reset(token)
             if lane:
                 lane.withdraw(candidates[index][1]['model'])
 

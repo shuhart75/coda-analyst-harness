@@ -9,6 +9,7 @@ import time
 import unicodedata
 
 SESSION_IDENTITY = ContextVar('sdd_session_identity', default='')
+CANDIDATE_MODEL = ContextVar('sdd_candidate_model', default=None)
 
 
 @contextmanager

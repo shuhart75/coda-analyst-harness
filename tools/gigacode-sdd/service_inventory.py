@@ -205,32 +205,59 @@ def _reconcile_listeners(ps, lsof, uid, processes, listeners):
                      'reason': 'absent-from-ps' if pid not in processes else 'uid-mismatch'} for pid in disputed]
     before_text, before_error = _command([ps, '-axo', 'pid=,ppid=,pgid=,uid=,lstart=,args='])
     before, malformed_before = _parse_ps(before_text or '')
-    live_text, live_error = _command([lsof, '-nP', '-a', '-u', str(uid), '-p',
-                                    ','.join(map(str, disputed)), '-iTCP', '-sTCP:LISTEN', '-Fpn'])
-    live, malformed_live = _parse_lsof(live_text or '', 'listener')
+    # Query disputed PIDs separately: lsof can return 1 with partial output
+    # when one of several selected PIDs has exited. Do not discard the surviving
+    # listeners, or treat arbitrary partial output as a successful inventory.
+    live, live_error, malformed_live = {}, None, False
+    for disputed_pid in disputed:
+        live_text, error = _command([lsof, '-nP', '-a', '-u', str(uid), '-p',
+                                    str(disputed_pid), '-iTCP', '-sTCP:LISTEN', '-Fpn'])
+        selected, malformed = _parse_lsof(live_text or '', 'listener')
+        live.update(selected)
+        live_error = live_error or error
+        malformed_live |= malformed or not set(selected).issubset({disputed_pid})
     after_text, after_error = _command([ps, '-axo', 'pid=,ppid=,pgid=,uid=,lstart=,args='])
     after, malformed_after = _parse_ps(after_text or '')
-    valid = (not any((before_error, live_error, after_error, malformed_before, malformed_live, malformed_after))
-             and set(live).issubset(disputed))
+    query_limitations = [name for name, failed in (
+        ('before-ps-failed', before_error), ('listener-query-failed', live_error),
+        ('after-ps-failed', after_error), ('before-ps-malformed', malformed_before),
+        ('listener-query-malformed', malformed_live), ('after-ps-malformed', malformed_after),
+        ('before-ps-empty', not before), ('after-ps-empty', not after),
+        ('unexpected-listener-pid', not set(live).issubset(disputed))) if failed]
+    valid = not query_limitations
     identity = lambda p: tuple(p.get(k) for k in ('pid', 'uid', 'started', 'ppid', 'pgid', 'kind')) if p else None
     listeners = dict(listeners)
     processes = dict(processes)
     for observation in observations:
         pid = observation['pid']
         first, last = before.get(pid), after.get(pid)
+        # These parsed records contain fixed identity fields, never ps arguments.
+        # Retain them even on failure so a vanished PID can be distinguished
+        # from PID reuse, an incomplete ps table, or a still-running process.
+        observation.update(before_process=first, after_process=last,
+                           listener_present=pid in live, queries_valid=valid,
+                           query_limitations=list(query_limitations))
         observation['resolution'] = 'unresolved'
         if not valid:
             continue
-        if first is None and last is None and pid not in live:
-            # Absent from both process tables and the intervening listener query.
+        if last is None and pid not in live:
+            # It may have existed in the first recheck and exited before lsof.
+            # The empty targeted listener query followed by a complete process
+            # table without this PID confirms disappearance during collection.
             listeners.pop(pid, None)
             observation['resolution'] = 'exited'
-        elif (first and last and first['uid'] == uid and identity(first) == identity(last)
-              and pid in live):
-            # A newly started listener omitted by the original ps is now stable.
+        elif first and last and first['uid'] == uid and identity(first) == identity(last):
+            # A newly started process omitted by the original ps is now stable.
+            # It may have closed an inherited listening socket in the meantime.
+            # Keep its identity: agents and Unix-only databases must still be
+            # inventoried even when they no longer have a TCP listener.
             processes[pid] = last
-            listeners[pid] = live[pid]
-            observation['resolution'] = 'stable-current-user-listener'
+            if pid in live:
+                listeners[pid] = live[pid]
+                observation['resolution'] = 'stable-current-user-listener'
+            else:
+                listeners.pop(pid, None)
+                observation['resolution'] = 'no-longer-listening'
     return processes, listeners, observations
 
 

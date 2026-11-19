@@ -206,6 +206,28 @@ class ConsoleTests(unittest.TestCase):
         self.assertIn('Запуск остановлен с ошибкой', self.stream.getvalue())
         self.assertNotIn('Обязательные проверки завершены', self.stream.getvalue().split('\n\n')[-2])
 
+    def test_overview_returns_on_acceptance_but_not_on_periodic_ticks(self):
+        value = dict(self.value, tasks=[
+            {'id': 'sdd-backend-prepare', 'status': 'done'},
+            {'id': 'backend-modular-its', 'status': 'running'},
+            {'id': 'backend-regression-compat', 'status': 'pending', 'depends_on': ['backend-modular-its']}])
+        self.display.summary(value)
+        self.assertIn('✓ Подготовка backend', self.stream.getvalue())
+        first = len(self.stream.getvalue())
+        self.now = 60
+        self.display.tick()
+        periodic = self.stream.getvalue()[first:]
+        self.assertNotIn('Маршрут', periodic)
+        self.assertNotIn('✓', periodic)
+        self.assertIn('Принято:', periodic)
+        first = len(self.stream.getvalue())
+        value['tasks'][1]['status'] = 'done'
+        value['done'] += 1
+        self.display.summary(value)
+        accepted = self.stream.getvalue()[first:]
+        self.assertIn('✓ Подготовка backend · Интеграционные тесты backend', accepted)
+        self.assertIn('Проверка обратной совместимости', accepted)
+
 
 if __name__ == '__main__':
     unittest.main()
