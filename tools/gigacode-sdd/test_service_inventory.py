@@ -246,11 +246,126 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(listeners[121], {8081})
         self.assertEqual(evidence[0]['resolution'], 'stable-current-user-listener')
 
-    def test_exited_listener_needs_absence_on_both_sides_of_lsof(self):
-        with patch.object(inv, '_command', side_effect=[('', None), ('', None), ('', None)]):
+    def test_listener_absent_from_both_process_tables_is_reconciled(self):
+        other = row(120, 1, 120, '/usr/bin/other')
+        with patch.object(inv, '_command', side_effect=[(other, None), ('', None), (other, None)]):
             _, listeners, evidence = inv._reconcile_listeners('ps', 'lsof', 501, {}, {121: {8081}})
         self.assertEqual(listeners, {})
         self.assertEqual(evidence[0]['resolution'], 'exited')
+
+    def test_mixed_disputed_live_and_exited_pids_are_queried_individually(self):
+        current = row(1, 0, 1, '/sbin/init') + row(122, 1, 122, '/usr/bin/java')
+        with patch.object(inv, '_command', side_effect=[
+                (current, None), ('', None), ('p122\nn*:54321\n', None), (current, None)]) as command:
+            processes, listeners, evidence = inv._reconcile_listeners(
+                'ps', 'lsof', 501, {}, {121: {54321}, 122: {54321}})
+        self.assertEqual(listeners, {122: {54321}})
+        self.assertIn(122, processes)
+        self.assertEqual([e['resolution'] for e in evidence], ['exited', 'stable-current-user-listener'])
+        selections = [call.args[0][call.args[0].index('-p')+1] for call in command.call_args_list
+                      if '-p' in call.args[0]]
+        self.assertEqual(selections, ['121', '122'])
+
+    def test_listener_exits_during_recheck_without_poisoning_live_cwd_query(self):
+        # Reproduce ps -> new inherited listener -> ps sees it -> it exits ->
+        # targeted lsof is empty -> final ps confirms exit. Including the dead
+        # PID in the cwd batch would yield rc1 and lose all live cwd results.
+        original = row(100, 1, 100, '/usr/bin/gigacode --token SECRET') + row(120, 1, 120, '/usr/bin/other')
+        fresh = original + row(121, 120, 120, '/usr/bin/other --token SECRET')
+        replies = [
+            (0, original), (0, 'p120\nn127.0.0.1:63342\np121\nn127.0.0.1:63342\n'),
+            (0, fresh), (1, ''), (0, original), (0, 'p100\nfcwd\nn/work/poc\np120\nfcwd\nn/\n')]
+        def run(argv, **kwargs):
+            if 'cwd' in argv:
+                self.assertEqual(argv[argv.index('-p') + 1], '100,120')
+            code, output = replies.pop(0)
+            return subprocess.CompletedProcess(argv, code, output.encode(), b'')
+        with patch.object(inv.shutil, 'which', side_effect=lambda name: '/usr/bin/' + name), \
+                patch.object(inv.os, 'getuid', return_value=501, create=True), \
+                patch.object(inv.subprocess, 'run', side_effect=run):
+            result = inv.inspect_services()
+        self.assertTrue(result['complete'], result)
+        self.assertEqual(result['collection_attempts'], 1)
+        self.assertEqual(result['agents'][0]['cwd'], '/work/poc')
+        self.assertEqual([s['pid'] for s in result['services']], [120])
+        evidence = result['listener_reconciliation'][0]
+        self.assertEqual(evidence['resolution'], 'exited')
+        self.assertEqual(evidence['before_process']['pid'], 121)
+        self.assertIsNone(evidence['after_process'])
+        self.assertNotIn('SECRET', json.dumps(result))
+        self.assertEqual(result['safe_to_stop'], 'not-established')
+
+    def test_closed_inherited_socket_retains_live_agents_and_unix_databases(self):
+        for executable, expected_agent, expected_service in [
+                ('/usr/bin/other', False, False), ('/usr/bin/gigacode', True, False),
+                ('/usr/bin/postgres', False, True)]:
+            with self.subTest(executable=executable):
+                original = row(120, 1, 120, '/usr/bin/other')
+                fresh = original + row(121, 120, 120, executable + ' --secret SECRET')
+                cwd = 'p120\nfcwd\nn/\n'
+                if expected_agent or expected_service:
+                    cwd += 'p121\nfcwd\nn/work/poc\n'
+                replies = [
+                    (0, original), (0, 'p120\nn*:54321\np121\nn*:54321\n'),
+                    (0, fresh), (1, ''), (0, fresh), (0, cwd)]
+                def run(argv, **kwargs):
+                    if 'cwd' in argv:
+                        self.assertEqual(argv[argv.index('-p') + 1],
+                                         '120,121' if expected_agent or expected_service else '120')
+                    code, output = replies.pop(0)
+                    return subprocess.CompletedProcess(argv, code, output.encode(), b'')
+                with patch.object(inv.shutil, 'which', side_effect=lambda name: '/usr/bin/' + name), \
+                        patch.object(inv.os, 'getuid', return_value=501, create=True), \
+                        patch.object(inv.subprocess, 'run', side_effect=run):
+                    result = inv.inspect_services()
+                self.assertTrue(result['complete'], result)
+                self.assertEqual(result['collection_attempts'], 1)
+                self.assertIn(121, [p['pid'] for p in result['processes']])
+                self.assertEqual([a['pid'] for a in result['agents']], [121] if expected_agent else [])
+                self.assertEqual([s['pid'] for s in result['services']], [120, 121] if expected_service else [120])
+                self.assertEqual(result['listener_reconciliation'][0]['resolution'], 'no-longer-listening')
+                if expected_service:
+                    self.assertEqual(result['services'][1]['ports'], [])
+                    self.assertEqual(result['services'][1]['observations'], ['postgres-process'])
+                self.assertNotIn('SECRET', json.dumps(result))
+
+    def test_empty_listener_query_does_not_hide_reused_or_unverifiable_pid(self):
+        other = row(120, 1, 120, '/usr/bin/other')
+        target = row(121, 1, 121, '/usr/bin/java')
+        variants = [
+            (other + row(121, 1, 121, '/usr/bin/java', uid=999), None),
+            (other + target.replace('10:20:30', '10:20:31'), None),
+            ('', None),
+            (other + 'malformed process row\n', None),
+            (other, 'command-failed'),
+        ]
+        for after, error in variants:
+            with self.subTest(after=after, error=error), patch.object(inv, '_command', side_effect=[
+                    (other + target, None), ('', None), (after, error)]):
+                _, listeners, evidence = inv._reconcile_listeners('ps', 'lsof', 501, {}, {121: {8081}})
+            self.assertIn(121, listeners)
+            self.assertEqual(evidence[0]['resolution'], 'unresolved')
+
+    def test_empty_listener_query_does_not_adopt_another_users_stable_process(self):
+        other = row(120, 1, 120, '/usr/bin/other')
+        foreign = other + row(121, 1, 121, '/usr/bin/java', uid=999)
+        with patch.object(inv, '_command', side_effect=[(foreign, None), ('', None), (foreign, None)]):
+            processes, listeners, evidence = inv._reconcile_listeners('ps', 'lsof', 501, {}, {121: {8081}})
+        self.assertNotIn(121, processes)
+        self.assertIn(121, listeners)
+        self.assertEqual(evidence[0]['resolution'], 'unresolved')
+
+    def test_failed_or_malformed_listener_query_cannot_prove_exit(self):
+        other = row(120, 1, 120, '/usr/bin/other')
+        target = row(121, 1, 121, '/usr/bin/java')
+        for listener, error in [('', 'command-failed'), ('pBAD\nn*:8081\n', None),
+                                ('p999\nn*:8081\n', None)]:
+            with self.subTest(listener=listener, error=error), patch.object(inv, '_command', side_effect=[
+                    (other + target, None), (listener, error), (other, None)]):
+                _, listeners, evidence = inv._reconcile_listeners('ps', 'lsof', 501, {}, {121: {8081}})
+            self.assertIn(121, listeners)
+            self.assertFalse(evidence[0]['queries_valid'])
+            self.assertTrue(evidence[0]['query_limitations'])
 
     def test_changed_identity_or_failed_query_remains_unresolved(self):
         for after, error in [(row(121, 1, 121, '/usr/bin/java', uid=999), None),

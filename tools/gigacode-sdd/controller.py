@@ -31,7 +31,7 @@ import operator_questions
 import run_status
 import task_acceptance
 import managed_services
-from progress import SESSION_IDENTITY
+from progress import SESSION_IDENTITY, CANDIDATE_MODEL
 from console_progress import ConsoleProgress
 from session_outcome import classify as session_outcome
 
@@ -576,7 +576,9 @@ class Runner:
         task_name = name.rsplit('-', 1)[0] if name.endswith(('-execute', '-review', '-adjudicate')) else name
         title = task_name + ' · ' + phase + (' · ' + model if model else '')
         with self.activity(activity, title=title, timeout=limit,
-                           metadata={'kind': 'llm', 'task_id': task_name, 'model': model, 'phase': phase}) as activity_token:
+                           metadata={'kind': 'llm', 'task_id': task_name, 'model': model, 'phase': phase,
+                                     'candidate_model': CANDIDATE_MODEL.get(),
+                                     'events_path': str(session_log/'stdout.jsonl')}) as activity_token:
             cli = [*self.cfg['cli'], '--model', model] if model else self.cfg['cli']
             result = run_session(cli, under(root, cwd), full_prompt,
                              session_log, approval_mode='plan' if role == 'review' else self.cfg['approval_mode'],
@@ -1004,7 +1006,9 @@ executed test names/counts, not just a successful command or test compilation.
             self.progress('Проверка возможностей уже пройдена для этой конфигурации; повтор не требуется')
         if not self.state.get('tasks'):
             self.plan()
-        self.run(retry_blocked)
+        import observers
+        with observers.Manager(self):
+            self.run(retry_blocked)
         self.progress('Состояние работы: ' + self.state['status'])
 
     def run(self, retry_blocked=False):

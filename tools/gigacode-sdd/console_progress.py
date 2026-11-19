@@ -18,6 +18,8 @@ class ConsoleProgress(Progress):
         self.last_notice = float('-inf')
         self.last_save = float('-inf')
         self.runtime_error = False
+        self.overview_key = None
+        self.include_overview = True
 
     def interactive(self):
         # A pending answer command is copyable text, not a clipped live row.
@@ -27,7 +29,7 @@ class ConsoleProgress(Progress):
             return False
         if value.get('tasks'):
             from run_status import dashboard
-            lines = dashboard(self._value(), include_command=False).splitlines()
+            lines = dashboard(self._value(), include_command=False, include_overview=self.include_overview).splitlines()
             width, height = self.dimensions()
             if len(lines) > height-2 or any(clipped(line, max(1, width-1)) != line for line in lines):
                 return False
@@ -74,7 +76,7 @@ class ConsoleProgress(Progress):
         from run_status import dashboard
         self.clear()
         columns, height = self.dimensions()
-        lines = dashboard(self._value(), include_command=False).splitlines()
+        lines = dashboard(self._value(), include_command=False, include_overview=self.include_overview).splitlines()
         for line in lines[:max(1, height-2)]:
             self.output.write(clipped(line, max(1, columns-1)) + '\n')
             self.rows += 1
@@ -83,14 +85,28 @@ class ConsoleProgress(Progress):
     def _emit(self, force=False):
         from run_status import dashboard
         self._save_runtime()
+        value = self._value()
+        overview_key = (tuple(t['id'] for t in value.get('tasks', [])),
+                        tuple(sorted(t['id'] for t in value.get('tasks', []) if t['status'] == 'done')))
+        self.include_overview = force or self.overview_key != overview_key
+        signature = dashboard(value, include_time=False, include_overview=False)
+        if self.include_overview:
+            # Keep milestones in terminal history; live redraws must not erase
+            # the just-accepted task or the initial route a second later.
+            self.clear()
+            self.output.write(dashboard(value) + '\n\n')
+            self.output.flush()
+            self.overview_key = overview_key
+            self.last_notice = self.clock()
+            self.last_plain = signature
+            self.include_overview = False
+            return
         if self.interactive():
             self.draw()
             return
         self.clear()
-        value = self._value()
-        signature = dashboard(value, include_time=False)
-        if force or signature != self.last_plain or self.clock()-self.last_notice >= 60:
-            self.output.write(dashboard(value) + '\n\n')
+        if signature != self.last_plain or self.clock()-self.last_notice >= 60:
+            self.output.write(dashboard(value, include_overview=False) + '\n\n')
             self.output.flush()
             self.last_notice = self.clock()
             self.last_plain = signature

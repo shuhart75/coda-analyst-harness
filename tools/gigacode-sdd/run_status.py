@@ -36,9 +36,16 @@ def candidate_label(value):
 
 def candidate(runner, task, value):
     name = oq.fingerprint([task['id'], value['model']])[:24]
+    history = []
+    for item in value.get('history', [])[-3:]:
+        if not isinstance(item, dict):
+            continue
+        detail = item.get('detail', '')
+        detail = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+        history.append({'kind': item.get('kind'), 'detail': detail[:1500], 'detail_truncated': len(detail) > 1500})
     write_projection(runner.root / 'progress' / (name + '.json'), {
         'task': task['id'], 'model': value['model'], 'stage': value['stage'],
-        'status': value['status'], 'resource_wait': value.get('resource_wait'),
+        'status': value['status'], 'resource_wait': value.get('resource_wait'), 'history': history,
         'checks': [{'ok': c.get('ok'), 'log': c.get('log')} for c in value.get('checks', [])],
         'updated_at': time.time()})
 
@@ -85,7 +92,19 @@ def snapshot(root, state=None):
         attempts = None
         problems.append('session-attempt-count-unavailable')
     service_stop = read_projection(root/'service-stop.json', problems) if (root/'service-stop.json').is_file() else {}
+    # Observer output is advisory. Its absence/failure cannot degrade execution telemetry.
+    observation_path = root/'observer/latest.json'
+    try:
+        observation = read_projection(observation_path, []) if observation_path.is_file() else {}
+    except OSError:
+        observation = {}
+    if not isinstance(observation, dict):
+        observation = {}
+    captured = observation.get('snapshot_at')
+    if isinstance(captured, (int, float)):
+        observation['stale'] = time.time()-captured > 900
     return {'service_stop': service_stop, 'session_attempts': attempts, 'jobs': config.get('jobs'),
+            'observation': observation,
             'operations': runtime.get('operations', []), 'telemetry_stale': stale,
             'telemetry_incomplete': bool(problems),
             'status': state.get('status'), 'tasks': rows,
@@ -167,15 +186,99 @@ def publish(runner, force=False):
     runner._last_progress_snapshot = value
     return value
 
-def dashboard(value, include_time=True, include_command=True):
+def model_label(model):
+    return {'DeepSeek-V4.1-Flash-1017': 'DeepSeek', 'GLM-5.3-Flash': 'GLM'}.get(model, model or 'модель не указана')
+
+
+def operation_label(op, tasks):
+    """The actor and candidate author are distinct, explicit identities."""
+    if op.get('purpose') == 'observation':
+        return op.get('title', 'Аудитор') + ' · ' + model_label(op.get('model'))
+    name = next((task_route.title(t) for t in tasks if t['id'] == op.get('task_id')), None)
+    if not name or op.get('kind') != 'llm':
+        return op.get('title', 'операция')
+    actor, author = op.get('model'), op.get('candidate_model')
+    phase = STAGES.get(op.get('phase'), op.get('phase', ''))
+    subject = model_label(actor)
+    if phase == 'разработка':
+        action = ('разрабатывает свой вариант' if author and author == actor else
+                  'разрабатывает вариант ' + model_label(author) if author else 'выполняет разработку')
+    elif phase in ('независимое ревью', 'разбор замечаний'):
+        action = ('проверяет' if phase == 'независимое ревью' else 'разбирает замечания к')
+        action += ' варианту ' if phase == 'разбор замечаний' else ' вариант '
+        action += model_label(author) if author else '(автор не указан)'
+    else:
+        action = phase
+    return name + ' · ' + subject + ' ' + action
+
+
+def _candidate_is_active(task, candidate, operations):
+    if (candidate.get('resource_wait') or {}).get('state') == 'waiting':
+        return False
+    return candidate.get('status') == 'running' and any(
+        op.get('task_id') == task['id'] and op.get('candidate_model') == candidate['model']
+        for op in operations)
+
+
+def observation_lines(value):
+    """Advisory assessment stays separate from factual controller health."""
+    observation = value.get('observation') or {}
+    if not isinstance(observation, dict) or not observation:
+        return []
+    labels = {'progress': 'продвижение есть', 'waiting': 'ожидание результата',
+              'concern': 'нужна проверка', 'unknown': 'данных недостаточно',
+              'disagreement': 'оценки расходятся', 'unavailable': 'недоступны'}
+    stamp = observation.get('snapshot_at')
+    try:
+        captured = time.strftime('%H:%M', time.localtime(stamp)) if isinstance(stamp, (int, float)) else None
+    except (ValueError, OverflowError, OSError):
+        captured = None
+    stopped = value.get('status') in ('interrupted', 'complete', 'blocked') or bool(value.get('console_error') or value.get('service_stop'))
+    stale = observation.get('stale') or (captured is not None and time.time()-stamp > 900)
+    prefix = 'Предыдущее наблюдение аудиторов' if stale or stopped else 'Аудиторы'
+    heading = prefix + (', снимок ' + captured if captured else ', время снимка неизвестно')
+    if stopped:
+        heading += ' (не описывает текущее исполнение)'
+    elif stale:
+        heading += ' (устарело)'
+    heading += ': ' + labels.get(observation.get('status'), 'данных недостаточно') + '.'
+    lines = [heading]
+    def sentence(raw):
+        if not isinstance(raw, str) or not raw.strip():
+            return ''
+        import unicodedata
+        text = ' '.join(''.join(c if not unicodedata.category(c).startswith('C') else ' '
+                               for c in raw).split())
+        # Never expose a cut-off instruction or half a model conclusion.
+        return text if len(text) <= 400 else 'Подробности в отчёте.'
+    results = observation.get('results') or {}
+    if observation.get('status') == 'disagreement' and isinstance(results, dict):
+        for role, title in (('progress', 'Прогресс'), ('scope', 'Соответствие задаче')):
+            result = results.get(role) or {}
+            summary = sentence(result.get('summary')) if isinstance(result, dict) else ''
+            if summary:
+                lines.append(title + ': ' + summary)
+    else:
+        result = (results.get('progress') or {}) if isinstance(results, dict) else {}
+        if observation.get('status') == 'unavailable':
+            result = {}
+        summary = sentence(result.get('summary')) if isinstance(result, dict) else ''
+        summary = summary or sentence(observation.get('summary'))
+        if summary:
+            lines.append('Основание: ' + summary)
+    return lines
+
+
+def dashboard(value, include_time=True, include_command=True, include_overview=True):
     """Answer operator questions without equating activity with correctness."""
     from progress import elapsed
     tasks = value.get('tasks', [])
     operations = value.get('operations', [])
     questions = value.get('questions', [])
     blocked = [t['id'] for t in tasks if t['status'] == 'blocked']
-    near_limit = any(op.get('timeout_seconds') and op['elapsed_seconds'] >= .8*op['timeout_seconds'] for op in operations)
-    quiet = any(op.get('idle_seconds') is not None and op['idle_seconds'] >= 300 for op in operations)
+    execution_operations = [op for op in operations if op.get('purpose') != 'observation']
+    near_limit = any(op.get('timeout_seconds') and op['elapsed_seconds'] >= .8*op['timeout_seconds'] for op in execution_operations)
+    quiet = any(op.get('idle_seconds') is not None and op['idle_seconds'] >= 300 for op in execution_operations)
     if value.get('service_stop'):
         health = value['service_stop']['reason']
     elif value.get('console_error'):
@@ -186,7 +289,7 @@ def dashboard(value, include_time=True, include_command=True):
         health = 'Работа остановлена. Для продолжения запустите мастер.'
     elif questions:
         health = 'Нужен ваш ответ: вопросов ' + str(len(questions)) + '.'
-        if operations:
+        if execution_operations:
             health += ' Независимая работа продолжается.'
     elif blocked or value.get('integration') == 'blocked' or value.get('status') == 'blocked':
         health = 'Есть блокировка. Требуется вмешательство; подробности в журнале.'
@@ -201,7 +304,8 @@ def dashboard(value, include_time=True, include_command=True):
     else:
         health = 'В работе. Запросов на вмешательство нет.'
     done, total = value.get('done', 0), value.get('total', 0)
-    lines = [health, f'Принято: {done} из {total} задач.' if total else 'План задач ещё не закреплён.']
+    lines = [health] + observation_lines(value)
+    lines.append(f'Принято: {done} из {total} задач.' if total else 'План задач ещё не закреплён.')
     if value.get('ready'):
         current = ['Сейчас: работа завершена.']
     elif value.get('status') == 'interrupted' or value.get('console_error'):
@@ -210,13 +314,12 @@ def dashboard(value, include_time=True, include_command=True):
         current = ['Сейчас: нет свежих данных об исполнении.']
     elif operations:
         current = []
-        for op in operations[:3]:
+        displayed = execution_operations + [op for op in operations if op.get('purpose') == 'observation']
+        for op in displayed[:3]:
             line = 'Сейчас: '
             if include_time:
                 line += elapsed(op['elapsed_seconds']) + ' · '
-            name = next((task_route.title(t) for t in tasks if t['id'] == op.get('task_id')), None)
-            line += (name + ' · ' + STAGES.get(op.get('phase'), op.get('phase', '')) + ' · ' + op.get('model', '')
-                     if name and op.get('kind') == 'llm' else op['title'])
+            line += operation_label(op, tasks)
             if op.get('timeout_seconds') and op['elapsed_seconds'] >= .8*op['timeout_seconds']:
                 line += ' (лимит ' + elapsed(op['timeout_seconds']) + ')'
             current.append(line)
@@ -233,13 +336,19 @@ def dashboard(value, include_time=True, include_command=True):
     if value.get('service_stop', {}).get('report'):
         lines.append('Отчёт об остановке: ' + value['service_stop']['report'])
     stopped = value.get('status') == 'interrupted' or bool(value.get('console_error'))
-    lines.extend(task_route.route(tasks, stopped=stopped))
+    if include_overview:
+        completed = [task_route.title(t) for t in tasks if t['status'] == 'done']
+        if completed:
+            lines.append('✓ ' + ' · '.join(completed))
+        lines.extend(task_route.route(tasks, stopped=stopped))
     active_rows = [t for t in tasks if t['status'] in ('running', 'waiting-user', 'blocked')]
     for task in active_rows:
         for candidate in task.get('candidates', []):
+            if not stopped and not value.get('telemetry_stale') and _candidate_is_active(task, candidate, operations):
+                continue
+            if candidate.get('status') == 'not-observed':
+                continue
             label = candidate_label(candidate)
-            if candidate.get('stage') in ('review', 'adjudicate') and candidate.get('status') == 'running':
-                label += ' другой моделью'
             prefix = '  Вариант ' if len(active_rows) == 1 else '  ' + task_route.title(task) + ' / '
             lines.append(prefix + ('сохранён: ' if stopped or value.get('telemetry_stale') else '') + label)
     if value.get('telemetry_stale') or value.get('telemetry_incomplete') or any('kind' not in op for op in operations):
@@ -258,8 +367,11 @@ def dashboard(value, include_time=True, include_command=True):
         waiting_answer = sum(c.get('status') == 'waiting-user' for c in candidates)
         if waiting_resource or waiting_answer:
             lines.append(f'Ожидают варианты: ресурс {waiting_resource}, ответ пользователя {waiting_answer}.')
-    if value.get('session_attempts') is not None:
+    if include_overview and value.get('session_attempts') is not None:
         lines.append('Попыток запуска LLM по журналам прогона: ' + str(value['session_attempts']) + ' (включая повторы).')
+    observation = value.get('observation') or {}
+    if include_overview and observation.get('report'):
+        lines.append('Отчёт аудиторов: ' + str(observation['report']))
     remaining = max(0, total-done)
     if value.get('ready'):
         lines.append('Осталось: 0 задач. Обязательные проверки завершены.')
