@@ -147,6 +147,20 @@ class ControllerServiceGuardTests(unittest.TestCase):
             self.assertIsNone(self.runner.cleanup_guard(54320))
             inspect.assert_not_called()
 
+    def test_recovered_inventory_diagnostics_survive_without_stopping_run(self):
+        inventory = self.inventory()
+        inventory['previous_attempts'] = [{'limitations': ['cwd-command-failed'],
+            'query_diagnostics': [{'argv': ['/usr/sbin/lsof'], 'returncode': 1, 'stderr': 'actual error'}]}]
+        with patch('controller.inspect_services', return_value=inventory):
+            self.runner.service_audit(self.inventory(), self.runner.root, 'fake')
+        reports = list((self.runner.root/'logs').glob('fake-services-*.json'))
+        self.assertEqual(len(reports), 1)
+        saved = controller.read(reports[0])
+        self.assertTrue(saved['collection_recovered'])
+        self.assertEqual(saved['inventory']['previous_attempts'][0]['query_diagnostics'][0]['stderr'], 'actual error')
+        self.assertFalse(self.runner.stop.is_set())
+        self.assertFalse((self.runner.root/'service-stop.json').exists())
+
     def test_incomplete_service_audit_is_recoverable_and_records_operator_reason(self):
         inventory = self.inventory(complete=False)
         inventory['limitations'] = ['listener-process-changed-or-unavailable']

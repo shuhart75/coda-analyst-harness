@@ -333,7 +333,7 @@ class Runner:
 
     def check_preserved_processes(self, roots=None):
         """Do not start another writer while a preserved process group is alive."""
-        inventory = inspect_services()
+        inventory = self.inspect_inventory('resume')
         if not inventory['complete']:
             raise Blocked('Cannot inspect managed processes before resume; run bootstrap --diagnose')
         processes = inventory.get('processes', [])
@@ -420,7 +420,7 @@ class Runner:
             if not process_scope_exists(group):
                 return None
             members = process_scope_pids(group)
-            inventory = inspect_services()
+            inventory = self.inspect_inventory('cleanup')
             observed = (inventory.get('processes', []) + inventory.get('agents', [])
                         + inventory.get('services', []))
             identities = []
@@ -461,8 +461,18 @@ class Runner:
         self.stop.set()
         return report
 
+    def inspect_inventory(self, name):
+        inventory = inspect_services()
+        recovered = inventory.get('complete') and inventory.get('previous_attempts')
+        if not inventory.get('complete') or recovered:
+            report = self.logdir(name + '-services').with_suffix('.json')
+            save(report, {'inventory': inventory, 'collection_recovered': bool(recovered)})
+            if recovered:
+                self.progress('Снимок процессов восстановлен после повторного сбора; отчёт: ' + str(report))
+        return inventory
+
     def service_audit(self, before, root, name):
-        after = inspect_services()
+        after = self.inspect_inventory(name)
         new_services = detect_new_services(before, after, root)
         if not after['complete'] or new_services:
             report = self.service_stop(after, new_services, name)
@@ -515,7 +525,7 @@ class Runner:
         prepare_permissions(under(root, cwd), role)
         before = snapshot(root, normalize_settings=True)
         controls = git_controls(root)
-        services_before = inspect_services()
+        services_before = self.inspect_inventory(name)
         if not services_before['complete']:
             report = self.service_stop(services_before, [], name)
             raise OperationalBlocked('Cannot inspect services before session; see ' + str(report))
@@ -871,7 +881,7 @@ executed test names/counts, not just a successful command or test compilation.
             self.guard()
             before = snapshot(root)
             controls = git_controls(root)
-            services_before = inspect_services()
+            services_before = self.inspect_inventory(name)
             if not services_before['complete']:
                 raise Blocked('Cannot inspect services before checks; run bootstrap --diagnose')
             self.check_existing_workspace_processes(services_before, root, name)

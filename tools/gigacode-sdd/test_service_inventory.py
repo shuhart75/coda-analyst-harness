@@ -22,6 +22,9 @@ class InventoryTests(unittest.TestCase):
         self.posix_platform = patch.object(inv.sys, 'platform', 'linux')
         self.posix_platform.start()
         self.addCleanup(self.posix_platform.stop)
+        self.sleep_patch = patch.object(inv.time, 'sleep')
+        self.sleep = self.sleep_patch.start()
+        self.addCleanup(self.sleep_patch.stop)
 
     def collect(self, process_rows, listeners='', cwd='', diagnostics=None):
         responses = [(process_rows, None), (listeners, None), (cwd, None)]
@@ -136,7 +139,7 @@ class InventoryTests(unittest.TestCase):
         self.assertIn('listener-process-changed-or-unavailable', result['limitations'])
         self.assertIn('listeners-command-diagnostic', result['limitations'])
 
-    def test_observed_pid_race_is_retried_only_once(self):
+    def test_observed_pid_race_stops_retrying_after_success(self):
         failed = {'complete': False, 'limitations': ['listener-process-changed-or-unavailable'],
                   'agents': [], 'services': []}
         passed = {'complete': True, 'limitations': [], 'agents': [], 'services': []}
@@ -145,6 +148,80 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(collect.call_count, 2)
         self.assertTrue(result['complete'])
         self.assertEqual(result['collection_attempts'], 2)
+
+    def test_combined_cwd_and_listener_failure_gets_bounded_fresh_retries(self):
+        failed = {'complete': False, 'limitations': ['agent-cwd-unavailable', 'cwd-command-failed',
+                  'listener-cwd-unavailable', 'listener-process-changed-or-unavailable']}
+        passed = {'complete': True, 'limitations': []}
+        with patch.object(inv, '_inspect_services_once', side_effect=[dict(failed), dict(failed), passed]) as collect:
+            result = inv.inspect_services()
+        self.assertEqual(collect.call_count, 3)
+        self.assertEqual(len(result['previous_attempts']), 2)
+        self.assertTrue(result['complete'])
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [.25, 1.0])
+        with patch.object(inv, '_inspect_services_once', side_effect=lambda: dict(failed)) as collect:
+            result = inv.inspect_services()
+        self.assertFalse(result['complete'])
+        self.assertEqual(collect.call_count, 3)
+
+    def test_nontransient_limitations_are_not_retried(self):
+        with patch.object(inv, '_inspect_services_once', return_value={'complete': False,
+                'limitations': ['lsof-unavailable']}) as collect:
+            result = inv.inspect_services()
+        self.assertEqual(collect.call_count, 1)
+        self.assertFalse(result['complete'])
+        self.sleep.assert_not_called()
+
+    def test_failed_command_diagnostics_preserve_partial_lsof_but_never_ps_arguments(self):
+        import subprocess
+        responses = [subprocess.CompletedProcess([], 0, row(120, 1, 120, '/bin/java --secret SECRET').encode(), b''),
+                     subprocess.CompletedProcess([], 1, b'p120\nn/work\n', b'lsof: actual failure')]
+        context = {'deadline': inv.time.monotonic()+10, 'queries': []}
+        token = inv._QUERY_CONTEXT.set(context)
+        try:
+            with patch.object(inv.subprocess, 'run', side_effect=responses):
+                inv._command(['/bin/ps', '-axo', 'pid=,ppid=,pgid=,uid=,lstart=,args='])
+                self.assertEqual(inv._command(['/usr/sbin/lsof', '-d', 'cwd']), (None, 'command-failed'))
+        finally:
+            inv._QUERY_CONTEXT.reset(token)
+        self.assertNotIn('SECRET', json.dumps(context))
+        self.assertEqual(context['queries'][1]['returncode'], 1)
+        self.assertEqual(context['queries'][1]['stderr'], 'lsof: actual failure')
+        self.assertEqual(context['queries'][1]['stdout'], 'p120\nn/work\n')
+
+    def test_parallel_collections_do_not_mix_query_diagnostics(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        barrier = threading.Barrier(2)
+        def collect():
+            label = threading.current_thread().name
+            inv._QUERY_CONTEXT.get()['queries'].append({'owner': label})
+            barrier.wait(timeout=5)
+            return {'complete': True, 'limitations': [], 'owner': label}
+        with patch.object(inv, '_inspect_services_once', side_effect=collect), ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(inv.inspect_services) for _ in range(2)]
+            results = [future.result() for future in futures]
+        self.assertNotEqual(results[0]['owner'], results[1]['owner'])
+        for result in results:
+            self.assertEqual(result['query_diagnostics'], [{'owner': result['owner']}])
+        self.assertIsNone(inv._QUERY_CONTEXT.get())
+
+    def test_collection_deadline_prevents_more_commands_and_retries(self):
+        context = {'deadline': inv.time.monotonic()-1, 'queries': []}
+        token = inv._QUERY_CONTEXT.set(context)
+        try:
+            with patch.object(inv.subprocess, 'run') as run:
+                self.assertEqual(inv._command(['/bin/ps']), (None, 'command-unavailable-or-timeout'))
+            run.assert_not_called()
+        finally:
+            inv._QUERY_CONTEXT.reset(token)
+        def exhausted():
+            inv._QUERY_CONTEXT.get()['deadline'] = inv.time.monotonic()-1
+            return {'complete': False, 'limitations': ['cwd-command-failed']}
+        with patch.object(inv, '_inspect_services_once', side_effect=exhausted) as collect:
+            self.assertFalse(inv.inspect_services()['complete'])
+        self.assertEqual(collect.call_count, 1)
+        self.sleep.assert_not_called()
 
     def test_complete_inventory_includes_reconciled_listener_and_cwd(self):
         original = row(120, 1, 120, '/usr/bin/other')

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from contextvars import ContextVar
 import json
 import ntpath
 import os
@@ -17,23 +18,58 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 
 
+_QUERY_CONTEXT = ContextVar('inventory_query_context', default=None)
+COLLECTION_SECONDS = 45
+RETRY_DELAYS = (.25, 1.0)
+TRANSIENT_LIMITATIONS = {
+    'listener-process-changed-or-unavailable', 'listener-cwd-unavailable',
+    'database-cwd-unavailable', 'agent-cwd-unavailable',
+    'listener-ancestry-incomplete', 'agent-ancestry-incomplete', 'process-table-unavailable',
+} | {prefix + '-' + error for prefix in ('ps', 'listeners', 'cwd')
+     for error in ('command-failed', 'command-diagnostic', 'command-unavailable-or-timeout')}
+
+
 def _command(argv):
+    context = _QUERY_CONTEXT.get()
+    started = time.monotonic()
+    timeout = min(20, max(0, context['deadline']-started)) if context else 20
+    result, failure = None, None
+    stdout, stderr = b'', b''
     try:
+        if timeout <= 0:
+            raise subprocess.TimeoutExpired(argv, 0)
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                timeout=20, check=False, env={**os.environ, 'LC_ALL': 'C'})
-    except (OSError, subprocess.TimeoutExpired):
+                                stderr=subprocess.PIPE, timeout=timeout, check=False,
+                                env={**os.environ, 'LC_ALL': 'C'})
+        stdout, stderr = result.stdout, result.stderr
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        failure = {'type': type(exc).__name__, 'errno': getattr(exc, 'errno', None)}
+        if isinstance(exc, subprocess.TimeoutExpired):
+            stdout, stderr = exc.output or b'', exc.stderr or b''
+        else:
+            failure['message'] = exc.strerror
+    if context is not None:
+        entry = {'argv': list(argv), 'returncode': result.returncode if result is not None else None,
+                 'elapsed_seconds': round(time.monotonic()-started, 3), 'timeout_seconds': timeout}
+        if failure:
+            entry['failure'] = failure
+        entry.update(stderr=stderr.decode('utf-8', 'replace')[:8192],
+                     stderr_truncated=len(stderr) > 8192, stdout_bytes=len(stdout))
+        # ps stdout contains arbitrary process arguments. Never persist it.
+        if Path(argv[0]).name == 'lsof':
+            entry.update(stdout=stdout[:16384].decode('utf-8', 'replace'),
+                         stdout_truncated=len(stdout) > 16384)
+        context['queries'].append(entry)
+    if failure:
         return None, 'command-unavailable-or-timeout'
-    # lsof returns 1 when its selection has no matches. Empty output without a
-    # diagnostic is therefore an ordinary empty result, not a failed inventory.
+    # Keep partial stdout in diagnostics, but do not accept a failed query.
     if result.returncode and not (Path(argv[0]).name == 'lsof' and result.returncode == 1
                                  and not result.stdout.strip() and not result.stderr.strip()):
         return None, 'command-failed'
-    # Text-mode universal newlines would turn a CR inside an argument into a
-    # new process row. Decode without altering the command's record delimiters.
     return result.stdout.decode('utf-8', 'replace'), 'command-diagnostic' if result.stderr.strip() else None
 
 
@@ -303,17 +339,31 @@ def _inspect_services_once():
 
 
 def inspect_services():
-    """Collect one snapshot, retrying once for an observed PID/cwd race only."""
-    result = _inspect_services_once()
-    result['collection_attempts'] = 1
-    race_limits = {'listener-process-changed-or-unavailable', 'listener-cwd-unavailable', 'database-cwd-unavailable'}
-    other_limits = set(result['limitations']) - race_limits
-    if race_limits.intersection(result['limitations']) and not other_limits:
-        previous = {k: result.get(k) for k in ('limitations', 'listener_reconciliation')}
-        result = _inspect_services_once()
-        result['previous_attempt'] = previous
-        result['collection_attempts'] = 2
-    return result
+    """Bounded fresh snapshots; a recovered query never grants process-control permission."""
+    started = time.monotonic()
+    context = {'deadline': started + COLLECTION_SECONDS, 'queries': []}
+    token = _QUERY_CONTEXT.set(context)
+    history = []
+    try:
+        for attempt in range(len(RETRY_DELAYS) + 1):
+            context['queries'] = []
+            result = _inspect_services_once()
+            result['query_diagnostics'] = context['queries']
+            result['collection_attempts'] = attempt + 1
+            limitations = set(result.get('limitations', []))
+            if result.get('complete') or not limitations or not limitations <= TRANSIENT_LIMITATIONS:
+                break
+            if attempt == len(RETRY_DELAYS) or time.monotonic() + RETRY_DELAYS[attempt] >= context['deadline']:
+                break
+            history.append({k: result.get(k) for k in
+                            ('limitations', 'listener_reconciliation', 'query_diagnostics')})
+            time.sleep(RETRY_DELAYS[attempt])
+        if history:
+            result['previous_attempts'] = history
+        result['collection_elapsed_seconds'] = round(time.monotonic()-started, 3)
+        return result
+    finally:
+        _QUERY_CONTEXT.reset(token)
 
 
 def assess_handoff(repo, inventory):
