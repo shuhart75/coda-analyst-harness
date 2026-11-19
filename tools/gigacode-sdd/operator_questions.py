@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import sys
@@ -71,7 +72,7 @@ def _load(path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def request(root, task, topic, question, *, options=None, details=None, generation='', model=None):
+def request(root, task, topic, question, *, options=None, details=None, generation='', model=None, action=None):
     from controller import save
     if not all(isinstance(v, str) and v.strip() for v in (task, topic, question)):
         raise ValueError('Question needs a task, topic and readable question')
@@ -87,6 +88,8 @@ def request(root, task, topic, question, *, options=None, details=None, generati
         path = folder / (key + '.json')
         if path.exists():
             value = _load(path)
+            if action is not None and value.get('action') != action:
+                raise ValueError('Question action changed; preserve the previous decision')
             variant = {'model': model, 'question': question, 'details': details}
             if variant not in value['requests']:
                 value['requests'].append(variant)
@@ -95,6 +98,8 @@ def request(root, task, topic, question, *, options=None, details=None, generati
             value = {'id': key, 'binding': bound, 'task': task, 'topic': topic,
                      'question': question, 'options': options, 'created_at': time.time(),
                      'requests': [{'model': model, 'question': question, 'details': details}]}
+            if action is not None:
+                value['action'] = action
             save(path, value)
     return key
 
@@ -133,6 +138,8 @@ def answer(root, question_id, text, explanation=''):
             raise ValueError('Question already answered/resolved; previous decision preserved')
         value = {'question': question_id, 'binding': current[question_id]['binding'],
                  'text': text.strip(), 'explanation': explanation.strip(), 'answered_at': time.time()}
+        if current[question_id].get('action') is not None:
+            value['action_sha256'] = fingerprint(current[question_id]['action'])
         save(path, value)
     return value
 
@@ -183,19 +190,96 @@ def interact(config, ui):
                   'Если запуск остановлен, выберите продолжение в обычном мастере.')
 
 
+class InvalidControlRequest(ValueError):
+    """An explicit request exists, but choosing an action would be ambiguous."""
+
+
 def control_result(text):
-    """Only an explicit machine envelope asks a question; ordinary prose stays prose."""
+    """Extract explicit control objects, independently of review verdict parsing.
+
+    Prose and diff blocks are presentation. They never become executable actions.
+    Multiple distinct requests or a malformed explicit request require clarification.
+    """
     from controller import parse_json, Blocked
+    kinds = ('operator_question', 'scope_request', 'service_request', 'service_action')
+    documents, invalid = [], False
+    blocks = list(re.finditer(r'^[ \t]*```([^\n`]*)\n(.*?)^[ \t]*```[ \t]*$', text, re.M | re.S))
+    if blocks:
+        for block in blocks:
+            if block[1].strip().lower() not in ('', 'json'):
+                continue
+            try:
+                documents.append(json.loads(block[2]))
+            except ValueError:
+                invalid |= any(re.search(r'"' + kind + r'"\s*:', block[2]) for kind in kinds)
+    else:
+        try:
+            documents.append(parse_json(text))
+        except (Blocked, ValueError, TypeError):
+            invalid = any(re.search(r'"' + kind + r'"\s*:', text) for kind in kinds)
+    requests = {}
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        for kind in kinds:
+            if kind in document:
+                if not isinstance(document[kind], dict):
+                    invalid = True
+                else:
+                    requests[fingerprint([kind, document[kind]])] = (kind, document[kind])
+    if invalid or len(requests) > 1:
+        raise InvalidControlRequest('Explicit request is malformed or contains competing actions')
+    if not requests:
+        return None
+    kind, original = next(iter(requests.values()))
+    if kind != 'operator_question':
+        return kind, original
+    value = dict(original)
+    question = value.get('question') or value.get('request') or value.get('message')
+    if not isinstance(question, str) or not question.strip():
+        raise InvalidControlRequest('Explicit question has no readable question text')
+    topic = value.get('topic') or value.get('subject')
+    if not isinstance(topic, str) or not topic.strip():
+        topic = 'question-' + fingerprint(question)[:20]
+    value.update(topic=topic, question=question)
+    extra = {k: v for k, v in original.items() if k not in ('question', 'request', 'message', 'topic', 'subject', 'options', 'details')}
+    if extra:
+        value['details'] = {'details': original.get('details'), 'context': extra}
+    return kind, value
+
+
+def control_or_question(text):
     try:
-        value = parse_json(text)
-    except (Blocked, ValueError, TypeError):
-        return None
-    if not isinstance(value, dict):
-        return None
-    for kind in ('operator_question', 'service_request', 'service_action'):
-        if kind in value and isinstance(value[kind], dict):
-            return kind, value[kind]
-    return None
+        return control_result(text)
+    except InvalidControlRequest as exc:
+        return 'operator_question', {
+            'topic': 'clarify-control-' + fingerprint(text)[:20],
+            'question': 'Модель запросила решение, но запрос неоднозначен. Как следует продолжить?',
+            'details': {'diagnostic': str(exc), 'model_output': text[:32000]}}
+
+
+def register(runner, task, value, control):
+    """Store questions without interpreting model patches as executable code."""
+    import scope_repair
+    kind, request_data = control
+    if scope_repair.is_request(kind, request_data):
+        try:
+            return scope_repair.prepare(runner, task, value, request_data)
+        except ValueError as exc:
+            return request(runner.root, task['id'], 'scope-unavailable-' + fingerprint(request_data)[:20],
+                'Нужное исправление выходит за область задачи и не может быть автоматически разрешено. '
+                'Как изменить план или устранить внешнюю причину?',
+                details={'reason': str(exc), 'model_request': request_data,
+                         'rule': 'Этот ответ не расширяет область записи; защищённые пути и независимые задачи сохраняют свои границы.'},
+                model=value['model'])
+    try:
+        return request(runner.root, task['id'], request_data.get('topic'), request_data.get('question'),
+            options=request_data.get('options'), details=request_data.get('details'),
+            generation=value.get('answer_generation', ''), model=value['model'])
+    except (ValueError, TypeError) as exc:
+        return request(runner.root, task['id'], 'clarify-question-' + fingerprint(request_data)[:20],
+            'Модель запросила решение. Уточните, как следует продолжить.',
+            details={'diagnostic': str(exc), 'model_request': request_data}, model=value['model'])
 
 
 PROMPT = '''If a required business/environment fact needs a human answer, do not guess or spin.
@@ -203,6 +287,10 @@ Finish independent permitted work, then return JSON
 {"operator_question":{"topic":"stable-short-topic","question":"clear question in Russian",
 "options":["choice 1","choice 2"],"details":"why this answer is needed"}}.
 Use the same topic for the same decision across attempts. A question is not a failure or acceptance.
+For a necessary repair outside task.writes, report an explicit request:
+{"scope_request":{"paths":["exact/repository-relative/existing-file"],"reason":"defect and failed check"}}.
+Do not edit these files yet. The controller can propose a narrowly approved repair of an accepted
+predecessor's file, preserve the pinned plan, then rerun all checks and independent review.
 Do not ask for permission to bypass corporate policy. Answers cannot waive requirements/checks.
 For a necessary persistent local service, do NOT start it from an agent shell. Return
 {"service_request":{"id":"stable-service-name","cwd":"repository-relative directory",
