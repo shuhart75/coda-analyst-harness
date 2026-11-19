@@ -7,7 +7,15 @@ import operator_questions as oq
 STAGES = {'execute': 'разработка', 'checks': 'обязательные проверки', 'review': 'независимое ревью',
           'adjudicate': 'разбор замечаний', 'accepted': 'вариант проверен'}
 STATUSES = {'pending': 'ожидает запуска', 'done': 'принято', 'running': 'в работе',
-            'blocked': 'заблокировано', 'waiting-user': 'нужен ответ', 'interrupted': 'остановлено'}
+            'blocked': 'заблокировано', 'waiting-user': 'нужен ответ', 'interrupted': 'остановлено',
+            'waiting-retry': 'пауза перед повтором', 'complete': 'завершено'}
+
+
+def candidate_label(value):
+    phase = STAGES.get(value['stage'], value['stage'])
+    if value['status'] in ('waiting-user', 'waiting-retry', 'interrupted'):
+        phase = STATUSES[value['status']] + ' (' + phase + ')'
+    return value['model'] + ': ' + phase
 
 
 def candidate(runner, task, value):
@@ -58,7 +66,7 @@ def render(value):
         if row['status'] == 'pending' and row['waiting_for']:
             line += '; после ' + ', '.join(row['waiting_for'])
         if row['status'] == 'running':
-            line += '; ' + '; '.join(p['model'] + ': ' + STAGES.get(p['stage'], p['stage']) +
+            line += '; ' + '; '.join(candidate_label(p) +
                 (' (ждёт ресурс)' if (p.get('resource_wait') or {}).get('state') == 'waiting' else '')
                 for p in row['candidates'])
         if row['status'] in ('blocked', 'waiting-user') and row['error']:

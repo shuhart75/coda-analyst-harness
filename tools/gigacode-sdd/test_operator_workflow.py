@@ -70,6 +70,11 @@ class MailboxTests(unittest.TestCase):
 
 
 class ContributionTests(unittest.TestCase):
+    def test_waiting_model_is_not_displayed_as_active_development(self):
+        label = run_status.candidate_label({'model': 'model', 'stage': 'execute', 'status': 'waiting-user'})
+        self.assertIn('нужен ответ', label)
+        self.assertIn('разработка', label)
+
     def test_downstream_proof_is_required_but_not_an_implementation_prerequisite(self):
         task = {'id': 'frontend', 'requirements': ['REQ-LIVE'], 'depends_on': []}
         plan = {'tasks': [task, {'id': 'stand', 'depends_on': ['frontend']},
