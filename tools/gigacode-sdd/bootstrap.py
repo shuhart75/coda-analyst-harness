@@ -451,13 +451,13 @@ def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False
             active = True
         if active:
             ui.notify('Этот запуск уже работает. Можно посмотреть прогресс и ответить на вопросы.')
-            ui.notify(run_status.render(run_status.snapshot(saved_root)))
+            ui.notify(run_status.dashboard(run_status.snapshot(saved_root)))
             operator_questions.interact(previous[0]['config'], ui)
             return 0
         mode = ui.choose('Что сделать?', ['Продолжить сохранённую работу (' + previous[0]['status'] + ')',
                                          'Новая работа', 'Только диагностика', 'Прогресс и ответы на вопросы'])
         if mode == 3:
-            ui.notify(run_status.render(run_status.snapshot(saved_root)))
+            ui.notify(run_status.dashboard(run_status.snapshot(saved_root)))
             operator_questions.interact(previous[0]['config'], ui)
             return 0
         if mode == 2:
@@ -558,7 +558,7 @@ def main(argv=None):
             config = args.answers_config or args.status_config
             if not config.is_file():
                 raise Blocked('Configuration file not found')
-            print(run_status.render(run_status.snapshot(config.resolve().parent)))
+            print(run_status.dashboard(run_status.snapshot(config.resolve().parent)))
             if args.answers_config:
                 operator_questions.interact(config, ConsoleUI())
             return 0

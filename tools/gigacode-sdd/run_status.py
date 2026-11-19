@@ -53,7 +53,10 @@ def snapshot(root, state=None):
         services.append({'id': value['spec']['id'], 'status': value['status'],
                          'health': value['spec']['health'], 'log': value.get('log')})
     readiness = read(root / 'readiness.json') if (root / 'readiness.json').is_file() else {}
-    return {'status': state.get('status'), 'tasks': rows,
+    runtime = read(root / 'console-status.json') if (root / 'console-status.json').is_file() else {}
+    stale = bool(runtime) and state.get('status') == 'running' and time.time()-runtime.get('observed_at', 0) > 90
+    return {'operations': runtime.get('operations', []), 'telemetry_stale': stale,
+            'status': state.get('status'), 'tasks': rows,
             'done': sum(r['status'] == 'done' for r in rows), 'total': len(rows),
             'questions': questions, 'answer_command': oq.command(root), 'services': services,
             'integration': state.get('integration', {}).get('status'),
@@ -119,5 +122,80 @@ def publish(runner, force=False):
     save(runner.root / 'progress.json', value)
     if rendered:
         runner.progress(rendered)
+    display = getattr(runner, '_display', None)
+    if display is not None and hasattr(display, 'summary'):
+        display.summary(value)
+        pending = [(q['id'], q['question']) for q in value['questions']]
+        if pending and pending != getattr(runner, '_console_questions', None):
+            display.notice('Нужен ваш ответ. Для просмотра вопросов и ответа выполните в другом окне:\n' + value['answer_command'])
+        runner._console_questions = pending
     runner._last_progress_snapshot = value
     return value
+
+def dashboard(value, include_time=True, include_command=True):
+    """Answer operator questions without equating activity with correctness."""
+    from progress import elapsed
+    tasks = value.get('tasks', [])
+    operations = value.get('operations', [])
+    questions = value.get('questions', [])
+    blocked = [t['id'] for t in tasks if t['status'] == 'blocked']
+    near_limit = any(op.get('timeout_seconds') and op['elapsed_seconds'] >= .8*op['timeout_seconds'] for op in operations)
+    quiet = any(op.get('idle_seconds') is not None and op['idle_seconds'] >= 300 for op in operations)
+    if value.get('console_error'):
+        health = 'Запуск остановлен с ошибкой. Нужна проверка журнала.'
+    elif value.get('ready'):
+        health = 'Завершено. Итоговая проверка пройдена.'
+    elif value.get('status') == 'interrupted':
+        health = 'Работа остановлена. Для продолжения запустите мастер.'
+    elif questions:
+        health = 'Нужен ваш ответ: вопросов ' + str(len(questions)) + '.'
+        if operations:
+            health += ' Независимая работа продолжается.'
+    elif blocked or value.get('integration') == 'blocked' or value.get('status') == 'blocked':
+        health = 'Есть блокировка. Требуется вмешательство; подробности в журнале.'
+    elif value.get('telemetry_stale'):
+        health = 'Сводка устарела. Текущее состояние процесса неизвестно.'
+    elif near_limit:
+        health = 'Долгий этап: близок лимит времени. Автоматический контроль продолжается.'
+    elif quiet:
+        health = 'Давно нет новых событий. Автоматический контроль продолжается.'
+    else:
+        health = 'В работе. Запросов на вмешательство нет.'
+    done, total = value.get('done', 0), value.get('total', 0)
+    lines = [health, f'Принято: {done} из {total} задач.' if total else 'План задач ещё не закреплён.']
+    if value.get('ready'):
+        current = ['Сейчас: работа завершена.']
+    elif value.get('status') == 'interrupted' or value.get('console_error'):
+        current = ['Сейчас: исполнение остановлено.']
+    elif value.get('telemetry_stale'):
+        current = ['Сейчас: нет свежих данных об исполнении.']
+    elif operations:
+        current = []
+        for op in operations[:3]:
+            line = 'Сейчас: ' + op['title']
+            if include_time:
+                line += ' · ' + elapsed(op['elapsed_seconds'])
+            if op.get('timeout_seconds') and op['elapsed_seconds'] >= .8*op['timeout_seconds']:
+                line += ' (лимит ' + elapsed(op['timeout_seconds']) + ')'
+            current.append(line)
+        if len(operations) > 3:
+            current.append('Других активных операций: ' + str(len(operations)-3))
+    elif blocked:
+        current = ['Заблокировано: ' + ', '.join(blocked[:3])]
+    elif questions:
+        current = ['Сейчас: ожидание ответа.']
+    else:
+        active = [t['id'] for t in tasks if t['status'] == 'running']
+        current = ['Сейчас: ' + (', '.join(active[:3]) + '; подготовка следующего шага.' if active else 'подготовка следующего шага.')]
+    lines.extend(current)
+    remaining = max(0, total-done)
+    if value.get('ready'):
+        lines.append('Осталось: 0 задач. Обязательные проверки завершены.')
+    elif total:
+        lines.append(('Осталось: ' + str(remaining) + ' задач и итоговая проверка.' if remaining else
+                      'Осталась итоговая проверка.') + ' Оценки времени пока нет.')
+    else:
+        lines.append('Остаток будет известен после проверки плана.')
+    if questions and include_command:
+        lines.append('Для ответа выполните в другом окне:\n' + value['answer_command'])
+    return '\n'.join(lines)

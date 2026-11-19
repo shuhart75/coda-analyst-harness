@@ -31,7 +31,8 @@ import operator_questions
 import run_status
 import task_acceptance
 import managed_services
-from progress import Progress, SESSION_IDENTITY, elapsed
+from progress import SESSION_IDENTITY
+from console_progress import ConsoleProgress
 from session_outcome import classify as session_outcome
 
 class Blocked(RuntimeError):
@@ -257,7 +258,7 @@ class Runner:
         self._probed = set()
         self._preflight_reports = []
         self._report_lock = threading.Lock()
-        self._display = Progress()
+        self._display = ConsoleProgress(self.root / 'logs' / 'controller.log')
         self._config_digest = digest(self.config_path)
         self.services = managed_services.Manager(self)
 
@@ -268,8 +269,8 @@ class Runner:
         self._display.message(message)
 
     @contextmanager
-    def activity(self, label):
-        with self._display.activity(label) as token:
+    def activity(self, label, **kwargs):
+        with self._display.activity(label, **kwargs) as token:
             yield token
 
     @contextmanager
@@ -305,6 +306,7 @@ class Runner:
                 finally:
                     for sig, handler in old.items():
                         signal.signal(sig, handler)
+                    self._display.close(status=self.state.get('status'), failed=failure is not None)
                     diagnostics.report(self.config_path, error=failure)
         finally:
             lock.__exit__(None, None, None)
@@ -541,19 +543,20 @@ class Runner:
         activity = (activity + ' / ' if activity else '') + 'Сессия ' + name + ' / ' + cwd + ' / ' + role
         if model and not identity:
             activity += ' / ' + model
-        with self.activity(activity) as activity_token:
+        limit = (min(300, self.cfg['session_timeout']) if name == 'preflight' else
+                 min(900, self.cfg['session_timeout']) if name == 'plan-review' else self.cfg['session_timeout'])
+        phase = run_status.STAGES.get(name.rsplit('-', 1)[-1], 'проверка возможностей' if name == 'preflight' else role)
+        task_name = name.rsplit('-', 1)[0] if name.endswith(('-execute', '-review', '-adjudicate')) else name
+        title = task_name + ' · ' + phase + (' · ' + model if model else '')
+        with self.activity(activity, title=title, timeout=limit) as activity_token:
             cli = [*self.cfg['cli'], '--model', model] if model else self.cfg['cli']
             result = run_session(cli, under(root, cwd), full_prompt,
                              session_log, approval_mode='plan' if role == 'review' else self.cfg['approval_mode'],
-                             timeout_seconds=min(300, self.cfg['session_timeout']) if name == 'preflight'
-                                             else min(900, self.cfg['session_timeout']) if name == 'plan-review'
-                                             else self.cfg['session_timeout'],
+                             timeout_seconds=limit,
                              env=self.env, stop_event=stop_event if stop_event is not None else self.stop,
                              cleanup_guard=self.cleanup_guard,
                              idle_timeout_seconds=self.cfg.get('session_idle_timeout', 900),
-                             activity_callback=lambda data: self._display.detail(activity_token,
-                                 'событий ' + str(data['events']) + '; без записи ' +
-                                 elapsed(data['idle_seconds']) + '; ждут ' + str(data['pending_calls'])))
+                             activity_callback=lambda data: self._display.telemetry(activity_token, data))
         if (result.get('cleanup') or {}).get('preserved'):
             self.preserve_cleanup(result['cleanup'])
             save(session_log / 'transport-result.json', result)
@@ -863,7 +866,7 @@ executed test names/counts, not just a successful command or test compilation.
                                       stderr=subprocess.STDOUT)
                 deadline = time.monotonic() + check.get('timeout', 600)
                 timed_out = False
-                token = self._display.start('Проверка ' + name + ' ' + str(len(reports)+1) + '/' + str(len(checks)))
+                token = self._display.start('Проверка ' + name + ' ' + str(len(reports)+1) + '/' + str(len(checks)), timeout=check.get('timeout', 600))
                 outcome = 'остановка с ошибкой'
                 try:
                     while proc.poll() is None and not stopping.is_set():
@@ -962,6 +965,7 @@ executed test names/counts, not just a successful command or test compilation.
 
     def start(self, retry_blocked=False):
         operator_input.reconcile(self)
+        self._display.notice('Подробный журнал: ' + str(self.root / 'logs' / 'controller.log'))
         self.progress('Запуск сохранённой работы. Каталог: ' + str(self.root))
         expected = {'config_sha256': digest(self.config_path), 'passed': True}
         if self.state.get('preflight') != expected:
