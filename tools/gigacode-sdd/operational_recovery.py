@@ -16,9 +16,10 @@ def eligible(fatal):
 
 
 def failure_record(exc, scope):
+    from controller import OperationalBlocked
     # Keep frames, not locals or source lines which may contain sensitive input.
     return {'error': str(exc), 'type': type(exc).__name__, 'scope': scope,
-            'category': 'operational' if isinstance(exc, OSError) else 'safety',
+            'category': 'operational' if isinstance(exc, (OSError, OperationalBlocked)) else 'safety',
             'errno': getattr(exc, 'errno', None),
             'frames': [{'file': Path(f.filename).name, 'line': f.lineno, 'function': f.name}
                        for f in traceback.extract_tb(exc.__traceback__)]}

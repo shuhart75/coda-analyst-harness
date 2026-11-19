@@ -306,6 +306,8 @@ class Runner:
                 finally:
                     for sig, handler in old.items():
                         signal.signal(sig, handler)
+                    if (self.root / 'service-stop.json').is_file():
+                        run_status.publish(self)
                     self._display.close(status=self.state.get('status'), failed=failure is not None)
                     diagnostics.report(self.config_path, error=failure)
         finally:
@@ -445,16 +447,30 @@ class Runner:
             return {**diagnostic, 'report': str(path)}
         return None
 
+    def service_stop(self, inventory, new_services, name):
+        report = self.logdir(name + '-services').with_suffix('.json')
+        save(report, {'inventory': inventory, 'new_workspace_services': new_services})
+        reason = ('Обнаружен новый сервис рабочей копии; нужна проверка его принадлежности.' if new_services else
+                  'Не удалось согласовать снимок процессов и сервисов; автоматическая остановка обвязки.')
+        with self._report_lock:
+            stop_path = self.root / 'service-stop.json'
+            previous = read(stop_path) if stop_path.is_file() else {}
+            if new_services or not previous.get('new_service_count'):
+                save(stop_path, {'reason': reason, 'report': str(report),
+                     'limitations': inventory.get('limitations', []), 'new_service_count': len(new_services)})
+        self.stop.set()
+        return report
+
     def service_audit(self, before, root, name):
         after = inspect_services()
         new_services = detect_new_services(before, after, root)
         if not after['complete'] or new_services:
-            report = self.logdir(name + '-services').with_suffix('.json')
-            save(report, {'inventory': after, 'new_workspace_services': new_services})
+            report = self.service_stop(after, new_services, name)
             for service in new_services:
                 save(self.root / 'preserved-services' / (str(service['pid']) + '.json'), service)
             self.stop.set()
-            raise Blocked('Service inspection requires attention; no automatic service shutdown. See ' + str(report))
+            error = Blocked if new_services else OperationalBlocked
+            raise error('Service inspection requires attention; no automatic service shutdown. See ' + str(report))
 
     def logdir(self, name):
         return self.root / 'logs' / (name + '-' + uuid.uuid4().hex[:12])
@@ -501,7 +517,8 @@ class Runner:
         controls = git_controls(root)
         services_before = inspect_services()
         if not services_before['complete']:
-            raise Blocked('Cannot inspect services before session; run bootstrap --diagnose')
+            report = self.service_stop(services_before, [], name)
+            raise OperationalBlocked('Cannot inspect services before session; see ' + str(report))
         self.check_existing_workspace_processes(services_before, root, name)
         context = (make_policy_prompt(self.cfg['nexus']['nexus_hosts'], role)
                    if name == 'preflight' else self.context(role, name in ('plan', 'plan-review')))
@@ -1005,6 +1022,7 @@ executed test names/counts, not just a successful command or test compilation.
                     self.integrate(task, record)
                 else:
                     record['status'] = 'pending'
+        (self.root / 'service-stop.json').unlink(missing_ok=True)
         self.state['status'] = 'running'
         self.persist()
         run_status.publish(self, force=True)

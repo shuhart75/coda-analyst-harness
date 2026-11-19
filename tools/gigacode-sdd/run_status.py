@@ -84,7 +84,8 @@ def snapshot(root, state=None):
     except OSError:
         attempts = None
         problems.append('session-attempt-count-unavailable')
-    return {'session_attempts': attempts, 'jobs': config.get('jobs'),
+    service_stop = read_projection(root/'service-stop.json', problems) if (root/'service-stop.json').is_file() else {}
+    return {'service_stop': service_stop, 'session_attempts': attempts, 'jobs': config.get('jobs'),
             'operations': runtime.get('operations', []), 'telemetry_stale': stale,
             'telemetry_incomplete': bool(problems),
             'status': state.get('status'), 'tasks': rows,
@@ -175,7 +176,9 @@ def dashboard(value, include_time=True, include_command=True):
     blocked = [t['id'] for t in tasks if t['status'] == 'blocked']
     near_limit = any(op.get('timeout_seconds') and op['elapsed_seconds'] >= .8*op['timeout_seconds'] for op in operations)
     quiet = any(op.get('idle_seconds') is not None and op['idle_seconds'] >= 300 for op in operations)
-    if value.get('console_error'):
+    if value.get('service_stop'):
+        health = value['service_stop']['reason']
+    elif value.get('console_error'):
         health = 'Запуск остановлен с ошибкой. Нужна проверка журнала.'
     elif value.get('ready'):
         health = 'Завершено. Итоговая проверка пройдена.'
@@ -227,6 +230,8 @@ def dashboard(value, include_time=True, include_command=True):
         active = [t['id'] for t in tasks if t['status'] == 'running']
         current = ['Сейчас: ' + (', '.join(active[:3]) + '; подготовка следующего шага.' if active else 'подготовка следующего шага.')]
     lines.extend(current)
+    if value.get('service_stop', {}).get('report'):
+        lines.append('Отчёт об остановке: ' + value['service_stop']['report'])
     stopped = value.get('status') == 'interrupted' or bool(value.get('console_error'))
     lines.extend(task_route.route(tasks, stopped=stopped))
     active_rows = [t for t in tasks if t['status'] in ('running', 'waiting-user', 'blocked')]

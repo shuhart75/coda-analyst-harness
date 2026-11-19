@@ -29,7 +29,7 @@ class InventoryTests(unittest.TestCase):
             responses = [(text, diagnostics.get(index)) for index, (text, _) in enumerate(responses)]
         with patch.object(inv.shutil, 'which', side_effect=lambda name: '/usr/bin/' + name), \
                 patch.object(inv.os, 'getuid', return_value=501, create=True), \
-                patch.object(inv, '_command', side_effect=responses * 2):
+                patch.object(inv, '_command', side_effect=lambda argv: responses[0 if '-axo' in argv else 2 if 'cwd' in argv else 1]):
             return inv.inspect_services()
 
     def test_agent_ancestry_and_process_group_survive_sanitization(self):
@@ -145,6 +145,46 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(collect.call_count, 2)
         self.assertTrue(result['complete'])
         self.assertEqual(result['collection_attempts'], 2)
+
+    def test_complete_inventory_includes_reconciled_listener_and_cwd(self):
+        original = row(120, 1, 120, '/usr/bin/other')
+        fresh = original + row(121, 1, 121, '/usr/bin/java')
+        with patch.object(inv.shutil, 'which', side_effect=lambda name: '/usr/bin/' + name), \
+                patch.object(inv.os, 'getuid', return_value=501, create=True), \
+                patch.object(inv, '_command', side_effect=[(original, None), ('p121\nn*:8081\n', None),
+                    (fresh, None), ('p121\nn*:8081\n', None), (fresh, None), ('p121\nn/work/stand\n', None)]):
+            result = inv.inspect_services()
+        self.assertTrue(result['complete'], result)
+        self.assertEqual(result['collection_attempts'], 1)
+        self.assertEqual(result['services'][0]['pid'], 121)
+        self.assertEqual(result['services'][0]['cwd'], '/work/stand')
+
+    def test_listener_born_after_ps_is_reconciled_with_stable_identity(self):
+        before = {120: {'pid': 120, 'uid': 501}}
+        with patch.object(inv, '_command', side_effect=[
+                (row(121, 1, 121, '/usr/bin/java'), None), ('p121\nn*:8081\n', None),
+                (row(121, 1, 121, '/usr/bin/java'), None)]):
+            processes, listeners, evidence = inv._reconcile_listeners('ps', 'lsof', 501, before, {121: {8081}})
+        self.assertEqual(processes[121]['uid'], 501)
+        self.assertEqual(listeners[121], {8081})
+        self.assertEqual(evidence[0]['resolution'], 'stable-current-user-listener')
+
+    def test_exited_listener_needs_absence_on_both_sides_of_lsof(self):
+        with patch.object(inv, '_command', side_effect=[('', None), ('', None), ('', None)]):
+            _, listeners, evidence = inv._reconcile_listeners('ps', 'lsof', 501, {}, {121: {8081}})
+        self.assertEqual(listeners, {})
+        self.assertEqual(evidence[0]['resolution'], 'exited')
+
+    def test_changed_identity_or_failed_query_remains_unresolved(self):
+        for after, error in [(row(121, 1, 121, '/usr/bin/java', uid=999), None),
+                             (row(121, 1, 121, '/usr/bin/java').replace('10:20:30', '10:20:31'), None),
+                             ('', 'command-failed')]:
+            with self.subTest(after=after, error=error), patch.object(inv, '_command', side_effect=[
+                    (row(121, 1, 121, '/usr/bin/java'), None), ('p121\nn*:8081\n', None), (after, error)]):
+                processes, listeners, evidence = inv._reconcile_listeners('ps', 'lsof', 501, {}, {121: {8081}})
+            self.assertNotIn(121, processes)
+            self.assertIn(121, listeners)
+            self.assertEqual(evidence[0]['resolution'], 'unresolved')
 
     def test_new_service_attribution_and_pid_reuse(self):
         old = {'pid': 40, 'started': 'first', 'cwd': '/work/poc/backend', 'ports': [8081]}
