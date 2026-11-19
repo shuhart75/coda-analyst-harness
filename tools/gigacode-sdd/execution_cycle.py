@@ -454,6 +454,9 @@ def execute_task(runner, task, record):
     folder.mkdir(parents=True, exist_ok=True)
     fatal_path = folder/'fatal.json'
     if fatal_path.exists():
+        import inventory_recovery
+        inventory_recovery.recover(runner, folder, scope, record)
+    if fatal_path.exists():
         import operational_recovery
         if fatal_path.is_symlink():
             raise Blocked('Preserved safety failure in execution portfolio; inspect ' + str(fatal_path))

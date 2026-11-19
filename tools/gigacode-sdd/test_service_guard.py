@@ -147,6 +147,31 @@ class ControllerServiceGuardTests(unittest.TestCase):
             self.assertIsNone(self.runner.cleanup_guard(54320))
             inspect.assert_not_called()
 
+    def test_incomplete_service_audit_is_recoverable_and_records_operator_reason(self):
+        inventory = self.inventory(complete=False)
+        inventory['limitations'] = ['listener-process-changed-or-unavailable']
+        with patch('controller.inspect_services', return_value=inventory):
+            with self.assertRaises(controller.OperationalBlocked):
+                self.runner.service_audit(self.inventory(), self.runner.root, 'fake')
+        stop = controller.read(self.runner.root/'service-stop.json')
+        self.assertEqual(stop['new_service_count'], 0)
+        self.assertTrue(Path(stop['report']).is_file())
+        self.assertTrue(self.runner.stop.is_set())
+
+    def test_locked_exit_refreshes_automatic_stop_reason(self):
+        with patch.object(self.runner, 'check_preserved_processes'), patch('controller.diagnostics.report'):
+            with self.runner.locked():
+                self.runner.service_stop(self.inventory(complete=False), [], 'fake')
+                self.runner.state['status'] = 'interrupted'
+        self.assertIn('снимок', self.runner._display.value['service_stop']['reason'])
+
+    def test_inventory_failure_does_not_hide_a_new_service_stop(self):
+        first = self.runner.service_stop(self.inventory(), [self.service()], 'first')
+        self.runner.service_stop(self.inventory(complete=False), [], 'second')
+        stop = controller.read(self.runner.root/'service-stop.json')
+        self.assertEqual(stop['report'], str(first))
+        self.assertEqual(stop['new_service_count'], 1)
+
     def test_detached_service_remains_blocker_on_next_run(self):
         service = self.service()
         with patch('controller.inspect_services', return_value=self.inventory([service])):

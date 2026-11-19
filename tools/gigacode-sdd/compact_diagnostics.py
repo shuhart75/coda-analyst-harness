@@ -398,9 +398,23 @@ def collect_compact(config, destination=None, error=None):
     state = state if isinstance(state, dict) else {}
     out.failure_sessions(state)
     out.failure_sessions({'error': str(error)})
-    for name in ('progress.json', 'console-status.json'):
+    for name in ('progress.json', 'console-status.json', 'service-stop.json'):
         if (root/name).is_file():
             out.json_file(root/name)
+    # Service-audit reports are direct log files, not model session folders.
+    # Include the recent reports before large historical payloads use the budget.
+    for path in newest(list((root/'logs').glob('*-services-*.json')))[:8]:
+        if not out.safe(path):
+            continue
+        try:
+            report = json.loads(out.read(path) or '{}')
+            inventory = report.get('inventory', {})
+            selected = {k: v for k, v in inventory.items() if k != 'processes'}
+            selected['process_count'] = len(inventory.get('processes', []))
+            out.add('compact/logs/' + path.name, encoded({'projection': True,
+                'inventory': selected, 'new_workspace_services': report.get('new_workspace_services')}))
+        except (ValueError, TypeError, AttributeError):
+            out.json_file(path)
     for path in sorted((root/'operator-questions').glob('*.json')):
         if out.safe(path):
             out.json_file(path)

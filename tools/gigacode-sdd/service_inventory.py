@@ -160,6 +160,44 @@ def _inside(path, root):
         return False
 
 
+def _reconcile_listeners(ps, lsof, uid, processes, listeners):
+    """Recheck unmatched listeners between two process snapshots, without guessing ownership."""
+    disputed = sorted(pid for pid in listeners if pid not in processes or processes[pid]['uid'] != uid)
+    if not disputed:
+        return processes, listeners, []
+    observations = [{'pid': pid, 'ports': sorted(listeners[pid]),
+                     'reason': 'absent-from-ps' if pid not in processes else 'uid-mismatch'} for pid in disputed]
+    before_text, before_error = _command([ps, '-axo', 'pid=,ppid=,pgid=,uid=,lstart=,args='])
+    before, malformed_before = _parse_ps(before_text or '')
+    live_text, live_error = _command([lsof, '-nP', '-a', '-u', str(uid), '-p',
+                                    ','.join(map(str, disputed)), '-iTCP', '-sTCP:LISTEN', '-Fpn'])
+    live, malformed_live = _parse_lsof(live_text or '', 'listener')
+    after_text, after_error = _command([ps, '-axo', 'pid=,ppid=,pgid=,uid=,lstart=,args='])
+    after, malformed_after = _parse_ps(after_text or '')
+    valid = (not any((before_error, live_error, after_error, malformed_before, malformed_live, malformed_after))
+             and set(live).issubset(disputed))
+    identity = lambda p: tuple(p.get(k) for k in ('pid', 'uid', 'started', 'ppid', 'pgid', 'kind')) if p else None
+    listeners = dict(listeners)
+    processes = dict(processes)
+    for observation in observations:
+        pid = observation['pid']
+        first, last = before.get(pid), after.get(pid)
+        observation['resolution'] = 'unresolved'
+        if not valid:
+            continue
+        if first is None and last is None and pid not in live:
+            # Absent from both process tables and the intervening listener query.
+            listeners.pop(pid, None)
+            observation['resolution'] = 'exited'
+        elif (first and last and first['uid'] == uid and identity(first) == identity(last)
+              and pid in live):
+            # A newly started listener omitted by the original ps is now stable.
+            processes[pid] = last
+            listeners[pid] = live[pid]
+            observation['resolution'] = 'stable-current-user-listener'
+    return processes, listeners, observations
+
+
 def _inspect_services_once():
     """Inspect own TCP listeners and PostgreSQL processes, including Unix-only DBs.
 
@@ -201,6 +239,10 @@ def _inspect_services_once():
     listeners, malformed = _parse_lsof(listener_text or '', 'listener')
     if malformed:
         limitations.append('listeners-incomplete-rows')
+    processes, listeners, observations = _reconcile_listeners(ps, lsof, uid, processes, listeners)
+    if observations:
+        result['listener_reconciliation'] = observations
+    result['processes'] = [{**p, 'owner_known': True, 'same_user': p['uid'] == uid} for p in processes.values()]
     own_agents = {pid: p for pid, p in processes.items() if p['uid'] == uid and p['kind'] == 'gigacode'}
     own_databases = {pid for pid, p in processes.items() if p['uid'] == uid and p['kind'] == 'postgres'}
     service_pids = set(listeners) | own_databases
@@ -267,7 +309,9 @@ def inspect_services():
     race_limits = {'listener-process-changed-or-unavailable', 'listener-cwd-unavailable', 'database-cwd-unavailable'}
     other_limits = set(result['limitations']) - race_limits
     if race_limits.intersection(result['limitations']) and not other_limits:
+        previous = {k: result.get(k) for k in ('limitations', 'listener_reconciliation')}
         result = _inspect_services_once()
+        result['previous_attempt'] = previous
         result['collection_attempts'] = 2
     return result
 
