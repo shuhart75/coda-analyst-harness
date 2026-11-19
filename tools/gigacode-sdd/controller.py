@@ -548,7 +548,8 @@ class Runner:
         phase = run_status.STAGES.get(name.rsplit('-', 1)[-1], 'проверка возможностей' if name == 'preflight' else role)
         task_name = name.rsplit('-', 1)[0] if name.endswith(('-execute', '-review', '-adjudicate')) else name
         title = task_name + ' · ' + phase + (' · ' + model if model else '')
-        with self.activity(activity, title=title, timeout=limit) as activity_token:
+        with self.activity(activity, title=title, timeout=limit,
+                           metadata={'kind': 'llm', 'task_id': task_name, 'model': model, 'phase': phase}) as activity_token:
             cli = [*self.cfg['cli'], '--model', model] if model else self.cfg['cli']
             result = run_session(cli, under(root, cwd), full_prompt,
                              session_log, approval_mode='plan' if role == 'review' else self.cfg['approval_mode'],
@@ -715,7 +716,7 @@ slashes, no leading ./, trailing slash, repeated slash, wildcard, absolute path,
 Never own '.', .git, .gigacode, .codex, AGENTS.md or GIGACODE.md. Read existing instructions;
 SDD edits belong in actual design/tasks/spec artifacts, not agent instruction files.
 Do not run tests or write files. Return ONLY JSON with this structure:
-{"tasks":[{"id":"safe-id","cwd":"backend","writes":["backend/src","backend/openspec"],
+{"tasks":[{"id":"safe-id","title":"Краткое название задачи для пользователя","cwd":"backend","writes":["backend/src","backend/openspec"],
 "depends_on":[],"resources":[],"prompt":"specific work and SDD stages",
 "requirements":["REQ-..."],"checks":[{"cwd":"backend","argv":["command","arg"],"timeout":600}]}],
 "integration_checks":[{"cwd":".","argv":["command","arg"],"timeout":600}]}

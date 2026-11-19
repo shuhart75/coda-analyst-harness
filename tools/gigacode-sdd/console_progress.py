@@ -22,7 +22,16 @@ class ConsoleProgress(Progress):
     def interactive(self):
         # A pending answer command is copyable text, not a clipped live row.
         # Plain updates retain it on screen without redrawing wrapped commands.
-        return super().interactive() and not (getattr(self, 'value', None) or {}).get('questions')
+        value = getattr(self, 'value', None) or {}
+        if not super().interactive() or value.get('questions'):
+            return False
+        if value.get('tasks'):
+            from run_status import dashboard
+            lines = dashboard(self._value(), include_command=False).splitlines()
+            width, height = self.dimensions()
+            if len(lines) > height-2 or any(clipped(line, max(1, width-1)) != line for line in lines):
+                return False
+        return True
 
     def message(self, message):
         with self.lock:
@@ -38,7 +47,7 @@ class ConsoleProgress(Progress):
     def operations(self):
         with self.lock:
             now = self.clock()
-            return [{'title': entry['label'], 'elapsed_seconds': max(0, now-entry['start']),
+            return [{**entry.get('metadata', {}), 'title': entry['label'], 'elapsed_seconds': max(0, now-entry['start']),
                      'timeout_seconds': entry.get('timeout'),
                      'idle_seconds': (entry['idle'] + now-entry['observed']) if 'idle' in entry else None}
                     for entry in self.active.values()]
@@ -95,10 +104,11 @@ class ConsoleProgress(Progress):
         with self.lock:
             self._emit()
 
-    def start(self, label, interval=30, title=None, timeout=None):
+    def start(self, label, interval=30, title=None, timeout=None, metadata=None):
         token = super().start(title or label, interval)
         with self.lock:
             self.active[token]['timeout'] = timeout
+            self.active[token]['metadata'] = dict(metadata or {'kind': 'check'})
             self.message('Начало операции: ' + label)
             self.last_save = float('-inf')
             self._emit()
@@ -111,8 +121,8 @@ class ConsoleProgress(Progress):
             self._emit()
 
     @contextmanager
-    def activity(self, label, interval=30, title=None, timeout=None):
-        token = self.start(label, interval, title, timeout)
+    def activity(self, label, interval=30, title=None, timeout=None, metadata=None):
+        token = self.start(label, interval, title, timeout, metadata)
         outcome = 'завершено'
         try:
             yield token

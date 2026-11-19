@@ -165,6 +165,27 @@ class ConsoleTests(unittest.TestCase):
         self.assertTrue(result['telemetry_incomplete'])
         self.assertIn('Сводка временно неполна', self.stream.getvalue())
 
+    def test_llm_metadata_survives_runtime_projection(self):
+        token = self.display.start('session', metadata={'kind': 'llm', 'model': 'GLM', 'task_id': 'code'})
+        try:
+            runtime = json.loads((self.root/'console-status.json').read_text())
+            self.assertEqual(runtime['operations'][0]['kind'], 'llm')
+            self.assertEqual(runtime['operations'][0]['model'], 'GLM')
+            self.assertIn('LLM-сессии сейчас: 1', self.stream.getvalue())
+        finally:
+            self.display.finish(token)
+
+    def test_route_is_not_clipped_in_small_terminal(self):
+        stream = Terminal()
+        with patch.dict(os.environ, {'TERM': 'xterm-256color'}):
+            display = ConsoleProgress(self.root/'logs/route.log', stream=stream,
+                clock=lambda: self.now, dimensions=lambda: (30, 8))
+            value = dict(self.value, tasks=[{'id': 'backend-modular-its', 'status': 'running'}])
+            display.summary(value)
+            self.assertIn('▶ Интеграционные тесты backend [сейчас]', stream.getvalue())
+            self.assertEqual(display.rows, 0)
+            display.close()
+
     def test_runtime_write_failure_does_not_abort_operation(self):
         with patch('console_progress.write_projection', return_value=False):
             token = self.display.start('backend')
