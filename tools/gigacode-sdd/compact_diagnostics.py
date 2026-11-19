@@ -398,7 +398,7 @@ def collect_compact(config, destination=None, error=None):
     state = state if isinstance(state, dict) else {}
     out.failure_sessions(state)
     out.failure_sessions({'error': str(error)})
-    for name in ('progress.json',):
+    for name in ('progress.json', 'console-status.json'):
         if (root/name).is_file():
             out.json_file(root/name)
     for path in sorted((root/'operator-questions').glob('*.json')):
