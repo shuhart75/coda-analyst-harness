@@ -1,5 +1,7 @@
 """Small user-facing projection; activity never substitutes for acceptance."""
 import json
+from collections import Counter
+import task_route
 from pathlib import Path
 import time
 import operator_questions as oq
@@ -17,8 +19,18 @@ SERVICE_STATUSES = {'awaiting-approval': 'нужно разрешение на �
 
 def candidate_label(value):
     phase = STAGES.get(value['stage'], value['stage'])
+    if value['status'] == 'not-observed':
+        return value['model'] + ': состояние ещё не получено'
+    if value['status'] in ('stalled', 'quarantined', 'external-blocker'):
+        return value['model'] + ': ' + {'stalled': 'приостановлен', 'quarantined': 'требует проверки',
+                                      'external-blocker': 'ждёт внешних данных'}[value['status']]
+    wait = value.get('resource_wait') or {}
+    if value['status'] in ('pending', 'running') and wait.get('state') == 'waiting':
+        return value['model'] + ': ждёт ресурс' + ('; занят вариантом ' + wait['holder'] if wait.get('holder') else '')
     if value['status'] in ('waiting-user', 'waiting-retry', 'interrupted'):
         phase = STATUSES[value['status']] + ' (' + phase + ')'
+    if value['status'] == 'pending':
+        phase = 'ожидает запуска (' + phase + ')'
     return value['model'] + ': ' + phase
 
 
@@ -35,6 +47,10 @@ def snapshot(root, state=None):
     from controller import read
     root = Path(root)
     state = state if state is not None else read(root / 'state.json')
+    config = read(root / 'config.json') if (root / 'config.json').is_file() else {}
+    models = config.get('execution_models') or config.get('plan_review_models')
+    if not isinstance(models, list) or not models or not all(isinstance(m, str) and m for m in models):
+        models = ['DeepSeek-V4.1-Flash-1017', 'GLM-5.3-Flash']
     plan = read(root / 'plan.json') if (root / 'plan.json').is_file() else {'tasks': []}
     problems = []
     progress = [read_projection(p, problems) for p in sorted((root / 'progress').glob('*.json'))] if (root / 'progress').exists() else []
@@ -42,12 +58,13 @@ def snapshot(root, state=None):
     rows = []
     for task in plan['tasks']:
         rec = state.get('tasks', {}).get(task['id'], {})
-        rows.append({'id': task['id'], 'status': rec.get('status', 'pending'),
+        rows.append({'id': task['id'], 'title': task_route.title(task), 'depends_on': task['depends_on'], 'status': rec.get('status', 'pending'),
             'goal': task.get('acceptance', {}).get('deliverables') or [],
             'waiting_for': [d for d in task['depends_on'] if state.get('tasks', {}).get(d, {}).get('status') != 'done'],
             'error': rec.get('error'), 'result': rec.get('workspace'),
             'deferred_evidence': rec.get('review', {}).get('deferred_evidence', []),
-            'candidates': [p for p in progress if p['task'] == task['id']]})
+            'candidates': [next((p for p in progress if p['task'] == task['id'] and p['model'] == model),
+                 {'model': model, 'status': 'not-observed', 'stage': 'unknown'}) for model in models]})
     questions = oq.questions(root, pending_only=True)
     services = []
     for path in sorted((root / 'managed-services').glob('*/service.json')):
@@ -56,8 +73,19 @@ def snapshot(root, state=None):
                          'health': value['spec']['health'], 'log': value.get('log')})
     readiness = read(root / 'readiness.json') if (root / 'readiness.json').is_file() else {}
     runtime = read_projection(root / 'console-status.json', problems) if (root / 'console-status.json').is_file() else {}
+    if state.get('status') == 'running' and not runtime:
+        problems.append('runtime-status-unavailable')
     stale = bool(runtime) and state.get('status') == 'running' and time.time()-runtime.get('observed_at', 0) > 90
-    return {'operations': runtime.get('operations', []), 'telemetry_stale': stale,
+    try:
+        # A prompt plus a stream file is an invocation attempt, including failed
+        # CLI launches. Do not count build checks, read prompts, or scan event logs.
+        attempts = sum(1 for p in (root/'logs').glob('*/prompt.txt')
+                       if not p.is_symlink() and not p.parent.is_symlink() and (p.parent/'stdout.jsonl').is_file())
+    except OSError:
+        attempts = None
+        problems.append('session-attempt-count-unavailable')
+    return {'session_attempts': attempts, 'jobs': config.get('jobs'),
+            'operations': runtime.get('operations', []), 'telemetry_stale': stale,
             'telemetry_incomplete': bool(problems),
             'status': state.get('status'), 'tasks': rows,
             'done': sum(r['status'] == 'done' for r in rows), 'total': len(rows),
@@ -183,7 +211,9 @@ def dashboard(value, include_time=True, include_command=True):
             line = 'Сейчас: '
             if include_time:
                 line += elapsed(op['elapsed_seconds']) + ' · '
-            line += op['title']
+            name = next((task_route.title(t) for t in tasks if t['id'] == op.get('task_id')), None)
+            line += (name + ' · ' + STAGES.get(op.get('phase'), op.get('phase', '')) + ' · ' + op.get('model', '')
+                     if name and op.get('kind') == 'llm' else op['title'])
             if op.get('timeout_seconds') and op['elapsed_seconds'] >= .8*op['timeout_seconds']:
                 line += ' (лимит ' + elapsed(op['timeout_seconds']) + ')'
             current.append(line)
@@ -197,6 +227,34 @@ def dashboard(value, include_time=True, include_command=True):
         active = [t['id'] for t in tasks if t['status'] == 'running']
         current = ['Сейчас: ' + (', '.join(active[:3]) + '; подготовка следующего шага.' if active else 'подготовка следующего шага.')]
     lines.extend(current)
+    stopped = value.get('status') == 'interrupted' or bool(value.get('console_error'))
+    lines.extend(task_route.route(tasks, stopped=stopped))
+    active_rows = [t for t in tasks if t['status'] in ('running', 'waiting-user', 'blocked')]
+    for task in active_rows:
+        for candidate in task.get('candidates', []):
+            label = candidate_label(candidate)
+            if candidate.get('stage') in ('review', 'adjudicate') and candidate.get('status') == 'running':
+                label += ' другой моделью'
+            prefix = '  Вариант ' if len(active_rows) == 1 else '  ' + task_route.title(task) + ' / '
+            lines.append(prefix + ('сохранён: ' if stopped or value.get('telemetry_stale') else '') + label)
+    if value.get('telemetry_stale') or value.get('telemetry_incomplete') or any('kind' not in op for op in operations):
+        lines.append('LLM-сессии сейчас: число неизвестно, нет полного свежего статуса.')
+    else:
+        active_sessions = [] if stopped else [op for op in operations if op.get('kind') == 'llm']
+        counts = Counter(op.get('model') or 'модель не указана' for op in active_sessions)
+        line = 'LLM-сессии сейчас: ' + str(len(active_sessions))
+        if counts:
+            line += ' (' + ', '.join(model + ': ' + str(n) for model, n in sorted(counts.items())) + ')'
+        lines.append(line + '.')
+    if not stopped and not value.get('telemetry_stale'):
+        candidates = [c for t in active_rows for c in t.get('candidates', [])]
+        waiting_resource = sum(c.get('status') in ('running', 'pending') and
+            (c.get('resource_wait') or {}).get('state') == 'waiting' for c in candidates)
+        waiting_answer = sum(c.get('status') == 'waiting-user' for c in candidates)
+        if waiting_resource or waiting_answer:
+            lines.append(f'Ожидают варианты: ресурс {waiting_resource}, ответ пользователя {waiting_answer}.')
+    if value.get('session_attempts') is not None:
+        lines.append('Попыток запуска LLM по журналам прогона: ' + str(value['session_attempts']) + ' (включая повторы).')
     remaining = max(0, total-done)
     if value.get('ready'):
         lines.append('Осталось: 0 задач. Обязательные проверки завершены.')
