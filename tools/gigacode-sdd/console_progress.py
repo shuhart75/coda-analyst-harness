@@ -1,11 +1,11 @@
 """Compact operator console; all technical messages remain in the run log."""
 from contextlib import contextmanager
-import json
 import os
 from pathlib import Path
 import time
 
 from progress import Progress, clipped
+from progress_io import write_projection
 
 
 class ConsoleProgress(Progress):
@@ -17,6 +17,7 @@ class ConsoleProgress(Progress):
         self.last_plain = None
         self.last_notice = float('-inf')
         self.last_save = float('-inf')
+        self.runtime_error = False
 
     def message(self, message):
         with self.lock:
@@ -43,17 +44,14 @@ class ConsoleProgress(Progress):
                 self.active[token].update(idle=data['idle_seconds'], observed=self.clock())
 
     def _value(self):
-        return dict(self.value or {}, operations=self.operations(), telemetry_stale=False)
+        return dict(self.value or {}, operations=self.operations(), telemetry_stale=False,
+                    telemetry_incomplete=self.runtime_error or (self.value or {}).get('telemetry_incomplete', False))
 
     def _save_runtime(self):
         if self.clock()-self.last_save < 30:
             return
-        self.runtime_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.runtime_path.with_suffix('.tmp')
-        with temporary.open('w', encoding='utf-8') as stream:
-            os.chmod(temporary, 0o600)
-            json.dump({'observed_at': time.time(), 'operations': self.operations()}, stream)
-        temporary.replace(self.runtime_path)
+        self.runtime_error = not write_projection(self.runtime_path,
+            {'observed_at': time.time(), 'operations': self.operations()})
         self.last_save = self.clock()
 
     def draw(self):

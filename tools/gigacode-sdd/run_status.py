@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import time
 import operator_questions as oq
+from progress_io import read_projection, write_projection
 
 STAGES = {'execute': 'разработка', 'checks': 'обязательные проверки', 'review': 'независимое ревью',
           'adjudicate': 'разбор замечаний', 'accepted': 'вариант проверен'}
@@ -22,9 +23,8 @@ def candidate_label(value):
 
 
 def candidate(runner, task, value):
-    from controller import save
     name = oq.fingerprint([task['id'], value['model']])[:24]
-    save(runner.root / 'progress' / (name + '.json'), {
+    write_projection(runner.root / 'progress' / (name + '.json'), {
         'task': task['id'], 'model': value['model'], 'stage': value['stage'],
         'status': value['status'], 'resource_wait': value.get('resource_wait'),
         'checks': [{'ok': c.get('ok'), 'log': c.get('log')} for c in value.get('checks', [])],
@@ -36,7 +36,9 @@ def snapshot(root, state=None):
     root = Path(root)
     state = state if state is not None else read(root / 'state.json')
     plan = read(root / 'plan.json') if (root / 'plan.json').is_file() else {'tasks': []}
-    progress = [read(p) for p in sorted((root / 'progress').glob('*.json'))] if (root / 'progress').exists() else []
+    problems = []
+    progress = [read_projection(p, problems) for p in sorted((root / 'progress').glob('*.json'))] if (root / 'progress').exists() else []
+    progress = [p for p in progress if all(k in p for k in ('task', 'model', 'stage', 'status'))]
     rows = []
     for task in plan['tasks']:
         rec = state.get('tasks', {}).get(task['id'], {})
@@ -53,9 +55,10 @@ def snapshot(root, state=None):
         services.append({'id': value['spec']['id'], 'status': value['status'],
                          'health': value['spec']['health'], 'log': value.get('log')})
     readiness = read(root / 'readiness.json') if (root / 'readiness.json').is_file() else {}
-    runtime = read(root / 'console-status.json') if (root / 'console-status.json').is_file() else {}
+    runtime = read_projection(root / 'console-status.json', problems) if (root / 'console-status.json').is_file() else {}
     stale = bool(runtime) and state.get('status') == 'running' and time.time()-runtime.get('observed_at', 0) > 90
     return {'operations': runtime.get('operations', []), 'telemetry_stale': stale,
+            'telemetry_incomplete': bool(problems),
             'status': state.get('status'), 'tasks': rows,
             'done': sum(r['status'] == 'done' for r in rows), 'total': len(rows),
             'questions': questions, 'answer_command': oq.command(root), 'services': services,
@@ -115,11 +118,18 @@ def render(value, previous=None):
 
 
 def publish(runner, force=False):
-    from controller import save
-    value = snapshot(runner.root, runner.state)
+    try:
+        value = snapshot(runner.root, runner.state)
+    except (OSError, ValueError) as exc:
+        # Display I/O is not an execution gate. Authoritative checks stay strict.
+        value = dict(getattr(runner, '_last_progress_snapshot', None) or {
+            'tasks': [], 'done': 0, 'total': 0, 'questions': [], 'services': [], 'integration': None})
+        value.update(status=runner.state.get('status'), ready=False, telemetry_incomplete=True)
+        runner.progress('Сводка временно недоступна: ' + str(exc))
     previous = None if force else getattr(runner, '_last_progress_snapshot', None)
     rendered = render(value, previous)
-    save(runner.root / 'progress.json', value)
+    if not write_projection(runner.root / 'progress.json', value):
+        value['telemetry_incomplete'] = True
     if rendered:
         runner.progress(rendered)
     display = getattr(runner, '_display', None)
@@ -153,6 +163,8 @@ def dashboard(value, include_time=True, include_command=True):
             health += ' Независимая работа продолжается.'
     elif blocked or value.get('integration') == 'blocked' or value.get('status') == 'blocked':
         health = 'Есть блокировка. Требуется вмешательство; подробности в журнале.'
+    elif value.get('telemetry_incomplete'):
+        health = 'Сводка временно неполна. Обновление повторится автоматически.'
     elif value.get('telemetry_stale'):
         health = 'Сводка устарела. Текущее состояние процесса неизвестно.'
     elif near_limit:

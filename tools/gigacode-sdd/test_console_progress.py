@@ -8,6 +8,9 @@ from unittest.mock import patch
 
 from console_progress import ConsoleProgress
 from run_status import dashboard, snapshot
+import run_status
+from progress_io import read_projection, write_projection
+from types import SimpleNamespace
 from controller import save
 from test_progress import Terminal
 
@@ -121,6 +124,34 @@ class ConsoleTests(unittest.TestCase):
         finally:
             self.display.finish(token)
         self.assertEqual(json.loads((self.root/'console-status.json').read_text())['operations'], [])
+
+    def test_windows_sharing_conflict_retries_and_does_not_fail_execution(self):
+        path = self.root/'progress/candidate.json'
+        problems = []
+        with patch.object(Path, 'read_text', side_effect=[PermissionError('sharing'), '{"task":"backend"}']):
+            self.assertEqual(read_projection(path, problems), {'task': 'backend'})
+        self.assertEqual(problems, [])
+        with patch.object(Path, 'read_text', side_effect=PermissionError('sharing')):
+            self.assertEqual(read_projection(path, problems), {})
+        self.assertEqual(problems, [str(path)])
+        with patch('progress_io.os.replace', side_effect=PermissionError('sharing')):
+            self.assertFalse(write_projection(path, {'task': 'backend'}))
+        self.assertEqual(list(path.parent.iterdir()), [])
+        runner = SimpleNamespace(root=self.root, state={'status': 'running'},
+                                 progress=lambda message: None, _display=self.display)
+        with patch.object(run_status, 'snapshot', side_effect=PermissionError('sharing')):
+            result = run_status.publish(runner)
+        self.assertTrue(result['telemetry_incomplete'])
+        self.assertIn('Сводка временно неполна', self.stream.getvalue())
+
+    def test_runtime_write_failure_does_not_abort_operation(self):
+        with patch('console_progress.write_projection', return_value=False):
+            token = self.display.start('backend')
+            try:
+                self.assertIn('Сводка временно неполна', self.stream.getvalue())
+            finally:
+                self.display.finish(token)
+        self.assertFalse(self.display.thread.is_alive())
 
     def test_failure_before_first_summary_is_visible(self):
         self.display.close(status='blocked', failed=True)
