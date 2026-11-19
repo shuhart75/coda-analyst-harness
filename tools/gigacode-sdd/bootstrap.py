@@ -441,8 +441,25 @@ def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False
         return 0
     previous = known_runs(root)
     if previous:
+        import operator_questions
+        import run_status
+        saved_root = Path(previous[0]['config']).parent
+        try:
+            with FileLock(saved_root / 'run.lock'):
+                active = False
+        except BlockingIOError:
+            active = True
+        if active:
+            ui.notify('Этот запуск уже работает. Можно посмотреть прогресс и ответить на вопросы.')
+            ui.notify(run_status.render(run_status.snapshot(saved_root)))
+            operator_questions.interact(previous[0]['config'], ui)
+            return 0
         mode = ui.choose('Что сделать?', ['Продолжить сохранённую работу (' + previous[0]['status'] + ')',
-                                         'Новая работа', 'Только диагностика'])
+                                         'Новая работа', 'Только диагностика', 'Прогресс и ответы на вопросы'])
+        if mode == 3:
+            ui.notify(run_status.render(run_status.snapshot(saved_root)))
+            operator_questions.interact(previous[0]['config'], ui)
+            return 0
         if mode == 2:
             return launch(ui, home, diagnose_only=True, repo_arg=previous[0]['source'])
         if mode == 0:
@@ -523,14 +540,28 @@ def main(argv=None):
             stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--diagnostics-config', type=Path, help='Collect one local UTF-8 text report for a stopped run; no agent launch')
+    parser.add_argument('--answers-config', type=Path, help='Answer pending questions; safe while controller is running')
+    parser.add_argument('--status-config', type=Path, help='Read current plan/progress; no controller or model launch')
     parser.add_argument('--diagnostics-full', action='store_true', help='With --diagnostics-config only: collect full-diagnostics.txt instead of the compact report')
     parser.add_argument('--diagnose', action='store_true', help='Read-only process/service inventory; no GUI or agent launch')
     parser.add_argument('--repo', help='Optional exact source root for diagnosis/advanced use')
     parser.add_argument('--dry-run', action='store_true', help='Select and validate without initializing or starting agents')
     args = parser.parse_args(argv)
+    if sum(bool(x) for x in (args.answers_config, args.status_config, args.diagnostics_config, args.diagnose)) > 1:
+        parser.error('Choose one operation')
     if args.diagnostics_full and not args.diagnostics_config:
         parser.error('--diagnostics-full requires --diagnostics-config')
     try:
+        if args.answers_config or args.status_config:
+            import operator_questions
+            import run_status
+            config = args.answers_config or args.status_config
+            if not config.is_file():
+                raise Blocked('Configuration file not found')
+            print(run_status.render(run_status.snapshot(config.resolve().parent)))
+            if args.answers_config:
+                operator_questions.interact(config, ConsoleUI())
+            return 0
         if args.diagnostics_config:
             with FileLock(args.diagnostics_config.parent / 'run.lock'):
                 if not args.diagnostics_config.is_file():

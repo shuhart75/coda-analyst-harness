@@ -27,6 +27,10 @@ import plan_review
 import review_cycle
 import diagnostics
 import operator_input
+import operator_questions
+import run_status
+import task_acceptance
+import managed_services
 from progress import Progress, SESSION_IDENTITY, elapsed
 from session_outcome import classify as session_outcome
 
@@ -193,6 +197,10 @@ def validate_plan(plan, root, requirements):
             raise Blocked('Cyclic task dependencies')
         done.update(ready)
     validate_checks(plan.get('integration_checks'), root)
+    try:
+        task_acceptance.validate_contracts(plan)
+    except ValueError as exc:
+        raise Blocked(str(exc)) from exc
     return plan
 
 
@@ -251,6 +259,7 @@ class Runner:
         self._report_lock = threading.Lock()
         self._display = Progress()
         self._config_digest = digest(self.config_path)
+        self.services = managed_services.Manager(self)
 
     def persist(self):
         save(self.state_path, self.state)
@@ -289,7 +298,10 @@ class Runner:
                 raise
             finally:
                 try:
-                    self.persist()
+                    try:
+                        self.services.close()
+                    finally:
+                        self.persist()
                 finally:
                     for sig, handler in old.items():
                         signal.signal(sig, handler)
@@ -462,6 +474,7 @@ class Runner:
             + 'Read the existing SDD instructions in the current contour and obey their stages/gates. '
               'Use installed SDD skills/agents. Preserve existing groomed task boundaries. '
               'Never commit, switch branches, push, merge, start persistent servers or touch another checkout. '
+              'Persistent services are requested from the controller through service_request. '
               'Do not edit permission settings, hooks or input packet. Shell/checks must use Nexus only. '
               'This workspace is an isolated copy of existing PoC work. Preserve that work.\n'
             + ('READ_ONLY_RESEARCH\n'
@@ -509,11 +522,17 @@ class Runner:
                         'to run under its resource lease.\n')
         elif name != 'preflight':
             context += ('\nPrefer dedicated file tools and simple workspace-local commands. '
+                        'Read the current bytes with read_file before each edit, including files changed by subagents. '
+                        'If a path is missing, locate its filename within this workspace, then search the symbol; '
+                        'do not repeat guessed paths. Prefer literal symbol search over complex regular expressions. '
+                        'Place portable ls options before operands. '
                         'Avoid heredocs, inline interpreters, command substitutions and scripts outside this workspace. '
                         'Use only declared ownership paths for any temporary files. '
                         'Respect tool denials: do not repeat a denied operation through another tool or wrapper. '
                         'Continue independent permitted work and report missing evidence honestly. '
                         'The controller inspects Git controls and performs commits; do not probe or change Git configuration.\n')
+            context += operator_questions.PROMPT
+            context += '\nController-managed ready services:\n' + json.dumps(self.services.context(), ensure_ascii=False)
         session_log = self.logdir(name)
         full_prompt = context + '\n' + prompt
         decision_sha = digest(self.root / 'decision.md') if (self.root / 'decision.md').is_file() else None
@@ -700,6 +719,11 @@ Do not run tests or write files. Return ONLY JSON with this structure:
 Checks must exercise behavior, not just echo/compile. Use actual existing commands. No public downloads.
 Do not invent blockers from unrelated legacy IT failures, but do not suppress relevant failing tests.
 Every requirement must have an owner. Cross-contour work depends on contract/SDD prerequisites.
+For each task add acceptance:{"deliverables":["concrete contribution"],
+"deferred_evidence":[{"requirement":"REQ-id","owner":"downstream-task-id",
+"evidence":"mandatory later proof","reason":"why this later task owns it"}]}.
+Do not require downstream live evidence before its prerequisite implementation can be accepted.
+Keep all final proofs mandatory, with a downstream owner and an executable integration gate.
 Assign every unfinished SDD item explicitly; preparation is not implementation evidence.
 Keep requirement arrays consistent with task instructions. Required evidence stays required even
 when an environment is unavailable: record not-run, never substitute a weaker proof as a pass.
@@ -726,7 +750,9 @@ executed test names/counts, not just a successful command or test compilation.
                   'Return ONLY JSON {"verdict":"pass|changes|blocked","findings":["concrete issue"],'
                   '"coverage":{"REQ-id":"specific file/test/evidence or gap"}}. '
                   + ('pass requires a complete feasible plan for every assigned requirement with SDD stages/checks. '
-                     if name == 'plan-review' else 'pass requires every assigned requirement satisfied and SDD followed. ')
+                     if name == 'plan-review' else 'pass requires the assigned task contribution satisfied and SDD followed. '
+                     'For FINAL_ACCEPTANCE every complete requirement must be satisfied. '
+                     'Follow TASK_CONTRIBUTION_ACCEPTANCE for intermediate tasks; never weaken current checks. ')
                   +
                   'blocked is only for external dependency or analyst business decision. '
                   'Optional improvements may be listed separately as optional_findings objects with status=optional, '
@@ -872,7 +898,7 @@ executed test names/counts, not just a successful command or test compilation.
 
     def worker(self, task, record):
         from execution_cycle import execute_task
-        return execute_task(self, task, record)
+        return execute_task(self, task_acceptance.with_incoming(self, task), record)
 
     def checkpoint(self, record):
         if 'workspace' not in record:
@@ -955,6 +981,7 @@ executed test names/counts, not just a successful command or test compilation.
             raise Blocked('Missing or changed plan; pinned plan is required')
         plan = validate_plan(read(plan_path), self.main, self.cfg['requirements'])
         tasks = plan['tasks']
+        self.services.restore(self.stop)
         for task in tasks:
             record = self.state['tasks'][task['id']]
             if record['status'] in ('running', 'accepted') or (retry_blocked and record['status'] == 'blocked'):
@@ -969,9 +996,19 @@ executed test names/counts, not just a successful command or test compilation.
                     record['status'] = 'pending'
         self.state['status'] = 'running'
         self.persist()
+        run_status.publish(self, force=True)
         active = {}
+        last_status = time.monotonic()
         with ThreadPoolExecutor(max_workers=self.cfg['jobs']) as pool:
             while not self.stop.is_set():
+                for record in self.state['tasks'].values():
+                    if record['status'] == 'waiting-user' and any(
+                            operator_questions.response(self.root, key) for key in record.get('question_ids', [])):
+                        record['status'] = 'pending'
+                        self.persist()
+                if time.monotonic() - last_status >= 30:
+                    run_status.publish(self)
+                    last_status = time.monotonic()
                 for task in tasks:
                     record = self.state['tasks'][task['id']]
                     if record['status'] != 'pending' or len(active) >= self.cfg['jobs']:
@@ -991,6 +1028,9 @@ executed test names/counts, not just a successful command or test compilation.
                     self.persist()
                     active[pool.submit(self.worker, task, record.copy())] = task
                 if not active:
+                    if any(r['status'] == 'waiting-user' for r in self.state['tasks'].values()):
+                        self.stop.wait(.5)
+                        continue
                     break
                 completed, _ = wait(active, timeout=.2, return_when=FIRST_COMPLETED)
                 for future in completed:
@@ -1000,8 +1040,12 @@ executed test names/counts, not just a successful command or test compilation.
                         self.state['tasks'][task['id']] = accepted
                         self.persist()
                         self.integrate(task, accepted)
+                        operator_questions.resolve_task(self.root, task['id'])
                         done = sum(r['status'] == 'done' for r in self.state['tasks'].values())
                         self.progress('Принято задач: ' + str(done) + '/' + str(len(tasks)))
+                    except operator_questions.WaitingForOperator as exc:
+                        record = self.state['tasks'][task['id']]
+                        record.update(status='waiting-user', error=str(exc), question_ids=exc.question_ids)
                     except Interrupted:
                         preserved = self.checkpoint(self.state['tasks'][task['id']])
                         preserved['status'] = 'running'
@@ -1015,6 +1059,7 @@ executed test names/counts, not just a successful command or test compilation.
                         self.state['tasks'][task['id']] = failed
                     self.persist()
                     operator_input.report(self, 'running')
+                    run_status.publish(self)
         if self.stop.is_set():
             self.state['status'] = 'interrupted'
             return
@@ -1055,11 +1100,22 @@ executed test names/counts, not just a successful command or test compilation.
         try:
             if 'integration_base' not in rec:
                 rec = self.checkpoint(rec)
-            accepted = rec if rec.get('status') == 'accepted' or 'integration_base' in rec else self.worker(final, rec.copy())
+            while True:
+                try:
+                    accepted = rec if rec.get('status') == 'accepted' or 'integration_base' in rec else self.worker(final, rec.copy())
+                    break
+                except operator_questions.WaitingForOperator as exc:
+                    self.state['integration'].update(status='waiting-user', error=str(exc))
+                    self.persist()
+                    run_status.publish(self)
+                    while not any(operator_questions.response(self.root, key) for key in exc.question_ids):
+                        if self.stop.wait(.5):
+                            raise Interrupted('Ожидание ответа остановлено; вопрос и рабочие файлы сохранены')
             accepted['operator_revision'] = self.state['operator_revision']['id']
             self.state['integration'] = accepted
             self.persist()
             self.integrate(final, accepted)
+            operator_questions.resolve_task(self.root, 'integration')
             self.state['status'] = 'complete'
             self.publish_readiness(accepted)
         except Interrupted:
@@ -1085,6 +1141,7 @@ executed test names/counts, not just a successful command or test compilation.
         operator_input.mark_reviewed(self, evidence)
         operator_input.report(self, 'complete', required_complete=True,
                               optional_findings=record['review'].get('optional_findings', []), evidence=evidence)
+        run_status.publish(self)
 
     def export(self, output):
         if self.state.get('status') != 'complete':
