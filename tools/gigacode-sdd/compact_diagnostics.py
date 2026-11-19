@@ -398,6 +398,15 @@ def collect_compact(config, destination=None, error=None):
     state = state if isinstance(state, dict) else {}
     out.failure_sessions(state)
     out.failure_sessions({'error': str(error)})
+    for name in ('progress.json',):
+        if (root/name).is_file():
+            out.json_file(root/name)
+    for path in sorted((root/'operator-questions').glob('*.json')):
+        if out.safe(path):
+            out.json_file(path)
+    for path in sorted((root/'managed-services').glob('*/service.json')):
+        if out.safe(path):
+            out.json_file(path)
     tasks = state.get('tasks', {})
     if isinstance(tasks, dict):
         out.add('compact/task-status.json', encoded({key: {

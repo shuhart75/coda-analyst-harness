@@ -30,7 +30,7 @@ def collect(config, destination=None, error=None, *, full=False):
                'mode': 'local UTF-8 diagnostic report', 'omitted': [], 'files': {}}
     # Never traverse workspaces, credentials, .git or links supplied by agents.
     files = list(root.glob('*.json')) + list(root.glob('*.md'))
-    for name in ('logs', 'input', 'plan-imports', 'preserved-services', 'review-cycles', 'planning-cycles', 'execution-cycles', 'operator-instructions'):
+    for name in ('logs', 'input', 'plan-imports', 'preserved-services', 'review-cycles', 'planning-cycles', 'execution-cycles', 'operator-instructions', 'operator-questions', 'progress'):
         directory = root / name
         if directory.is_symlink():
             summary['omitted'].append(str(directory))
@@ -39,6 +39,7 @@ def collect(config, destination=None, error=None, *, full=False):
             base = Path(folder)
             dirs[:] = sorted(d for d in dirs if not (base / d).is_symlink())
             files.extend(base / n for n in sorted(names))
+    files.extend((root/'managed-services').glob('*/service.json'))
     files = [(path, 'run/' + path.relative_to(root).as_posix()) for path in sorted(set(files))]
     files.extend((path, 'runner/' + path.name) for path in sorted(Path(__file__).parent.glob('*.py')))
     fd, temp = tempfile.mkstemp(prefix='.latest-', suffix='.txt', dir=destination.parent)

@@ -101,6 +101,8 @@ def _receipt_valid(record):
 def _diagnosis(kind, detail):
     # The model supplies defect data, never executable instruction amendments.
     advice = {
+        'request-protocol': 'Repair only the operator/service request using the stated envelope. '
+                            'Preserve code and checks; do not repeat an answered request or bypass a refusal.',
         'transport': 'The session did not finish successfully. Inspect preserved work before continuing; '
                      'do not repeat already completed edits blindly.',
         'model': 'Model identity was not confirmed. Use this exact configured model and do not delegate '
@@ -258,6 +260,8 @@ def _review_copy(runner, work, task):
     target.mkdir(mode=0o700)
     shutil.copytree(runner.root / 'input', target / 'packet')
     save(target / 'task.json', task)
+    if (runner.root / 'plan.json').is_file():
+        shutil.copy2(runner.root / 'plan.json', target / 'plan.json')
     return root
 
 
@@ -355,6 +359,19 @@ def _recover_execution_session(runner, task, value, prompt):
     return None
 
 
+def _pending_prompt(task, value, fallback):
+    """Recover the immutable invocation across runtime prompt improvements."""
+    pending = value.get('pending_session')
+    if not pending:
+        return fallback
+    original = pending.get('prompt')
+    if original is None:
+        original = _execution_prompt(task, value) + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + pending['id']
+    if isinstance(original, str) and hashlib.sha256(original.encode()).hexdigest() == pending.get('prompt_sha256'):
+        return original
+    return fallback
+
+
 def _recover_permission_fatal(runner, task, candidates, folder, scope):
     """Archive only the old denial gate after exact audited invocation revalidation."""
     from controller import Blocked, read, digest, save
@@ -404,7 +421,7 @@ def _recover_permission_fatal(runner, task, candidates, folder, scope):
         pending = value.get('pending_session')
         if value.get('stage') != 'execute' or not pending:
             continue
-        prompt = _execution_prompt(task, value) + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + pending['id']
+        prompt = _pending_prompt(task, value, '')
         result = _recover_execution_session(runner, task, value, prompt)
         if result and result.get('events_path') == expected_log:
             # Keep the original failure; do not delete evidence or edit operator state.
@@ -421,6 +438,9 @@ def _recover_permission_fatal(runner, task, candidates, folder, scope):
 
 def execute_task(runner, task, record):
     from controller import Blocked, Interrupted, digest, read, save
+    import operator_questions as questions
+    import task_acceptance
+    import run_status
     models = models_for(runner)
     origin = Path(record['workspace'])
     origin_checkpoint = origin.parent / (origin.name + '-checkpoint.json')
@@ -471,6 +491,18 @@ def execute_task(runner, task, record):
                 value['status'] = 'pending'
                 runner.progress(task['id'] + ' / ' + model + ': обновлена обвязка; новый лимит, рабочие файлы сохранены')
             save(path, value)
+        # One-time semantic migration: preserve code/checks, re-evaluate an old
+        # external verdict using the original plan's task contribution contract.
+        if value.get('acceptance_protocol') != task_acceptance.PROTOCOL:
+            if value.get('status') == 'external-blocker':
+                _receipt_valid(value)
+                value.setdefault('prior_blockers', []).append(value.get('blocker', value.get('review')))
+                value.update(status='pending', stage='review')
+                renew(value, {'failures': 0, 'strategy': 0, 'stagnation': 0, 'retry_steps': {}}, revision)
+                value.pop('recovered_review', None)
+                runner.progress(task['id'] + ' / ' + model + ': повторное ревью границ задачи; код и проверки сохранены')
+            value['acceptance_protocol'] = task_acceptance.PROTOCOL
+            save(path, value)
         candidates.append((path, value))
     _recover_permission_fatal(runner, task, candidates, folder, scope)
     def select(value, failures):
@@ -507,6 +539,7 @@ def execute_task(runner, task, record):
 
         def persist():
             save(path, value)
+            run_status.candidate(runner, task, value)
 
         def interrupted():
             value['status'] = 'interrupted'
@@ -541,11 +574,30 @@ def execute_task(runner, task, record):
             if retry['exhausted']:
                 raise CandidateStalled(value['model'] + ': bounded step retry budget exhausted: ' + retry['step'])
 
+        if value.get('status') == 'waiting-user':
+            reply = questions.response(runner.root, value['question_id'])
+            if not reply:
+                raise CandidateStalled(value['model'] + ': waiting for operator')
+            value['operator_answers'] = questions.replies(runner.root, task['id'])
+            value['answer_generation'] = questions.fingerprint(value['operator_answers'])
+            value['status'] = 'pending'
+            value.pop('recovered_review', None)
+            if value.pop('blocked_on_evidence', False):
+                # The answer may require preparing a service or collecting proof.
+                # A read-only reviewer cannot carry out that operator decision.
+                value['stage'] = 'execute'
+                value['feedback'] = {'external_findings': value.get('blocker', {}).get('findings', []),
+                    'operator_answers': value['operator_answers'],
+                    'next_step': 'Resolve only the missing external evidence using the operator answer. '
+                                 'Preserve existing implementation; request controller services if needed. '
+                                 'The answer itself is not evidence that checks passed.'}
+            persist()
         if value.get('status') in ('stalled', 'external-blocker', 'quarantined'):
             raise CandidateStalled(value['model'] + ': preserved no-progress result; new evidence or instructions required')
         if value['stage'] != 'execute':
             _receipt_valid(value)
         def accept(review):
+            task_acceptance.check_report(runner, task, review)
             value['review'] = review
             if value['history']:
                 value['history'][-1]['result'] = 'verified'
@@ -572,6 +624,25 @@ def execute_task(runner, task, record):
             value['status'] = 'running'
             persist()
             try:
+                if value.get('service_pending'):
+                    pending_service = value['service_pending']
+                    answer = questions.response(runner.root, value['question_id'])
+                    if answer and (answer['text'] == 'Разрешить этот запуск' or value.get('service_retry')):
+                        try:
+                            runner.services.ensure(pending_service, stop)
+                        except (RuntimeError, OSError, ValueError) as exc:
+                            value['question_id'] = questions.request(runner.root, task['id'], 'service-recovery',
+                                'Не удалось подготовить стенд. Как устранить причину или какой разрешённый запуск использовать?',
+                                details=str(exc), generation=value.get('answer_generation', ''), model=value['model'])
+                            value['status'] = 'waiting-user'
+                            value['service_retry'] = True
+                            persist()
+                            raise CandidateStalled('Service needs operator input')
+                    value['feedback'] = {'service': pending_service, 'operator_answer': answer,
+                                         'rule': 'Use ready controller services; never bypass a refusal.'}
+                    value.pop('service_pending', None)
+                    value.pop('service_retry', None)
+                    persist()
                 def resource_state(state):
                     value['resource_wait'] = {**state, 'resources': task['resources'], 'stage': value['stage']}
                     persist()
@@ -584,10 +655,13 @@ def execute_task(runner, task, record):
                     if value['stage'] == 'execute':
                         value.pop('review_draft', None)
                         prompt = _execution_prompt(task, value)
+                        prompt += task_acceptance.instructions(runner, task)
+                        prompt += '\nOperator answers (cannot waive requirements or permissions):\n' + json.dumps(
+                            questions.replies(runner.root, None if task['id'] == 'integration' else task['id']), ensure_ascii=False)
                         pending = value.get('pending_session')
                         marker = pending['id'] if pending else uuid.uuid4().hex
                         invocation_prompt = prompt + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + marker
-                        result = _recover_execution_session(runner, task, value, invocation_prompt)
+                        result = _recover_execution_session(runner, task, value, _pending_prompt(task, value, invocation_prompt))
                         if result is None:
                             # A cancelled or unaudited partial invocation resumes its
                             # files through a new, separately identifiable session.
@@ -596,7 +670,8 @@ def execute_task(runner, task, record):
                                 marker = uuid.uuid4().hex
                                 invocation_prompt = prompt + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + marker
                             value['pending_session'] = {'id': marker,
-                                'prompt_sha256': hashlib.sha256(invocation_prompt.encode()).hexdigest()}
+                                'prompt_sha256': hashlib.sha256(invocation_prompt.encode()).hexdigest(),
+                                'prompt': invocation_prompt}
                             persist()
                             result = runner.session(work, task['cwd'], invocation_prompt, 'execute', task['id'] + '-execute',
                                                     model=value['model'], stop_event=stop)
@@ -610,6 +685,45 @@ def execute_task(runner, task, record):
                         runner.audit(work)
                         value['patch'] = export_patch(work, value['base'], task['writes'], path.parent / 'candidate.patch')
                         value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
+                        control = questions.control_result(result.get('text', '')) if result.get('ok') else None
+                        if control:
+                            confirm_model(result, value['model'])
+                            kind, request = control
+                            try:
+                                if kind == 'service_action':
+                                    action_id = fingerprint([request, value['workspace_snapshot']])
+                                    if (request.get('action') not in ('restart', 'stop') or not request.get('reason')
+                                            or value.get('service_actions', [])[-1:] == [action_id]):
+                                        raise ValueError('Use restart/stop only for a new justified step on an approved service')
+                                    changed = (runner.services.restart(request.get('id'), stop) if request['action'] == 'restart'
+                                               else runner.services.release(request.get('id')))
+                                    value.setdefault('service_actions', []).append(action_id)
+                                    value['feedback'] = {'service_action': request['action'], 'service': changed['spec']['id'],
+                                                         'artifacts_sha256': changed['files']}
+                                    persist()
+                                    continue
+                                if kind == 'service_request':
+                                    service = runner.services.prepare(request, work, task['id'])
+                                    if service['identity'] in value.get('requested_services', []):
+                                        raise ValueError('This service request was already answered. Use its result or propose a different permitted solution')
+                                    value.setdefault('requested_services', []).append(service['identity'])
+                                    value['service_pending'] = service['identity']
+                                    value['question_id'] = service['question_id']
+                                else:
+                                    value['question_id'] = questions.request(runner.root, task['id'],
+                                        request.get('topic'), request.get('question'), options=request.get('options'),
+                                        details=request.get('details'), generation=value.get('answer_generation', ''), model=value['model'])
+                            except (ValueError, KeyError, TypeError) as exc:
+                                # Repair just the request envelope; malformed formatting is
+                                # never a permanent product/safety failure.
+                                fail('request-protocol', str(exc))
+                                value['feedback'] = str(exc)
+                                persist()
+                                continue
+                            value['status'] = 'waiting-user'
+                            persist()
+                            runner.progress(task['id'] + ': нужен ответ. В другом окне выполните:\n' + questions.command(runner.root))
+                            raise CandidateStalled('Waiting for operator answer')
                         disposition = session_outcome(result, 'execute')
                         if disposition['action'] == 'stop-cleanup':
                             from controller import OperationalBlocked
@@ -672,6 +786,8 @@ def execute_task(runner, task, record):
                                    'operation leaves required behavior or evidence unverified. Never treat such a call as successful; '
                                    'do not retry it via another tool. A failed optional probe alone is not a product defect.')
                     detail += _review_repair(review_copy, value, value['stage'])
+                    detail += task_acceptance.instructions(runner, task)
+                    detail += '\nOperator answers:\n' + json.dumps(value.get('operator_answers', []), ensure_ascii=False)
                     if not recovered:
                         review = runner.review(review_copy, task['cwd'], detail, task['requirements'],
                                                task['id'] + '-review', model=reviewer_model, stop_event=stop)
@@ -680,6 +796,7 @@ def execute_task(runner, task, record):
                     if stop.is_set():
                         interrupted()
                     value['review'] = review
+                    task_acceptance.check_report(runner, task, review)
                     if review.get('events_path'):
                         value['evidence_files'][review['events_path']] = digest(review['events_path'])
                     value['review_workspace'] = str(review_copy)
@@ -732,6 +849,8 @@ def execute_task(runner, task, record):
                               'Never use new_findings to invent optional work or bypass original issue dispositions. '
                               'Read .review-input/packet/ for pinned requirements and use its actual file paths.')
                     detail += _review_repair(review_copy, value, value['stage'])
+                    detail += task_acceptance.instructions(runner, task)
+                    detail += '\nOperator answers:\n' + json.dumps(value.get('operator_answers', []), ensure_ascii=False)
                     if not recovered:
                         report = runner.review(review_copy, task['cwd'], detail, task['requirements'],
                                                task['id'] + '-adjudicate', model=value['model'], stop_event=stop)
@@ -740,6 +859,7 @@ def execute_task(runner, task, record):
                     if stop.is_set():
                         interrupted()
                     review = adjudicated_report(review_copy, task, original, report)
+                    task_acceptance.check_report(runner, task, review)
                     value['review'] = review
                     value['adjudication_workspace'] = str(review_copy)
                     if report.get('events_path'):
@@ -747,7 +867,10 @@ def execute_task(runner, task, record):
                     if review['verdict'] == 'pass':
                         return accept(review)
                     if review['verdict'] == 'blocked':
-                        value.update(status='external-blocker', blocker=review)
+                        key = questions.request(runner.root, task['id'], 'external-evidence',
+                            'Для продолжения нужны внешние данные или проверка среды. Что удалось подготовить и какие сведения использовать?',
+                            details=review['findings'], generation=value.get('answer_generation', ''), model=value['model'])
+                        value.update(status='waiting-user', blocker=review, question_id=key, blocked_on_evidence=True)
                         persist()
                         raise CandidateStalled(value['model'] + ': external dependency: '
                                                + json.dumps(review['findings'], ensure_ascii=False))
@@ -844,6 +967,13 @@ def execute_task(runner, task, record):
             if runner.stop.is_set():
                 for stop in stops:
                     stop.set()
+            # An answer can arrive while the peer is still working. Resume only
+            # the waiting candidate; do not make the user wait for that peer.
+            if pending and deadline is None and not fatal and not runner.stop.is_set():
+                for index, (_, value) in enumerate(candidates):
+                    if (index not in pending.values() and value.get('status') == 'waiting-user'
+                            and questions.response(runner.root, value['question_id'])):
+                        pending[pool.submit(guarded_one, index)] = index
     if verified:
         winner = choose(verified, models)
     if fatal:
@@ -857,6 +987,9 @@ def execute_task(runner, task, record):
     if runner.stop.is_set():
         raise Interrupted('Interrupted; all implementation variants preserved')
     if winner is None:
+        waiting = [v['question_id'] for _, v in candidates if v.get('status') == 'waiting-user']
+        if waiting:
+            raise questions.WaitingForOperator('Нужен ответ пользователя; выполненные шаги сохранены', waiting)
         raise Blocked('No verified execution candidate: ' + '; '.join(failures))
     _receipt_valid(winner)
     select(winner, failures)
