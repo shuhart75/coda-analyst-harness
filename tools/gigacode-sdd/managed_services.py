@@ -231,6 +231,9 @@ class Manager:
         with self.lock:
             matches = [p for p in self.folder.glob('*/service.json')
                        if read(p)['spec']['id'] == name and read(p)['status'] in ('ready', 'stopped')]
+            if not matches:
+                matches = [p for p in self.folder.glob('*/service.json')
+                           if read(p)['spec']['id'] == name and read(p)['status'] == 'released']
             if len(matches) != 1:
                 raise ValueError('Restart requires one previously approved service')
             path = matches[0]
@@ -245,6 +248,26 @@ class Manager:
                 value.update(status='stopped', stopped_at=time.time())
                 save(path, value)
             return self.ensure(identity, stop)
+
+    def release(self, name):
+        """Explicitly release our service before an approved replacement launch."""
+        from controller import read, save
+        with self.lock:
+            matches = [(identity, proc) for identity, proc in self.active.items()
+                       if read(self.folder / identity / 'service.json')['spec']['id'] == name]
+            if len(matches) != 1:
+                raise ValueError('Stop requires one service owned by this controller')
+            identity, proc = matches[0]
+            if proc.poll() is None:
+                stop_process_scope(proc)
+            proc.wait(timeout=10)
+            path = self.folder / identity / 'service.json'
+            value = read(path)
+            value.update(status='released', stopped_at=time.time())
+            save(path, value)
+            del self.active[identity]
+            self.runner.progress('Стенд: ' + name + ' остановлен; файлы и журнал сохранены')
+            return value
 
     def restore(self, stop):
         from controller import read

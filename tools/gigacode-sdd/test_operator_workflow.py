@@ -280,6 +280,24 @@ class ManagedServicesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'definition'):
             self.runner.services.ensure(value['identity'], self.runner.stop)
 
+    def test_released_service_is_not_restored_and_replacement_keeps_old_artifacts(self):
+        spec = self.spec()
+        value = self.prepared(spec)
+        self.addCleanup(self.runner.services.close)
+        with patch('managed_services.inspect_services', side_effect=self.owned_inventory):
+            self.runner.services.ensure(value['identity'], self.runner.stop)
+            self.runner.services.release('preview')
+            self.runner.services.restore(self.runner.stop)
+            self.assertFalse(ms.port_open(spec['ports'][0]))
+            self.runner.services.restart('preview', self.runner.stop)
+            self.runner.services.release('preview')
+            (self.runner.main/'backend/value.txt').write_text('new version')
+            replacement = self.prepared(spec)
+            self.assertNotEqual(replacement['identity'], value['identity'])
+            self.runner.services.ensure(replacement['identity'], self.runner.stop)
+            self.assertTrue(ms.port_open(spec['ports'][0]))
+            self.assertEqual((Path(value['workspace'])/'backend/value.txt').read_text(), '0')
+
     def test_health_cannot_reach_external_host_or_undeclared_port(self):
         spec = self.spec()
         for url in ('http://example.com:8080', 'http://127.0.0.1:1', 'file:///etc/passwd'):

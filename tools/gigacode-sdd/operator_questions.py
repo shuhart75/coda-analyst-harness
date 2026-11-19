@@ -214,6 +214,8 @@ Use foreground processes only, never daemonize. Paths to artifacts must be relat
 the controller freezes them in a separate service copy. Include scripts/config needed for launch in artifacts.
 To restart a previously approved service with the SAME frozen artifacts, return
 {"service_action":{"id":"service-name","action":"restart","reason":"required experiment step"}}.
+Use action="stop" to release an owned service before requesting an approved replacement; its files remain.
+Never replace frozen artifacts inside a pinned no-rebuild experiment.
 Do not repeat a completed action without new work/evidence. No rebuild occurs during restart.
 Use only approved local tooling and isolated test data. Never propose disabling managed browser/security
 policy or using an existing PoC database for destructive experiments. Use Nexus for dependencies.

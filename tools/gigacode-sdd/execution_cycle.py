@@ -685,13 +685,14 @@ def execute_task(runner, task, record):
                             try:
                                 if kind == 'service_action':
                                     action_id = fingerprint([request, value['workspace_snapshot']])
-                                    if (request.get('action') != 'restart' or not request.get('reason')
-                                            or action_id in value.get('service_actions', [])):
-                                        raise ValueError('Use restart only for a new justified step on an approved service')
-                                    restarted = runner.services.restart(request.get('id'), stop)
+                                    if (request.get('action') not in ('restart', 'stop') or not request.get('reason')
+                                            or value.get('service_actions', [])[-1:] == [action_id]):
+                                        raise ValueError('Use restart/stop only for a new justified step on an approved service')
+                                    changed = (runner.services.restart(request.get('id'), stop) if request['action'] == 'restart'
+                                               else runner.services.release(request.get('id')))
                                     value.setdefault('service_actions', []).append(action_id)
-                                    value['feedback'] = {'service_restarted': restarted['spec']['id'],
-                                                         'artifacts_sha256': restarted['files']}
+                                    value['feedback'] = {'service_action': request['action'], 'service': changed['spec']['id'],
+                                                         'artifacts_sha256': changed['files']}
                                     persist()
                                     continue
                                 if kind == 'service_request':
