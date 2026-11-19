@@ -172,6 +172,22 @@ class CandidateQuestionsTests(unittest.TestCase):
         self.assertEqual(self.check_count, 0)
         self.assertEqual(len(accepted['prior_blockers']), 1)
 
+    def test_external_answer_can_prepare_evidence_before_rechecking(self):
+        self.primary_only = True
+        self.run_task()
+        path = next(p for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')
+                    if read(p)['status'] == 'accepted')
+        key = oq.request(self.runner.root, self.task['id'], 'external-evidence', 'Как подготовить стенд?')
+        value = read(path)
+        value.update(status='waiting-user', stage='adjudicate', question_id=key, blocked_on_evidence=True,
+                     blocker={'findings': ['Live evidence missing']})
+        save(path, value)
+        oq.answer(self.runner.root, key, 'Запросите управляемый сервис')
+        self.calls.clear()
+        self.assertEqual(self.run_task()['status'], 'accepted')
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn('Resolve only the missing external evidence', self.calls[0][2])
+
 
 class SchedulerQuestionTests(unittest.TestCase):
     setUp = fixtures.ControllerE2E.setUp

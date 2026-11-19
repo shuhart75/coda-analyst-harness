@@ -583,7 +583,14 @@ def execute_task(runner, task, record):
             value['status'] = 'pending'
             value.pop('recovered_review', None)
             if value.pop('blocked_on_evidence', False):
-                value['stage'] = 'checks'
+                # The answer may require preparing a service or collecting proof.
+                # A read-only reviewer cannot carry out that operator decision.
+                value['stage'] = 'execute'
+                value['feedback'] = {'external_findings': value.get('blocker', {}).get('findings', []),
+                    'operator_answers': value['operator_answers'],
+                    'next_step': 'Resolve only the missing external evidence using the operator answer. '
+                                 'Preserve existing implementation; request controller services if needed. '
+                                 'The answer itself is not evidence that checks passed.'}
             persist()
         if value.get('status') in ('stalled', 'external-blocker', 'quarantined'):
             raise CandidateStalled(value['model'] + ': preserved no-progress result; new evidence or instructions required')
