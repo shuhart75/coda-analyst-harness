@@ -25,7 +25,7 @@ class MailboxTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='question space ')
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         save(self.root/'config.json', {'requirements_sha256': 'pinned'})
         save(self.root/'plan.json', {'tasks': []})
         save(self.root/'state.json', {'status': 'running', 'tasks': {}})
