@@ -69,6 +69,27 @@ class ConsoleTests(unittest.TestCase):
             self.assertEqual(p.rows, 0)
             self.assertIn('Работа остановлена', stream.getvalue())
 
+    def test_pending_question_keeps_full_command_in_plain_and_narrow_tty_status(self):
+        command = "python3 '/path with spaces/" + 'folder/'*30 + "bootstrap.py' --answers-config '/run space/config.json'"
+        value = dict(self.value, questions=[{'question': 'Разрешить?'}], answer_command=command)
+        for stream in (io.StringIO(), Terminal()):
+            with patch.dict(os.environ, {'TERM': 'xterm-256color'}):
+                display = ConsoleProgress(self.root/'logs/command.log', stream=stream,
+                    clock=lambda: self.now, dimensions=lambda: (40, 12))
+                display.summary(self.value)
+                display.summary(value)
+                initial = stream.getvalue()
+                self.assertIn(command, initial)
+                self.assertIn('Откройте отдельное окно терминала', initial)
+                self.assertEqual(display.rows, 0)
+                self.now += 1
+                display.tick()
+                self.assertEqual(stream.getvalue(), initial)
+                self.now += 60
+                display.tick()
+                self.assertIn(command, stream.getvalue()[len(initial):])
+                display.close()
+
     def test_active_events_do_not_imply_success_and_remaining_is_not_a_time_estimate(self):
         result = dashboard(self.value)
         self.assertIn('Запросов на вмешательство нет', result)

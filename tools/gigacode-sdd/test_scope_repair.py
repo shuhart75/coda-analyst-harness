@@ -141,6 +141,34 @@ class ScopeRepairTests(unittest.TestCase):
         self.assertEqual((self.runner.main/'backend/value.txt').read_text(), '2')
         self.assertEqual((self.runner.root/'plan.json').read_bytes(), self.plan_bytes)
 
+    def test_controller_migrates_unassigned_question_then_checks_approved_repair(self):
+        self.setup_scope()
+        self.primary_only = True
+        plan = read(self.runner.root/'plan.json')
+        plan['tasks'][0]['writes'] = ['backend/other.txt']
+        save(self.runner.root/'plan.json', plan)
+        def ask(root, cwd, prompt, role, name, model=None, stop_event=None):
+            result = self.result(root, model)
+            result['text'] = json.dumps({'scope_request': {'paths': ['value.txt'], 'reason': 'Missing bean'}})
+            return result
+        with patch.object(sr, 'validate_owners', side_effect=ValueError('No accepted predecessor owns the requested file: backend/value.txt')):
+            with self.assertRaises(oq.WaitingForOperator) as caught:
+                self.run_task(session=ask)
+        old = caught.exception.question_ids[0]
+        with self.assertRaises(oq.WaitingForOperator) as caught:
+            self.run_task(session=lambda *a, **kw: self.fail('Migration must not execute'))
+        new = caught.exception.question_ids[0]
+        self.assertNotEqual(old, new)
+        self.assertEqual(len(oq.questions(self.runner.root, pending_only=True)), 1)
+        oq.answer(self.runner.root, new, sr.APPROVE)
+        accepted = self.run_task()
+        self.assertIn(new, accepted['scope_grants'])
+        self.assertGreater(self.check_count, 0)
+        self.assertGreater(self.review_count, 0)
+        with patch.object(self.runner, 'guard'):
+            self.runner.integrate(self.task, accepted)
+        self.assertEqual((self.runner.main/'backend/value.txt').read_text(), '2')
+
     def test_saved_audited_question_is_recovered_without_session(self):
         self.primary_only = True
         question = json.dumps({'operator_question': {'subject': 'name', 'request': 'Какое имя?'}})
@@ -167,6 +195,63 @@ class ScopeRepairTests(unittest.TestCase):
         self.assertEqual(value['failures'], 0)
         oq.answer(self.runner.root, value['question_id'], 'Учебная проверка')
         self.assertEqual(self.run_task()['status'], 'accepted')
+
+
+class UnassignedRepairTests(unittest.TestCase):
+    setUp = ScopeRepairTests.setUp
+    setup_scope = ScopeRepairTests.setup_scope
+    approve = ScopeRepairTests.approve
+    def setup_unassigned(self):
+        self.setup_scope()
+        plan = read(self.runner.root/'plan.json')
+        plan['tasks'][0]['writes'] = ['backend/other.txt']
+        save(self.runner.root/'plan.json', plan)
+        self.plan_bytes = (self.runner.root/'plan.json').read_bytes()
+
+    def test_unassigned_tracked_file_requires_exact_approval(self):
+        self.setup_unassigned()
+        key = self.approve()
+        q = next(q for q in oq.questions(self.runner.root) if q['id'] == key)
+        self.assertEqual(q['action']['files'][0]['owners'], [])
+        self.assertEqual(sr.effective_task(self.runner, self.task, self.value)['writes'],
+                         ['backend/new.txt', 'backend/value.txt'])
+        self.assertEqual((self.runner.root/'plan.json').read_bytes(), self.plan_bytes)
+
+    def test_downstream_only_owner_cannot_be_reassigned_as_unowned(self):
+        self.setup_unassigned()
+        plan = read(self.runner.root/'plan.json')
+        plan['tasks'].append(dict(self.task, id='later', depends_on=['be'], writes=['backend/value.txt']))
+        save(self.runner.root/'plan.json', plan)
+        with self.assertRaises(ValueError):
+            self.approve()
+
+    def test_old_unanswered_question_migrates_once_and_recovers_after_crash(self):
+        self.setup_unassigned()
+        key = oq.request(self.runner.root, self.task['id'], 'scope-unavailable-old', 'Old question',
+            details={'reason': 'No accepted predecessor owns the requested file: backend/value.txt',
+                     'model_request': {'paths': ['backend/value.txt'], 'reason': 'Missing bean'}})
+        self.value.update(status='waiting-user', question_id=key)
+        self.assertTrue(sr.refresh_pending(self.runner, self.task, self.value))
+        new = self.value['question_id']
+        self.assertNotEqual(key, new)
+        self.assertEqual([q['id'] for q in oq.questions(self.runner.root, pending_only=True)], [new])
+        self.assertFalse(sr.refresh_pending(self.runner, self.task, self.value))
+        self.value['question_id'] = key  # Crash before candidate checkpoint persisted.
+        self.assertTrue(sr.refresh_pending(self.runner, self.task, self.value))
+        self.assertEqual(self.value['question_id'], new)
+        self.assertEqual(sr.effective_task(self.runner, self.task, self.value)['writes'], ['backend/new.txt'])
+        oq.answer(self.runner.root, new, sr.APPROVE)
+        self.assertIn('backend/value.txt', sr.effective_task(self.runner, self.task, self.value)['writes'])
+
+    def test_prior_answer_is_not_reinterpreted_as_new_approval(self):
+        self.setup_unassigned()
+        key = oq.request(self.runner.root, self.task['id'], 'scope-unavailable-old', 'Old question',
+            details={'reason': 'No accepted predecessor owns the requested file: backend/value.txt',
+                     'model_request': {'paths': ['backend/value.txt']}})
+        oq.answer(self.runner.root, key, 'да')
+        self.value.update(status='waiting-user', question_id=key)
+        self.assertFalse(sr.refresh_pending(self.runner, self.task, self.value))
+        self.assertEqual(sr.effective_task(self.runner, self.task, self.value)['writes'], ['backend/new.txt'])
 
 
 if __name__ == '__main__':

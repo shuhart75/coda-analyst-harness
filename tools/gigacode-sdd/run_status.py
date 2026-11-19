@@ -94,7 +94,7 @@ def _sections(value):
     for q in value['questions']:
         questions.append(q['task'] + ': ' + q['question'])
     if value['questions']:
-        questions.append('Для ответа выполните в другом окне:\n' + value['answer_command'])
+        questions.append('Откройте отдельное окно терминала и выполните:\n' + value['answer_command'])
     sections['questions'] = '\n'.join(questions) if value['questions'] else ''
     return sections
 
@@ -135,10 +135,6 @@ def publish(runner, force=False):
     display = getattr(runner, '_display', None)
     if display is not None and hasattr(display, 'summary'):
         display.summary(value)
-        pending = [(q['id'], q['question']) for q in value['questions']]
-        if pending and pending != getattr(runner, '_console_questions', None):
-            display.notice('Нужен ваш ответ. Для просмотра вопросов и ответа выполните в другом окне:\n' + value['answer_command'])
-        runner._console_questions = pending
     runner._last_progress_snapshot = value
     return value
 
@@ -210,5 +206,5 @@ def dashboard(value, include_time=True, include_command=True):
     else:
         lines.append('Остаток будет известен после проверки плана.')
     if questions and include_command:
-        lines.append('Для ответа выполните в другом окне:\n' + value['answer_command'])
+        lines.append('Откройте отдельное окно терминала и выполните:\n' + value['answer_command'])
     return '\n'.join(lines)
