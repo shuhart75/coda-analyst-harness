@@ -118,7 +118,8 @@ class ConsoleProgress(Progress):
         if not self.screen_open:
             self.output.write('\x1b[?1049h\x1b[?25l')
             self.screen_open = True
-        self.output.write('\x1b[H' + '\n'.join(lines) + '\x1b[J')
+        # Clear the previous frame too: shorter lines must not retain old tails.
+        self.output.write('\x1b[H\x1b[J' + '\n'.join(lines) + '\x1b[J')
         self.rows = occupied
         self.output.flush()
 

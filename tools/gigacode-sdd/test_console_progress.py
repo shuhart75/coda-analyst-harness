@@ -29,7 +29,7 @@ class ConsoleTests(unittest.TestCase):
                 start = len(stream.getvalue())
                 display.tick()
                 frame = stream.getvalue()[start:]
-                self.assertTrue(frame.startswith('\x1b[H'))
+                self.assertTrue(frame.startswith('\x1b[H\x1b[J'))
                 self.assertIn('▶ Интеграционные тесты backend', frame)
                 self.assertIn('Проверка обратной совместимости', frame)
                 self.assertTrue(frame.endswith('\x1b[J'))
