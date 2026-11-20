@@ -206,13 +206,13 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(len(self.activities), 4)
         self.assertTrue(all(a[1]['metadata']['purpose'] == 'observation' for a in self.activities))
 
-    def test_wrong_reported_model_disables_observation_without_changing_acceptance(self):
+    def test_wrong_reported_model_requests_next_round_without_changing_acceptance(self):
         transport, calls = self.fake_transport(reported_model='unexpected-model')
         state = copy.deepcopy(self.runner.state)
         with patch.object(observers, 'run_session', side_effect=transport):
             self.manager.observe(self.packet())
         self.assertEqual(len(calls), 2)  # no assessment after either failed capability probe
-        self.assertTrue(self.manager.disabled)
+        self.assertTrue(self.manager.retry_pending)
         self.assertEqual(self.runner.state, state)
         self.assertFalse(self.runner.stop.is_set())
         latest = json.loads((self.manager.root / 'latest.json').read_text())
@@ -230,9 +230,9 @@ class ObserverTests(unittest.TestCase):
         self.assertTrue(all(r['details'] == prose for r in latest['results'].values()))
         self.assertEqual(self.runner.state, state)
         self.assertFalse(self.runner.stop.is_set())
-        self.assertFalse(self.manager.disabled)
+        self.assertFalse(self.manager.retry_pending)
 
-    def test_one_observer_exception_is_isolated_and_not_retried(self):
+    def test_one_observer_exception_keeps_peer_and_requests_next_round(self):
         state = copy.deepcopy(self.runner.state)
         def evaluate(role, model, value):
             if role == 'scope':
@@ -241,7 +241,7 @@ class ObserverTests(unittest.TestCase):
         with patch.object(self.manager, 'evaluate', side_effect=evaluate) as run:
             self.manager.observe(self.packet())
         self.assertEqual(run.call_count, 2)
-        self.assertTrue(self.manager.disabled)
+        self.assertTrue(self.manager.retry_pending)
         self.assertEqual(self.runner.state, state)
         self.assertFalse(self.runner.stop.is_set())
         latest = json.loads((self.manager.root / 'latest.json').read_text())
@@ -254,6 +254,110 @@ class ObserverTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, 'profile'):
                 self.manager.session('progress', 'model-a', 'test')
         run.assert_not_called()
+
+    def test_timeout_keeps_successful_peer_and_next_round_uses_new_snapshot(self):
+        for failed_role in ('progress', 'scope'):
+            with self.subTest(failed_role=failed_role):
+                manager = observers.Manager(self.runner)
+                transport, calls = self.fake_transport()
+                def run(argv, cwd, prompt, log, **kwargs):
+                    result = transport(argv, cwd, prompt, log, **kwargs)
+                    if 'СНИМОК:\n' in prompt and ('observer-'+failed_role+'-') in Path(log).name:
+                        result.update(ok=False, timed_out=True, terminal_result=False,
+                                      errors=['Missing terminal root result event'])
+                    return result
+                first = self.packet()
+                with patch.object(observers, 'run_session', side_effect=run):
+                    manager.observe(first)
+                failed = json.loads((manager.root/'latest.json').read_text())
+                self.assertTrue(failed['partial'])
+                self.assertEqual(failed['status'], 'waiting')
+                self.assertEqual(set(failed['audit_errors']), {failed_role})
+                self.assertTrue(failed['audit_errors'][failed_role]['timed_out'])
+                self.assertTrue(manager.retry_pending)
+                second = copy.deepcopy(first)
+                second['snapshot_at'] += 180
+                second['done'] = 1
+                with patch.object(observers, 'run_session', side_effect=transport):
+                    manager.observe(second)
+                latest = json.loads((manager.root/'latest.json').read_text())
+                self.assertFalse(manager.retry_pending)
+                self.assertFalse(latest['partial'])
+                self.assertEqual(latest['audit_errors'], {})
+                assessments = [c for c in calls if 'СНИМОК:\n' in c['prompt']]
+                self.assertEqual(len(assessments), 4)
+                self.assertEqual(len({str(c['cwd']) for c in calls}), len(calls))
+                for call in assessments[-2:]:
+                    self.assertEqual(json.loads(call['prompt'].split('СНИМОК:\n')[1]), second)
+                self.assertFalse(self.runner.stop.is_set())
+
+    def test_both_failures_retry_next_assignment_without_stopping_main(self):
+        with patch.object(self.manager, 'evaluate', side_effect=OSError('temporary outage')):
+            self.manager.observe(self.packet())
+        latest = json.loads((self.manager.root/'latest.json').read_text())
+        self.assertEqual(latest['status'], 'unavailable')
+        self.assertEqual(len(latest['audit_errors']), 2)
+        self.assertTrue(self.manager.retry_pending)
+        with patch.object(self.manager, 'evaluate', return_value={'status': 'progress', 'summary': 'Checks passed'}) as run:
+            self.manager.observe(self.packet())
+        self.assertEqual(run.call_count, 2)
+        self.assertFalse(self.manager.retry_pending)
+        self.assertFalse(self.runner.stop.is_set())
+
+    def test_uncertain_cleanup_preserves_ledger_but_not_a_global_observer_stop(self):
+        transport, calls = self.fake_transport()
+        def uncertain(*args, **kwargs):
+            result = transport(*args, **kwargs)
+            result['cleanup'] = {'preserved': True, 'process_group': 1234}
+            return result
+        with patch.object(observers, 'run_session', side_effect=uncertain):
+            self.manager.observe(self.packet())
+        self.assertTrue((self.root/'preserved-processes/1234.json').is_file())
+        self.assertTrue(self.manager.retry_pending)
+        with patch.object(observers, 'run_session', side_effect=transport):
+            self.manager.observe(self.packet())
+        self.assertFalse(self.manager.retry_pending)
+        self.assertTrue((self.root/'preserved-processes/1234.json').is_file())
+        self.assertFalse(self.runner.stop.is_set())
+
+    def test_scheduler_retries_failure_with_fresh_packet_even_when_fingerprint_is_same(self):
+        now = [1000]
+        waits = []
+        snapshots = []
+        class Stop:
+            def is_set(inner): return False
+            def wait(inner, seconds):
+                waits.append(seconds)
+                now[0] += seconds
+                return len(snapshots) >= 2
+        self.manager.stop = Stop()
+        def observe(value):
+            snapshots.append(value)
+            if len(snapshots) == 1:
+                raise OSError('Snapshot/report failure')
+        def packet(*args): return {'status': 'running', 'snapshot_at': now[0]}
+        with patch.object(observers.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(observers, 'packet', side_effect=packet), \
+                patch.object(observers, 'fingerprint', return_value='unchanged'), \
+                patch.object(self.manager, 'observe', side_effect=observe):
+            self.manager.loop()
+        self.assertEqual(snapshots[1]['snapshot_at']-snapshots[0]['snapshot_at'], 180)
+        self.assertTrue(list((self.manager.root/'reports').glob('error-*.json')))
+        self.assertFalse(self.runner.stop.is_set())
+
+    def test_partial_status_shows_surviving_scope_auditor_and_error(self):
+        from run_status import observation_lines
+        lines = observation_lines({'status': 'running', 'observation': {
+            'status': 'concern', 'partial': True, 'retry_pending': True,
+            'results': {'progress': {'status': 'unavailable', 'summary': 'ошибка сессии'},
+                        'scope': {'status': 'concern', 'summary': 'Repeated failure without new checks'}},
+            'audit_errors': {'progress': {'model': 'DeepSeek-V4.1-Flash-1017',
+                                         'summary': 'превышено время ожидания'}}}})
+        text = '\n'.join(lines)
+        self.assertIn('Наблюдение частичное', text)
+        self.assertIn('Repeated failure without new checks', text)
+        self.assertIn('DeepSeek: превышено время ожидания', text)
+        self.assertIn('автоматически', text)
 
     def test_context_exit_cancels_observer_lifecycle_without_main_stop(self):
         entered = threading.Event()
@@ -300,7 +404,7 @@ class ObserverTests(unittest.TestCase):
         with patch.object(observers, 'run_session', side_effect=run):
             self.manager.observe(self.packet())
         self.assertEqual(len(calls), 4)
-        self.assertTrue(self.manager.disabled)
+        self.assertTrue(self.manager.retry_pending)
         latest = json.loads((self.manager.root / 'latest.json').read_text())
         self.assertEqual(latest['status'], 'unavailable')
         self.assertFalse(self.runner.stop.is_set())
