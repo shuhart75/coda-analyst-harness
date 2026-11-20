@@ -167,6 +167,10 @@ class DisputeTests(unittest.TestCase):
         self.assertEqual(checked['status'], 'withdrawn')
         with self.assertRaises(Blocked):
             review_receipt.load(self.runner, self.task, value, str(events), MODELS[0])
+        state['operator_answers'] = [{'answer': 'New business clarification'}]
+        with self.assertRaisesRegex(Blocked, 'different findings or objections'):
+            review_receipt.load(self.runner, self.task, value, str(events), MODELS[1])
+        state['operator_answers'] = []
         state['requests'][0]['reason'] = 'Different objection'
         with self.assertRaisesRegex(Blocked, 'different findings or objections'):
             review_receipt.load(self.runner, self.task, value, str(events), MODELS[1])
