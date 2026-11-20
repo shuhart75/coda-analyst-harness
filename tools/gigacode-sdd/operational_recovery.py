@@ -42,7 +42,7 @@ def recover(runner, task, candidates, folder, scope):
         if value.get('stage') not in ('review', 'adjudicate'):
             continue
         _receipt_valid(value)
-        model = models[1-models.index(value['model'])] if value['stage'] == 'review' else value['model']
+        model = models[1-models.index(value['model'])] if (value['stage'] == 'review' or value.get('review_resolution')) else value['model']
         name = task['id'] + ('-review' if value['stage'] == 'review' else '-adjudicate')
         # A newer interrupted attempt does not erase older completed evidence.
         for receipt in sorted((runner.root/'logs').glob(name+'-*/session-receipt.json'),

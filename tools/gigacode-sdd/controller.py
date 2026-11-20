@@ -821,10 +821,8 @@ executed test names/counts, not just a successful command or test compilation.
         diagnostic_errors = review_diagnostic_errors(result)
         if not result['ok'] and not review_feedback_usable(result) and diagnostic_errors is None:
             raise RetryableSessionError('Reviewer failed: ' + result['events_path'], result)
-        try:
-            report = parse_json(result['text'])
-        except (ValueError, TypeError, Blocked) as exc:
-            raise RetryableSessionError('Malformed reviewer JSON: ' + str(exc), result) from exc
+        from review_format import read_response
+        report = read_response(result)
         if name == 'plan-review' and report.get('candidate_sha256') != expected:
             raise Blocked('Reviewer candidate SHA256 mismatch')
         # Accept the equally explicit {id, text} representation without asking a
@@ -838,7 +836,9 @@ executed test names/counts, not just a successful command or test compilation.
             raise RetryableSessionError('Malformed reviewer verdict', result)
         coverage = report.get('coverage')
         if not isinstance(coverage, dict) or not set(requirements) <= coverage.keys() or any(not isinstance(coverage[r], str) or not coverage[r].strip() for r in requirements):
-            raise RetryableSessionError('Reviewer omitted requirement evidence', result)
+            missing = [r for r in requirements if not isinstance(coverage, dict)
+                       or not isinstance(coverage.get(r), str) or not coverage[r].strip()]
+            raise RetryableSessionError('Reviewer omitted requirement evidence: ' + ', '.join(missing), result)
         if report['verdict'] == 'pass' and report['findings']:
             raise RetryableSessionError('Reviewer passed unresolved findings', result)
         if report['verdict'] != 'pass' and not report['findings']:
@@ -856,9 +856,17 @@ executed test names/counts, not just a successful command or test compilation.
             try:
                 operator_input._optional(report['optional_findings'])
             except (Blocked, ValueError, TypeError, KeyError) as exc:
-                raise RetryableSessionError('Invalid optional finding scope: ' + str(exc), result) from exc
+                items = report['optional_findings']
+                # Explicit mandatory scope cannot be silently reclassified. Mere
+                # missing presentation fields in an aside do not invalidate the
+                # independent verdict and its mandatory coverage.
+                if isinstance(items, list) and any(isinstance(i, dict) and
+                        (i.get('requirements') or i.get('outside_required_scope') is False)
+                        for i in items):
+                    raise RetryableSessionError('Optional finding contradicts mandatory scope', result) from exc
+                report['unverified_optional_findings'] = {'items': report.pop('optional_findings'), 'error': str(exc)}
             try:
-                for issue in report['optional_findings']:
+                for issue in report.get('optional_findings', []):
                     packet, code = False, False
                     for cite in issue['evidence']:
                         path = under(root, cite['path'])
@@ -874,6 +882,12 @@ executed test names/counts, not just a successful command or test compilation.
         report['events_sha256'] = digest(result['events_path'])
         report['model_reported'] = model
         return report
+
+    def resolve_review_issue(self, root, task, state, item, detail, name, model, stop_event=None):
+        import review_resolution
+        prompt = review_resolution.prompt(task, state, item) + detail
+        result = self.session(root, task['cwd'], prompt, 'review', name, model=model, stop_event=stop_event)
+        return review_resolution.validate(self, root, task, result, model)
 
     def checks(self, root, checks, name, stop_event=None):
         stopping = stop_event if stop_event is not None else self.stop

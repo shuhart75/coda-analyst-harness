@@ -4,6 +4,22 @@ from retry_budget import renew
 
 
 class StepRecoveryTests(unittest.TestCase):
+    def test_identical_failure_guard_survives_restart_and_ignores_log_ids(self):
+        import json
+        state = {}
+        for n in range(3):
+            state = json.loads(json.dumps(state))
+            result = record_failure(state, 'review', 'review-protocol', 1,
+                'Missing field reason; inspect /logs/review-' + str(n)*12)
+            self.assertEqual(result['exhausted'], n == 2)
+
+    def test_incremental_repairs_are_not_identical_failures(self):
+        state = {}
+        for field in ('verdict', 'findings', 'REQ-1', 'REQ-2', 'REQ-3'):
+            result = record_failure(state, 'review', 'review-protocol', 1, 'Missing ' + field)
+            self.assertFalse(result['exhausted'])
+            self.assertEqual(result['repeated_failure_count'], 1)
+
     def test_context_and_schema_share_budget_but_adjudication_is_distinct(self):
         state = {}
         for kind in ('review-protocol', 'review-context') * 3:

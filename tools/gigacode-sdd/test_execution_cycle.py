@@ -168,7 +168,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
             nonlocal reviews
             reviews += 1
             if reviews <= 3:
-                raise RetryableSessionError('malformed review')
+                raise RetryableSessionError('Missing coverage: REQ-' + str(reviews))
             return self.review(*args, **kwargs)
         accepted = self.run_task(checks=checks, review=review)
         self.assertEqual(accepted['status'], 'accepted')
@@ -218,11 +218,11 @@ class ExecutionPortfolioTests(unittest.TestCase):
             self.run_task(review=review)
         self.assertTrue(exhausted_writes)
         self.assertEqual(set(exhausted_writes), {'stalled'})
-        self.assertEqual(len(details), 6)
-        self.assertIn('Reconstruct the response', details[-1])
+        self.assertEqual(len(details), 3)
+        self.assertIn('checklist', details[-1])
         with self.assertRaises(Blocked):
             self.run_task(review=review)
-        self.assertEqual(len(details), 6)
+        self.assertEqual(len(details), 3)
         self.assertEqual(self.check_count, 1)
 
     def test_shared_resources_serialize_and_no_progress_switches_model(self):
@@ -370,29 +370,19 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(accepted['budget_history'][0]['counters']['failures'], 6)
         self.assertGreaterEqual(len(accepted['history']), 6)
 
-    def test_false_review_finding_is_refuted_without_repeating_executor(self):
+    def test_agreed_review_finding_goes_directly_to_repair(self):
         self.primary_only = True
-        self.task['resources'] = ['database']
-        issue = 'Required backend behavior is absent'
-        def review(root,cwd,detail,requirements,name,model=None,stop_event=None):
-            report = self.review(root,cwd,detail,requirements,name,model,stop_event)
-            if name.endswith('-adjudicate'):
-                self.assertEqual(model, MODELS[0])
-                report['issue_dispositions'] = {fingerprint(issue)[:16]: {
-                    'status': 'refuted', 'requirements': ['REQ-BE'],
-                    'reason': 'The actual implementation and passing check already cover it.',
-                    'evidence': [{'path': 'backend/value.txt', 'quote': '2'},
-                                 {'path':'.review-input/packet/requirements.md','quote':'REQ-BE: value 2'}]}}
-            else:
-                report.update(verdict='changes', findings=[issue])
+        def review(*args, **kwargs):
+            report = self.review(*args, **kwargs)
+            if self.review_count == 1:
+                report.update(verdict='changes', findings=['Fix backend behavior'])
             return report
-        accepted = self.run_task(review=review)
+        with patch.object(self.runner, 'resolve_review_issue', side_effect=AssertionError('no dispute')):
+            accepted = self.run_task(review=review)
         self.assertEqual(accepted['status'], 'accepted')
-        self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.check_count, 1)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.check_count, 2)
         self.assertEqual(self.review_count, 2)
-        self.assertEqual(accepted['original_review']['verdict'], 'changes')
-        self.assertEqual(accepted['review']['verdict'], 'pass')
 
     def test_adjudication_accepts_markdown_typos_and_paraphrases(self):
         root = _review_copy(self.runner, self.work, self.task)
@@ -424,36 +414,24 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(reviewed['findings'], [issue])
         self.assertEqual(reviewed['reported_findings'], ['Missing **поведние** in backend'])
 
-    def test_bad_adjudication_evidence_retries_only_adjudication(self):
+    def test_legacy_adjudication_returns_findings_without_discarding_code(self):
         self.primary_only = True
-        self.task['resources'] = ['database']
-        issue = 'Required backend behavior is absent'
-        count = 0
-        def review(root,cwd,detail,requirements,name,model=None,stop_event=None):
-            nonlocal count
-            report = self.review(root,cwd,detail,requirements,name,model,stop_event)
-            if name.endswith('-adjudicate'):
-                count += 1
-                report['issue_dispositions'] = {fingerprint(issue)[:16]: {
-                    'status': 'refuted', 'requirements': ['REQ-BE'], 'reason': 'Existing implementation covers it.',
-                    'evidence': [{'path': 'backend/missing.txt' if count == 1 else 'backend/value.txt', 'quote': '2'},
-                                 {'path':'.review-input/packet/requirements.md','quote':'REQ-BE: value 2'}]}}
-                if count == 2:
-                    self.assertIn('Previous protocol error', detail)
-                    self.assertIn('issue_dispositions.' + fingerprint(issue)[:16] + '.evidence[0]', detail)
-                    self.assertIn('backend/missing.txt', detail)
-                    self.assertIn('does not exist', detail)
-                    draft = read(root/'.review-input/previous-review-draft.json')
-                    previous = json.loads(draft['text'])
-                    self.assertEqual(previous['issue_dispositions'][fingerprint(issue)[:16]]['evidence'][0]['path'], 'backend/missing.txt')
-            else:
-                report.update(verdict='changes', findings=[issue])
-            return report
-        accepted = self.run_task(review=review)
-        self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.check_count, 1)
-        self.assertEqual(count, 2)
-        self.assertEqual(accepted['history'][0]['kind'], 'review-protocol')
+        accepted = self.run_task()
+        path = next(p for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')
+                    if read(p)['model'] == accepted['model'])
+        value = read(path)
+        original = dict(value['review'], verdict='changes', findings=['Check backend behavior'])
+        value.update(stage='adjudicate', status='interrupted', original_review=original)
+        value.pop('review_resolution', None)
+        checks = value['checks']
+        save(path, value)
+        def resumed(root, cwd, prompt, role, name, model=None, stop_event=None):
+            self.assertEqual((Path(root)/'backend/value.txt').read_text(), '2')
+            self.assertIn('Check backend behavior', prompt)
+            self.assertIn('REVIEW_FEEDBACK', prompt)
+            self.assertEqual(read(path)['checks'], checks)
+            return self.session(root, cwd, prompt, role, name, model, stop_event)
+        self.assertEqual(self.run_task(session=resumed)['status'], 'accepted')
 
     def test_new_instruction_invalidates_accepted_candidate_cache(self):
         self.primary_only = True

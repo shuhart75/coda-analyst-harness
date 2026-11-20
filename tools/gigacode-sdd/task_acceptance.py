@@ -55,7 +55,7 @@ def validate_deferred(plan, task, items):
     return items
 
 
-def instructions(runner, task):
+def instructions(runner, task, *, focused=False):
     from controller import read
     if task['id'] == 'integration':
         return '\nFINAL_ACCEPTANCE: every pinned requirement and all deferred evidence must be satisfied. No deferrals allowed.'
@@ -66,6 +66,11 @@ def instructions(runner, task):
     later = descendants(plan, task['id'])
     owners = [{'id': t['id'], 'requirements': t['requirements'], 'prompt': t['prompt'],
                'acceptance': t.get('acceptance')} for t in plan['tasks'] if t['id'] in later]
+    if focused:
+        return ('\nAny deferred proof must remain mandatory and name its downstream owner. '
+                'Only defer proof explicitly assigned downstream in .review-input/plan.json; '
+                'current task defects cannot be deferred. Downstream task IDs: '
+                + json.dumps(sorted(later), ensure_ascii=False))
     return ('\nTASK_CONTRIBUTION_ACCEPTANCE: Assess the concrete work assigned by this task prompt and '
             'acceptance contract. Requirement IDs are traceability, not a demand that this intermediate '
             'task alone complete the entire product. All current task checks and deliverables remain mandatory. '
@@ -76,7 +81,7 @@ def instructions(runner, task):
             'Only defer when the pinned task instructions actually assign that proof downstream; uncertainty '
             'about an implementation defect is not grounds for deferral. Coverage/coverage_checks describe '
             'this task contribution; covered does not mean downstream live proof is complete. '
-            'In adjudication refute a premature whole-product gate only with the plan assignment plus actual '
+            'When disputing a premature whole-product gate, use the plan assignment plus actual '
             'task implementation evidence, and retain deferred_evidence. '
             'A downstream task prompt may explicitly own a scenario even if its legacy requirement list '
             'omitted the identifier; record the identifier in deferred_evidence for mandatory final verification. '
@@ -85,11 +90,13 @@ def instructions(runner, task):
 
 def check_report(runner, task, report):
     from controller import read, RetryableSessionError
+    from review_format import deferred
     path = runner.root / 'plan.json'
-    items = report.get('deferred_evidence', [])
-    if not path.exists() and not items:
-        return
     try:
+        items = deferred(report.get('deferred_evidence', []))
+        if not path.exists() and not items:
+            return
         validate_deferred(read(path), task, items)
+        report['deferred_evidence'] = items
     except ValueError as exc:
         raise RetryableSessionError(str(exc)) from exc

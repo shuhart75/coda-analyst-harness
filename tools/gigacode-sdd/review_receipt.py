@@ -46,10 +46,18 @@ def load(runner, task, value, events_path, model, *, validate=True):
         raise Blocked('Saved review candidate differs from the current task or pinned packet; inspect ' + str(binding_path))
     text = prompt.read_text(encoding='utf-8')
     checks = json.dumps(value['checks'])
-    if ('INDEPENDENT_REVIEW\n' not in text or 'Task:\n' + json.dumps(task, ensure_ascii=False) not in text
+    resolution = value.get('review_resolution') if stage == 'adjudicate' else None
+    marker = 'FOCUSED_REVIEW_DISPUTE\n' if resolution else 'INDEPENDENT_REVIEW\n'
+    prompt_task = {key: task[key] for key in ('id', 'cwd', 'requirements')} if resolution else task
+    if (marker not in text or 'Task:\n' + json.dumps(prompt_task, ensure_ascii=False) not in text
             or checks not in text):
         raise Blocked('Saved review prompt does not bind this task and its checks')
-    if stage == 'adjudicate':
+    if resolution:
+        import review_resolution
+        item = next((item for item in resolution['requests'] if item['id'] == resolution.get('active_id')), None)
+        if not item or review_resolution.prompt(task, resolution, item) not in text:
+            raise Blocked('Saved dispute decision belongs to different findings or objections')
+    elif stage == 'adjudicate':
         issues = {fingerprint(item)[:16]: item for item in value['original_review']['findings']}
         if 'ISSUE_ADJUDICATION' not in text or json.dumps(issues, ensure_ascii=False) not in text:
             raise Blocked('Saved adjudication belongs to different findings')
@@ -62,5 +70,8 @@ def load(runner, task, value, events_path, model, *, validate=True):
     binding['session'] = {key: result.get(key) for key in ('returncode', 'timed_out', 'cancelled', 'terminal_result')}
     binding['disposition'] = session_outcome(result, 'review')
     save(binding_path, binding)
-    report = runner.validate_review_result(root, result, task['requirements'], name, model) if validate else None
+    report = None
+    if validate:
+        report = (review_resolution.validate(runner, root, task, result, model) if resolution else
+                  runner.validate_review_result(root, result, task['requirements'], name, model))
     return root, report

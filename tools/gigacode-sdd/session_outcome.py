@@ -18,9 +18,10 @@ def classify(result, role):
     if not isinstance(errors, list) or not all(isinstance(error, str) for error in errors):
         return {'action': 'retry', 'cause': 'malformed-transport', 'incomplete': True}
     context = any('CLI context exhausted' in error for error in errors)
-    incomplete = (result.get('timed_out') or context or not result.get('terminal_result')
+    provider = result.get('provider_failure')
+    incomplete = (result.get('timed_out') or context or provider or not result.get('terminal_result')
                   or result.get('returncode') != 0)
-    cause = ('context-limit' if context else 'timeout' if result.get('timed_out') else
+    cause = ('context-limit' if context else provider if provider else 'timeout' if result.get('timed_out') else
              'transport' if incomplete else 'tool-errors' if errors or result.get('permission_denials') else 'complete')
     if not incomplete and result.get('ok') and not errors and not result.get('permission_denials'):
         action = 'check' if role == 'execute' else 'validate'

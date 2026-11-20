@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 import threading
@@ -34,6 +35,7 @@ def parse_events(path: Path, *, _legacy_denial_text=False) -> dict:
     session_id, final_text, terminal = None, "", None
     event_count = 0
     context_failure = False
+    provider_failure = None
     if not path.exists():
         errors.append("Missing stdout.jsonl")
     else:
@@ -121,9 +123,14 @@ def parse_events(path: Path, *, _legacy_denial_text=False) -> dict:
                     errors.append("CLI emitted a root error event")
                 if root and event.get('type') in ('assistant', 'result', 'error'):
                     body = (_text(content) + '\n' + _text(event.get('result', ''))).lower()
-                    if ('compression_failed_api_error' in body or
-                            ('[api error:' in body and any(marker in body for marker in
-                             ('context is too large', 'maximum context length', 'context length exceeded')))):
+                    # GigaCode may wrap a provider error in a successful result.
+                    # Match the entire root reply, never quoted diagnostics or tool output.
+                    if re.fullmatch(r'\s*\[api error:[\s\S]*\]\s*', body):
+                        provider_failure = 'context-limit' if any(marker in body for marker in
+                            ('413', 'length limit exceeded', 'request too large', 'context is too large',
+                             'maximum context length', 'context length exceeded')) else 'transport'
+                        context_failure |= provider_failure == 'context-limit'
+                    if 'compression_failed_api_error' in body:
                         context_failure = True
     if terminal is None:
         errors.append("Missing terminal root result event")
@@ -135,11 +142,14 @@ def parse_events(path: Path, *, _legacy_denial_text=False) -> dict:
         errors.append("CLI reported denied permissions; interactive approval is unavailable")
     if context_failure:
         errors.append('CLI context exhausted; fresh focused review required')
+    if provider_failure:
+        errors.append('CLI provider rejected request: ' + provider_failure)
     return {"ok": not errors, "returncode": None, "timed_out": False,
             "cancelled": False, "permission_denials": denials,
             "session_id": session_id, "text": final_text,
             "events_path": str(path), "errors": errors,
             "event_count": event_count, "terminal_result": terminal is not None,
+            "provider_failure": provider_failure,
             "tool_calls": tool_calls, "tool_results": tool_results,
             "syntax_errors": syntax_errors, "missing_path_errors": missing_path_errors,
             "read_tool_errors": read_tool_errors}
@@ -165,7 +175,7 @@ def revalidate_saved_result(result, events):
                   'CLI reported denied permissions; interactive approval is unavailable']
     updated = dict(result)
     for key in ('permission_denials', 'tool_calls', 'tool_results', 'terminal_result',
-                'syntax_errors', 'missing_path_errors', 'read_tool_errors'):
+                'syntax_errors', 'missing_path_errors', 'read_tool_errors', 'provider_failure'):
         updated[key] = parsed[key]
     updated['errors'] = list(dict.fromkeys(errors + parsed['errors']))
     updated['ok'] = (not updated['errors'] and updated.get('returncode') == 0

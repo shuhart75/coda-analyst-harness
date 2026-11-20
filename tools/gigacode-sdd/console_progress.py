@@ -3,6 +3,8 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import time
+import tempfile
+import unicodedata
 
 from progress import Progress, clipped
 from progress_io import write_projection
@@ -20,20 +22,22 @@ class ConsoleProgress(Progress):
         self.runtime_error = False
         self.overview_key = None
         self.include_overview = True
+        self.screen_open = False
+        self.status_path = self.log_path.parent.parent / 'operator-status.txt'
 
     def interactive(self):
-        # A pending answer command is copyable text, not a clipped live row.
-        # Plain updates retain it on screen without redrawing wrapped commands.
-        value = getattr(self, 'value', None) or {}
-        if not super().interactive() or value.get('questions'):
-            return False
-        if value.get('tasks'):
-            from run_status import dashboard
-            lines = dashboard(self._value(), include_command=False, include_overview=self.include_overview).splitlines()
-            width, height = self.dimensions()
-            if len(lines) > height-2 or any(clipped(line, max(1, width-1)) != line for line in lines):
-                return False
-        return True
+        return super().interactive()
+
+    def clear(self):
+        if self.screen_open:
+            self.output.write('\x1b[H')
+        self.rows = 0
+
+    def _leave_screen(self):
+        if self.screen_open:
+            self.output.write('\x1b[?25h\x1b[?1049l')
+            self.screen_open = False
+        self.rows = 0
 
     def message(self, message):
         with self.lock:
@@ -43,8 +47,10 @@ class ConsoleProgress(Progress):
                 stream.write(time.strftime('[%Y-%m-%d %H:%M:%S] ') + str(message) + '\n')
 
     def notice(self, message):
-        # Commands/questions must remain copyable, even on narrow terminals.
-        Progress.message(self, message)
+        with self.lock:
+            self.message(message)
+            self._leave_screen()
+            Progress.message(self, message)
 
     def operations(self):
         with self.lock:
@@ -68,52 +74,78 @@ class ConsoleProgress(Progress):
             return
         self.runtime_error = not write_projection(self.runtime_path,
             {'observed_at': time.time(), 'operations': self.operations()})
+        from run_status import dashboard
+        temporary = None
+        try:
+            self.status_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                    dir=self.status_path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(dashboard(self._value()) + '\n')
+            os.replace(temporary, self.status_path)
+        except OSError:
+            self.runtime_error = True
+        finally:
+            if temporary and temporary.exists():
+                try:
+                    temporary.unlink()
+                except OSError:
+                    self.runtime_error = True
         self.last_save = self.clock()
 
     def draw(self):
         if not self.interactive():
             return
         from run_status import dashboard
-        self.clear()
         columns, height = self.dimensions()
-        lines = dashboard(self._value(), include_command=False, include_overview=self.include_overview).splitlines()
-        for line in lines[:max(1, height-2)]:
-            self.output.write(clipped(line, max(1, columns-1)) + '\n')
-            self.rows += 1
+        width = max(1, columns - 1)
+        lines = dashboard(self._value(), compact=True).splitlines()
+        def cells(line):
+            return sum(0 if unicodedata.combining(c) else
+                       2 if unicodedata.east_asian_width(c) in 'WF' else 1 for c in line)
+        # Sanitize controls without shortening commands. Let the terminal wrap
+        # naturally, so copied shell commands do not acquire hard newlines.
+        lines = [clipped(line, max(width, cells(line))) for line in lines]
+        occupied = sum(max(1, (cells(line) + columns - 1)//max(1, columns)) for line in lines)
+        if occupied > max(1, height - 1):
+            lines = [lines[0], f"Принято: {(self.value or {}).get('done', 0)} из {(self.value or {}).get('total', 0)}.",
+                     'Увеличьте окно для полного маршрута.',
+                     'Полный статус и команда ответа: ' + str(self.status_path)]
+            occupied = sum(max(1, (cells(line) + columns - 1)//max(1, columns)) for line in lines)
+            if occupied > max(1, height - 1):
+                lines = ['Увеличьте окно.' if width >= 15 else '...' if width >= 3 else '']
+                occupied = 1
+        if not self.screen_open:
+            self.output.write('\x1b[?1049h\x1b[?25l')
+            self.screen_open = True
+        # Clear the previous frame too: shorter lines must not retain old tails.
+        self.output.write('\x1b[H\x1b[J' + '\n'.join(lines) + '\x1b[J')
+        self.rows = occupied
         self.output.flush()
 
     def _emit(self, force=False):
         from run_status import dashboard
         self._save_runtime()
+        if self.interactive() and not force:
+            self.draw()
+            return
         value = self._value()
         overview_key = (tuple(t['id'] for t in value.get('tasks', [])),
                         tuple(sorted(t['id'] for t in value.get('tasks', []) if t['status'] == 'done')))
         self.include_overview = force or self.overview_key != overview_key
         signature = dashboard(value, include_time=False, include_overview=False)
-        if self.include_overview:
-            # Keep milestones in terminal history; live redraws must not erase
-            # the just-accepted task or the initial route a second later.
-            self.clear()
-            self.output.write(dashboard(value) + '\n\n')
+        if self.include_overview or signature != self.last_plain or self.clock()-self.last_notice >= 60:
+            self._leave_screen()
+            self.output.write(dashboard(value, include_overview=self.include_overview) + '\n\n')
             self.output.flush()
             self.overview_key = overview_key
-            self.last_notice = self.clock()
-            self.last_plain = signature
-            self.include_overview = False
-            return
-        if self.interactive():
-            self.draw()
-            return
-        self.clear()
-        if signature != self.last_plain or self.clock()-self.last_notice >= 60:
-            self.output.write(dashboard(value, include_overview=False) + '\n\n')
-            self.output.flush()
             self.last_notice = self.clock()
             self.last_plain = signature
 
     def summary(self, value):
         with self.lock:
             self.value = value
+            self.last_save = float('-inf')
             self._emit()
 
     def tick(self):
@@ -155,10 +187,5 @@ class ConsoleProgress(Progress):
                 self.value.update(ready=False, console_error=True)
             self.last_save = float('-inf')
             self._save_runtime()
-            if self.interactive():
-                from run_status import dashboard
-                self.clear()
-                self.output.write(dashboard(self._value()) + '\n')
-                self.output.flush()
-            else:
-                self._emit(force=True)
+            self._leave_screen()
+            self._emit(force=True)
