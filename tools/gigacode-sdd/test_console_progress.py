@@ -16,6 +16,33 @@ from test_progress import Terminal
 
 
 class ConsoleTests(unittest.TestCase):
+    def test_route_remains_on_each_frame_and_resize_does_not_append_history(self):
+        stream = Terminal()
+        size = [100, 30]
+        with patch.dict(os.environ, {'TERM': 'xterm'}):
+            display = ConsoleProgress(self.root/'logs/screen.log', stream=stream,
+                clock=lambda: self.now, dimensions=lambda: size)
+            value = dict(self.value, tasks=[{'id': 'backend-modular-its', 'status': 'running'},
+                {'id': 'backend-regression-compat', 'status': 'pending', 'depends_on': ['backend-modular-its']}])
+            display.summary(value)
+            for self.now in range(1, 4):
+                start = len(stream.getvalue())
+                display.tick()
+                frame = stream.getvalue()[start:]
+                self.assertTrue(frame.startswith('\x1b[H'))
+                self.assertIn('▶ Интеграционные тесты backend', frame)
+                self.assertIn('Проверка обратной совместимости', frame)
+                self.assertTrue(frame.endswith('\x1b[J'))
+                self.assertNotIn('\x1b[?1049l', frame)
+            size[:] = [30, 8]
+            display.tick()
+            size[:] = [100, 30]
+            display.tick()
+            self.assertIn('▶ Интеграционные тесты backend', stream.getvalue().rsplit('\x1b[H', 1)[1])
+            self.assertEqual(stream.getvalue().count('\x1b[?1049h'), 1)
+            display.close(status='interrupted')
+            self.assertIn('\x1b[?25h\x1b[?1049l', stream.getvalue())
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -58,7 +85,8 @@ class ConsoleTests(unittest.TestCase):
                 self.now = 18*60+19
                 p.tick()
                 self.assertIn('Сейчас: 00:18:19 · backend-modular-its', stream.getvalue())
-                self.assertIn('\x1b[1A', stream.getvalue())
+                self.assertIn('\x1b[?1049h', stream.getvalue())
+                self.assertIn('\x1b[H', stream.getvalue())
                 command = 'python /' + 'long-path/'*30 + 'bootstrap.py --answers-config /run/config.json'
                 p.notice(command)
                 self.assertIn(command, stream.getvalue())
@@ -69,25 +97,23 @@ class ConsoleTests(unittest.TestCase):
             self.assertEqual(p.rows, 0)
             self.assertIn('Работа остановлена', stream.getvalue())
 
-    def test_pending_question_keeps_full_command_in_plain_and_narrow_tty_status(self):
+    def test_question_command_is_complete_in_panel_or_full_status_file(self):
         command = "python3 '/path with spaces/" + 'folder/'*30 + "bootstrap.py' --answers-config '/run space/config.json'"
         value = dict(self.value, questions=[{'question': 'Разрешить?'}], answer_command=command)
-        for stream in (io.StringIO(), Terminal()):
+        for stream, size in ((io.StringIO(), (40, 12)), (Terminal(), (100, 40)), (Terminal(), (40, 12))):
             with patch.dict(os.environ, {'TERM': 'xterm-256color'}):
                 display = ConsoleProgress(self.root/'logs/command.log', stream=stream,
-                    clock=lambda: self.now, dimensions=lambda: (40, 12))
+                    clock=lambda: self.now, dimensions=lambda: size)
                 display.summary(self.value)
                 display.summary(value)
-                initial = stream.getvalue()
-                self.assertIn(command, initial)
-                self.assertIn('Откройте отдельное окно терминала', initial)
-                self.assertEqual(display.rows, 0)
-                self.now += 1
-                display.tick()
-                self.assertEqual(stream.getvalue(), initial)
-                self.now += 60
-                display.tick()
-                self.assertIn(command, stream.getvalue()[len(initial):])
+                full = (self.root/'operator-status.txt').read_text()
+                self.assertIn(command, full)
+                self.assertIn('Откройте отдельное окно терминала', full)
+                if size == (100, 40) or not stream.isatty():
+                    self.assertIn(command, stream.getvalue())
+                else:
+                    self.assertIn('Увеличьте окно', stream.getvalue())
+                self.assertLess(display.rows, size[1])
                 display.close()
 
     def test_active_events_do_not_imply_success_and_remaining_is_not_a_time_estimate(self):
@@ -182,8 +208,9 @@ class ConsoleTests(unittest.TestCase):
                 clock=lambda: self.now, dimensions=lambda: (30, 8))
             value = dict(self.value, tasks=[{'id': 'backend-modular-its', 'status': 'running'}])
             display.summary(value)
-            self.assertIn('▶ Интеграционные тесты backend [сейчас]', stream.getvalue())
-            self.assertEqual(display.rows, 0)
+            self.assertIn('Увеличьте окно', stream.getvalue())
+            self.assertIn('▶ Интеграционные тесты backend [сейчас]', (self.root/'operator-status.txt').read_text())
+            self.assertLess(display.rows, 8)
             display.close()
 
     def test_runtime_write_failure_does_not_abort_operation(self):

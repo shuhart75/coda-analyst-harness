@@ -12,6 +12,21 @@ from transport import parse_events, run_session, preflight_session_ok
 
 
 class TransportTests(unittest.TestCase):
+    def test_provider_413_in_success_envelope_is_context_failure(self):
+        from session_outcome import classify
+        result = self.parse([{'type': 'result', 'subtype': 'success', 'is_error': False,
+                             'result': '[API Error: 413 length limit exceeded]'}])
+        result['returncode'] = 0
+        self.assertEqual(result['provider_failure'], 'context-limit')
+        self.assertEqual(classify(result, 'review')['cause'], 'context-limit')
+        self.assertEqual(classify(result, 'review')['action'], 'retry')
+
+    def test_provider_error_quoted_in_report_is_not_transport_failure(self):
+        result = self.parse([{'type': 'result', 'subtype': 'success', 'is_error': False,
+                             'result': json.dumps({'reason': '[API Error: 413 length limit exceeded]'})}])
+        self.assertTrue(result['ok'])
+        self.assertIsNone(result['provider_failure'])
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

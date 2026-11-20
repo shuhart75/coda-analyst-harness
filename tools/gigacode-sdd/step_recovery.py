@@ -24,8 +24,11 @@ def step_key(stage, kind):
     return stage + ':' + kind if kind == 'transport' else 'execute:' + kind
 
 
-def record_failure(state, stage, kind, count):
+def record_failure(state, stage, kind, count, detail=None):
     key = step_key(stage, kind)
+    issue = (state.get('review_resolution') or {}).get('active_id') if stage == 'adjudicate' else None
+    if issue:
+        key = key.replace('adjudicate:', 'adjudicate:' + issue + ':', 1)
     budget = state.setdefault('retry_steps', {}).setdefault(key, {'failures': 0})
     budget['failures'] += 1
     state['failures'] = state.get('failures', 0) + 1
@@ -34,6 +37,13 @@ def record_failure(state, stage, kind, count):
     # Legacy summary fields remain useful to old diagnostic clients.
     state['strategy'] = budget['strategy']
     state['stagnation'] = budget['failures'] % 2
-    return {'step': key, 'step_failures': budget['failures'],
+    repeated = 0
+    if kind in ('review-protocol', 'review-context', 'request-protocol') and detail is not None:
+        from review_format import failure_signature
+        signature = failure_signature(stage, kind, detail)
+        guard = state.setdefault('repeat_guard', {})
+        repeated = guard.get('count', 0) + 1 if guard.get('signature') == signature else 1
+        guard.update(signature=signature, count=repeated)
+    return {'step': key, 'step_failures': budget['failures'], 'repeated_failure_count': repeated,
             'strategy': budget['strategy'], 'total_failures': state['failures'],
-            'exhausted': budget['failures'] >= PER_STEP_FAILURES or state['failures'] >= TOTAL_FAILURES}
+            'exhausted': repeated >= 3 or budget['failures'] >= PER_STEP_FAILURES or state['failures'] >= TOTAL_FAILURES}

@@ -8,7 +8,7 @@ import operator_questions as oq
 from progress_io import read_projection, write_projection
 
 STAGES = {'execute': 'разработка', 'checks': 'обязательные проверки', 'review': 'независимое ревью',
-          'adjudicate': 'разбор замечаний', 'accepted': 'вариант проверен'}
+          'adjudicate': 'разбор спорного замечания', 'accepted': 'вариант проверен'}
 STATUSES = {'pending': 'ожидает запуска', 'done': 'принято', 'running': 'в работе',
             'blocked': 'заблокировано', 'waiting-user': 'нужен ответ', 'interrupted': 'остановлено',
             'waiting-retry': 'пауза перед повтором', 'complete': 'завершено'}
@@ -203,9 +203,8 @@ def operation_label(op, tasks):
     if phase == 'разработка':
         action = ('разрабатывает свой вариант' if author and author == actor else
                   'разрабатывает вариант ' + model_label(author) if author else 'выполняет разработку')
-    elif phase in ('независимое ревью', 'разбор замечаний'):
-        action = ('проверяет' if phase == 'независимое ревью' else 'разбирает замечания к')
-        action += ' варианту ' if phase == 'разбор замечаний' else ' вариант '
+    elif phase in ('независимое ревью', 'разбор спорного замечания', 'разбор замечаний'):
+        action = ('проверяет вариант ' if phase == 'независимое ревью' else 'разбирает возражение по варианту ')
         action += model_label(author) if author else '(автор не указан)'
     else:
         action = phase
@@ -269,7 +268,7 @@ def observation_lines(value):
     return lines
 
 
-def dashboard(value, include_time=True, include_command=True, include_overview=True):
+def dashboard(value, include_time=True, include_command=True, include_overview=True, compact=False):
     """Answer operator questions without equating activity with correctness."""
     from progress import elapsed
     tasks = value.get('tasks', [])
@@ -333,7 +332,7 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
         active = [t['id'] for t in tasks if t['status'] == 'running']
         current = ['Сейчас: ' + (', '.join(active[:3]) + '; подготовка следующего шага.' if active else 'подготовка следующего шага.')]
     lines.extend(current)
-    if value.get('service_stop', {}).get('report'):
+    if not compact and value.get('service_stop', {}).get('report'):
         lines.append('Отчёт об остановке: ' + value['service_stop']['report'])
     stopped = value.get('status') == 'interrupted' or bool(value.get('console_error'))
     if include_overview:
@@ -342,7 +341,7 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
             lines.append('✓ ' + ' · '.join(completed))
         lines.extend(task_route.route(tasks, stopped=stopped))
     active_rows = [t for t in tasks if t['status'] in ('running', 'waiting-user', 'blocked')]
-    for task in active_rows:
+    for task in ([] if compact else active_rows):
         for candidate in task.get('candidates', []):
             if not stopped and not value.get('telemetry_stale') and _candidate_is_active(task, candidate, operations):
                 continue
@@ -367,10 +366,10 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
         waiting_answer = sum(c.get('status') == 'waiting-user' for c in candidates)
         if waiting_resource or waiting_answer:
             lines.append(f'Ожидают варианты: ресурс {waiting_resource}, ответ пользователя {waiting_answer}.')
-    if include_overview and value.get('session_attempts') is not None:
+    if not compact and include_overview and value.get('session_attempts') is not None:
         lines.append('Попыток запуска LLM по журналам прогона: ' + str(value['session_attempts']) + ' (включая повторы).')
     observation = value.get('observation') or {}
-    if include_overview and observation.get('report'):
+    if not compact and include_overview and observation.get('report'):
         lines.append('Отчёт аудиторов: ' + str(observation['report']))
     remaining = max(0, total-done)
     if value.get('ready'):
