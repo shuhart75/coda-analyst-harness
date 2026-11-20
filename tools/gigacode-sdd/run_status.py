@@ -241,6 +241,8 @@ def observation_lines(value):
     elif stale:
         heading += ' (устарело)'
     heading += ': ' + labels.get(observation.get('status'), 'данных недостаточно') + '.'
+    if observation.get('partial'):
+        heading += ' Наблюдение частичное.'
     lines = [heading]
     def sentence(raw):
         if not isinstance(raw, str) or not raw.strip():
@@ -258,13 +260,20 @@ def observation_lines(value):
             if summary:
                 lines.append(title + ': ' + summary)
     else:
-        result = (results.get('progress') or {}) if isinstance(results, dict) else {}
+        result = next((r for r in results.values() if r.get('status') != 'unavailable'), {}) if isinstance(results, dict) else {}
         if observation.get('status') == 'unavailable':
             result = {}
         summary = sentence(result.get('summary')) if isinstance(result, dict) else ''
         summary = summary or sentence(observation.get('summary'))
         if summary:
             lines.append('Основание: ' + summary)
+    errors = observation.get('audit_errors') or {}
+    if errors:
+        failed = ', '.join(model_label(r.get('model')) + ': ' + (sentence(r.get('summary')) or 'ошибка аудита')
+                           for r in errors.values())
+        lines.append('Ошибка аудита: ' + failed + '.')
+        if observation.get('retry_pending') and not stopped:
+            lines.append('Следующее задание аудиторам запустится автоматически.')
     return lines
 
 
