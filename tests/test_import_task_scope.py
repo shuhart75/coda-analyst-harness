@@ -88,6 +88,22 @@ class ImportTaskScopeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'SA'):
             EXCHANGE.import_task_context(self.repo, self.state)
 
+    def test_new_delivery_does_not_request_bindings_for_unchanged_legacy(self):
+        from analysis_task_fixture import task_binding
+        self.git('switch', 'source')
+        self.git('merge', '--no-edit', 'main')
+        index = json.loads((self.repo / 'delivery-index.json').read_text())
+        index['deliveries']['new'] = {'path': 'features/new', 'quarter': '2026-Q4'}
+        self.put('delivery-index.json', json.dumps(index))
+        self.put('features/new/requirements.md', 'New requirements')
+        self.put('features/new/analysis-task.json', json.dumps(task_binding(owner_id='new')))
+        self.commit('Add delivery')
+        self.state['source_commit'] = self.git('rev-parse', 'HEAD')
+        self.git('switch', 'main')
+        keys, _ = EXCHANGE.import_task_context(self.repo, self.state)
+        self.assertEqual(keys, {'RSCON-123', 'RSCON-8222'})
+        self.assertEqual([item['owner']['id'] for item in self.state['task_binding_targets']], ['new'])
+
     def test_receiver_only_material_does_not_expand_import_scope(self):
         self.put('features/receiver-only/requirements.md', 'Receiver-only work\n')
         self.commit('Accept unrelated receiver work')
