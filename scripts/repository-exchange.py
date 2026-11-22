@@ -939,12 +939,18 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
     @cache
     def read(path):
         return json.dumps(files[path], ensure_ascii=False) if path in files else read_original(path)
+    previous_read = cache(lambda path: git_output(checkout, "show", base + ":" + path))
+    target_paths = list(paths)
+    if 'delivery-index.json' in target_paths:
+        from commit_message_policy import delivery_index_changes
+        target_paths.remove('delivery-index.json')
+        target_paths.extend(path for _, path, _ in delivery_index_changes(read, previous_read))
     from receiver_tasks import requests_for_paths, binding_targets_for_paths, work_targets_for_paths
-    state['task_requests'] = requests_for_paths(paths, read)
-    state['task_binding_targets'] = binding_targets_for_paths(paths, read_original)
+    state['task_requests'] = requests_for_paths(target_paths, read)
+    state['task_binding_targets'] = binding_targets_for_paths(target_paths, read_original)
     state['task_work_targets'] = work_targets_for_paths(paths, read)
     state['task_work_registry'] = json.loads(read('work-task-bindings.json') or '{}')
-    keys = keys_for_paths(paths, read)
+    keys = keys_for_paths(paths, read, previous_read)
     if not keys:
         binding = decisions.get("analysis_task")
         carried = read("context/analysis-task.json")
@@ -1378,7 +1384,8 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     try:
         required = keys_for_paths(filter(None, changed.stdout.split("\0")),
             lambda path: git_output(checkout, "show", candidate + ":" + path)
-            or git_output(checkout, "show", state["base_commit"] + ":" + path))
+            or git_output(checkout, "show", state["base_commit"] + ":" + path),
+            lambda path: git_output(checkout, "show", state["base_commit"] + ":" + path))
         title = git(checkout, "log", "-1", "--format=%s").stdout.strip()
         require_valid_commit_message(title, required)
     except ValueError as exc:
@@ -1729,7 +1736,8 @@ def update_feature_branch_command(args: argparse.Namespace) -> int:
                 raise ValueError("Не удалось проверить поставки входящих изменений")
             keys = keys_for_paths(filter(None, changed.stdout.split("\0")),
                 lambda path: git_output(analytics, "show", incoming_commit + ":" + path)
-                or git_output(analytics, "show", local_commit + ":" + path))
+                or git_output(analytics, "show", local_commit + ":" + path),
+                lambda path: git_output(analytics, "show", local_commit + ":" + path))
             if not keys:
                 deliveries = work.get("execution_scope", {}).get("features") or [work["feature"]]
                 keys = {delivery_analysis_task(analytics, item)["key"] for item in deliveries}

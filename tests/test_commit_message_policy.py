@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from commit_message_policy import (require_valid_commit_message, delivery_message,
     delivery_analysis_task, keys_for_paths, validate_binding, staged_keys,
-    validate_file, is_harness_repository)
+    validate_file, is_harness_repository, working_keys)
 from workspace import install_commit_message_hook
 
 
@@ -24,6 +24,82 @@ def binding(key='RSCON-123', kind='delivery', quarter='2026-Q4'):
 
 
 class CommitMessagePolicyTests(unittest.TestCase):
+    def test_registry_delta_ignores_unchanged_unbound_deliveries(self):
+        old = {'delivery-index.json': json.dumps({'schema_version': 1, 'deliveries': {
+            'legacy': {'path': 'features/legacy'}}})}
+        new = {'delivery-index.json': json.dumps({'schema_version': 1, 'deliveries': {
+            'legacy': {'path': 'features/legacy'}, 'demo': {'path': 'features/demo'}}}),
+            'features/demo/analysis-task.json': json.dumps(binding())}
+        self.assertEqual(keys_for_paths(['delivery-index.json'], new.get, old.get), {'RSCON-123'})
+        del new['features/demo/analysis-task.json']
+        with self.assertRaisesRegex(ValueError, 'demo'):
+            keys_for_paths(['delivery-index.json'], new.get, old.get)
+
+    def test_registry_removal_move_and_global_metadata_require_owners(self):
+        old = {'delivery-index.json': json.dumps({'schema_version': 1, 'deliveries': {
+            'demo': {'path': 'features/old'}}}),
+            'features/old/analysis-task.json': json.dumps(binding())}
+        new = {'delivery-index.json': json.dumps({'schema_version': 1, 'deliveries': {
+            'demo': {'path': 'features/new'}}}),
+            'features/new/analysis-task.json': json.dumps(binding('RSCON-456'))}
+        self.assertEqual(keys_for_paths(['delivery-index.json'], new.get, old.get),
+                         {'RSCON-123', 'RSCON-456'})
+        new['delivery-index.json'] = json.dumps({'schema_version': 1, 'deliveries': {}})
+        self.assertEqual(keys_for_paths(['delivery-index.json'], new.get, old.get), {'RSCON-123'})
+        with self.assertRaisesRegex(ValueError, 'Нельзя удалить'):
+            keys_for_paths(['delivery-index.json'], lambda _: None, old.get)
+        changed = json.loads(old['delivery-index.json'])
+        changed['metadata'] = 'changed'
+        new = {'delivery-index.json': json.dumps(changed)}
+        with self.assertRaisesRegex(ValueError, 'demo'):
+            keys_for_paths(['delivery-index.json'], new.get, old.get)
+
+    def test_registry_only_formatting_and_shared_alias_cannot_hide_other_owner(self):
+        old = {'delivery-index.json': json.dumps({'schema_version': 1, 'deliveries': {
+            'demo': {'path': 'features/demo', 'quarter': '2026-Q4'}}})}
+        new = {'delivery-index.json': json.dumps(json.loads(old['delivery-index.json']), indent=2)}
+        self.assertEqual(keys_for_paths(['delivery-index.json'], new.get, old.get), set())
+        changed = json.loads(new['delivery-index.json'])
+        changed['deliveries']['demo']['quarter'] = '2027-Q1'
+        new['delivery-index.json'] = json.dumps(changed)
+        new['work-task-bindings.json'] = json.dumps({'schema_version': 1,
+            'paths': {'delivery-index.json': ['other']}, 'tasks': {'other': binding('RSCON-999')}})
+        with self.assertRaisesRegex(ValueError, 'demo'):
+            keys_for_paths(['delivery-index.json'], new.get, old.get)
+
+    def test_registry_save_and_real_hook_without_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            def git(*args):
+                result = subprocess.run(['git', '-C', str(project), *args], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result
+            git('init', '-b', 'main')
+            git('config', 'user.name', 'Test')
+            git('config', 'user.email', 'test@example.invalid')
+            index = project / 'delivery-index.json'
+            entries = {f'legacy-{n}': {'path': f'features/legacy-{n}'} for n in range(34)}
+            index.write_text(json.dumps({'schema_version': 1, 'deliveries': entries}))
+            git('add', '--', 'delivery-index.json')
+            git('commit', '-m', 'Legacy snapshot before managed hook')
+            install_commit_message_hook(project, ROOT / 'scripts/commit_message_policy.py')
+            owner = project / 'features/demo'
+            owner.mkdir(parents=True)
+            assoc = owner / 'analysis-task.json'
+            assoc.write_text(json.dumps(binding()))
+            (owner / 'requirements.md').write_text('Requirements')
+            entries['demo'] = {'path': 'features/demo'}
+            index.write_text(json.dumps({'schema_version': 1, 'deliveries': entries}))
+            paths = ['delivery-index.json', 'features/demo/analysis-task.json', 'features/demo/requirements.md']
+            self.assertEqual(working_keys(project, paths), {'RSCON-123'})
+            git('add', '--', *paths)
+            assoc.write_text(json.dumps(binding('RSCON-999')))
+            self.assertEqual(staged_keys(project), {'RSCON-123'})
+            rejected = subprocess.run(['git', '-C', str(project), 'commit', '-m', 'RSCON-999: Wrong task'],
+                                      capture_output=True, text=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            git('commit', '-m', 'RSCON-123: Register delivery and requirements')
+
     def test_large_snapshot_reads_bindings_once_and_does_not_cache_between_calls(self):
         files = {'baseline/analysis-task.json': json.dumps(task_binding(kind='baseline'))}
         calls = Counter()

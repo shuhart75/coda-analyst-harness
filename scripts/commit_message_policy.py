@@ -53,7 +53,7 @@ def delivery_message(project: Path, deliveries, description: str) -> str:
     return message
 
 
-def keys_for_paths(paths, read) -> set[str]:
+def keys_for_paths(paths, read, previous_read=None) -> set[str]:
     """Resolve delivery and quarterly planning ownership from one snapshot."""
     # Scope to this validation only, including missing files. Never reuse reads
     # across changes to the index, worktree or receiver decisions.
@@ -65,6 +65,9 @@ def keys_for_paths(paths, read) -> set[str]:
     roots = {entry['path']: entry for entry in entries.values()}
     owners, quarters = set(), set()
     work_task_keys = set()
+    if 'delivery-index.json' in paths and previous_read is not None:
+        work_task_keys.update(delivery_index_keys(read, cache(previous_read)))
+        paths.remove('delivery-index.json')
     planning_raw = read(PLANNING_BINDINGS)
     planning = json.loads(planning_raw) if planning_raw else {}
     if not isinstance(planning, dict) or (planning and (planning.get('schema_version') != 1
@@ -181,6 +184,51 @@ def keys_for_paths(paths, read) -> set[str]:
     return keys
 
 
+def delivery_index_changes(read, previous_read):
+    """Attribute registry changes to entries, not a permanent shared-file alias."""
+    current_raw = read('delivery-index.json')
+    previous_raw = previous_read('delivery-index.json')
+    if not current_raw:
+        raise ValueError('Нельзя удалить delivery-index.json при сохранении аналитики')
+    current = json.loads(current_raw)
+    previous = json.loads(previous_raw) if previous_raw else {'deliveries': {}}
+    for value in (current, previous):
+        if not isinstance(value, dict) or not isinstance(value.get('deliveries'), dict):
+            raise ValueError('Некорректный реестр delivery-index.json')
+    old, new = previous['deliveries'], current['deliveries']
+    # Registry-wide changes conservatively affect all entries.
+    global_change = bool(previous_raw) and (
+        {k: v for k, v in current.items() if k != 'deliveries'} !=
+        {k: v for k, v in previous.items() if k != 'deliveries'})
+    changed = {key for key in old.keys() | new.keys()
+               if global_change or old.get(key) != new.get(key)}
+    for key in sorted(changed):
+        for entries, reader in ((old, previous_read), (new, read)):
+            if key not in entries:
+                continue
+            entry = entries[key]
+            if not isinstance(entry, dict) or not isinstance(entry.get('path'), str):
+                raise ValueError('Некорректная запись delivery-index.json: ' + key)
+            path = entry['path'] + '/' + BINDING_FILE
+            # A retained entry can acquire its first binding in this commit.
+            # Deleted/moved entries retain their previous ownership as well.
+            if entries is old and key in new and new[key].get('path') == entry['path']:
+                continue
+            yield key, path, reader
+
+
+def delivery_index_keys(read, previous_read) -> set[str]:
+    keys = set()
+    for key, path, reader in delivery_index_changes(read, previous_read):
+        raw = reader(path)
+        try:
+            keys.add(validate_binding(json.loads(raw) if raw else None, 'delivery')['key'])
+        except ValueError as exc:
+            raise ValueError(f'Разреши задачу [SA][PR] для изменённой поставки {key} ({path}). '
+                             'До разрешения задачи коммит запрещён.') from exc
+    return keys
+
+
 def require_preserved_planning_bindings(current, previous) -> None:
     if previous is None:
         return
@@ -210,7 +258,7 @@ def working_keys(project: Path, paths) -> set[str]:
     if PLANNING_BINDINGS in paths:
         require_preserved_planning_bindings(read(PLANNING_BINDINGS),
                                            git_output(project, 'show', 'HEAD:' + PLANNING_BINDINGS))
-    return keys_for_paths(paths, read)
+    return keys_for_paths(paths, read, lambda path: git_output(project, 'show', 'HEAD:' + path))
 
 
 def git_output(repository: Path, *args) -> str | None:
@@ -227,6 +275,8 @@ def staged_keys(repository: Path) -> set[str]:
         value = git_output(repository, 'show', ':' + path)
         # A deleted package retains its archived binding, never an unstaged substitute.
         if value is None and path in deleted:
+            if path == 'delivery-index.json':
+                return None
             if path == PLANNING_BINDINGS:
                 raise ValueError('Нельзя удалить реестр задач квартального планирования перед коммитом')
             if path.endswith('/' + BINDING_FILE) or path.endswith('/manifest.json'):
@@ -238,7 +288,8 @@ def staged_keys(repository: Path) -> set[str]:
     if PLANNING_BINDINGS in paths.split('\0'):
         require_preserved_planning_bindings(read(PLANNING_BINDINGS),
                                            git_output(repository, 'show', 'HEAD:' + PLANNING_BINDINGS))
-    return keys_for_paths(filter(None, paths.split('\0')), read)
+    return keys_for_paths(filter(None, paths.split('\0')), read,
+                          lambda path: git_output(repository, 'show', 'HEAD:' + path))
 
 
 def validate_file(path: Path, repository: Path | None = None) -> None:
