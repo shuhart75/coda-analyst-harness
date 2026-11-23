@@ -111,7 +111,7 @@ class Manager:
     def prepare(self, spec, work, task):
         from controller import read, save, under
         spec = validate(spec, Path(work))
-        self.runner.audit(Path(work))
+        self.runner.audit(Path(work), operations=[spec])
         files = manifest(Path(work), spec['artifacts'])
         identity = oq.fingerprint({'spec': spec, 'files': files})
         slot = self.folder / identity
