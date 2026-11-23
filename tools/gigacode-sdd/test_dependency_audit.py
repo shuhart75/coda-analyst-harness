@@ -183,7 +183,7 @@ class PrivateInputTests(unittest.TestCase):
             subprocess.run(['git', 'init', '-q', str(work)], check=True)
             for name in ('.npmrc', 'data/generated/.npmrc', 'data/tracked/.npmrc'):
                 path = work / name; path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text('registry=http://127.0.0.1:1234\n//private/:_auth=SECRET')
+                path.write_text('registry=https://nexus.example/npm\n//private/:_auth=SECRET')
             subprocess.run(['git', '-C', str(work), 'add', 'data/tracked/.npmrc'], check=True)
             report = assess(work, ['nexus.example'])
             runner = SimpleNamespace(logdir=lambda name: root / name)

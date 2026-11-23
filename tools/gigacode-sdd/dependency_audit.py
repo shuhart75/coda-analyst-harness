@@ -139,13 +139,15 @@ def assess(root, hosts, *, contours=('.',), operations=()):
             except (ValueError, OSError, AttributeError):
                 pass
 
-    findings = audit_dependency_sources(root, hosts, extra_configs=explicit)
+    inventory = []
+    findings = audit_dependency_sources(root, hosts, extra_configs=explicit, inventory=inventory)
     blocking, observations = list(operation_findings), []
     for finding in findings:
         reasons = active.get(finding['path'])
         (blocking if reasons else observations).append({**finding,
             'role': 'build-input' if reasons else 'unbound-config', 'reasons': sorted(reasons or [])})
     return {'schema': 1, 'blocking': blocking, 'observations': observations,
+            'unbound_configs': [item for item in inventory if item['path'] not in active],
             'limitations': sorted(set(limitations)), 'network_isolation_proven': False,
             'active_configs': {k: sorted(v) for k, v in sorted(active.items())}}
 
@@ -162,7 +164,7 @@ def preserve_generated_private_configs(runner, work, report):
     from controller import save
     work = Path(work).resolve()
     tracked = set(_tracked(work))
-    candidates = [item['path'] for item in report['observations']
+    candidates = [item['path'] for item in report.get('unbound_configs', [])
                   if item['path'] not in tracked and _secret(item['path'])]
     if not candidates:
         return []

@@ -205,7 +205,7 @@ def nexus_environment(policy: dict, base_env=None):
     return env
 
 
-def audit_dependency_sources(root, nexus_hosts, *, extra_configs=None):
+def audit_dependency_sources(root, nexus_hosts, *, extra_configs=None, inventory=None):
     """Inspect dependency download URLs only, not documentation or XML namespaces.
 
     Findings intentionally omit complete URLs, which may contain credentials.
@@ -238,6 +238,9 @@ def audit_dependency_sources(root, nexus_hosts, *, extra_configs=None):
                 continue
             sources.setdefault(Path(directory) / name, kind)
     for path, kind in sources.items():
+        if inventory is not None:
+            inventory.append({'path': path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path),
+                              'kind': kind})
         if any(p.is_symlink() for p in (path, *path.parents)):
             add(path, "file", "symlink-config-not-audited")
             continue
