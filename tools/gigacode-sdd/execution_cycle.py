@@ -89,6 +89,8 @@ def confirm_model(result, model):
 
 def _receipt_valid(record):
     from controller import Blocked, digest
+    if 'workspace_snapshot' not in record:
+        raise Blocked('Saved execution candidate has no completed workspace receipt')
     if snapshot(record['workspace'], normalize_settings=True) != record['workspace_snapshot']:
         raise Blocked('Saved execution candidate changed outside its recorded step')
     for path, expected in record.get('evidence_files', {}).items():
@@ -559,7 +561,21 @@ def execute_task(runner, task, record):
                 or not result.get('terminal_result') or result.get('cancelled') or result.get('timed_out')
                 or (result.get('cleanup') or {}).get('preserved')):
             continue
-        control = questions.control_or_question(result.get('text', ''))
+        if value.get('stage') == 'execute' and 'workspace_snapshot' not in value:
+            # A session can finish before audit/export records a checkpoint.
+            # Preserve its output as diagnostics, never replay its control actions
+            # or manufacture a receipt for the current, unverified workspace.
+            value.setdefault('incomplete_execution_results', []).append(value.pop('session_result'))
+            value['feedback'] = {'previous_feedback': value.get('feedback'),
+                'incomplete_execution_result': result,
+                'instruction': 'The previous session ended before workspace audit/export completed. '
+                               'Inspect and continue the preserved work; do not repeat completed edits blindly. '
+                               'Previous control requests were not applied. Submit any still needed request again.'}
+            value['status'] = 'pending'
+            save(path, value)
+            runner.progress(task['id'] + ': сохранённая сессия не прошла фиксацию; продолжу рабочие файлы с проверками')
+            continue
+        control = questions.execution_control(result.get('text', ''))
         if not control or control[0] not in ('operator_question', 'scope_request'):
             continue
         identity = fingerprint([result.get('events_path'), result.get('text')])

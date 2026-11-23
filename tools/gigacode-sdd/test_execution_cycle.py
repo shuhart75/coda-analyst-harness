@@ -88,6 +88,43 @@ class ExecutionPortfolioTests(unittest.TestCase):
     def records(self):
         return [read(p) for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')]
 
+    def test_resume_execution_without_snapshot_preserves_work_and_rechecks(self):
+        self.resume_incomplete_result(json.dumps({'operator_question': {
+            'topic': 'stand', 'question': 'Start the stand?'}}))
+
+    def test_resume_legacy_conflicting_controls_without_snapshot(self):
+        self.resume_incomplete_result(json.dumps({
+            'service_request': [{'kind': 'postgres', 'bind': '127.0.0.1:5434'}],
+            'scope_request': {'paths': ['frontend/node_modules']}}))
+
+    def resume_incomplete_result(self, text):
+        self.primary_only = True
+        accepted = self.run_task()
+        path = next(p for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')
+                    if read(p)['model'] == accepted['model'])
+        value = read(path)
+        value.update(stage='execute', status='running')
+        value.pop('workspace_snapshot')
+        value['session_result']['text'] = text
+        old_result = value['session_result'].copy()
+        save(path, value)
+        before = self.check_count
+        def resumed(root, cwd, prompt, role, name, model=None, stop_event=None):
+            self.assertEqual((Path(root)/'backend/value.txt').read_text(), '2')
+            self.assertIn('previous session ended before workspace audit/export', prompt)
+            self.assertNotIn('workspace_snapshot', read(path))
+            self.assertNotIn('question_id', read(path))
+            return self.session(root, cwd, prompt, role, name, model, stop_event)
+        result = self.run_task(session=resumed)
+        self.assertEqual(result['status'], 'accepted')
+        self.assertEqual(result['incomplete_execution_results'], [old_result])
+        self.assertGreater(self.check_count, before)
+
+    def test_review_without_snapshot_stays_blocked(self):
+        from execution_cycle import _receipt_valid
+        with self.assertRaisesRegex(Blocked, 'no completed workspace receipt'):
+            _receipt_valid({'workspace': str(self.work), 'stage': 'review'})
+
     def test_verified_winner_cancels_only_peer_after_comparison_window(self):
         barrier = threading.Barrier(2)
         def concurrent(root, cwd, prompt, role, name, model=None, stop_event=None):
