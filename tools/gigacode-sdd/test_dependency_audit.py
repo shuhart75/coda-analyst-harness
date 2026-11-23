@@ -70,10 +70,6 @@ class OperationAuditTests(unittest.TestCase):
         self.assertEqual(report['blocking'], [])
         self.assertEqual(report['observations'][0]['code'], 'invalid-dependency-config')
 
-
-if __name__ == '__main__':
-    unittest.main()
-
 class StaticRecoveryTests(unittest.TestCase):
     def test_old_static_gate_archived_without_accepting_candidate(self):
         from types import SimpleNamespace
@@ -217,3 +213,7 @@ class OverrideTests(unittest.TestCase):
             path.write_text('[]')
             report = assess(tmp, ['nexus.example'])
             self.assertEqual(report['observations'][0]['code'], 'invalid-dependency-config')
+
+
+if __name__ == '__main__':
+    unittest.main()

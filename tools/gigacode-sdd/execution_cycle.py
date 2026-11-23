@@ -847,7 +847,14 @@ def execute_task(runner, task, record):
                                         'rule': 'Inspect test results; this does not accept the task or replace mandatory checks.'}
                                     value['evidence_files'][isolated['log']] = digest(isolated['log'])
                                     value['handled_question_result'] = fingerprint([result.get('events_path'), result.get('text')])
+                                    check_identity = fingerprint({'request': request, 'inputs': isolated['inputs']})
+                                    repeated = value.get('last_isolated_check') == check_identity
+                                    value['last_isolated_check'] = check_identity
                                     persist()
+                                    if not isolated['ok']:
+                                        fail('checks', json.dumps({'isolated_check': isolated}, ensure_ascii=False))
+                                    elif repeated:
+                                        fail('request-protocol', 'Identical isolated check already completed; use its recorded result or change inputs.')
                                     continue
                                 if scope_repair.is_request(kind, request):
                                     task = runner.scopes.requested(task, value, request)
