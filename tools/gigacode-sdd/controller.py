@@ -311,7 +311,8 @@ class Runner:
                         signal.signal(sig, handler)
                     if (self.root / 'service-stop.json').is_file():
                         run_status.publish(self)
-                    self._display.close(status=self.state.get('status'), failed=failure is not None)
+                    self._display.close(status=self.state.get('status'), failed=failure is not None
+                                        and not isinstance(failure, operator_questions.WaitingForOperator))
                     diagnostics.report(self.config_path, error=failure)
         finally:
             lock.__exit__(None, None, None)
@@ -373,13 +374,28 @@ class Runner:
             if not alive:
                 continue
             raise Blocked('A preserved agent/service group is still present; inspect ' + str(path))
+        handoffs = []
         for path in (self.root / 'preserved-services').glob('*.json'):
-            pid = read(path)['pid']
+            record = read(path)
+            pid = record['pid']
             if not isinstance(pid, int) or pid <= 1:
                 raise Blocked('Invalid preserved service record: ' + str(path))
-            if not process_exists(pid):
+            current = next((item for item in observed if item.get('pid') == pid), None)
+            if current is None:
                 continue
-            raise Blocked('A detached service from an earlier session is still present; inspect ' + str(path))
+            # Old PID records are not authority over a recycled process. Any
+            # new listener inside our workspace is reconciled below afresh.
+            if record.get('started') and record['started'] != current.get('started'):
+                continue
+            import service_handoff
+            listener = next((item for item in inventory.get('services', []) if item.get('pid') == pid), None)
+            if listener and service_handoff.accepted(self, listener):
+                continue
+            if not listener:
+                raise Blocked('A detached service from an earlier session is still present; inspect ' + str(path))
+            handoffs.append(listener)
+        if handoffs:
+            service_handoff.reconcile(self, handoffs)
         # A killed controller cannot always write a preservation record. Inspect
         # its managed directories before resuming so a surviving writer or a
         # listener that started late is not mistaken for a clean restart.
@@ -394,6 +410,8 @@ class Runner:
         This does not identify a process that changed cwd outside our state.
         """
         services = detect_new_services({'services': []}, inventory, root)
+        import service_handoff
+        services = [item for item in services if not service_handoff.accepted(self, item)]
         agents = []
         for agent in inventory.get('agents', []):
             cwd = agent.get('cwd')
@@ -409,6 +427,9 @@ class Runner:
         save(report, {'workspace': str(root), 'services': services, 'agents': agents})
         for service in services:
             save(self.root / 'preserved-services' / (str(service['pid']) + '.json'), service)
+        if services and not agents and inventory.get('complete'):
+            service_handoff.reconcile(self, services)
+            return
         self.stop.set()
         raise Blocked('Existing managed agent or service requires handoff before another writer starts; inspect ' + str(report))
 
@@ -481,6 +502,8 @@ class Runner:
     def service_audit(self, before, root, name):
         after = self.inspect_inventory(name)
         new_services = detect_new_services(before, after, root)
+        import service_handoff
+        new_services = [item for item in new_services if not service_handoff.accepted(self, item)]
         if not after['complete'] or new_services:
             report = self.service_stop(after, new_services, name)
             for service in new_services:
@@ -569,6 +592,12 @@ class Runner:
                         'The controller inspects Git controls and performs commits; do not probe or change Git configuration.\n')
             context += operator_questions.PROMPT
             context += '\nController-managed ready services:\n' + json.dumps(self.services.context(), ensure_ascii=False)
+            import service_handoff
+            context += '\nOperator-confirmed existing services (readiness and artifacts must be verified):\n' + json.dumps(
+                service_handoff.context(self, services_before), ensure_ascii=False)
+            context += ('\nBefore restarting work, inspect existing task artifacts and evidence. '
+                        'Validate a completed experiment before considering another run; never rebuild its frozen artifacts. '
+                        'Existing listeners are not proof of readiness or permission to stop/reconfigure them.\n')
         session_log = self.logdir(name)
         full_prompt = context + '\n' + prompt
         decision_sha = digest(self.root / 'decision.md') if (self.root / 'decision.md').is_file() else None
@@ -598,7 +627,6 @@ class Runner:
             self.preserve_cleanup(result['cleanup'])
             save(session_log / 'transport-result.json', result)
             raise OperationalBlocked('Process cleanup incomplete; inspect preserved-processes before resume')
-        self.service_audit(services_before, root, name)
         self.guard()
         after = snapshot(root, normalize_settings=True)
         if git_controls(root) != controls:
@@ -622,6 +650,9 @@ class Runner:
             'git_controls': git_controls(root),
             'model': model, 'prompt_sha256': hashlib.sha256(full_prompt.encode()).hexdigest(),
             'decision_sha256': decision_sha})
+        # Preserve a validated execution receipt even when service handoff is
+        # still needed. Resume must reconcile services before using this receipt.
+        self.service_audit(services_before, root, name)
         if result['cancelled']:
             raise Interrupted(result=result)
         if result['permission_denials'] and name == 'preflight':

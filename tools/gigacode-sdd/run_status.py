@@ -295,7 +295,10 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
     execution_operations = [op for op in operations if op.get('purpose') != 'observation']
     near_limit = any(op.get('timeout_seconds') and op['elapsed_seconds'] >= .8*op['timeout_seconds'] for op in execution_operations)
     quiet = any(op.get('idle_seconds') is not None and op['idle_seconds'] >= 300 for op in execution_operations)
-    if value.get('service_stop'):
+    if value.get('status') == 'waiting-user' and questions:
+        health = 'Нужно решение по работающим сервисам. Процессы сохранены.' if any(
+            q.get('task') == 'service-handoff' for q in questions) else 'Нужен ваш ответ: вопросов ' + str(len(questions)) + '.'
+    elif value.get('service_stop'):
         health = value['service_stop']['reason']
     elif value.get('console_error'):
         health = 'Запуск остановлен с ошибкой. Нужна проверка журнала.'
