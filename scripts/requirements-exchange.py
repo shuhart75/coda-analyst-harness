@@ -7,6 +7,8 @@ from project_layout import (feature_root as layout_feature_root, exchange_bindin
 import argparse
 import publication_cancellation as cancellation
 import analyst_delivery
+import analyst_results
+import exchange_migration
 import hashlib
 import json
 import os
@@ -179,6 +181,7 @@ def install_root_contract(exchange: Path) -> None:
         "README.md": "# Обмен требованиями и результатами разработки",
         "AGENTS.md": "# Договор SDD для обмена требованиями",
         "SDD-WORKFLOW.md": "# Работа разработческой SDD с поставкой",
+        "DOCUMENTS-WORKFLOW.md": "# Новый обмен через documents",
         "tasks.template.md": "# Задачи разработки",
         "task-result.template.md": "# Результат задачи",
         "summary.template.md": "# Итог реализации редакции этапа",
@@ -187,6 +190,7 @@ def install_root_contract(exchange: Path) -> None:
     }
     managed_files = (
         ("README.template.md", "README.md"),
+        ("DOCUMENTS-WORKFLOW.template.md", "DOCUMENTS-WORKFLOW.md"),
         ("AGENTS.template.md", "AGENTS.md"),
         ("receipt.template.json", "receipt.template.json"),
         ("receipt-sdd.template.json", "receipt-sdd.template.json"),
@@ -311,6 +315,8 @@ def require_confirmed_audit(project: Path, feature: str, requirements: Path) -> 
 
 
 def requested_returns_contract(schema_version: int = 2) -> dict[str, Any]:
+    if schema_version == 6:
+        return {"required": False, "results": "analyst-owned-evidence-review-v1"}
     contract: dict[str, Any] = {
         "tasks": {
             "path": "revisions/<NNN>/returns/tasks.md",
@@ -348,6 +354,8 @@ def requested_returns_contract(schema_version: int = 2) -> dict[str, Any]:
 
 
 def traceability_contract(schema_version: int) -> dict[str, str]:
+    if schema_version == 6:
+        return {"requirement_pattern": "REQ-*", "chain": "groomed-task -> REQ/scenario -> commit/SDD/code -> analyst-review"}
     chain = "REQ-* -> tasks.md -> task result -> summary.md"
     if schema_version >= 2:
         chain = "REQ-* -> local SDD change -> tasks.md -> task result -> summary.md"
@@ -366,6 +374,8 @@ def developer_sdd_contract(schema_version: int = 2) -> dict[str, str]:
     if schema_version >= 5:
         contract.update(input_role="business-and-analyst-sdd",
                         technical_artifacts="analyst-proposal-specs-developer-design-tasks")
+    if schema_version == 6:
+        contract["revision_receipt"] = "not-required"
     return contract
 
 
@@ -442,6 +452,8 @@ def validate_receipt(
 
 
 def revision_processing_status(feature_root: Path, entry: dict[str, Any]) -> dict[str, Any]:
+    if entry.get("returns_contract_version") == 3:
+        return analyst_results.processing_status(feature_root, entry)
     revision = entry["revision"]
     returns = feature_root / entry["returns_path"]
     contract_version = entry.get("returns_contract_version", 0)
@@ -526,7 +538,7 @@ def revision_processing_status(feature_root: Path, entry: dict[str, Any]) -> dic
 def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
     errors: list[str] = []
     schema_version = manifest.get("schema_version")
-    if schema_version not in {1, 2, 3, 4, 5} or manifest.get("exchange_kind") != "feature-requirements":
+    if schema_version not in {1, 2, 3, 4, 5, 6} or manifest.get("exchange_kind") != "feature-requirements":
         errors.append("неподдерживаемая схема manifest.json")
         schema_version = CURRENT_MANIFEST_SCHEMA
     feature = manifest.get("feature")
@@ -534,7 +546,7 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
         errors.append("feature в manifest.json не совпадает с каталогом функциональности")
     binding = manifest.get("delivery_binding")
     ceiling = manifest.get("legacy_revision_ceiling", 0)
-    if schema_version == 4 or (schema_version == 5 and binding is not None):
+    if schema_version == 4 or (schema_version in {5, 6} and binding is not None):
         try:
             validate_exchange_binding(binding, feature)
         except ValueError as exc:
@@ -574,20 +586,23 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
         errors.append("номера редакций должны быть положительными целыми числами")
     elif len(revision_numbers) != len(set(revision_numbers)):
         errors.append("номера редакций должны быть уникальными")
-    if binding is not None and schema_version in {4, 5} and (not isinstance(active, int) or active <= ceiling):
+    if binding is not None and schema_version in {4, 5, 6} and (not isinstance(active, int) or active <= ceiling):
         errors.append("Active delivery revision must be newer than legacy history")
     if matches[0].get("state") == "superseded":
         errors.append("активная редакция не может быть вытеснена новой")
     sdd_floor = manifest.get("sdd_revision_floor")
-    if schema_version == 5 and (type(sdd_floor) is not int or not 1 <= sdd_floor <= active):
+    if (schema_version == 5 or (schema_version == 6 and sdd_floor is not None)) and (type(sdd_floor) is not int or not 1 <= sdd_floor <= active):
         errors.append("Schema 5 requires a valid SDD revision floor")
+    analyst_floor = manifest.get('analyst_revision_floor')
+    if schema_version == 6 and (type(analyst_floor) is not int or not 1 <= analyst_floor <= active):
+        errors.append('Schema 6 requires analyst_revision_floor')
     for item in revisions:
         if not isinstance(item, dict) or not isinstance(item.get("revision"), int):
             errors.append("некорректная запись редакции")
             continue
         if item.get("state") not in ALLOWED_REVISION_STATES:
             errors.append(f"редакция {item.get('revision')} имеет неизвестное состояние")
-        if schema_version == 4 or (schema_version == 5 and binding is not None):
+        if schema_version == 4 or (schema_version in {5, 6} and binding is not None):
             if item.get("delivery_binding") is not None:
                 if item["delivery_binding"] != binding:
                     errors.append("Revision belongs to another delivery")
@@ -606,7 +621,9 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
             errors.append(str(exc))
             valid_stage = False
         contract_version = item.get("returns_contract_version", None if item.get("stage_id") else 0)
-        if schema_version >= 3 and contract_version not in {0, 1, 2}:
+        if schema_version == 6 and type(analyst_floor) is int and item['revision'] >= analyst_floor and contract_version != 3:
+            errors.append('New documents revisions require analyst results contract 3')
+        if schema_version >= 3 and contract_version not in ({0, 1, 2, 3} if schema_version == 6 else {0, 1, 2}):
             errors.append(
                 f"редакция {item.get('revision')} не содержит поддерживаемую версию договора возвратов"
             )
@@ -629,10 +646,10 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
             except ValueError as exc:
                 errors.append(str(exc))
         sdd = item.get("sdd_input")
-        if schema_version == 5 and type(sdd_floor) is int and item["revision"] >= sdd_floor and sdd is None:
+        if schema_version in {5, 6} and type(sdd_floor) is int and item["revision"] >= sdd_floor and sdd is None:
             errors.append("New revision requires an SDD input")
         if sdd is not None:
-            if schema_version != 5 or contract_version != 2:
+            if schema_version not in {5, 6} or contract_version not in {2, 3}:
                 errors.append("SDD input requires manifest schema 5 and returns contract 2")
             else:
                 try:
@@ -685,6 +702,7 @@ def prepare_in_exchange(
     requirements_bytes: bytes,
     requirements_text: str,
     analyst: str,
+    *, analyst_owned: bool = False,
 ) -> dict[str, Any]:
     analysis_task = delivery_analysis_task(project, feature)
     binding = require_exchange_delivery_binding(project, feature)
@@ -731,7 +749,7 @@ def prepare_in_exchange(
         (item for item in revisions if isinstance(item, dict) and item.get("revision") == active),
         None,
     )
-    if active_entry and active_entry.get("state") != "cancelled" and active_entry.get("stage_id") and active_entry.get("sha256") == current_hash and active_entry.get("sdd_input") == sdd:
+    if active_entry and active_entry.get("state") != "cancelled" and active_entry.get("stage_id") and active_entry.get("sha256") == current_hash and active_entry.get("sdd_input") == sdd and (not analyst_owned or active_entry.get("returns_contract_version") == 3):
         stages.require_entry_stage(active_entry, stage)
         return {
             "status": "already-current",
@@ -754,15 +772,15 @@ def prepare_in_exchange(
             "developer_sdd": developer_sdd_contract(CURRENT_MANIFEST_SCHEMA),
         })
     if binding is not None:
-        if manifest.get("schema_version") not in {4, 5}:
+        if manifest.get("schema_version") not in {4, 5, 6}:
             manifest["legacy_revision_ceiling"] = max((entry["revision"] for entry in revisions), default=0)
-        manifest.update(schema_version=5 if manifest.get("schema_version") == 5 else 4, delivery_binding=binding)
+        manifest.update(schema_version=manifest["schema_version"] if manifest.get("schema_version") in {5, 6} else 4, delivery_binding=binding)
     known_entries = [dict(stages.record_entry(record), **({"state": "cancelled"} if cancellation.cancelled(record) else {})) for record in records]
     effective = {item["revision"]: item for item in known_entries}
     all_entries = [*(effective.get(item["revision"], item) for item in revisions), *known_entries]
     latest = max(all_entries, key=lambda item: item["revision"], default=None)
     legacy_numbers = {record["entry"]["revision"] for record in records if "legacy_overlay" in record}
-    reuse = latest if latest and latest.get("state") != "cancelled" and latest["revision"] not in legacy_numbers and latest["sha256"] == current_hash and latest.get("stage") == stage and latest.get("sdd_input") == sdd else None
+    reuse = latest if latest and latest.get("state") != "cancelled" and latest["revision"] not in legacy_numbers and latest["sha256"] == current_hash and latest.get("stage") == stage and latest.get("sdd_input") == sdd and (not analyst_owned or latest.get("returns_contract_version") == 3) else None
     revision = reuse["revision"] if reuse else max((item["revision"] for item in all_entries), default=0) + 1
     stage_revision = reuse["stage_revision"] if reuse else max(
         (item["stage_revision"] for item in all_entries if item.get("stage_id") == stage["stage_id"]), default=0,
@@ -771,7 +789,7 @@ def prepare_in_exchange(
         manifest.setdefault("sdd_revision_floor", revision)
         manifest.update(schema_version=5, requested_returns=requested_returns_contract(5),
                         traceability=traceability_contract(5), developer_sdd=developer_sdd_contract(5))
-    elif manifest.get("schema_version") == 5:
+    elif manifest.get("schema_version") == 5 or manifest.get("sdd_revision_floor") is not None:
         raise ValueError("Cannot downgrade SDD exchange to a requirements-only input")
     revision_root = feature_exchange / "revisions" / f"{revision:03d}"
     if revision_root.exists():
@@ -812,6 +830,11 @@ def prepare_in_exchange(
     })
     if sdd is not None:
         revisions[-1].update(sdd_input=sdd, returns_contract_version=2)
+    if analyst_owned and not reuse:
+        revisions[-1]["returns_contract_version"] = 3
+        manifest.setdefault("analyst_revision_floor", revision)
+        manifest.update(schema_version=6, requested_returns=requested_returns_contract(6),
+                        traceability=traceability_contract(6), developer_sdd=developer_sdd_contract(6))
     if binding is not None:
         revisions[-1]["delivery_binding"] = binding
     manifest["analysis_task"] = analysis_task
@@ -865,6 +888,14 @@ def cache_manifest(feature: str, revision: int, manifest: Path, publication: dic
     target = state_root() / "exchange-publications" / scope / feature / f"{revision:03d}" / "manifest.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = load_json(manifest)
+    if payload.get('schema_version') == 6:
+        exchange = target.parent / 'exchange'
+        exchange.mkdir(exist_ok=True)
+        shutil.copytree(manifest.parent, exchange / feature, dirs_exist_ok=True)
+        for contract in manifest.parent.parent.iterdir():
+            if contract.is_file():
+                shutil.copy2(contract, exchange / contract.name)
+        target = exchange / feature / 'manifest.json'
     payload["publication"] = publication
     save_json(target, payload)
     return target
@@ -940,6 +971,7 @@ def publish_to_code(
     requirements_text: str,
     analyst: str,
     target_branch: str | None = None,
+    *, destination_role: str = "code",
 ) -> dict[str, Any]:
     analysis_task = delivery_analysis_task(project, feature)
     binding = require_exchange_delivery_binding(project, feature)
@@ -952,7 +984,7 @@ def publish_to_code(
     before = code_snapshot(code_root)
     if before is None:
         raise CodeDestinationUnavailable("роль code не является доступным клоном Git с веткой и origin")
-    target = delivery_target(before["remote"], target_branch or configured_delivery_target())
+    target = delivery_target(before["remote"], target_branch or (configured_delivery_target() if destination_role == "code" else None))
     current_hash = hashlib.sha256(requirements_bytes).hexdigest()
     for record in stages.registry(state)["revisions"]:
         if record["publication_confirmed"] or cancellation.cancelled(record):
@@ -981,10 +1013,14 @@ def publish_to_code(
             raise CodeDestinationUnavailable("нет доступа к целевой ветке роли code")
         exchange = clone / EXCHANGE_DIR
         require_plain_exchange(exchange)
+        if destination_role == "analytics":
+            exchange.mkdir(exist_ok=True)
         if not exchange.is_dir():
             raise CodeDestinationUnavailable("в целевой ветке роли code отсутствует корневой requirements-exchange")
-        if sdd is not None:
+        if sdd is not None and destination_role == "code":
             sdd_bundle.verify_sources(layout_feature_root(project, feature) / "sdd", sdd, clone)
+        if destination_role == "analytics":
+            exchange_migration.validate(SimpleNamespace(**globals()), project, feature, state, root=exchange / feature)
         target_commit = git_value(clone, "rev-parse", "HEAD")
         manifest_path = exchange / feature / "manifest.json"
 
@@ -1015,7 +1051,7 @@ def publish_to_code(
             result = {
                 **prepared, "delivery_binding": binding, "status": "already-current" if merged else "awaiting-merge",
                 "stage_id": stage["stage_id"], "stage_revision": prepared_entry["stage_revision"],
-                "destination_role": "code", "manifest": str(cached),
+                "destination_role": destination_role, "manifest": str(cached),
                 "repository_url": before["remote"], "repository_branch": target if merged else branch,
                 "target_branch": target, "request_branch": None if merged else branch,
                 "repository_path": f"{EXCHANGE_DIR}/{feature}",
@@ -1072,7 +1108,7 @@ def publish_to_code(
                             cancellation.inventory(exchange / feature / "revisions" / f"{accepted['revision']:03d}") != record["publication_cancellation"]["files"]):
                         raise ValueError("Отменённая редакция появилась в target; требуется разбор")
             active = next(entry for entry in manifest["revisions"] if entry["revision"] == manifest["active_revision"])
-            if active.get("state") != "cancelled" and active.get("stage_id") and active["sha256"] == current_hash and active.get("sdd_input") == sdd:
+            if active.get("state") != "cancelled" and active.get("stage_id") and active["sha256"] == current_hash and active.get("sdd_input") == sdd and (destination_role == "code" or active.get("returns_contract_version") == 3):
                 stages.require_entry_stage(active, stage)
                 return response({"revision": active["revision"], "feature": feature, "manifest_path": manifest_path}, True, target_commit)
 
@@ -1168,7 +1204,8 @@ def publish_to_code(
             raise ValueError("Не удалось создать изолированную ветку передачи")
         install_root_contract(exchange)
         cancellation.restore_history(SimpleNamespace(**globals()), exchange, feature, state, before["remote"], target)
-        prepared = prepare_in_exchange(exchange, project, feature, requirements_bytes, requirements_text, analyst)
+        prepared = prepare_in_exchange(exchange, project, feature, requirements_bytes, requirements_text, analyst,
+                                       analyst_owned=destination_role == "analytics")
         manifest = load_json(prepared["manifest_path"])
         manifest["publication_request"] = {"schema_version": 1, **identity,
                                            "identity_sha256": stages.checksum(identity), "request_branch": branch}
@@ -1224,45 +1261,11 @@ def prepare_command(args: argparse.Namespace) -> int:
     code_root = resolve_code_root(project, args.code_root)
     state = load_json(feature_root / "requirements-state.json")
     sdd_audit.snapshot(feature_root, state, code_root, verify_source=True)
-    pending = [item for item in stages.registry(state)["revisions"] if not item["publication_confirmed"]]
-    # Cancelled history still forbids fallback to another destination; it is restored only in code.
-    reason = "Репозиторий роли code отсутствует или не настроен"
-    if code_root is not None:
-        try:
-            result = publish_to_code(
-                project, code_root, args.feature, requirements_bytes, requirements_text, analyst,
-                getattr(args, "target_branch", None),
-            )
-            record_prepared(project, args.feature, result)
-            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-            return 0
-        except CodeDestinationUnavailable as exc:
-            if pending:
-                raise ValueError("Незавершённая передача в code блокирует резервное размещение; сначала проверь её PR/MR") from exc
-            reason = str(exc)
-    elif pending:
-        raise ValueError("Незавершённая передача в code блокирует резервное размещение; сначала проверь её PR/MR")
-    exchange = project / EXCHANGE_DIR
-    exchange.mkdir(parents=True, exist_ok=True)
-    prepared = prepare_in_exchange(
-        exchange, project, args.feature, requirements_bytes, requirements_text, analyst
-    )
-    result = {
-        **prepared,
-        "delivery_binding": exchange_binding(project, args.feature),
-        "destination_role": "analytics",
-        "publication_confirmed": True,
-        "exchange_root": str(exchange),
-        "manifest": str(prepared["manifest_path"]),
-        "requirements": str(prepared["requirements_path"]),
-        "selection_reason": reason,
-        "message": (
-            f"Редакция {prepared['revision']:03d} размещена в резервном каталоге роли analytics: "
-            f"{exchange}. Причина: {reason}"
-        ),
-    }
-    result.pop("manifest_path", None)
-    result.pop("requirements_path", None)
+    exchange_migration.validate(SimpleNamespace(**globals()), project, args.feature, state)
+    # No fallback to product code, including on failed or uncertain publication.
+    result = publish_to_code(project, project, args.feature, requirements_bytes,
+                             requirements_text, analyst, getattr(args, "target_branch", None),
+                             destination_role="analytics")
     record_prepared(project, args.feature, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -1337,7 +1340,7 @@ def scan_command(args: argparse.Namespace) -> int:
             feature = manifest_path.parent.name
             manifest = load_json(manifest_path)
             errors = validate_manifest(manifest, manifest_path.parent)
-            if manifest.get("schema_version") in {4, 5}:
+            if manifest.get("schema_version") in {4, 5, 6}:
                 try:
                     require_manifest_binding(project, feature, manifest)
                 except ValueError as exc:
@@ -1370,7 +1373,7 @@ def scan_command(args: argparse.Namespace) -> int:
                     "new_returns": [],
                 })
                 continue
-            returns = manifest_path.parent / revision_entry["returns_path"]
+            returns = manifest_path.parent / (f"revisions/{revision:03d}/analysis" if revision_entry.get("returns_contract_version") == 3 else revision_entry["returns_path"])
             try:
                 analytical_root = layout_feature_root(project, feature)
             except ValueError as exc:
@@ -1386,9 +1389,12 @@ def scan_command(args: argparse.Namespace) -> int:
                 })
                 continue
             processed = processed_ids(analytical_root)
+            current_analysis = (returns / "current").read_text().strip() if revision_entry.get("returns_contract_version") == 3 and (returns / "current").is_file() else None
             new_returns = []
             for path in sorted(returns.rglob("*")) if returns.is_dir() else []:
-                if not path.is_file():
+                if not path.is_file() or (revision_entry.get("returns_contract_version") == 3 and path.suffix != ".json"):
+                    continue
+                if current_analysis is not None and path.stem != current_analysis:
                     continue
                 relative = path.relative_to(manifest_path.parent).as_posix()
                 digest = sha256(path)
@@ -1408,6 +1414,7 @@ def scan_command(args: argparse.Namespace) -> int:
                 "revision": revision,
                 "status": "new-results" if new_returns else "no-new-results",
                 "processing": processing,
+                **({"next_action": "inspect-groomed-task-commits" if processing["state"] == "awaiting-analysis" else "review-current-analysis" if new_returns else "analysis-already-processed"} if revision_entry.get("returns_contract_version") == 3 else {}),
                 "new_returns": new_returns
             })
     print(json.dumps({
@@ -1433,10 +1440,13 @@ def publication_root(project: Path, feature: str, record: dict[str, Any]) -> Pat
     if not record.get("publication_confirmed"):
         raise ValueError("Место передачи ещё не подтверждено")
     if record["destination_role"] == "analytics":
-        expected = project / EXCHANGE_DIR / feature / "manifest.json"
-        if manifest_path != expected.resolve():
-            raise ValueError("Подтверждённое место analytics не совпадает с каталогом проекта")
-        return manifest_path.parent
+        if record['entry'].get('returns_contract_version') != 3:
+            expected = project / EXCHANGE_DIR / feature / "manifest.json"
+            if manifest_path != expected.resolve():
+                raise ValueError("Подтверждённое место analytics не совпадает с каталогом проекта")
+            return manifest_path.parent
+        return analyst_results.published_root(SimpleNamespace(**globals()), project, feature, record)
+
     publication = manifest.get("publication", {})
     if publication.get("state") != "merged" or not publication.get("target_commit"):
         raise ValueError("Подтверждённое место code требует принятого merge")
@@ -1451,6 +1461,11 @@ def publication_root(project: Path, feature: str, record: dict[str, Any]) -> Pat
 
 
 def validate_result_review(project: Path, feature: str, return_id: str, review: dict[str, Any], *, publication: dict[str, Any] | None = None) -> None:
+    if analyst_results.is_result_id(return_id):
+        requirement_ids = analyst_results.validate_result(SimpleNamespace(**globals()), project, feature,
+                                                           return_id, review, publication=publication)
+        validate_review_items(project, requirement_ids, review)
+        return
     parts = return_id.split(":", 3)
     if len(parts) != 4 or parts[0] != feature or not parts[1].isdigit():
         raise ValueError("Некорректный return_id итогового отчёта")
@@ -1508,6 +1523,10 @@ def validate_result_review(project: Path, feature: str, return_id: str, review: 
     if not found or not requirement_ids:
         raise ValueError("Точный итоговый отчёт с переданными REQ-* не найден; повтори scan")
 
+    validate_review_items(project, requirement_ids, review)
+
+
+def validate_review_items(project, requirement_ids, review):
     def text(value: Any) -> bool:
         return isinstance(value, str) and bool(value.strip())
 
@@ -1588,6 +1607,9 @@ def record_processed_command(args: argparse.Namespace) -> int:
     if not analyst:
         raise ValueError("Не задан идентификатор аналитика")
     review = None
+    if analyst_results.is_result_id(args.return_id):
+        from tracker_safety import require_write_context
+        require_write_context(project, modes=("requirements", "release-finalization"), feature=args.feature)
     if args.decision == "reviewed":
         if not args.review_file:
             raise ValueError("Для reviewed требуется --review-file с решениями аналитика")
@@ -1595,7 +1617,7 @@ def record_processed_command(args: argparse.Namespace) -> int:
         validate_result_review(project, args.feature, args.return_id, review)
     elif args.review_file:
         raise ValueError("--review-file применяется только с --decision reviewed")
-    elif "/returns/summary.md:" in args.return_id:
+    elif "/returns/summary.md:" in args.return_id or analyst_results.is_result_id(args.return_id):
         raise ValueError("Итоговый summary.md требует --decision reviewed и --review-file")
     state_path = feature_root / STATE_NAME
     state = load_json(state_path) if state_path.is_file() else {
@@ -1663,6 +1685,12 @@ def validate_command(args: argparse.Namespace) -> int:
     return 0 if not errors else 1
 
 
+def migration_command(args):
+    result = exchange_migration.command(SimpleNamespace(**globals()), args)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Обмен требованиями и результатами разработки")
     commands = result.add_subparsers(dest="command", required=True)
@@ -1690,6 +1718,12 @@ def parser() -> argparse.ArgumentParser:
     cancel.add_argument("--reason", required=True)
     cancel.add_argument("--analyst-confirmed", action="store_true")
     cancel.set_defaults(handler=lambda args: cancellation.command(SimpleNamespace(**globals()), args))
+    migrate = commands.add_parser("migrate-code-exchange")
+    migrate.add_argument("project")
+    migrate.add_argument("feature")
+    migrate.add_argument("--analyst-confirmed", action="store_true")
+    migrate.add_argument("--reason", required=True)
+    migrate.set_defaults(handler=lambda args: migration_command(args))
     scan = commands.add_parser("scan")
     scan.add_argument("project")
     scan.add_argument("--analyst")

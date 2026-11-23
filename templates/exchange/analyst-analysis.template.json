@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "kind": "analyst-implementation-review",
+  "feature": "delivery-key",
+  "revision": 1,
+  "requirements_sha256": "REPLACE_WITH_INPUT_HASH",
+  "sdd_sha256": "REPLACE_WITH_SDD_HASH_OR_NULL",
+  "bindings": {
+    "be-task": {"key": "RSCON-123", "evidence": "Проверенный журнал создания Story или решение аналитика"}
+  },
+  "evidence": [],
+  "scenarios": [{
+    "task_id": "be-task",
+    "requirement": "REQ-DEMO-001",
+    "scenario": "Точное имя сценария или AC-id",
+    "expected": "Требуемый наблюдаемый результат",
+    "actual": "Фактическое поведение пока не установлено",
+    "implementation": "unknown",
+    "conformity": "unknown",
+    "verification": "not-run",
+    "merge": "unknown",
+    "deployment": "unknown",
+    "limitations": "Указать конкретные пробелы доказательств",
+    "evidence": []
+  }]
+}

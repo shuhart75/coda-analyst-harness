@@ -12,7 +12,7 @@ from tests.test_requirements_exchange import register_stage, requirements
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "requirementsctl.py"
-EXCHANGE = ROOT / "scripts" / "requirements-exchange.py"
+EXCHANGE = ROOT / "tests" / "legacy_exchange_fixture.py"
 
 
 def run(*args: str) -> subprocess.CompletedProcess[str]:

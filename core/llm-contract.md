@@ -1,5 +1,15 @@
 # LLM Contract
 
+## Новые передачи через documents
+
+Для всех новых передач следуй `core/documents-exchange.md`: публикация только
+в documents, manifest schema 6, собственный анализ по задачам груминга вместо
+обязательных квитанций и returns. Указания ниже о публикации в code и обязательных
+returns относятся только к прежним редакциям. Новый процесс не пишет в code.
+Текущие исходные specs закрепляются до разработки; результат ищется после неё
+по номерам согласованных задач. Архивация не подтверждает тесты или внедрение.
+
+
 ## Grooming before delivery
 
 Follow `core/grooming.md` for explicit grooming commands. Confirm tasks one at a time using requirement titles, infer FE/BE from the task prefix, and use person-days exclusively. Include confirmed task documents in the audited SDD input. Create or update SberTrack Story records only after confirmed publication, with `RSCON_dev` on every new story and a revision-bound document link. The receiver preserves groomed story scope and owns technical design/tasks within it. Legacy inputs without grooming retain their previous decomposition contract.

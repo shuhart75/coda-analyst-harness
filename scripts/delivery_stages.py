@@ -33,7 +33,10 @@ def snapshot(stage: dict[str, Any]) -> dict[str, Any]:
 
 
 def revision_identity(entry: dict[str, Any]) -> dict[str, Any]:
-    return {field: entry.get(field) for field in REVISION_FIELDS}
+    value = {field: entry.get(field) for field in REVISION_FIELDS}
+    if entry.get("returns_contract_version") == 3:
+        value["returns_contract_version"] = 3
+    return value
 
 
 def record_entry(record: dict[str, Any]) -> dict[str, Any]:

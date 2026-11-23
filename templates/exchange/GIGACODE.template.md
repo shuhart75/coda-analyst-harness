@@ -1,5 +1,9 @@
 # GigaCode: разработка по переданным требованиям
 
+Для manifest schema 6 сначала прочитай `DOCUMENTS-WORKFLOW.md`. Она заменяет
+описанные ниже обязательные receipt/returns и публикацию в code. Остальные
+проверки точности входа сохраняются. Старые редакции сохраняют прежний договор.
+
 ## MANDATORY PROTOCOL: READ FIRST
 
 **DOCS:** Прочитай `AGENTS.md` и `SDD-WORKFLOW.md` рядом с этим файлом, затем

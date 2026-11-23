@@ -26,7 +26,7 @@ def prepare(project, feature, web_url):
     key = binding['delivery_key'] if binding else feature
     state = read(root / 'requirements-state.json')
     published = state.get('last_published') or {}
-    if published.get('destination_role') != 'code':
+    if published.get('destination_role') not in {'code', 'analytics'}:
         raise ValueError('Stories require confirmed publication in code, not local fallback')
     manifest = read(published['manifest_path'])
     proof = manifest.get('publication', {})
@@ -40,7 +40,7 @@ def prepare(project, feature, web_url):
             or entry.get('delivery_binding') != binding):
         raise ValueError('Wrong or inactive published delivery')
     records = state.get('delivery_stages', {}).get('revisions', [])
-    if not any(r.get('publication_confirmed') is True and r.get('destination_role') == 'code'
+    if not any(r.get('publication_confirmed') is True and r.get('destination_role') == published['destination_role']
                and r['entry']['revision'] == revision and r['entry'].get('sdd_input') == entry.get('sdd_input') for r in records):
         raise ValueError('Publication is not confirmed in the delivery registry')
     text = (root / 'requirements.md').read_text()
@@ -56,6 +56,10 @@ def prepare(project, feature, web_url):
     if (parsed.scheme != 'https' or not parsed.netloc or parsed.query or parsed.fragment
             or parsed.username or parsed.password):
         raise ValueError('Repository browser URL must be HTTPS without credentials/query/fragment')
+    if manifest.get('schema_version') == 6:
+        repository_name = urlsplit(proof['repository_url']).path.rstrip('/').split('/')[-1].removesuffix('.git')
+        if parsed.path.rstrip('/').split('/')[-1] != repository_name:
+            raise ValueError('Story links must point to the published documents repository')
     payloads = []
     for task in plan['tasks']:
         identity = {'repository': proof['repository_url'], 'delivery': key,
@@ -66,9 +70,9 @@ def prepare(project, feature, web_url):
         payloads.append({'local_id': task['id'], 'request_id': request_id, 'type': 'Story',
                          'summary': task['summary'], 'epic_key': plan['epic_key'],
                          'estimate': task['estimate'], 'estimate_unit': 'person-days', 'labels': ['RSCON_dev'],
-                         'requirements_url': url,
+                         'requirements_url': url, 'publication_commit': proof['target_commit'],
                          'description': task['description'] + '\n\nКритерий приёмки: ' + task['acceptance']
-                         + '\n\nТребования: ' + url + '\n\nГруминг: grooming/' + request_id})
+                         + '\n\nТребования: ' + url + '\n\nКоммит публикации: ' + proof['target_commit'] + '\n\nГруминг: grooming/' + request_id})
     data = {'schema_version': 1, 'provider': 'sbertrek', 'delivery': key, 'revision': revision,
             'input_sha256': entry['sdd_input']['sha256'], 'repository_url': proof['repository_url'],
             'target_branch': proof['target_branch'], 'web_url': web_url, 'tasks': payloads}

@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-SCRIPT = ROOT / "scripts" / "requirements-exchange.py"
+SCRIPT = ROOT / "tests" / "legacy_exchange_fixture.py"
 STATE_SCRIPT = ROOT / "scripts" / "requirementsctl.py"
 
 

@@ -6,6 +6,7 @@ from project_layout import (feature_root as layout_feature_root, exchange_bindin
 
 import sdd_audit
 import argparse
+import analyst_results
 import hashlib
 import importlib.util
 import json
@@ -481,6 +482,10 @@ def mark_published_command(args: argparse.Namespace) -> int:
     publication = manifest.get("publication")
     if isinstance(publication, dict) and publication.get("state") != "merged":
         raise ValueError("Передача ожидает принятия PR/MR; повтори prepare после слияния")
+    if manifest.get('schema_version') == 6:
+        proof = manifest.get('publication', {})
+        if args.destination_role != 'analytics' or proof.get('state') != 'merged' or not proof.get('target_commit'):
+            raise ValueError('New publication requires verified documents merge')
     if args.destination_role == "analytics":
         errors = exchange_module().validate_manifest(manifest, manifest_path.parent)
         if errors:
@@ -746,6 +751,8 @@ def close_stage_command(args: argparse.Namespace) -> int:
     if latest["destination_role"] == "code" and manifest.get("publication", {}).get("state") != "merged":
         raise ValueError("Нельзя закрыть этап, ожидающий merge")
     expected_prefix = f"{args.feature}:{entry['revision']:03d}:revisions/{entry['revision']:03d}/returns/summary.md:"
+    if entry.get("returns_contract_version") == 3:
+        expected_prefix = f"{args.feature}:{entry['revision']:03d}:revisions/{entry['revision']:03d}/analysis/"
     if not args.return_id.startswith(expected_prefix):
         raise ValueError("Закрытие требует точный return_id summary последней переданной редакции")
     review = current_review(feature_root, args.feature, args.return_id)
