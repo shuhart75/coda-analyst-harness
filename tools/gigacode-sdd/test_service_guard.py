@@ -264,6 +264,8 @@ class ControllerServiceGuardTests(unittest.TestCase):
         preserve_changed_receipts(self.runner, [self.runner.main])
         self.assertTrue(receipts[0].exists())
         (self.runner.main/'backend/service.log').write_text('new service output')
+        preserve_changed_receipts(self.runner, [self.runner.main], {str(self.runner.main): 'another invocation'})
+        self.assertTrue(receipts[0].exists())
         preserve_changed_receipts(self.runner, [self.runner.main])
         self.assertFalse(receipts[0].exists())
         archived = list(receipts[0].parent.glob('session-receipt-before-handoff-*.json'))

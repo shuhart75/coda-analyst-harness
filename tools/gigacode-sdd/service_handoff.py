@@ -41,7 +41,7 @@ def accepted(runner, service):
 
 
 def request(runner, service):
-    from controller import Blocked, save
+    from controller import Blocked, read, save
     bound = identity(service)
     if not bound:
         raise Blocked('Existing managed agent or service: недостаточно данных для передачи сервиса; нужны владелец, команда, время старта и рабочий каталог. PID: '
@@ -52,18 +52,48 @@ def request(runner, service):
     token = questions.fingerprint(bound)
     if (runner.root / 'service-handoffs').is_symlink():
         raise Blocked('Service handoff registry must not be a symlink')
+    record_path = runner.root / 'service-handoffs' / (token + '.json')
+    generation = token
+    if record_path.exists():
+        if record_path.is_symlink():
+            raise Blocked('Service handoff record must not be a symlink')
+        previous = read(record_path)
+        generation = previous.get('generation', token)
+        question = next((q for q in questions.questions(runner.root) if q['id'] == previous.get('question_id')), None)
+        if question and question.get('resolved'):
+            generation += ':' + questions.fingerprint(question['resolved'])
     key = questions.request(runner.root, 'service-handoff', 'reuse:' + token,
         'Обнаружен работающий сервис ' + str(bound['kind']) + ' (PID ' + str(bound['pid'])
         + ', порты ' + ', '.join(map(str, bound['ports'])) + '). Использовать его в этом прогоне?'
         + '\nКаталог: ' + bound['cwd'] + '\nЗапущен: ' + str(bound['started'])
         + '\nОбвязка сохранит процесс и не будет его останавливать или перезапускать. '
           'Это не подтверждает готовность сервиса или результаты опыта: они проверяются отдельно.',
-        options=[ACCEPT, DECLINE], details={'identity': bound, 'lifecycle': 'externally-owned'}, generation=token)
-    save(runner.root / 'service-handoffs' / (token + '.json'), {'identity': bound, 'question_id': key})
+        options=[ACCEPT, DECLINE], details={'identity': bound, 'lifecycle': 'externally-owned'}, generation=generation)
+    save(record_path, {'identity': bound, 'question_id': key, 'generation': generation})
     answer = questions.response(runner.root, key)
     if answer and answer['text'] == ACCEPT:
         return True
     return False
+
+
+def refresh(runner, inventory):
+    """Retire unanswered questions only after the bound process is gone."""
+    from controller import read, save
+    if not inventory.get('complete') or 'processes' not in inventory:
+        return
+    fields = ('pid', 'started', 'pgid', 'uid', 'command_sha256')
+    live = {tuple(item.get(k) for k in fields) for item in inventory['processes']}
+    pending = {q['id'] for q in questions.questions(runner.root, pending_only=True) if q['task'] == 'service-handoff'}
+    for path in (runner.root/'service-handoffs').glob('*.json'):
+        if path.is_symlink() or path.parent.is_symlink():
+            continue
+        record = read(path)
+        key = record.get('question_id')
+        if key in pending and tuple(record['identity'].get(k) for k in fields) not in live:
+            with questions.locked(runner.root) as folder:
+                if not (folder/(key + '-answer.json')).exists():
+                    save(folder/(key + '-resolved.json'), {'reason': 'service-process-no-longer-observed',
+                                                        'inventory_at': inventory.get('captured_at')})
 
 
 def reconcile(runner, services):

@@ -344,6 +344,8 @@ class Runner:
         inventory = self.inspect_inventory('resume')
         if not inventory['complete']:
             raise Blocked('Cannot inspect managed processes before resume; run bootstrap --diagnose')
+        import service_handoff
+        service_handoff.refresh(self, inventory)
         processes = inventory.get('processes', [])
         observed = processes + inventory.get('agents', []) + inventory.get('services', [])
         by_identity = {(item.get('pid'), item.get('started'), item.get('pgid'))

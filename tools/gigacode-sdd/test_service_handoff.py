@@ -110,6 +110,21 @@ class HandoffTests(unittest.TestCase):
         self.assertTrue(rendered.startswith('Нужно решение по работающим сервисам'))
         self.assertIn('--answers-config', rendered)
 
+    def test_disappeared_process_retires_question_only_on_complete_inventory(self):
+        handoff.request(self.runner, self.service)
+        handoff.refresh(self.runner, {'complete': False, 'processes': []})
+        self.assertEqual(len(oq.questions(self.root, pending_only=True)), 1)
+        handoff.refresh(self.runner, {'complete': True, 'processes': [self.service]})
+        self.assertEqual(len(oq.questions(self.root, pending_only=True)), 1)
+        handoff.refresh(self.runner, {'complete': True, 'processes': []})
+        self.assertEqual(oq.questions(self.root, pending_only=True), [])
+        self.assertFalse(handoff.accepted(self.runner, self.service))
+        handoff.request(self.runner, self.service)
+        self.assertEqual(len(oq.questions(self.root, pending_only=True)), 1)
+        self.assertEqual(len(oq.questions(self.root)), 2)
+        handoff.request(self.runner, self.service)
+        self.assertEqual(len(oq.questions(self.root)), 2)
+
     def test_new_service_fatal_can_resume_after_identity_bound_handoff(self):
         self.approve()
         report = self.root/'logs/task-execute-services-123456abcdef.json'

@@ -4,7 +4,7 @@ import re
 import uuid
 
 
-def preserve_changed_receipts(runner, roots):
+def preserve_changed_receipts(runner, roots, pending_prompts=None):
     """Live servers can append workspace logs after a session completes.
 
     An altered ordinary file requires fresh execution/checks, not a fabricated
@@ -18,6 +18,13 @@ def preserve_changed_receipts(runner, roots):
         value = read(path)
         if value.get('workspace') not in allowed or not value.get('workspace_snapshot'):
             continue
+        if pending_prompts is not None:
+            prompt = pending_prompts.get(value['workspace'])
+            prompt_file = path.parent/'prompt.txt'
+            if not prompt or not prompt_file.is_file() or prompt_file.is_symlink():
+                continue
+            if not prompt_file.read_text(encoding='utf-8').endswith('\n' + prompt):
+                continue
         work = Path(value['workspace'])
         before = value['workspace_snapshot']
         after = snapshot(work, normalize_settings=True)
@@ -77,6 +84,7 @@ def recover(runner, folder, scope, record):
     if not inventory.get('complete'):
         raise Blocked('Service inventory remains incomplete; preserved failure retained: ' + str(path))
     roots = [Path(record['workspace'])]
+    pending_prompts = {}
     for candidate in folder.glob('*/candidate.json'):
         if candidate.is_symlink() or candidate.parent.is_symlink():
             raise Blocked('Unsafe candidate path during inventory recovery')
@@ -84,10 +92,13 @@ def recover(runner, folder, scope, record):
         if value.get('scope') != scope:
             raise Blocked('Candidate scope mismatch during inventory recovery')
         roots.append(Path(value['workspace']))
+        prompt = (value.get('pending_session') or {}).get('prompt')
+        if isinstance(prompt, str) and prompt:
+            pending_prompts[str(Path(value['workspace']).resolve())] = prompt
     # No signals: every surviving service must have a current reuse decision;
     # live agent groups and incomplete inventories remain blockers.
     runner.check_preserved_processes(roots=roots)
-    preserve_changed_receipts(runner, roots)
+    preserve_changed_receipts(runner, roots, pending_prompts)
     path.rename(folder/('fatal-inventory-recovered-' + uuid.uuid4().hex + '.json'))
     stop = runner.root/'service-stop.json'
     if stop.is_file() and not stop.is_symlink() and read(stop).get('report') in [str(p) for p in reports]:
