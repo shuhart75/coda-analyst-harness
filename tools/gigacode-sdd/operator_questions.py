@@ -316,6 +316,11 @@ For a necessary persistent local service, do NOT start it from an agent shell. R
 "health":{"url":"http://127.0.0.1:8082/health","status":200},
 "artifacts":["path/to/built-artifact"],"reason":"purpose and data scope"}}.
 The controller shows the exact launch to the operator once, owns the process and reuses healthy services.
+Return this request as soon as a service is the next prerequisite; you do not have to finish the task first.
+The controller resumes execution after handling the request. A shell launch, including a background
+process started by a helper script, does not register a service and cannot replace this handoff.
+An operator-confirmed existing service is externally owned: verify readiness and artifact identity,
+but do not stop/restart it or overwrite the artifacts it serves. Request operator help if it needs changes.
 Use foreground processes only, never daemonize. Paths to artifacts must be relative to the declared cwd;
 the controller freezes them in a separate service copy. Include scripts/config needed for launch in artifacts.
 To restart a previously approved service with the SAME frozen artifacts, return

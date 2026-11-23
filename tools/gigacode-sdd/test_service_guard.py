@@ -192,11 +192,10 @@ class ControllerServiceGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(controller.Blocked, 'no automatic service shutdown'):
                 self.runner.service_audit(self.inventory(), self.runner.root, 'fake')
         resumed = controller.Runner(self.config)
-        with patch('controller.process_exists', return_value=True) as probe:
-            with self.assertRaisesRegex(controller.Blocked, 'detached service'):
+        with patch('controller.inspect_services', return_value=self.inventory([service])):
+            with self.assertRaisesRegex(controller.Blocked, 'Existing managed agent or service'):
                 resumed.check_preserved_processes()
-            probe.assert_called_once_with(service['pid'])
-        with patch('controller.process_exists', return_value=False):
+        with patch('controller.inspect_services', return_value=self.inventory()):
             resumed.check_preserved_processes()
 
     def test_resume_finds_late_listener_without_a_preservation_record(self):
@@ -230,6 +229,52 @@ class ControllerServiceGuardTests(unittest.TestCase):
         inventory['services'][0]['cwd'] = str(worker / 'backend')
         with self.assertRaisesRegex(controller.Blocked, 'Existing managed agent or service'):
             self.runner.check_existing_workspace_processes(inventory, worker, 'test')
+
+    def test_confirmed_external_listener_survives_resume_and_close(self):
+        import operator_questions as oq
+        import service_handoff
+        service = dict(self.service(), uid=501, command_sha256='command')
+        inventory = self.inventory([service])
+        with patch('controller.inspect_services', return_value=inventory):
+            with self.assertRaises(oq.WaitingForOperator):
+                self.runner.check_preserved_processes()
+            question = oq.questions(self.runner.root, pending_only=True)[0]
+            oq.answer(self.runner.root, question['id'], service_handoff.ACCEPT)
+            self.runner.check_preserved_processes()
+            self.runner.service_audit(self.inventory(), self.runner.root, 'confirmed')
+            with patch('managed_services.stop_process_scope') as stop:
+                self.runner.services.close()
+                stop.assert_not_called()
+            self.assertFalse(self.runner.stop.is_set())
+            changed = dict(service, started='replacement')
+            with self.assertRaises(oq.WaitingForOperator):
+                self.runner.check_existing_workspace_processes(self.inventory([changed]), self.runner.root, 'replacement')
+
+    def test_completed_session_receipt_survives_service_handoff_block(self):
+        with patch.object(self.runner, 'service_audit', side_effect=controller.Blocked('handoff required')):
+            with self.assertRaisesRegex(controller.Blocked, 'handoff required'):
+                self.runner.session(self.runner.main, '.', 'EXECUTE_TASK\n' + json.dumps(
+                    self.task('be', 'backend', ['REQ-BE'])), 'execute', 'be-execute', model='model')
+        receipts = list((self.runner.root/'logs').glob('be-execute-*/session-receipt.json'))
+        self.assertEqual(len(receipts), 1)
+        receipt = controller.read(receipts[0])
+        self.assertEqual(receipt['events_sha256'], controller.digest(receipt['result']['events_path']))
+        self.assertEqual(receipt['workspace_snapshot'], controller.snapshot(self.runner.main, normalize_settings=True))
+        from inventory_recovery import preserve_changed_receipts
+        preserve_changed_receipts(self.runner, [self.runner.main])
+        self.assertTrue(receipts[0].exists())
+        (self.runner.main/'backend/service.log').write_text('new service output')
+        preserve_changed_receipts(self.runner, [self.runner.main], {str(self.runner.main): 'another invocation'})
+        self.assertTrue(receipts[0].exists())
+        preserve_changed_receipts(self.runner, [self.runner.main])
+        self.assertFalse(receipts[0].exists())
+        archived = list(receipts[0].parent.glob('session-receipt-before-handoff-*.json'))
+        self.assertEqual(controller.read(archived[0]), receipt)
+        controller.save(receipts[0], receipt)
+        Path(receipt['result']['events_path']).write_text('changed evidence')
+        with self.assertRaisesRegex(controller.Blocked, 'evidence or Git controls changed'):
+            preserve_changed_receipts(self.runner, [self.runner.main])
+        self.assertTrue(receipts[0].exists())
 
     def test_resume_requires_an_actual_complete_process_snapshot(self):
         with patch('controller.inspect_services', return_value=self.inventory(complete=False)):

@@ -421,6 +421,9 @@ def collect_compact(config, destination=None, error=None):
     for path in sorted((root/'managed-services').glob('*/service.json')):
         if out.safe(path):
             out.json_file(path)
+    for path in sorted((root/'service-handoffs').glob('*.json')):
+        if out.safe(path):
+            out.json_file(path)
     tasks = state.get('tasks', {})
     if isinstance(tasks, dict):
         out.add('compact/task-status.json', encoded({key: {

@@ -7,6 +7,7 @@ stopped, detached, signalled, adopted, restarted, or reconfigured by this module
 from __future__ import annotations
 
 import argparse
+import hashlib
 from datetime import datetime, timezone
 from contextvars import ContextVar
 import json
@@ -122,7 +123,8 @@ def _parse_ps(text):
             malformed = True
             continue
         result[pid] = {'pid': pid, 'ppid': ppid, 'pgid': pgid, 'uid': uid,
-                       'started': ' '.join(parts[4:9]), 'kind': _identity(parts[9])}
+                       'started': ' '.join(parts[4:9]), 'kind': _identity(parts[9]),
+                       'command_sha256': hashlib.sha256(parts[9].encode()).hexdigest()}
     return result, malformed
 
 

@@ -7,6 +7,7 @@ remain unknown, never inferred from the executable's directory.
 from __future__ import annotations
 
 import ctypes as C
+import hashlib
 from ctypes import wintypes as W
 from datetime import datetime, timezone
 import ntpath
@@ -291,6 +292,7 @@ def collect(native=None):
         details = native.describe(pid, own_sid) if pid else {}
         kind = identity(details.get('command', ''), row['executable'])
         process = {'pid': pid, 'ppid': row['ppid'], 'pgid': None, 'uid': None,
+                   'command_sha256': hashlib.sha256(details['command'].encode()).hexdigest() if details.get('command') else None,
                    'started': details.get('started'), 'kind': kind,
                    'owner_known': details.get('owner_known', False), 'same_user': details.get('same_user', False)}
         processes[pid] = process
