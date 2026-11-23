@@ -820,7 +820,7 @@ def execute_task(runner, task, record):
                         control = (questions.execution_control(result.get('text', ''))
                                    if result.get('terminal_result') and not result.get('timed_out')
                                    and not (result.get('cleanup') or {}).get('preserved') else None)
-                        if control and control[0] in ('service_request', 'service_action') and not result.get('ok'):
+                        if control and control[0] in ('service_request', 'service_action', 'isolated_check_request') and not result.get('ok'):
                             control = None
                         value['pending_control'] = control
                         persist()
