@@ -40,9 +40,9 @@ def command(scratch, argv, ports, *, platform=None, seccomp_fd=None):
                    '(allow file-read*)', '(allow sysctl-read)', f'(allow file-write* (subpath {quoted}))',
                    '(allow file-write* (literal "/dev/null"))']
         for port in ports:
-            profile += [f'(allow network-bind (local ip "127.0.0.1:{port}"))',
-                        f'(allow network-inbound (local ip "127.0.0.1:{port}"))',
-                        f'(allow network-outbound (remote ip "127.0.0.1:{port}"))']
+            profile += [f'(allow network-bind (local ip "localhost:{port}"))',
+                        f'(allow network-inbound (local ip "localhost:{port}"))',
+                        f'(allow network-outbound (remote ip "localhost:{port}"))']
         return [shutil.which('sandbox-exec'), '-p', '\n'.join(profile), *argv]
     raise IsolationUnavailable('Installed OS isolation is unavailable; no unsandboxed retry')
 

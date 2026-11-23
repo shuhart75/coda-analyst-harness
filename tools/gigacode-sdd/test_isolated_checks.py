@@ -1,6 +1,6 @@
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 import tempfile
 import threading
@@ -19,10 +19,10 @@ class IsolatedChecksTests(unittest.TestCase):
 
     def test_macos_profile_only_allows_allocated_ports_and_scratch_writes(self):
         with patch('isolated_checks.shutil.which', return_value='/usr/bin/sandbox-exec'):
-            argv = isolated.command(Path('/tmp/check'), ['python3', 'test.py'], [43111], platform='darwin')
+            argv = isolated.command(PurePosixPath('/tmp/check'), ['python3', 'test.py'], [43111], platform='darwin')
         profile = argv[2]
         self.assertIn('(deny default)', profile)
-        self.assertIn('127.0.0.1:43111', profile)
+        self.assertIn('localhost:43111', profile)
         self.assertNotIn('(allow default)', profile)
         self.assertNotIn('localhost:*', profile)
         self.assertIn('(subpath "/tmp/check")', profile)
