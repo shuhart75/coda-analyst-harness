@@ -19,6 +19,7 @@ import threading
 import time
 import uuid
 import review_resolution
+from dynamic_scope import ScopeWait
 
 from workspace import clone_snapshot, export_patch, snapshot
 from session_outcome import classify as session_outcome
@@ -469,6 +470,7 @@ def execute_task(runner, task, record):
     folder = runner.root / 'execution-cycles' / scope
     folder.mkdir(parents=True, exist_ok=True)
     fatal_path = folder/'fatal.json'
+    runner.scopes.recover_fatal(folder)
     if fatal_path.exists():
         import inventory_recovery
         inventory_recovery.recover(runner, folder, scope, record)
@@ -523,6 +525,10 @@ def execute_task(runner, task, record):
                 runner.progress(task['id'] + ' / ' + model + ': повторное ревью границ задачи; код и проверки сохранены')
             value['acceptance_protocol'] = task_acceptance.PROTOCOL
             save(path, value)
+        if value.get('stage') != 'execute':
+            _receipt_valid(value)
+        if runner.scopes.refresh(task, value, slot):
+            save(path, value)
         candidates.append((path, value))
     _recover_permission_fatal(runner, task, candidates, folder, scope)
     for path, value in candidates:
@@ -542,7 +548,7 @@ def execute_task(runner, task, record):
     for path, value in candidates:
         if value.get('status') == 'waiting-user':
             _receipt_valid(value)
-            if scope_repair.refresh_pending(runner, task, value):
+            if runner.scopes.resume_question(task, value) or scope_repair.refresh_pending(runner, task, value):
                 save(path, value)
                 run_status.candidate(runner, task, value)
     for path, value in candidates:
@@ -567,6 +573,11 @@ def execute_task(runner, task, record):
         confirm_model(restored, value['model'])
         if restored.get('text') != result.get('text'):
             raise Blocked('Saved question text does not match terminal events')
+        if scope_repair.is_request(*control):
+            runner.scopes.requested(task, value, control[1], allow_reserved=True)
+            value.update(status='pending', stage='execute', handled_question_result=identity)
+            save(path, value)
+            continue
         key = questions.register(runner, task, value, control)
         value.update(status='waiting-user', stage='execute', question_id=key,
                      resource_wait=None, handled_question_result=identity)
@@ -574,8 +585,17 @@ def execute_task(runner, task, record):
         run_status.candidate(runner, task, value)
         runner.progress(task['id'] + ': восстановлен вопрос из сохранённого результата; повтор исполнения не нужен')
     def select(value, failures):
+        effective = scope_repair.effective_task(runner, task, value)
+        if runner.scopes.data['tasks'].get(task['id'], {}).get('paths') and value.get('checked_scope') != fingerprint(
+                {'writes': effective['writes'], 'checks': effective['checks']}):
+            for path, candidate in candidates:
+                if candidate['status'] == 'accepted':
+                    candidate.update(status='pending', stage='checks')
+                    save(path, candidate)
+            raise ScopeWait('Область расширилась во время сравнения; повтор обязательных проверок')
+        value['origin_base'] = record['base']
         save(folder / 'selection.json', {'winner': value['model'], 'workspace': value['workspace'],
-                                        'origin_workspace': str(origin), 'base': value['base'], 'scope': scope,
+                                        'origin_workspace': str(origin), 'origin_base': record['base'], 'base': value['base'], 'scope': scope,
                                         'patch_sha256': value['patch']['sha256'],
                                         'rule': 'fewest validated optional gaps among verified candidates; configured model order breaks ties',
                                         'compared': [{'model': v['model'], 'optional_gaps': quality(v)}
@@ -595,9 +615,10 @@ def execute_task(runner, task, record):
     stops = [StopScope(runner.stop) for _ in candidates]
     retry_seconds = runner.cfg.get('recovery_retry_seconds', 5)
     retry_at(0, 1, retry_seconds)  # Validate before either worker starts.
+    lane_task = runner.scopes.effective(task)
     lane = ResourceLane([(v['model'], v.get('resource_wait')) for _, v in candidates
                          if v['stage'] in ('execute', 'checks')
-                         and v.get('status') not in ('stalled', 'external-blocker', 'quarantined')]) if task.get('resources') else None
+                         and v.get('status') not in ('stalled', 'external-blocker', 'quarantined')]) if lane_task.get('resources') else None
 
     base_task = task
 
@@ -697,6 +718,13 @@ def execute_task(runner, task, record):
             if stop.is_set():
                 interrupted()
             task = scope_repair.effective_task(runner, base_task, value)
+            task = runner.scopes.discover(task, value)
+            if (value['stage'] in ('review', 'adjudicate')
+                    and runner.scopes.data['tasks'].get(task['id'], {}).get('paths')
+                    and value.get('checked_scope') != fingerprint({'writes': task['writes'], 'checks': task['checks']})):
+                value['stage'] = 'checks'
+                value.pop('recovered_review', None)
+                value.pop('review_draft', None)
             value['status'] = 'running'
             persist()
             try:
@@ -759,6 +787,13 @@ def execute_task(runner, task, record):
                         value['session_result'] = result
                         value['evidence_files'][result['events_path']] = digest(result['events_path'])
                         runner.audit(work)
+                        task = runner.scopes.discover(task, value)
+                        try:
+                            runner.scopes.verify_conflicts(value)
+                        except ValueError as exc:
+                            value['stage'] = 'execute'
+                            fail('checks', str(exc))
+                            continue
                         value['patch'] = export_patch(work, value['base'], task['writes'], path.parent / 'candidate.patch')
                         value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
                         control = (questions.control_or_question(result.get('text', ''))
@@ -770,6 +805,12 @@ def execute_task(runner, task, record):
                             confirm_model(result, value['model'])
                             kind, request = control
                             try:
+                                if scope_repair.is_request(kind, request):
+                                    task = runner.scopes.requested(task, value, request)
+                                    value['handled_question_result'] = fingerprint([result.get('events_path'), result.get('text')])
+                                    value['feedback'] = {'scope': 'Technical paths reserved by controller; continue implementation.'}
+                                    persist()
+                                    continue
                                 if kind == 'service_action':
                                     action_id = fingerprint([request, value['workspace_snapshot']])
                                     if (request.get('action') not in ('restart', 'stop') or not request.get('reason')
@@ -836,12 +877,21 @@ def execute_task(runner, task, record):
                             value['stage'] = 'checks'
                             persist()
                     if value['stage'] == 'checks':
+                        checked_task = task
                         checks = runner.checks(work, task['checks'], task['id'] + '-check', stop_event=stop)
                         if stop.is_set():
                             interrupted()
                         runner.audit(work)
+                        task = runner.scopes.discover(task, value)
+                        try:
+                            runner.scopes.verify_conflicts(value)
+                        except ValueError as exc:
+                            value['stage'] = 'execute'
+                            fail('checks', str(exc))
+                            continue
                         value['patch'] = export_patch(work, value['base'], task['writes'], path.parent / 'candidate.patch')
                         value['checks'] = checks
+                        value['checked_scope'] = fingerprint({'writes': checked_task['writes'], 'checks': checked_task['checks']})
                         value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
                         for check in checks:
                             value['evidence_files'][check['log']] = digest(check['log'])
@@ -850,8 +900,10 @@ def execute_task(runner, task, record):
                             value['stage'] = 'execute'
                             fail('checks', failed, len(failed))
                             continue
-                        value['stage'] = 'review'
+                        value['stage'] = 'review' if checked_task['checks'] == task['checks'] else 'checks'
                         persist()
+                        if value['stage'] == 'checks':
+                            continue
                 if value['stage'] == 'review':
                     recovered = value.get('recovered_review')
                     if recovered:
@@ -893,6 +945,11 @@ def execute_task(runner, task, record):
                     value['review_workspace'] = str(review_copy)
                     value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
                     if review['verdict'] == 'pass':
+                        latest_task = runner.scopes.effective(task)
+                        if latest_task['writes'] != task['writes'] or latest_task['checks'] != task['checks']:
+                            value.update(stage='checks', status='pending')
+                            persist()
+                            continue
                         return accept(review)
                     # Return findings directly; resolve only explicit objections.
                     review_resolution.begin(value, review)
@@ -944,6 +1001,11 @@ def execute_task(runner, task, record):
                     task_acceptance.check_report(runner, task, review)
                     value['review'] = review
                     if review['verdict'] == 'pass':
+                        latest_task = runner.scopes.effective(task)
+                        if latest_task['writes'] != task['writes'] or latest_task['checks'] != task['checks']:
+                            value.update(stage='checks', status='pending')
+                            persist()
+                            continue
                         return accept(review)
                     value['stage'] = 'execute'
                     value['feedback'] = review
@@ -980,6 +1042,7 @@ def execute_task(runner, task, record):
     winner = None
     failures = []
     fatal = None
+    scope_wait = None
     fatal_errors = []
     def record_fatal(exc, index):
         nonlocal fatal
@@ -997,7 +1060,7 @@ def execute_task(runner, task, record):
     if not isinstance(grace, (int, float)) or grace < 0:
         raise Blocked('execution_comparison_seconds must be nonnegative')
     runner.progress(task['id'] + ': две модели; ' +
-                    ('исполнение и проверки разделяют ресурсы: ' + ', '.join(task['resources'])
+                    ('исполнение и проверки разделяют ресурсы: ' + ', '.join(lane_task['resources'])
                      if lane else 'независимое параллельное исполнение') + '; ' + ', '.join(models))
     verified = []
     deadline = None
@@ -1024,6 +1087,13 @@ def execute_task(runner, task, record):
                         deadline = time.monotonic() + grace
                         runner.progress(task['id'] + ': обязательная задача решена проверенным вариантом; '
                                         'сравниваю со вторым, ожидание не более ' + str(grace) + ' с')
+                except ScopeWait as exc:
+                    scope_wait = exc
+                    candidates[index][1]['status'] = 'waiting-scope'
+                    save(*candidates[index])
+                    run_status.candidate(runner, task, candidates[index][1])
+                    for stop in stops:
+                        stop.set()
                 except CandidateStalled as exc:
                     failures.append(str(exc))
                 except Interrupted:
@@ -1061,6 +1131,15 @@ def execute_task(runner, task, record):
         raise fatal
     if runner.stop.is_set():
         raise Interrupted('Interrupted; all implementation variants preserved')
+    if scope_wait:
+        # No candidate is accepted from a portfolio whose footprint changed
+        # while the peer was being checked. Both resume against the new base.
+        for path, value in candidates:
+            if value.get('status') not in ('waiting-user', 'quarantined', 'external-blocker', 'stalled'):
+                value.update(status='waiting-scope', stage='execute')
+            save(path, value)
+            run_status.candidate(runner, task, value)
+        raise scope_wait
     if winner is None:
         waiting = [v['question_id'] for _, v in candidates if v.get('status') == 'waiting-user']
         if waiting:

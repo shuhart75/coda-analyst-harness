@@ -31,6 +31,7 @@ class ControllerReviewTests(unittest.TestCase):
                 controller.relative(value)
 
     def accepted_patch(self):
+        controller.save(self.runner.root/'plan.json', self.plan)
         work = self.runner.root / 'manual-worker'
         clone_snapshot(self.runner.main, work)
         base = git(work, 'rev-parse', 'HEAD')

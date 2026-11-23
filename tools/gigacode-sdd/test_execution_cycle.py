@@ -21,6 +21,8 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.runner = self.fixture.runner
         self.runner.cfg['execution_comparison_seconds'] = .05
         self.task = self.fixture.plan['tasks'][0]
+        save(self.runner.root/'plan.json', self.fixture.plan)
+        self.runner.state['tasks'] = {t['id']: {'status': 'pending'} for t in self.fixture.plan['tasks']}
         self.work = self.runner.root / 'workers' / 'original'
         clone_snapshot(self.runner.main, self.work)
         self.record = {'workspace': str(self.work), 'base': git(self.work, 'rev-parse', 'HEAD'),

@@ -121,14 +121,7 @@ class ScopeRepairTests(unittest.TestCase):
     def test_scope_approval_executes_checks_reviews_and_integrates(self):
         self.setup_scope()
         self.primary_only = True
-        def ask(root, cwd, prompt, role, name, model=None, stop_event=None):
-            result = self.result(root, model)
-            result['text'] = json.dumps({'scope_request': {'paths': ['value.txt'], 'reason': 'Missing bean'}})
-            return result
-        with self.assertRaises(oq.WaitingForOperator) as caught:
-            self.run_task(session=ask)
-        self.assertEqual(self.check_count, 0)
-        oq.answer(self.runner.root, caught.exception.question_ids[0], sr.APPROVE)
+        self.approve()  # Previously approved runs remain resumable.
         accepted = self.run_task()
         self.assertGreater(self.check_count, 0)
         self.assertGreater(self.review_count, 0)
@@ -141,28 +134,21 @@ class ScopeRepairTests(unittest.TestCase):
         self.assertEqual((self.runner.main/'backend/value.txt').read_text(), '2')
         self.assertEqual((self.runner.root/'plan.json').read_bytes(), self.plan_bytes)
 
-    def test_controller_migrates_unassigned_question_then_checks_approved_repair(self):
+    def test_controller_migrates_unanswered_scope_question_automatically(self):
         self.setup_scope()
         self.primary_only = True
-        plan = read(self.runner.root/'plan.json')
-        plan['tasks'][0]['writes'] = ['backend/other.txt']
-        save(self.runner.root/'plan.json', plan)
         def ask(root, cwd, prompt, role, name, model=None, stop_event=None):
             result = self.result(root, model)
-            result['text'] = json.dumps({'scope_request': {'paths': ['value.txt'], 'reason': 'Missing bean'}})
+            result['text'] = json.dumps({'operator_question': {
+                'topic': 'scope-unavailable-old', 'question': 'Разрешить правку?',
+                'details': {'reason': 'No accepted predecessor owns the requested file',
+                            'model_request': {'paths': ['backend/value.txt']}}}})
             return result
-        with patch.object(sr, 'validate_owners', side_effect=ValueError('No accepted predecessor owns the requested file: backend/value.txt')):
-            with self.assertRaises(oq.WaitingForOperator) as caught:
-                self.run_task(session=ask)
-        old = caught.exception.question_ids[0]
-        with self.assertRaises(oq.WaitingForOperator) as caught:
-            self.run_task(session=lambda *a, **kw: self.fail('Migration must not execute'))
-        new = caught.exception.question_ids[0]
-        self.assertNotEqual(old, new)
-        self.assertEqual(len(oq.questions(self.runner.root, pending_only=True)), 1)
-        oq.answer(self.runner.root, new, sr.APPROVE)
+        with self.assertRaises(oq.WaitingForOperator):
+            self.run_task(session=ask)
         accepted = self.run_task()
-        self.assertIn(new, accepted['scope_grants'])
+        self.assertFalse(oq.questions(self.runner.root, pending_only=True))
+        self.assertIn('backend/value.txt', self.runner.scopes.effective(self.task)['writes'])
         self.assertGreater(self.check_count, 0)
         self.assertGreater(self.review_count, 0)
         with patch.object(self.runner, 'guard'):

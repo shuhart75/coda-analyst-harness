@@ -287,8 +287,8 @@ Finish independent permitted work, then return JSON
 Use the same topic for the same decision across attempts. A question is not a failure or acceptance.
 For a necessary repair outside task.writes, report an explicit request:
 {"scope_request":{"paths":["exact/repository-relative/existing-file"],"reason":"defect and failed check"}}.
-Do not edit these files yet. The controller can propose a narrowly approved repair of an accepted
-predecessor's file, preserve the pinned plan, then rerun all checks and independent review.
+Do not edit these files yet. The controller reserves technical paths automatically, queues conflicting
+tasks, preserves the pinned plan, then reruns checks of the task and affected accepted owners plus independent review.
 Do not ask for permission to bypass corporate policy. Answers cannot waive requirements/checks.
 For a necessary persistent local service, do NOT start it from an agent shell. Return
 {"service_request":{"id":"stable-service-name","cwd":"repository-relative directory",
