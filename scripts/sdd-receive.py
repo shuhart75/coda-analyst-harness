@@ -95,7 +95,7 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
     plain_path(packet, manifest_path)
     manifest = read_object(manifest_path)
     feature = manifest.get("feature")
-    if manifest.get("schema_version") != 5 or manifest.get("exchange_kind") != "feature-requirements":
+    if manifest.get("schema_version") not in {5, 6} or manifest.get("exchange_kind") != "feature-requirements":
         raise ValueError("Приём proposal/spec требует manifest schema 5")
     if not isinstance(feature, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", feature) or feature != packet.name:
         raise ValueError("Идентификатор передачи не совпадает с каталогом")
@@ -109,7 +109,7 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
         raise ValueError("Редакция должна быть зарегистрирована ровно один раз")
     entry = matches[0]
     floor = manifest.get("sdd_revision_floor")
-    if type(floor) is not int or floor < 1 or revision < floor or entry.get("returns_contract_version") != 2:
+    if type(floor) is not int or floor < 1 or revision < floor or entry.get("returns_contract_version") not in ({2, 3} if manifest.get("schema_version") == 6 else {2}):
         raise ValueError("Редакция не принадлежит новому договору SDD")
     if entry.get("state") not in {"sent", "in-progress"}:
         raise ValueError("Состояние редакции не допускает приём")
@@ -264,7 +264,7 @@ def receive(packet: Path, revision: int, code_root: Path, *, apply: bool = False
                       if "materials" in descriptor else None),
         "delivery_decision": decision,
         "runtime_validation": "not-performed", "receipt_created": False,
-        "next_action": ("receiver-record-receipt" if decision else "receiver-validate-openspec-then-record-receipt") if apply else "review-then-receiver-apply",
+        "next_action": "continue-developer-design-tasks" if manifest.get("schema_version") == 6 and apply else ("receiver-record-receipt" if decision else "receiver-validate-openspec-then-record-receipt") if apply else "review-then-receiver-apply",
     }
 
 

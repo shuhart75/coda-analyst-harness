@@ -1,5 +1,15 @@
 # Code Inspection Policy
 
+## Новые передачи через documents
+
+Для всех новых передач следуй `core/documents-exchange.md`: публикация только
+в documents, manifest schema 6, собственный анализ по задачам груминга вместо
+обязательных квитанций и returns. Указания ниже о публикации в code и обязательных
+returns относятся только к прежним редакциям. Новый процесс не пишет в code.
+Текущие исходные specs закрепляются до разработки; результат ищется после неё
+по номерам согласованных задач. Архивация не подтверждает тесты или внедрение.
+
+
 This policy governs read-only use of a locally cloned code repository by analysts and their LLM tools.
 
 ## Repository layout

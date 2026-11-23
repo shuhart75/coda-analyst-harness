@@ -59,8 +59,8 @@ def command(api, args):
     state = api.load_json(state_path)
     records = api.stages.registry(state)['revisions']
     record = next((r for r in records if r['entry']['revision'] == args.revision), None)
-    if not record or record['destination_role'] != 'code' or record['publication_confirmed']:
-        raise ValueError('Можно отменить только неподтверждённого кандидата в code')
+    if not record or record['destination_role'] not in {'code', 'analytics'} or record['publication_confirmed']:
+        raise ValueError('Можно отменить только неподтверждённого кандидата публикации')
     if cancelled(record):
         if record['publication_cancellation']['request_commit'] != args.expected_commit:
             raise ValueError('Коммит отмены не совпал')

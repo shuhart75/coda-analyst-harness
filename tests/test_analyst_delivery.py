@@ -6,16 +6,17 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 import test_sdd_exchange as helpers
+import test_documents_exchange as documents
 
 
 class AnalystDeliveryTests(unittest.TestCase):
-    for _name, _method in vars(helpers.SddExchangeTests).items():
+    for _name, _method in vars(documents.DocumentsExchangeTests).items():
         if callable(_method) and not _name.startswith('test_'):
             locals()[_name] = _method
     del _name, _method
 
     def send(self, success=True, confirm=True):
-        return self.cli(helpers.legacy.SCRIPT, 'send-by-decision', self.project, 'demo',
+        return self.cli(documents.SCRIPT, 'send-by-decision', self.project, 'demo',
                         '--reason', 'Передать как есть по моему решению', '--analyst', 'owner',
                         *(['--analyst-confirmed'] if confirm else []), success=success)
 

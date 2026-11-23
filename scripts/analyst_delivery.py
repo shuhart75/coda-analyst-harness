@@ -69,7 +69,7 @@ def save_record(api, state_path, operation, manifest_path, merged):
             record.update(manifest_path=str(manifest_path), publication_confirmed=merged)
             break
     else:
-        records.append(dict(entry=entry, destination_role='code', manifest_path=str(manifest_path),
+        records.append(dict(entry=entry, destination_role='analytics', manifest_path=str(manifest_path),
                             publication_confirmed=merged))
     for record in records:
         if record['entry']['revision'] < entry['revision'] and not record['publication_confirmed']:
@@ -78,7 +78,7 @@ def save_record(api, state_path, operation, manifest_path, merged):
     if merged and entry['revision'] >= (state.get('last_published') or {}).get('revision', 0):
         state['last_published'] = dict(revision=entry['revision'], sdd_input=entry.get('sdd_input'),
             requirements_sha256=entry['sha256'], published_at=api.now(), manifest_path=str(manifest_path),
-            destination_role='code', stage_id=entry['stage_id'], stage_revision=entry['stage_revision'],
+            destination_role='analytics', stage_id=entry['stage_id'], stage_revision=entry['stage_revision'],
             stage_sha256=entry['stage_sha256'], delivery_decision=entry['delivery_decision'])
         state['revision_offer'] = dict(state='not-needed', offered_at=None,
             reason='Передано по явному решению аналитика')
@@ -157,13 +157,13 @@ def publish(api, project, feature, state_path, operation_path, operation, before
         if old_entry != entry:
             raise ValueError('Кэш номера редакции занят другим входом; прежний манифест сохранён')
     cached = api.cache_manifest(feature, entry['revision'], packet / 'manifest.json', publication)
+    if api.code_snapshot(code_root) != before:
+        raise ValueError('Рабочая копия documents изменилась параллельно; ветка отправки сохранена')
     save_record(api, state_path, operation, cached, merged)
     operation['publication_confirmed'] = merged
     api.save_json(operation_path, operation)
-    if api.code_snapshot(code_root) != before:
-        raise ValueError('Обычный клон code изменился параллельно; ветка отправки сохранена')
     return dict(status='published' if merged else 'awaiting-merge', feature=feature,
-        revision=entry['revision'], manifest=str(cached), requirements_sha256=entry['sha256'],
+        destination_role='analytics', revision=entry['revision'], manifest=str(cached), requirements_sha256=entry['sha256'],
         sdd_sha256=(entry.get('sdd_input') or {}).get('sha256'), delivery_decision=entry['delivery_decision'],
         request_branch=operation['request_branch'], request_commit=operation['request_commit'],
         target_branch=operation['target_branch'], repository_url=operation['repository_url'],
@@ -186,14 +186,13 @@ def command(api, args):
     state = api.load_json(state_path) if state_path.exists() else {}
     data, descriptor, materials = input_snapshot(feature_root)
     analyst = api.current_analyst(args.analyst, project) or 'analyst'
-    code_root = api.resolve_code_root(project, args.code_root)
-    if code_root is None:
-        raise ValueError('Для отправки укажи доступный репозиторий разработки через --code-root')
+    api.exchange_migration.validate(api, project, feature, state)
+    code_root = project
     before = api.code_snapshot(code_root)
     if before is None:
-        raise ValueError('Недоступен адрес репозитория разработки')
+        raise ValueError('Недоступен адрес репозитория documents')
     remote = before['remote']
-    target = api.delivery_target(remote, args.target_branch or api.configured_delivery_target())
+    target = api.delivery_target(remote, args.target_branch)
     title = api.title_from_requirements(data.decode('utf-8'), feature)
     stage = stage_for(api, state, title)
     identity = dict(project=str(project), feature=feature, repository=remote, target=target,
@@ -224,9 +223,9 @@ def prepare(api, args, project, feature_root, state, data, descriptor, materials
     if result.returncode:
         raise ValueError('Не удалось прочитать целевую ветку: ' + result.stderr.strip())
     exchange = clone / api.EXCHANGE_DIR
-    if not exchange.is_dir():
-        raise ValueError('В репозитории разработки отсутствует каталог requirements-exchange')
+    exchange.mkdir(exist_ok=True)
     api.require_plain_exchange(exchange)
+    api.exchange_migration.validate(api, project, feature, state, root=exchange / feature)
     binding = api.exchange_binding(project, feature)
     packet = exchange / feature
     manifest_path = packet / 'manifest.json'
@@ -260,7 +259,7 @@ def prepare(api, args, project, feature_root, state, data, descriptor, materials
     entry = dict(revision=number, stage_id=stage['stage_id'], stage_revision=stage_revision,
         stage=stage, stage_sha256=api.stages.checksum(stage), state='sent', created_at=api.now(),
         requirements_path=f'revisions/{number:03d}/requirements.md', returns_path=f'revisions/{number:03d}/returns',
-        returns_contract_version=2 if descriptor else 1, sha256=decision['requirements_sha256'],
+        returns_contract_version=3, sha256=decision['requirements_sha256'],
         source=dict(repository_role='analytics', feature_path=(feature_root / 'requirements.md').relative_to(project).as_posix(),
                     commit=api.git_value(project, 'rev-parse', 'HEAD'), snapshot='working-tree'), delivery_decision=decision)
     if descriptor:
@@ -270,7 +269,6 @@ def prepare(api, args, project, feature_root, state, data, descriptor, materials
     destination = packet / 'revisions' / f'{number:03d}'
     destination.mkdir(parents=True, exist_ok=False)
     (destination / 'requirements.md').write_bytes(data)
-    (destination / 'returns').mkdir()
     if descriptor:
         shutil.copytree(feature_root / 'sdd', destination / 'sdd')
     if materials is not None:
@@ -283,7 +281,8 @@ def prepare(api, args, project, feature_root, state, data, descriptor, materials
         if previous.get('state') in {'sent','in-progress','paused'}:
             previous['state'] = 'superseded'
     entries.append(entry)
-    schema = 5 if descriptor else (4 if binding else 3)
+    schema = 6
+    manifest.setdefault('analyst_revision_floor', number)
     schema = max(schema, manifest.get('schema_version', 0))
     manifest.update(schema_version=schema, exchange_kind='feature-requirements', feature=feature,
         title=title_from(api, data, feature), owner={'analyst_id':analyst}, active_revision=number,

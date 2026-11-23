@@ -111,10 +111,10 @@ def scan_archives(project, analyst=None, all_owners=False):
                 raise ValueError("; ".join(errors))
             revisions = []
             for entry in manifest["revisions"]:
-                returns = root / entry["returns_path"]
+                returns = root / (f"revisions/{entry['revision']:03d}/analysis" if entry.get("returns_contract_version") == 3 else entry["returns_path"])
                 revisions.append({"revision": entry["revision"], "processing": module.revision_processing_status(root, entry),
                                   "return_ids": [f"{key}:{entry['revision']:03d}:{item.relative_to(root).as_posix()}:{module.sha256(item)}"
-                                                 for item in sorted(returns.rglob("*")) if item.is_file()]})
+                                                 for item in sorted(returns.rglob("*")) if item.is_file() and (entry.get("returns_contract_version") != 3 or item.suffix == ".json")]})
             items.append({"status": "archived", "feature": key, "release_id": record["release_id"],
                           "archive_path": str(root), "owner": owner, "revisions": revisions})
     return {"status": "ok", "scope": "archived", "items": items}
@@ -150,10 +150,16 @@ def _closure(project, key, root):
         raise ValueError("Есть новая или неподтверждённая редакция передачи")
     entry = next(item for item in manifest["revisions"] if item["revision"] == closure["revision"])
     status = module.revision_processing_status(root, entry)
-    if status["state"] not in {"completed", "legacy-results-present"} or status["errors"]:
+    if status["state"] not in {"completed", "legacy-results-present", "analysis-present"} or status["errors"]:
         raise ValueError("Нет корректного итогового возврата поставки")
     summary = root / entry["returns_path"] / "summary.md"
-    return_id = f"{key}:{entry['revision']:03d}:{entry['returns_path']}/summary.md:{module.sha256(summary)}"
+    return_id = (closure["return_id"] if entry.get("returns_contract_version") == 3 else
+                 f"{key}:{entry['revision']:03d}:{entry['returns_path']}/summary.md:{module.sha256(summary)}")
+    if entry.get("returns_contract_version") == 3:
+        return_id = closure["return_id"]
+        candidates = _read(analytical / "development-results-state.json")["processed"]
+        reviewed = next((r["review"] for r in reversed(candidates) if r.get("return_id") == return_id and r.get("decision") == "reviewed"), None)
+        module.validate_result_review(project, key, return_id, reviewed or {}, publication=latest)
     reviews = [item for item in _read(analytical / "development-results-state.json")["processed"]
                if item.get("return_id") == return_id and item.get("decision") == "reviewed"]
     if (return_id != closure["return_id"] or entry["sha256"] != closure["requirements_sha256"]
