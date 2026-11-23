@@ -31,6 +31,7 @@ import operator_questions
 import run_status
 import task_acceptance
 import managed_services
+import dependency_audit
 from progress import SESSION_IDENTITY, CANDIDATE_MODEL
 from console_progress import ConsoleProgress
 from session_outcome import classify as session_outcome
@@ -328,10 +329,14 @@ class Runner:
         # Keep their protected paths for export; validate owned copies at the
         # plan, session and integration boundaries, including crash recovery.
 
-    def audit(self, root):
-        findings = audit_dependency_sources(root, self.cfg['nexus']['nexus_hosts'])
-        if findings:
-            raise Blocked('Dependency sources are not Nexus-only: ' + json.dumps(findings, ensure_ascii=False))
+    def audit(self, root, operations=(), *, inventory_only=False):
+        report = dependency_audit.assess(root, self.cfg['nexus']['nexus_hosts'],
+            contours=self.cfg.get('contours', ['.']) if inventory_only or not operations else (), operations=operations)
+        path = self.logdir('dependency-audit').with_suffix('.json')
+        save(path, report)
+        if report['blocking'] and not inventory_only:
+            raise dependency_audit.DependencyConfigurationError(report, path)
+        return report
 
     def check_preserved_processes(self, roots=None):
         """Do not start another writer while a preserved process group is alive."""
@@ -631,7 +636,7 @@ class Runner:
         if key in self._probed:
             return
         prepare_permissions(under(root, cwd), role)
-        self.audit(root)
+        self.audit(root, inventory_only=True)
         before = snapshot(root, normalize_settings=True)
         target = under(root, cwd) / ('.sdd-permission-probe-' + uuid.uuid4().hex)
         prompt = ('PERMISSION_PREFLIGHT\nThis is ONLY a bounded tool capability probe, not product work. '
@@ -897,6 +902,7 @@ executed test names/counts, not just a successful command or test compilation.
         for check in checks:
             self.progress('Проверка ' + name + ': ' + str(len(reports) + 1) + '/' + str(len(checks)))
             self.guard()
+            self.audit(root, operations=[{**check, 'env': self.env}])
             before = snapshot(root)
             controls = git_controls(root)
             services_before = self.inspect_inventory(name)

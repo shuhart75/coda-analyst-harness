@@ -205,7 +205,7 @@ def nexus_environment(policy: dict, base_env=None):
     return env
 
 
-def audit_dependency_sources(root, nexus_hosts):
+def audit_dependency_sources(root, nexus_hosts, *, extra_configs=None, inventory=None):
     """Inspect dependency download URLs only, not documentation or XML namespaces.
 
     Findings intentionally omit complete URLs, which may contain credentials.
@@ -217,7 +217,7 @@ def audit_dependency_sources(root, nexus_hosts):
     findings = []
 
     def add(path, location, code, host=None):
-        findings.append({"path": str(path.relative_to(root)), "location": str(location),
+        findings.append({"path": (path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path)), "location": str(location),
                          "code": code, "host": host})
 
     def check(path, location, value, required=False):
@@ -225,6 +225,7 @@ def audit_dependency_sources(root, nexus_hosts):
         if code:
             add(path, location, code, host)
 
+    sources = dict(extra_configs or {})
     for directory, dirs, files in os.walk(root, followlinks=False):
         dirs[:] = sorted(d for d in dirs if d not in EXCLUDED_DIRS and not (Path(directory) / d).is_symlink())
         for name in sorted(files):
@@ -235,72 +236,76 @@ def audit_dependency_sources(root, nexus_hosts):
                     "xml" if name in {"pom.xml", "settings.xml"} or name.endswith("-settings.xml") else None)
             if kind is None:
                 continue
-            path = Path(directory) / name
-            if path.is_symlink():
-                add(path, "file", "symlink-config-not-audited")
+            sources.setdefault(Path(directory) / name, kind)
+    for path, kind in sources.items():
+        if inventory is not None:
+            inventory.append({'path': path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path),
+                              'kind': kind})
+        if any(p.is_symlink() for p in (path, *path.parents)):
+            add(path, "file", "symlink-config-not-audited")
+            continue
+        try:
+            if path.stat().st_size > 32 * 1024 * 1024:
+                add(path, "file", "config-too-large")
                 continue
-            try:
-                if path.stat().st_size > 32 * 1024 * 1024:
-                    add(path, "file", "config-too-large")
-                    continue
-                text = path.read_text(encoding="utf-8-sig")
-                if kind == "package":
-                    data = json.loads(text)
-                    for section in ("dependencies", "devDependencies", "optionalDependencies",
-                                    "peerDependencies", "overrides", "resolutions"):
-                        def dependency_values(obj, location):
-                            if isinstance(obj, dict):
-                                for key, value in obj.items():
-                                    dependency_values(value, location + "." + key)
-                            elif isinstance(obj, str):
-                                if "://" in obj or obj.startswith("//"):
-                                    check(path, location, obj)
-                                elif obj.startswith(("github:", "gitlab:", "bitbucket:", "git@")):
-                                    add(path, location, "non-nexus-download")
-                                elif re.fullmatch(r"[\w.-]+/[\w.-]+(?:#.*)?", obj):
-                                    add(path, location, "non-nexus-download")
-                        dependency_values(data.get(section, {}), section)
-                elif kind == "lock":
-                    data = json.loads(text)
-                    def walk(obj, location="$"):
+            text = path.read_text(encoding="utf-8-sig")
+            if kind == "package":
+                data = json.loads(text)
+                for section in ("dependencies", "devDependencies", "optionalDependencies",
+                                "peerDependencies", "overrides", "resolutions"):
+                    def dependency_values(obj, location):
                         if isinstance(obj, dict):
                             for key, value in obj.items():
-                                if key == "resolved":
-                                    check(path, location + ".resolved", value)
-                                else:
-                                    walk(value, location + "." + key)
-                        elif isinstance(obj, list):
-                            for index, value in enumerate(obj):
-                                walk(value, f"{location}[{index}]")
-                    walk(data)
-                elif kind == "npm":
-                    for index, line in enumerate(text.splitlines(), 1):
-                        stripped = line.strip()
-                        if not stripped or stripped.startswith(("#", ";")) or "=" not in stripped:
-                            continue
-                        key, value = stripped.split("=", 1)
-                        if key.strip() == "registry" or key.strip().endswith(":registry"):
-                            check(path, index, value.strip(), True)
-                elif kind == "pip":
-                    for index, line in enumerate(text.splitlines(), 1):
-                        stripped = line.strip()
-                        if stripped.startswith("#"):
-                            continue
-                        for value in URL_RE.findall(stripped):
-                            check(path, index, value)
-                        if re.match(r"(?:--extra-index-url|--index-url|-i|--find-links|-f)(?:\s|=)", stripped) and not URL_RE.search(stripped):
-                            add(path, index, "unresolved-download-url")
-                elif kind == "xml":
-                    tree = ET.fromstring(text)
-                    for element in tree.iter():
-                        tag = element.tag.rsplit("}", 1)[-1]
-                        if tag not in {"repository", "pluginRepository", "mirror"}:
-                            continue
-                        for child in element:
-                            if child.tag.rsplit("}", 1)[-1] == "url":
-                                check(path, tag + "/url", child.text or "", True)
-            except (ValueError, UnicodeError, OSError, ET.ParseError):
-                add(path, "file", "invalid-dependency-config")
+                                dependency_values(value, location + "." + key)
+                        elif isinstance(obj, str):
+                            if "://" in obj or obj.startswith("//"):
+                                check(path, location, obj)
+                            elif obj.startswith(("github:", "gitlab:", "bitbucket:", "git@")):
+                                add(path, location, "non-nexus-download")
+                            elif re.fullmatch(r"[\w.-]+/[\w.-]+(?:#.*)?", obj):
+                                add(path, location, "non-nexus-download")
+                    dependency_values(data.get(section, {}), section)
+            elif kind == "lock":
+                data = json.loads(text)
+                def walk(obj, location="$"):
+                    if isinstance(obj, dict):
+                        for key, value in obj.items():
+                            if key == "resolved":
+                                check(path, location + ".resolved", value)
+                            else:
+                                walk(value, location + "." + key)
+                    elif isinstance(obj, list):
+                        for index, value in enumerate(obj):
+                            walk(value, f"{location}[{index}]")
+                walk(data)
+            elif kind == "npm":
+                for index, line in enumerate(text.splitlines(), 1):
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith(("#", ";")) or "=" not in stripped:
+                        continue
+                    key, value = stripped.split("=", 1)
+                    if key.strip() == "registry" or key.strip().endswith(":registry"):
+                        check(path, index, value.strip(), True)
+            elif kind == "pip":
+                for index, line in enumerate(text.splitlines(), 1):
+                    stripped = line.strip()
+                    if stripped.startswith("#"):
+                        continue
+                    for value in URL_RE.findall(stripped):
+                        check(path, index, value)
+                    if re.match(r"(?:--extra-index-url|--index-url|-i|--find-links|-f)(?:\s|=)", stripped) and not URL_RE.search(stripped):
+                        add(path, index, "unresolved-download-url")
+            elif kind == "xml":
+                tree = ET.fromstring(text)
+                for element in tree.iter():
+                    tag = element.tag.rsplit("}", 1)[-1]
+                    if tag not in {"repository", "pluginRepository", "mirror"}:
+                        continue
+                    for child in element:
+                        if child.tag.rsplit("}", 1)[-1] == "url":
+                            check(path, tag + "/url", child.text or "", True)
+        except (ValueError, UnicodeError, OSError, ET.ParseError, TypeError, AttributeError):
+            add(path, "file", "invalid-dependency-config")
     return findings
 
 

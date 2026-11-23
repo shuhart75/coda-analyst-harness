@@ -199,7 +199,7 @@ def control_result(text):
     Multiple distinct requests or a malformed explicit request require clarification.
     """
     from controller import parse_json, Blocked
-    kinds = ('operator_question', 'scope_request', 'service_request', 'service_action')
+    kinds = ('operator_question', 'scope_request', 'service_request', 'service_action', 'isolated_check_request')
     documents, invalid = [], False
     blocks = list(re.finditer(r'^[ \t]*```([^\n`]*)\n(.*?)^[ \t]*```[ \t]*$', text, re.M | re.S))
     if blocks:
@@ -246,6 +246,16 @@ def control_result(text):
     return kind, value
 
 
+def execution_control(text):
+    """Protocol repair belongs to the executor, not to the human operator."""
+    try:
+        return control_result(text)
+    except InvalidControlRequest as exc:
+        return 'request_repair', {'diagnostic': str(exc),
+            'instruction': 'Return one valid control object at a time, using the documented schema. '
+            'Preserve all requested work; request prerequisites first. Do not ask the operator to fix JSON.'}
+
+
 def control_or_question(text):
     try:
         return control_result(text)
@@ -290,6 +300,16 @@ For a necessary repair outside task.writes, report an explicit request:
 Do not edit these files yet. The controller reserves technical paths automatically, queues conflicting
 tasks, preserves the pinned plan, then reruns checks of the task and affected accepted owners plus independent review.
 Do not ask for permission to bypass corporate policy. Answers cannot waive requirements/checks.
+For a negative test with deliberately invalid package registries or configuration, use a disposable
+controller-owned check instead of weakening build policy:
+{"isolated_check_request":{"reason":"what failure is tested","inputs":["tools/test.py","tests/fixtures"],
+"cwd":".","argv":["python3","tools/test.py"],"local_ports":2,"timeout":120}}.
+Only declared regular inputs are copied. Source and shared caches are read-only; HOME/cache are fresh.
+No external network is allowed. Local mock ports are allocated by the controller and passed as the
+JSON array SDD_TEST_PORTS. Do not connect to existing services. Isolation is probed before execution;
+unavailable isolation is a check-level blocker, never permission to run outside the sandbox.
+Output files remain in the recorded scratch directory. A failed expected operation must be asserted
+by the test: the test itself returns zero only after verifying the expected failure.
 For a necessary persistent local service, do NOT start it from an agent shell. Return
 {"service_request":{"id":"stable-service-name","cwd":"repository-relative directory",
 "argv":["installed-executable","argument"],"ports":[8082],
