@@ -37,6 +37,7 @@ def route(tasks, stopped=False):
                  for i in range(1, len(ordered)))
     lines = ['Маршрут оставшихся задач:' if serial else 'Оставшиеся задачи и зависимости:']
     labels = {'running': ('▶', 'сейчас'), 'waiting-user': ('?', 'нужен ответ'),
+              'waiting-scope': ('○', 'ждёт пересекающуюся задачу'),
               'blocked': ('!', 'заблокировано'), 'interrupted': ('■', 'остановлено'),
               'accepted': ('✓', 'проверено; ожидает интеграции'), 'pending': ('○', 'ожидает')}
     for i, task in enumerate(ordered):

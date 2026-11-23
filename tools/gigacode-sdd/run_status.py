@@ -11,11 +11,19 @@ STAGES = {'execute': 'разработка', 'checks': 'обязательные
           'adjudicate': 'разбор спорного замечания', 'accepted': 'вариант проверен'}
 STATUSES = {'pending': 'ожидает запуска', 'done': 'принято', 'running': 'в работе',
             'blocked': 'заблокировано', 'waiting-user': 'нужен ответ', 'interrupted': 'остановлено',
-            'waiting-retry': 'пауза перед повтором', 'complete': 'завершено'}
+            'waiting-scope': 'ждёт пересекающуюся задачу', 'waiting-retry': 'пауза перед повтором', 'complete': 'завершено'}
 
 SERVICE_STATUSES = {'awaiting-approval': 'нужно разрешение на запуск', 'starting': 'запускается',
                     'ready': 'готов', 'failed': 'ошибка запуска', 'stopped': 'остановлен',
                     'released': 'остановлен и освобождён'}
+
+def solution_variants(count):
+    if count % 10 == 1 and count % 100 != 11:
+        return 'вариант решения'
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return 'варианта решения'
+    return 'вариантов решения'
+
 
 def candidate_label(value):
     phase = STAGES.get(value['stage'], value['stage'])
@@ -27,7 +35,7 @@ def candidate_label(value):
     wait = value.get('resource_wait') or {}
     if value['status'] in ('pending', 'running') and wait.get('state') == 'waiting':
         return value['model'] + ': ждёт ресурс' + ('; занят вариантом ' + wait['holder'] if wait.get('holder') else '')
-    if value['status'] in ('waiting-user', 'waiting-retry', 'interrupted'):
+    if value['status'] in ('waiting-user', 'waiting-scope', 'waiting-retry', 'interrupted'):
         phase = STATUSES[value['status']] + ' (' + phase + ')'
     if value['status'] == 'pending':
         phase = 'ожидает запуска (' + phase + ')'
@@ -349,7 +357,7 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
         if completed:
             lines.append('✓ ' + ' · '.join(completed))
         lines.extend(task_route.route(tasks, stopped=stopped))
-    active_rows = [t for t in tasks if t['status'] in ('running', 'waiting-user', 'blocked')]
+    active_rows = [t for t in tasks if t['status'] in ('running', 'waiting-user', 'waiting-scope', 'blocked')]
     for task in ([] if compact else active_rows):
         for candidate in task.get('candidates', []):
             if not stopped and not value.get('telemetry_stale') and _candidate_is_active(task, candidate, operations):
@@ -374,7 +382,17 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
             (c.get('resource_wait') or {}).get('state') == 'waiting' for c in candidates)
         waiting_answer = sum(c.get('status') == 'waiting-user' for c in candidates)
         if waiting_resource or waiting_answer:
-            lines.append(f'Ожидают варианты: ресурс {waiting_resource}, ответ пользователя {waiting_answer}.')
+            if waiting_resource:
+                noun = solution_variants(waiting_resource)
+                verb = 'ждёт' if noun == 'вариант решения' else 'ждут'
+                lines.append(f'В очереди: {waiting_resource} {noun} {verb} ресурс.')
+            if waiting_answer:
+                lines.append(f'Ответ пользователя ожидают: {waiting_answer} {solution_variants(waiting_answer)}.')
+            else:
+                lines.append('Ответ пользователя не требуется.')
+        waiting_scope = sum(c.get('status') == 'waiting-scope' for c in candidates)
+        if waiting_scope:
+            lines.append(f'Ожидают завершения пересекающихся задач: {waiting_scope} {solution_variants(waiting_scope)}.')
     if not compact and include_overview and value.get('session_attempts') is not None:
         lines.append('Попыток запуска LLM по журналам прогона: ' + str(value['session_attempts']) + ' (включая повторы).')
     observation = value.get('observation') or {}

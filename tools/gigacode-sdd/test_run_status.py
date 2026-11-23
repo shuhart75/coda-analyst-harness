@@ -120,6 +120,8 @@ class ProgressTests(unittest.TestCase):
         value['operations'].pop()
         output = run_status.dashboard(value)
         self.assertIn('GLM-5.3-Flash: ждёт ресурс', output)
+        self.assertIn('В очереди: 1 вариант решения ждёт ресурс.', output)
+        self.assertIn('Ответ пользователя не требуется.', output)
         self.assertNotIn('Вариант DeepSeek', output)
         value['status'] = 'interrupted'
         self.assertIn('Вариант сохранён: DeepSeek', run_status.dashboard(value))

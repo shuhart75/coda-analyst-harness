@@ -131,7 +131,7 @@ def effective_task(runner, task, record, *, integration=False):
             'Re-run all task checks and obtain independent review; prior task acceptance is not proof of this repair.')
     if not integration:
         record['scope_grants'] = [g['question_id'] for g in grants]
-    return effective
+    return runner.scopes.effective(effective)
 
 
 def refresh_pending(runner, task, value):

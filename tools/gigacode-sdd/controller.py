@@ -261,6 +261,8 @@ class Runner:
         self._display = ConsoleProgress(self.root / 'logs' / 'controller.log')
         self._config_digest = digest(self.config_path)
         self.services = managed_services.Manager(self)
+        import dynamic_scope
+        self.scopes = dynamic_scope.Manager(self)
 
     def persist(self):
         save(self.state_path, self.state)
@@ -954,7 +956,7 @@ executed test names/counts, not just a successful command or test compilation.
         path = work.parent / (work.name + '-checkpoint.json')
         if path.exists():
             saved = read(path)
-            if saved.get('base') != record['base']:
+            if saved.get('base') != record['base'] and saved.get('origin_base') != record['base']:
                 raise Blocked('Worker checkpoint belongs to another workspace')
             if saved.get('workspace') != record['workspace']:
                 scope = saved.get('portfolio_scope', '')
@@ -963,12 +965,18 @@ executed test names/counts, not just a successful command or test compilation.
                 selection = read(self.root / 'execution-cycles' / scope / 'selection.json')
                 if (selection.get('workspace') != saved['workspace']
                         or selection.get('patch_sha256') != saved.get('patch', {}).get('sha256')
-                        or selection.get('winner') != saved.get('model')):
+                        or selection.get('winner') != saved.get('model')
+                        or selection.get('base') != saved.get('base')
+                        or (saved.get('origin_base') and selection.get('origin_base') != saved['origin_base'])):
                     raise Blocked('Selected execution alternative differs from its durable receipt')
             return {**record, **saved}
         return record
 
     def integrate(self, task, record):
+        with self.scopes.lock:
+            return self._integrate(task, record)
+
+    def _integrate(self, task, record):
         """Journal apply+commit so an interruption never requires discarding WIP."""
         self.guard()
         import scope_repair
@@ -1035,10 +1043,11 @@ executed test names/counts, not just a successful command or test compilation.
         tasks = plan['tasks']
         self.services.restore(self.stop)
         import scope_repair
+        import dynamic_scope
         for task in tasks:
             record = self.state['tasks'][task['id']]
-            if record['status'] == 'waiting-user' and scope_repair.needs_refresh(
-                    self.root, record.get('question_ids', [])):
+            if record['status'] == 'waiting-user' and (scope_repair.needs_refresh(
+                    self.root, record.get('question_ids', [])) or self.scopes.needs_question_refresh(record.get('question_ids', []))):
                 record['status'] = 'pending'
             if record['status'] in ('running', 'accepted') or (retry_blocked and record['status'] == 'blocked'):
                 # Integration journal takes precedence over the last worker checkpoint.
@@ -1066,24 +1075,25 @@ executed test names/counts, not just a successful command or test compilation.
                 if time.monotonic() - last_status >= 30:
                     run_status.publish(self)
                     last_status = time.monotonic()
-                for task in tasks:
-                    record = self.state['tasks'][task['id']]
-                    if record['status'] != 'pending' or len(active) >= self.cfg['jobs']:
-                        continue
-                    if any(self.state['tasks'][d]['status'] != 'done' for d in task['depends_on']):
-                        continue
-                    if any(overlaps(task, other) for other in active.values()):
-                        continue
-                    # A fresh copy includes all accepted predecessors and previous independent work.
-                    # On resume preserve the original worker and baseline instead of overwriting WIP.
-                    if 'workspace' not in record:
-                        work = self.root / 'workers' / (task['id'] + '-' + uuid.uuid4().hex[:8])
-                        clone_snapshot(self.main, work)
-                        record.update(workspace=str(work), base=git(work, 'rev-parse', 'HEAD'))
-                    record['status'] = 'running'
-                    self.progress('Запуск задачи ' + task['id'])
-                    self.persist()
-                    active[pool.submit(self.worker, task, record.copy())] = task
+                with self.scopes.lock:
+                    for task in tasks:
+                        record = self.state['tasks'][task['id']]
+                        if record['status'] not in ('pending', 'waiting-scope') or len(active) >= self.cfg['jobs']:
+                            continue
+                        if any(self.state['tasks'][d]['status'] != 'done' for d in task['depends_on']):
+                            continue
+                        if not self.scopes.try_start(task):
+                            continue
+                        # A fresh copy includes all accepted predecessors and previous independent work.
+                        # On resume preserve the original worker and baseline instead of overwriting WIP.
+                        if 'workspace' not in record:
+                            work = self.root / 'workers' / (task['id'] + '-' + uuid.uuid4().hex[:8])
+                            clone_snapshot(self.main, work)
+                            record.update(workspace=str(work), base=git(work, 'rev-parse', 'HEAD'))
+                        record['status'] = 'running'
+                        self.progress('Запуск задачи ' + task['id'])
+                        self.persist()
+                        active[pool.submit(self.worker, task, record.copy())] = task
                 if not active:
                     if any(r['status'] == 'waiting-user' for r in self.state['tasks'].values()):
                         self.stop.wait(.5)
@@ -1100,6 +1110,10 @@ executed test names/counts, not just a successful command or test compilation.
                         operator_questions.resolve_task(self.root, task['id'])
                         done = sum(r['status'] == 'done' for r in self.state['tasks'].values())
                         self.progress('Принято задач: ' + str(done) + '/' + str(len(tasks)))
+                    except dynamic_scope.ScopeWait as exc:
+                        record = self.state['tasks'][task['id']]
+                        record.update(status='waiting-scope', error=str(exc))
+                        self.progress(task['id'] + ': изменения сохранены; задача в очереди пересечений')
                     except operator_questions.WaitingForOperator as exc:
                         record = self.state['tasks'][task['id']]
                         record.update(status='waiting-user', error=str(exc), question_ids=exc.question_ids)
@@ -1114,6 +1128,8 @@ executed test names/counts, not just a successful command or test compilation.
                             failed = self.checkpoint(failed)
                         failed.update(status='blocked', error=str(exc))
                         self.state['tasks'][task['id']] = failed
+                    finally:
+                        self.scopes.finish(task)
                     self.persist()
                     operator_input.report(self, 'running')
                     run_status.publish(self)
@@ -1125,7 +1141,7 @@ executed test names/counts, not just a successful command or test compilation.
             self.persist()
             raise Blocked('Some tasks are blocked; inspect status/logs, resolve cause, then run --retry-blocked')
         # Final full integration checks and a fresh review use the same repair loop.
-        final = {'id': 'integration', 'cwd': '.', 'writes': sorted({p for t in tasks for p in t['writes']}),
+        final = {'id': 'integration', 'cwd': '.', 'writes': sorted({p for t in tasks for p in self.scopes.effective(t)['writes']}),
                  'depends_on': [], 'resources': sorted({r for t in tasks for r in t.get('resources', [])}), 'requirements': self.cfg['requirements'],
                  'checks': plan['integration_checks'],
                  'prompt': 'Verify the entire integrated PoC against every pinned requirement and SDD. '
