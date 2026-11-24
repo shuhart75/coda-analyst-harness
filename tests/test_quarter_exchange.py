@@ -28,6 +28,19 @@ class QuarterExchangeTests(unittest.TestCase):
             violations = exchange.analytics_content_violations(Path("/unused"), "HEAD")
         self.assertEqual({item["path"] for item in violations}, set(paths[-2:]))
 
+    def test_exchange_root_allowed_without_bypassing_content_policy(self):
+        allowed = ["requirements-exchange/preparation.md",
+                   "requirements-exchange/demo/revisions/002/manifest.json",
+                   "requirements-exchange/demo/revisions/002/tasks/grooming.json"]
+        forbidden = ["requirements-exchange/.idea/settings.xml",
+                     "requirements-exchange/demo/GIGACODE.md",
+                     "requirements-exchange/materials.zip",
+                     "context/source-materials/materials.ZIP",
+                     "unexpected/requirements.md"]
+        with patch.object(exchange, "tracked_paths", return_value=allowed + forbidden):
+            violations = exchange.analytics_content_violations(Path("/unused"), "HEAD")
+        self.assertEqual({item["path"] for item in violations}, set(forbidden))
+
     def test_import_keeps_quarter_requirements_and_plans_protected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -14,6 +14,19 @@ The repositories are independent under the `coda-analyst-harness` root. Roles `a
 
 The first bootstrap prepares all configured roles. After that, the analyst may remove the local `code` repository, the hidden `source` mirror, or both. `bootstrap` records these optional roles as `absent` and does not recreate them. Role `analytics` is mandatory and is never automatically recloned after removal.
 
+## Analytical exchange files
+
+The registered analytical roots include `requirements-exchange/`, the publication
+catalog owned by documents under `core/documents-exchange.md`. Source import and
+reverse-patch validation accept this root under the same content checks as other
+analytical roots. Local tool settings remain forbidden inside it. Acceptance of a
+path does not validate or publish its delivery manifest.
+
+ZIP is prohibited by corporate policy. Do not create, read, extract or transfer ZIP
+archives, including in Downloads. Keep handoff materials as ordinary files. The
+content policy rejects tracked `.zip` files case-insensitively, including inside
+source-materials evidence directories. Historical Git objects are not rewritten.
+
 ## Synchronization transaction
 
 `delivery-index.json` is authored analytical content, not a local cache.
