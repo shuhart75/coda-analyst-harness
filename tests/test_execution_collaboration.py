@@ -82,6 +82,14 @@ class ExecutionCollaborationTests(unittest.TestCase):
         self.git(self.project, 'commit', '-m', 'RSCON-123: Prepare execution fixtures')
         self.initial_head = self.git(self.project, 'rev-parse', 'HEAD')
 
+    def test_submit_accepts_committed_delivery_deletion(self):
+        self.git(self.project, 'push', 'origin', 'HEAD:main')
+        self.git(self.project, 'rm', '-r', '--', 'features/other')
+        self.git(self.project, 'commit', '-m', 'RSCON-123: Remove incorporated delivery')
+        result = self.collaboration(self.workspace, self.environment, 'submit')
+        self.assertEqual(result['status'], 'feature-work-awaiting-merge')
+        self.assertEqual(result['commit'], self.git(self.project, 'rev-parse', 'HEAD'))
+
     def expand(self):
         lines = import_module('expand-plantuml-includes').expand_file(self.gantt / 'actual-progress.puml', [])
         (self.gantt / 'actual-progress-confluence.puml').write_text('\n'.join(lines).rstrip() + '\n')

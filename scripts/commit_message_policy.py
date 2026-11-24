@@ -245,9 +245,10 @@ def require_preserved_planning_bindings(current, previous) -> None:
                          'Нельзя удалить прежнюю связь без замены; до ответа коммит запрещён.')
 
 
-def working_keys(project: Path, paths) -> set[str]:
+def working_keys(project: Path, paths, *, base_ref: str = "HEAD") -> set[str]:
+    """Validate worktree ownership against the specified pre-change commit."""
     paths = list(paths)
-    removed = git_output(project, 'diff', 'HEAD', '--name-only', '--diff-filter=D', '-z')
+    removed = git_output(project, 'diff', base_ref, '--name-only', '--no-renames', '--diff-filter=D', '-z')
     if removed is None:
         raise ValueError('Не удалось проверить удалённые материалы перед сохранением')
     deleted = set(filter(None, removed.split('\0')))
@@ -268,12 +269,12 @@ def working_keys(project: Path, paths) -> set[str]:
                     raise ValueError('Не удалось проверить оставшиеся материалы поставки')
                 if set(filter(None, tracked.split('\0'))) - deleted:
                     raise ValueError('Нельзя удалить связь с задачей, сохранив материалы поставки: ' + path)
-            return git_output(project, 'show', 'HEAD:' + path)
+            return git_output(project, 'show', base_ref + ':' + path)
         return None
     if PLANNING_BINDINGS in paths:
         require_preserved_planning_bindings(read(PLANNING_BINDINGS),
-                                           git_output(project, 'show', 'HEAD:' + PLANNING_BINDINGS))
-    return keys_for_paths(paths, read, lambda path: git_output(project, 'show', 'HEAD:' + path))
+                                           git_output(project, 'show', base_ref + ':' + PLANNING_BINDINGS))
+    return keys_for_paths(paths, read, lambda path: git_output(project, 'show', base_ref + ':' + path))
 
 
 def git_output(repository: Path, *args) -> str | None:
