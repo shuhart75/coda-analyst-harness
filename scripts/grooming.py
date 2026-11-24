@@ -112,8 +112,8 @@ def validate(plan, text, package, *, confirmed=True, complete=True):
         if not prefix or task.get('role') != prefix[1]:
             raise ValueError('Grooming: role must match summary prefix')
         estimate = task.get('estimate')
-        if type(estimate) not in (int, float) or not math.isfinite(estimate) or estimate <= 0:
-            raise ValueError('Grooming: positive finite person-days required')
+        if estimate is not None and (type(estimate) not in (int, float) or not math.isfinite(estimate) or estimate <= 0):
+            raise ValueError('Grooming: estimate, when provided, must be positive finite person-days')
         nonempty(task.get('description'), 'short description')
         nonempty(task.get('acceptance'), 'observable acceptance result')
         deps = task.get('depends_on')
@@ -195,7 +195,7 @@ def rebase_links(text):
 
 
 def task_document(task, plan, blocks):
-    lines = ['# ' + task['summary'], '', f"Оценка: {task['estimate']:g} чел.-дн.",
+    lines = ['# ' + task['summary'], '', (f"Оценка: {task['estimate']:g} чел.-дн." if task.get('estimate') is not None else "Оценка не указана."),
              f"Этап поставки: {plan['stage_id']}", '', task['description'], '',
              '## Приёмка', '', task['acceptance'], '',
              '## Зависимости', '']
@@ -247,7 +247,7 @@ def preview(plan, text, package):
             pending.append(task)
     task = pending[0] if pending else None
     return {'next_action': 'confirm-one-task' if task else 'review-complete-plan',
-            'task': ({'summary': task['summary'], 'estimate_person_days': task['estimate'],
+            'task': ({'summary': task['summary'], 'estimate_person_days': task.get('estimate'),
                       'requirements': [{'title': blocks[x['req_id']]['title'], 'scope': x['scope'],
                                         'scenarios': x['scenarios']} for x in task['requirements']],
                       'acceptance': task['acceptance'],
@@ -255,7 +255,10 @@ def preview(plan, text, package):
                      if task else None),
             'confirmation_sha256': approval_hash(task or plan),
             'source_sha256': task['source_sha256'] if task else None, 'remaining_tasks': len(pending),
-            'total_person_days': sum(t['estimate'] for t in plan['tasks'])}
+            'total_person_days': (sum(t['estimate'] for t in plan['tasks'])
+                                  if all(t.get('estimate') is not None for t in plan['tasks']) else None),
+            'estimated_person_days': sum(t['estimate'] for t in plan['tasks'] if t.get('estimate') is not None),
+            'unestimated_tasks': sum(t.get('estimate') is None for t in plan['tasks'])}
 
 
 def build(project, feature, plan):

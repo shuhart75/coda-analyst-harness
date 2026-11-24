@@ -88,6 +88,43 @@ class GroomingUnitTests(unittest.TestCase):
         self.assertIn('`[code](keep.json)`', actual)
         self.assertIn('```text\n[code](keep.json)\n```', actual)
 
+    def test_optional_estimates_validate_render_and_roundtrip(self):
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                plan = deepcopy(self.plan)
+                if missing:
+                    plan['tasks'][0].pop('estimate')
+                else:
+                    plan['tasks'][0]['estimate'] = None
+                confirm(plan)
+                grooming.validate(plan, self.text, self.package)
+                files = grooming.files_for(plan, self.text, self.package)
+                self.assertIn('Оценка не указана.', files['be-01/requirements.md'])
+                self.assertNotIn('0 чел.-дн.', files['be-01/requirements.md'])
+                preview = grooming.preview(plan, self.text, self.package)
+                self.assertIsNone(preview['total_person_days'])
+                self.assertEqual(preview['unestimated_tasks'], 1)
+                self.assertEqual(preview['estimated_person_days'], 0)
+
+    def test_partial_estimates_do_not_claim_complete_total(self):
+        plan = deepcopy(self.plan)
+        second = deepcopy(plan['tasks'][0])
+        second['id'] = 'be-02'
+        second.pop('estimate')
+        plan['tasks'].append(second)
+        result = grooming.preview(plan, self.text, self.package)
+        self.assertIsNone(result['total_person_days'])
+        self.assertEqual(result['estimated_person_days'], 2.5)
+        self.assertEqual(result['unestimated_tasks'], 1)
+        self.assertIsNone(result['task']['estimate_person_days'])
+
+    def test_invalid_supplied_estimates_remain_rejected(self):
+        for estimate in (0, -1, True, '3', float('inf'), float('nan')):
+            plan = deepcopy(self.plan)
+            plan['tasks'][0]['estimate'] = estimate
+            with self.subTest(estimate=estimate), self.assertRaises(ValueError):
+                grooming.validate(confirm(plan), self.text, self.package)
+
     def test_grooming_changed_estimate_invalidates_both_approvals(self):
         self.plan['tasks'][0]['estimate'] = 3
         with self.assertRaisesRegex(ValueError, 'stale confirmation'):
@@ -181,6 +218,26 @@ class GroomingExchangeTests(exchange_tests.SddExchangeTests):
         self.assertEqual(response.returncode, 0, response.stdout + response.stderr)
         self.assertEqual(json.loads(response.stdout)['tasks']['sha256'], descriptor['tasks']['sha256'])
 
+    def test_unestimated_grooming_with_materials_and_standalone_receiver(self):
+        from test_sdd_materials import write_materials
+        import subprocess
+        import sys
+        self.enable_grooming()
+        self.plan['tasks'][0].pop('estimate')
+        write_tasks(self.feature / 'tasks', self.text, self.package, confirm(self.plan))
+        write_materials(self.feature / 'materials')
+        self.authorize()
+        result = self.prepare()
+        packet = Path(result['requirements']).parent.parent.parent
+        descriptor = self.manifest(result)['revisions'][0]['sdd_input']
+        self.assertIn('tasks', descriptor)
+        self.assertIn('materials', descriptor)
+        response = subprocess.run([sys.executable, str(packet.parent / 'sdd-receive.py'),
+            '--packet', str(packet), '--revision', '1', '--code-root', str(self.code)],
+            cwd=self.parent, capture_output=True, text=True)
+        self.assertEqual(response.returncode, 0, response.stdout + response.stderr)
+        self.assertEqual(json.loads(response.stdout)['tasks']['sha256'], descriptor['tasks']['sha256'])
+
     def test_grooming_new_revision_preserves_old_tasks(self):
         self.enable_grooming()
         self.authorize()
@@ -209,6 +266,28 @@ class GroomingExchangeTests(exchange_tests.SddExchangeTests):
         payload = tracker.prepare(self.project, 'demo', 'https://onework.sigma.sbrf.ru/sc/RSCON/coda')
         task = payload['tasks'][0]
         self.assertEqual(task['type'], 'Story')
+        self.assertEqual(task['labels'], ['RSCON_dev'])
+        self.assertEqual(task['epic_key'], 'RSCON-10')
+        self.assertIn('revisions%2F001%2Ftasks%2Fbe-01%2Frequirements.md', task['requirements_url'])
+        self.assertEqual(before, self.code_snapshot())
+
+    def test_unestimated_publication_omits_estimate_from_story_payload(self):
+        self.enable_grooming()
+        self.plan['tasks'][0].pop('estimate')
+        write_tasks(self.feature / 'tasks', self.text, self.package, confirm(self.plan))
+        self.enable_code_exchange()
+        self.authorize()
+        before = self.code_snapshot()
+        result = self.prepare()
+        with self.assertRaises(ValueError):
+            tracker.prepare(self.project, 'demo', 'https://onework.sigma.sbrf.ru/sc/RSCON/coda')
+        self.accept(result)
+        result = self.prepare()
+        self.state('mark-published', '--manifest', result['manifest'], '--revision', str(result['revision']), '--destination-role', 'code')
+        payload = tracker.prepare(self.project, 'demo', 'https://onework.sigma.sbrf.ru/sc/RSCON/coda')
+        task = payload['tasks'][0]
+        self.assertEqual(task['type'], 'Story')
+        self.assertNotIn('estimate', task)
         self.assertEqual(task['labels'], ['RSCON_dev'])
         self.assertEqual(task['epic_key'], 'RSCON-10')
         self.assertIn('revisions%2F001%2Ftasks%2Fbe-01%2Frequirements.md', task['requirements_url'])
@@ -282,6 +361,15 @@ class GroomingTrackerTests(unittest.TestCase):
 
     def op(self, action, **args):
         return tracker.operate(self.root / 'journal', self.batch, action, 'be-01', **args)
+
+    def test_unestimated_story_does_not_require_or_overwrite_tracker_estimate(self):
+        self.task.pop('estimate')
+        mapping = json.loads(self.mapping.read_text())
+        mapping.pop('estimate')
+        self.mapping.write_text(json.dumps(mapping))
+        self.write_evidence(estimate=8)
+        self.op('claim', confirmation='b'*64)
+        self.assertEqual(self.op('bind', evidence=self.evidence, mapping=self.mapping)['key'], 'RSCON-123')
 
     def test_grooming_single_attempt_bind_and_no_duplicate(self):
         with self.assertRaises(ValueError): self.op('claim')
