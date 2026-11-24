@@ -69,7 +69,8 @@ def prepare(project, feature, web_url):
         url = web_url.rstrip('/') + '?path=' + quote(path, safe='')
         payloads.append({'local_id': task['id'], 'request_id': request_id, 'type': 'Story',
                          'summary': task['summary'], 'epic_key': plan['epic_key'],
-                         'estimate': task['estimate'], 'estimate_unit': 'person-days', 'labels': ['RSCON_dev'],
+                         **({'estimate': task['estimate']} if task.get('estimate') is not None else {}),
+                         'estimate_unit': 'person-days', 'labels': ['RSCON_dev'],
                          'requirements_url': url, 'publication_commit': proof['target_commit'],
                          'description': task['description'] + '\n\nКритерий приёмки: ' + task['acceptance']
                          + '\n\nТребования: ' + url + '\n\nКоммит публикации: ' + proof['target_commit'] + '\n\nГруминг: grooming/' + request_id})
@@ -91,14 +92,16 @@ def pointer(data, path):
 def verify_evidence(raw, mapping, payload):
     data = json.loads(raw)
     fields = {name: pointer(data, mapping[name]) for name in
-              ('key', 'type', 'summary', 'epic_key', 'estimate', 'labels', 'description')}
+              ('key', 'type', 'summary', 'epic_key', 'labels', 'description')}
+    if payload.get('estimate') is not None:
+        fields['estimate'] = pointer(data, mapping['estimate'])
     if 'requirements_url' in mapping:
         fields['requirements_url'] = pointer(data, mapping['requirements_url'])
         if fields['requirements_url'] != payload['requirements_url']:
             raise ValueError('Created Story differs from confirmed payload: requirements_url')
     if not grooming.KEY.fullmatch(str(fields['key'])):
         raise ValueError('Evidence has no native SberTrack key')
-    for name in ('type', 'summary', 'epic_key', 'estimate'):
+    for name in ('type', 'summary', 'epic_key') + (('estimate',) if payload.get('estimate') is not None else ()):
         if fields[name] != payload[name] or (name == 'estimate' and type(fields[name]) not in (int, float)):
             raise ValueError('Created Story differs from confirmed payload: ' + name)
     if not isinstance(fields['labels'], list) or 'RSCON_dev' not in fields['labels']:
