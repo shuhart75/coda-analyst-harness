@@ -831,6 +831,14 @@ executed test names/counts, not just a successful command or test compilation.
                   'Optional improvements may be listed separately as optional_findings objects with status=optional, '
                   'requirements=[], outside_required_scope=true, text, reason, evidence=[{path,quote}]. They MUST NOT waive a pinned requirement or failing check. '
                   'Required identifiers: ' + json.dumps(requirements))
+        repair = Path(root) / '.review-input/output-repair.json'
+        if name != 'plan-review' and repair.is_file():
+            prompt += ('\nOUTPUT_REPAIR_ONLY: the controller retained a completed review on the same '
+                       'code snapshot and checks. Read .review-input/output-repair.json and repair '
+                       'only the reported protocol defect. Do not repeat the whole investigation. '
+                       'Preserve substantive findings and evidence; never drop findings to manufacture pass. '
+                       'Use targeted reads only if required to resolve the defective field. '
+                       'If evidence is insufficient, retain that gap. All acceptance validators still apply.')
         if name == 'plan-review':
             expected = digest(Path(root) / '.review-input/plan.json')
             prompt += ('\nInclude candidate_sha256 in the JSON, exactly ' + expected
@@ -846,7 +854,7 @@ executed test names/counts, not just a successful command or test compilation.
         disposition = session_outcome(result, 'review')
         if disposition['cause'] == 'context-limit':
             raise RetryableSessionError('Reviewer context exhausted; retry only review with bounded excerpts', result, cause='context-limit')
-        if disposition['action'] != 'validate':
+        if disposition['action'] not in ('validate', 'validate-feedback'):
             raise RetryableSessionError('Reviewer failed; needs repair: ' + disposition['cause'] + '; ' + result['events_path'], result, cause=disposition['cause'])
         if model:
             from planning_cycle import verify_model
@@ -859,7 +867,8 @@ executed test names/counts, not just a successful command or test compilation.
             except (ValueError, OSError, TypeError, KeyError) as error:
                 raise Blocked('Invalid plan-review evidence: ' + str(error)) from None
         diagnostic_errors = review_diagnostic_errors(result)
-        if not result['ok'] and not review_feedback_usable(result) and diagnostic_errors is None:
+        if (not result['ok'] and not review_feedback_usable(result) and diagnostic_errors is None
+                and disposition['action'] != 'validate-feedback'):
             raise RetryableSessionError('Reviewer failed: ' + result['events_path'], result)
         from review_format import read_response
         report = read_response(result)

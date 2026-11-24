@@ -14,6 +14,22 @@ from workspace import clone_snapshot, git, snapshot
 
 
 class ExecutionPortfolioTests(unittest.TestCase):
+    def test_output_repair_is_bound_to_complete_draft_and_checked_inputs(self):
+        from execution_cycle import _review_repair
+        import tempfile
+        value = {'workspace_snapshot': {'head': 'abc'}, 'checks': [{'ok': True}],
+                 'history': [{'kind': 'review-protocol', 'stage': 'review', 'instruction': 'repair',
+                              'bounded_instruction': 'only output', 'detail': 'invalid verdict'}]}
+        binding = fingerprint({'snapshot': value['workspace_snapshot'], 'checks': value['checks']})
+        for completed, truncated, bound, eligible in ((True, False, binding, True),
+                (False, False, binding, False), (True, True, binding, False), (True, False, 'old', False)):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                value['review_draft'] = {'stage': 'review', 'text': '{}', 'completed': completed,
+                                        'truncated': truncated, 'input_binding': bound}
+                _review_repair(root, value, 'review')
+                self.assertEqual((root/'.review-input/output-repair.json').exists(), eligible)
+
     def setUp(self):
         self.fixture = fixtures.ControllerE2E('test_init_preserves_source_and_rejects_changed_packet')
         self.fixture.setUp()

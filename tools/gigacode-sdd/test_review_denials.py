@@ -153,6 +153,28 @@ class ReviewDenialTests(unittest.TestCase):
         with self.assertRaises(RetryableSessionError):
             self.runner.validate_review_result(self.work, result, self.task['requirements'], 'be-review', MODELS[1])
 
+    def test_completed_shell_error_preserves_negative_feedback_only(self):
+        for verdict in ('changes', 'pass', 'blocked'):
+            self.report_override = {'verdict': verdict, 'findings': ['Required evidence missing'] if verdict != 'pass' else []}
+            result = self.review_session(self.work, '.', 'task', 'review', 'be-review', model=MODELS[1])
+            events = Path(result['events_path'])
+            rows = [json.loads(line) for line in events.read_text().splitlines()]
+            rows[-1:-1] = [
+                {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 'shell',
+                    'name': 'run_shell_command', 'input': {'command': 'ls --time-style=full-iso'}}]}},
+                {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'shell',
+                    'is_error': True, 'content': "ls: unrecognized option '--time-style=full-iso'"}]}}]
+            events.write_text('\n'.join(map(json.dumps, rows)), encoding='utf-8')
+            result = parse_events(events)
+            result.update(returncode=0, cleanup={'preserved': False})
+            if verdict == 'changes':
+                report = self.runner.validate_review_result(self.work, result, self.task['requirements'], 'be-review', MODELS[1])
+                self.assertEqual(report['verdict'], 'changes')
+                self.assertIn('Tool run_shell_command (shell) returned an error', report['tool_warnings'])
+                result['terminal_result'] = False
+            with self.assertRaises(RetryableSessionError):
+                self.runner.validate_review_result(self.work, result, self.task['requirements'], 'be-review', MODELS[1])
+
     def test_object_findings_keep_text_without_protocol_retry(self):
         self.report_override = {'verdict': 'changes', 'findings': [{'id': 'issue-1', 'text': 'Fix **значние**'}]}
         result = self.review_session(self.work, '.', 'task', 'review', 'be-review', model=MODELS[1])

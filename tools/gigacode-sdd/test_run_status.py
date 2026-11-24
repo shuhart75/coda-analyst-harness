@@ -163,6 +163,18 @@ class ProgressTests(unittest.TestCase):
             self.assertFalse(value['telemetry_incomplete'])
             self.assertEqual(value['observation'], {})
 
+    def test_observer_health_shows_attempt_and_retry_but_not_after_stop(self):
+        value = self.value()
+        value['observation'] = {'snapshot_at': 1000, 'status': 'unavailable'}
+        value['observer_health'] = {'scope': {'model': 'GLM', 'attempt': 3, 'phase': 'waiting',
+            'last_success_at': 800, 'failure': 'превышено время ожидания', 'next_attempt_at': 1200}}
+        text = '\n'.join(run_status.observation_lines(value))
+        self.assertIn('попытка 3', text)
+        self.assertIn('последний успех', text)
+        self.assertIn('повтор не раньше', text)
+        value['status'] = 'interrupted'
+        self.assertNotIn('повтор не раньше', '\n'.join(run_status.observation_lines(value)))
+
     def test_candidate_history_is_bounded_with_explicit_truncation(self):
         with TemporaryDirectory() as tmp:
             runner = SimpleNamespace(root=Path(tmp))
