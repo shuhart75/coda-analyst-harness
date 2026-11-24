@@ -88,7 +88,7 @@ class ExecutionPortfolioTests(unittest.TestCase):
     def records(self):
         return [read(p) for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')]
 
-    def test_review_copy_race_repairs_candidate_without_fatal(self):
+    def test_review_copy_race_freezes_candidate_without_fatal(self):
         from workspace import SnapshotChanged
         self.primary_only = True
         calls = []
@@ -103,8 +103,9 @@ class ExecutionPortfolioTests(unittest.TestCase):
             accepted = self.run_task()
         self.assertEqual(accepted['status'], 'accepted')
         self.assertEqual(self.check_count, 2)
-        self.assertEqual(len(self.calls), 2)
-        self.assertIn('snapshot', [item['kind'] for item in accepted['history']])
+        self.assertEqual(len(self.calls), 1)
+        self.assertNotEqual(accepted['workspace'], str(self.work))
+        self.assertTrue(accepted['verification_checkpoint'])
         self.assertEqual(list((self.runner.root/'execution-cycles').glob('*/fatal.json')), [])
         self.assertTrue(Path(accepted['snapshot_conflicts'][0]).is_file())
 
@@ -126,6 +127,54 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(accepted['status'], 'accepted')
         self.assertEqual(self.check_count, 2)
         self.assertEqual(len(self.calls), 1)
+
+    def test_pending_snapshot_question_resumes_through_frozen_checks_without_operator(self):
+        import operator_questions as questions
+        import snapshot_recovery
+        import workspace as ws
+        self.primary_only = True
+        accepted = self.run_task()
+        path = next(p for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')
+                    if read(p)['model'] == accepted['model'])
+        value = read(path)
+        source = Path(value['workspace'])
+        log = source/'backend/runtime-evidence.data'
+        log.write_text('observed experiment\n')
+        value.update(stage='execute', status='waiting-user', workspace_snapshot=snapshot(source))
+        value['snapshot_recovery'] = {'previous_candidate': str(path.parent/'old-candidate.json')}
+        value['feedback'] = snapshot_recovery.repair_instruction(value['snapshot_recovery']['previous_candidate'])
+        key = questions.request(self.runner.root, self.task['id'], 'runtime-placement',
+                                'Who redirects the runtime output?', model=value['model'])
+        value['question_id'] = key
+        save(path,value)
+        original_copy = ws._copy_permissions
+        def append_live(source_root, dest):
+            if Path(source_root) == source:
+                with log.open('a') as stream:
+                    stream.write('periodic metrics\n')
+            return original_copy(source_root,dest)
+        initial_sessions, initial_checks = len(self.calls), self.check_count
+        with patch.object(ws,'_copy_permissions',side_effect=append_live):
+            result = self.run_task()
+        self.assertEqual(result['status'],'accepted')
+        self.assertNotEqual(result['workspace'],str(source))
+        self.assertEqual(len(self.calls),initial_sessions)
+        self.assertEqual(self.check_count,initial_checks+1)
+        self.assertEqual((Path(result['workspace'])/'backend/runtime-evidence.data').read_text(),
+                         'observed experiment\n')
+        self.assertIn('periodic metrics',log.read_text())
+        self.assertIsNone(questions.response(self.runner.root,key))
+        self.assertFalse(questions.questions(self.runner.root,pending_only=True))
+        self.assertTrue(read(self.runner.root/'operator-questions'/(key+'-resolved.json'))['operator_action_performed'] is False)
+
+    def test_unrelated_question_is_not_bypassed_by_old_snapshot_recovery(self):
+        import verification_checkpoint
+        self.primary_only=True
+        value=self.run_task()
+        value.update(stage='execute',status='waiting-user',feedback='Need a product decision',
+                     snapshot_recovery={'previous_candidate':'historical'})
+        self.assertFalse(verification_checkpoint.prepare(self.runner,value,self.runner.root/'candidate.json'))
+        self.assertEqual(value['status'],'waiting-user')
 
     def test_resume_execution_without_snapshot_preserves_work_and_rechecks(self):
         self.resume_incomplete_result(json.dumps({'operator_question': {
