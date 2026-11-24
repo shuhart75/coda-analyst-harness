@@ -62,6 +62,16 @@ class CommitMessagePolicyTests(unittest.TestCase):
             self.assertEqual(working_keys(project, paths), {'RSCON-123'})
             git('add', '--', *paths)
             self.assertEqual(staged_keys(project), {'RSCON-123'})
+            base = git('rev-parse', 'HEAD').strip()
+            git('commit', '-m', 'Remove delivery')
+            # submit validates committed branch changes against origin/main.
+            self.assertEqual(working_keys(project, paths, base_ref=base), {'RSCON-123'})
+            replacement.write_text('A later commit must not orphan remaining material')
+            git('add', '--', root + '/replacement.md')
+            git('commit', '-m', 'Restore material without binding')
+            with self.assertRaisesRegex(ValueError, 'сохранив материалы'):
+                working_keys(project, paths, base_ref=base)
+            replacement.unlink()
             index.unlink()
             with self.assertRaisesRegex(ValueError, 'Нельзя удалить delivery-index'):
                 working_keys(project, paths)
