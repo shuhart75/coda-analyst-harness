@@ -13,10 +13,25 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import uuid
 
 
 class WorkspaceError(RuntimeError):
     pass
+
+
+class SnapshotChanged(WorkspaceError):
+    """Concurrent ordinary writes; no usable snapshot or acceptance implied."""
+    def __init__(self, report):
+        self.report = report
+        super().__init__("Source changed during snapshot; see " + report)
+
+
+def snapshot_difference(before, after):
+    return {"head_changed": before["head"] != after["head"],
+            "status_changed": before["status"] != after["status"],
+            "paths": sorted(name for name in before["files"].keys() | after["files"].keys()
+                            if before["files"].get(name) != after["files"].get(name))}
 
 
 def _run(root, args, *, env=None, data=None, base_env=None):
@@ -372,7 +387,26 @@ def _copy_permissions(source, dest):
     return copied
 
 
-def clone_snapshot(source, dest, ref="HEAD", include_dirty=False):
+def clone_snapshot(source, dest, ref="HEAD", include_dirty=False, *, attempts=1):
+    """Retry only concurrent ordinary writes, retaining each failed copy/report."""
+    if type(attempts) is not int or not 1 <= attempts <= 3:
+        raise ValueError("Snapshot attempts must be between 1 and 3")
+    retries = []
+    for attempt in range(attempts):
+        try:
+            result = _clone_snapshot(source, dest, ref, include_dirty)
+            result['retry_reports'] = retries
+            return result
+        except SnapshotChanged:
+            if attempt + 1 == attempts:
+                raise
+            # A new name preserves evidence without reusing an inconsistent copy.
+            retained = Path(dest).with_name(Path(dest).name + "-unstable-" + uuid.uuid4().hex)
+            Path(dest).rename(retained)
+            retries.append(str(retained / '.git' / 'snapshot-conflict.json'))
+
+
+def _clone_snapshot(source, dest, ref="HEAD", include_dirty=False):
     source, dest = Path(source).resolve(), Path(dest).absolute()
     if dest.exists() or dest.is_symlink():
         raise WorkspaceError(f"Destination already exists: {dest}")
@@ -422,8 +456,17 @@ def clone_snapshot(source, dest, ref="HEAD", include_dirty=False):
         for name in instructions:
             if name not in _tracked(dest):
                 stream.write("/" + name + "\n")
-    if snapshot(source) != before:
-        raise WorkspaceError("Source changed during snapshot; clone retained but not usable")
+    after = snapshot(source)
+    if after != before:
+        difference = snapshot_difference(before, after)
+        report = dest / ".git" / "snapshot-conflict.json"
+        report.write_text(json.dumps({"source": str(source), "destination": str(dest),
+            "usable": False, "difference": difference}, ensure_ascii=True, indent=2) + "\n",
+            encoding="utf-8")
+        # Protected inputs and branch movement are not transient copy races.
+        if difference["head_changed"] or any(_forbidden(name) for name in difference["paths"]):
+            raise WorkspaceError("Protected source changed during snapshot; see " + str(report))
+        raise SnapshotChanged(str(report))
     return {"root": str(dest.resolve()), "head": resolved, "copied": sorted(set(copied)),
             "instructions": instructions, "skipped": skipped, "hooks": hooks,
             "permission_settings": permissions}

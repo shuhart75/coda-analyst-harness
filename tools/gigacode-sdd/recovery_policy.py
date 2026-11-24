@@ -19,6 +19,8 @@ def decide(stage, cause):
         return {'action': 'wait-resource', 'kind': None, 'instruction_change': False}
     if cause == 'request-protocol':
         return {'action': 'repair-response', 'kind': 'request-protocol', 'instruction_change': True}
+    if cause == 'snapshot':
+        return {'action': 'repair-implementation', 'kind': 'snapshot', 'instruction_change': True}
     if stage in ('review', 'adjudicate'):
         kind = 'review-context' if cause == 'context-limit' else 'review-protocol'
         return {'action': 'repair-response', 'kind': kind, 'instruction_change': True}
