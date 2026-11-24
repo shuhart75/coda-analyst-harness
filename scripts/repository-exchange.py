@@ -885,6 +885,33 @@ def roundtrip_candidate(documents: Path, candidate: str, target: str, proof: dic
     )
 
 
+def merge_source_with_snapshot(root, documents, analytics_id, checkout, state):
+    incoming, branch = state['source_commit'], state['request_branch']
+    snapshot = create_analytics_snapshot(
+        root, documents, analytics_id, 'source-analytics-merge', incoming,
+        f'{SOURCE_REMOTE}/{BRANCH}', local_commit=state['base_commit'],
+    )
+    merged = git(checkout, '-c', 'user.name=Coda Analyst Harness',
+                 '-c', 'user.email=coda-analyst-harness@local.invalid',
+                 'merge', '--no-ff', '--no-commit', incoming)
+    if merged.returncode:
+        conflicts = analytics_origin_conflict_records(checkout)
+        snapshot = archive_snapshot_conflicts(root, snapshot, checkout, conflicts)
+        raise ValueError(json.dumps({
+            'status': 'blocked', 'reason': 'source-analytics-merge-conflict',
+            'message': 'Импорт остановлен в изолированной копии; documents/main не изменена входящим source.',
+            'import_checkout': str(checkout), 'request_branch': branch,
+            'conflicts': conflicts, 'protective_snapshot': snapshot_summary(root, snapshot),
+            'allowed_next_action': 'inspect-source-analytics-conflict',
+            'forbidden_alternatives': ['skip-source-merge', 'overwrite-analytics-from-source'],
+            'detail': merged.stderr.strip(),
+        }, ensure_ascii=False))
+
+
+class ImportMergeConflict(ValueError):
+    """A prospective conflict must reach merge handling before JSON readers."""
+
+
 def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
     """Read carried bindings and explicit receiver decisions before any commit."""
     incoming = state["source_commit"]
@@ -910,14 +937,14 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
             raise ValueError("Некорректный реестр квартальных связей")
     # Classify the actual prospective merge, not source history since divergence.
     # A resumed merge must use its reviewed/staged resolutions.
+    prospective_conflict = False
     if git(checkout, "rev-parse", "--verify", "MERGE_HEAD").returncode == 0:
         merged = git(checkout, "write-tree")
         if merged.returncode:
             raise ValueError("Сначала разреши конфликты изолированного импорта")
     else:
         merged = git(checkout, "merge-tree", "--write-tree", "HEAD", incoming)
-        # Exit 1 still returns a tree, with unresolved paths. The normal merge
-        # workflow below retains conflict reporting and prevents committing it.
+        prospective_conflict = merged.returncode == 1
         if merged.returncode not in (0, 1):
             raise ValueError("Не удалось построить дерево входящего слияния: " + merged.stderr.strip())
     tree = merged.stdout.splitlines()[0] if merged.stdout else ""
@@ -934,6 +961,11 @@ def import_task_context(checkout: Path, state: dict) -> tuple[set[str], dict]:
         for revision in (tree, base):
             result = git(checkout, "show", revision + ":" + path)
             if not result.returncode:
+                if prospective_conflict and revision == tree and path.endswith('.json'):
+                    try:
+                        json.loads(result.stdout)
+                    except json.JSONDecodeError as exc:
+                        raise ImportMergeConflict('Конфликт входящего JSON: ' + path) from exc
                 return result.stdout
         return None
     @cache
@@ -1000,7 +1032,14 @@ def bind_import_task_command(args):
                 or checkout.resolve() != checkout.absolute()
                 or git(checkout, 'rev-parse', 'HEAD').stdout.strip() != args.expected_base):
             raise ValueError('Изолированный checkout не соответствует ожидающему импорту')
-        require_clean(checkout, 'Изолированный импорт перед привязкой задачи')
+        active_merge = merge_head(checkout)
+        if active_merge:
+            if (active_merge != args.expected_source or analytics_origin_conflict_records(checkout)
+                    or git(checkout, 'diff', '--quiet').returncode
+                    or git(checkout, 'ls-files', '--others', '--exclude-standard').stdout.strip()):
+                raise ValueError('Разреши и проиндексируй конфликты ожидаемого импорта перед привязкой задачи')
+        else:
+            require_clean(checkout, 'Изолированный импорт перед привязкой задачи')
         task_path = Path(args.task_state)
         with task_path.with_suffix('.lock').open('a') as task_lock:
             fcntl.flock(task_lock, fcntl.LOCK_EX)
@@ -1313,7 +1352,7 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     if active_merge and (active_merge != incoming or analytics_origin_conflict_records(checkout)):
         raise ValueError(json.dumps({
             "status": "blocked", "reason": "source-analytics-merge-conflict",
-            "message": "Разреши конфликт только в изолированной ветке импорта и создай смысловой merge-коммит, затем повтори sync.",
+            "message": "Разреши и проиндексируй конфликт только в изолированной ветке импорта, затем повтори sync для проверки задач и создания merge-коммита.",
             "import_checkout": str(checkout), "request_branch": branch,
             "conflicts": analytics_origin_conflict_records(checkout),
         }, ensure_ascii=False))
@@ -1333,6 +1372,14 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
     if active_merge or git(checkout, "merge-base", "--is-ancestor", incoming, "HEAD").returncode != 0:
         try:
             task_keys, task_files = import_task_context(checkout, state)
+        except ImportMergeConflict:
+            merge_source_with_snapshot(root, documents, analytics_id, checkout, state)
+            # If Git resolves it (e.g. rerere), validate the staged tree too.
+            active_merge = merge_head(checkout)
+            try:
+                task_keys, task_files = import_task_context(checkout, state)
+            except ValueError as exc:
+                return pause_import_for_task(state_path, state, str(exc))
         except ValueError as exc:
             return pause_import_for_task(state_path, state, str(exc))
     if active_merge:
@@ -1349,24 +1396,7 @@ def prepare_source_import(root: Path, source: Path, documents: Path, analytics_i
             if returned in proofs and git(checkout, "merge-base", "--is-ancestor", returned, "HEAD").returncode:
                 connect_roundtrip_history(checkout, branch, proofs[returned], task_keys)
                 break
-        snapshot = create_analytics_snapshot(
-            root, documents, analytics_id, "source-analytics-merge", incoming,
-            f"{SOURCE_REMOTE}/{BRANCH}", local_commit=state["base_commit"],
-        )
-        merged = git(checkout, "-c", "user.name=Coda Analyst Harness", "-c", "user.email=coda-analyst-harness@local.invalid",
-                     "merge", "--no-ff", "--no-commit", incoming)
-        if merged.returncode:
-            conflicts = analytics_origin_conflict_records(checkout)
-            snapshot = archive_snapshot_conflicts(root, snapshot, checkout, conflicts)
-            raise ValueError(json.dumps({
-                "status": "blocked", "reason": "source-analytics-merge-conflict",
-                "message": "Импорт остановлен в изолированной копии; documents/main не изменена входящим source.",
-                "import_checkout": str(checkout), "request_branch": branch,
-                "conflicts": conflicts, "protective_snapshot": snapshot_summary(root, snapshot),
-                "allowed_next_action": "inspect-source-analytics-conflict",
-                "forbidden_alternatives": ["skip-source-merge", "overwrite-analytics-from-source"],
-                "detail": merged.stderr.strip(),
-            }, ensure_ascii=False))
+        merge_source_with_snapshot(root, documents, analytics_id, checkout, state)
         preflight_import_tree(root, source, checkout, incoming)
         try:
             progress(root, "commit-import-and-hook")
