@@ -539,6 +539,8 @@ def execute_task(runner, task, record):
                 runner.progress(task['id'] + ' / ' + model + ': повторное ревью границ задачи; код и проверки сохранены')
             value['acceptance_protocol'] = task_acceptance.PROTOCOL
             save(path, value)
+        from verification_checkpoint import prepare
+        prepare(runner, value, path)
         if value.get('stage') != 'execute':
             _receipt_valid(value)
         if runner.scopes.refresh(task, value, slot):
@@ -727,6 +729,8 @@ def execute_task(runner, task, record):
                 value['history'][-1]['result'] = 'verified'
             value.update(status='accepted', stage='accepted', accepted_at=time.time(), reviewer_model=reviewer_model)
             persist()
+            from verification_checkpoint import resolve_snapshot_question
+            resolve_snapshot_question(runner, value)
             runner.progress(task['id'] + ': вариант ' + value['model']
                             + ' прошёл проверки и независимое ревью ' + reviewer_model)
             return value
@@ -980,6 +984,8 @@ def execute_task(runner, task, record):
                             continue
                         value['stage'] = 'review' if checked_task['checks'] == task['checks'] else 'checks'
                         persist()
+                        from verification_checkpoint import resolve_snapshot_question
+                        resolve_snapshot_question(runner, value)
                         if value['stage'] == 'checks':
                             continue
                 if value['stage'] == 'review':
@@ -1095,18 +1101,18 @@ def execute_task(runner, task, record):
             except Exception as exc:
                 from dependency_audit import DependencyConfigurationError
                 if isinstance(exc, SnapshotChanged):
-                    from snapshot_recovery import repair_instruction
+                    from verification_checkpoint import prepare
                     report = path.parent / ('snapshot-conflict-' + uuid.uuid4().hex + '.json')
-                    save(report, {**read(exc.report), 'previous_checks': value.get('checks', []),
-                                  'previous_workspace_snapshot': value.get('workspace_snapshot')})
-                    # This is a new unverified checkpoint, never an updated old receipt.
-                    value['checks'] = []
-                    value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
+                    save(report, read(exc.report))
                     value.setdefault('snapshot_conflicts', []).append(str(report))
-                    value['stage'] = 'checks' if getattr(exc, 'stabilized', False) else 'execute'
-                    value.pop('recovered_review', None)
-                    value.pop('review_resolution', None)
-                    fail('snapshot', repair_instruction(report))
+                    try:
+                        prepare(runner, value, path, force=True)
+                    except SnapshotChanged:
+                        # Rewrites/rotations require a coherent recapture, not an
+                        # exemption by filename. Keep the existing bounded budget.
+                        fail('snapshot', 'Source is being rewritten during capture; retry a coherent checkpoint')
+                        continue
+                    work = Path(value['workspace'])
                     continue
                 if isinstance(exc, DependencyConfigurationError):
                     value['stage'] = 'execute'

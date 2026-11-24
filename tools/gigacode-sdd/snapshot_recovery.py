@@ -81,7 +81,7 @@ def recover(runner, folder, scope):
         # Preserve the entire old candidate before invalidating its result.
         saved = candidate.with_name('candidate-before-snapshot-recovery-' + uuid.uuid4().hex + '.json')
         save(saved, value)
-        value.update(stage='execute', status='pending', feedback=repair_instruction(saved))
+        value.update(stage='checks', status='pending', feedback=repair_instruction(saved))
         value['snapshot_recovery'] = {'previous_candidate': str(saved), 'previous_candidate_sha256': digest(saved),
                                       'difference': delta, 'fatal_sha256': fatal_sha}
         for key in ('recovered_review', 'review_resolution', 'review', 'pending_session'):
