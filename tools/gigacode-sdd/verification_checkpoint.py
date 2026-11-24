@@ -35,7 +35,7 @@ def prepare(runner, value, candidate_path, *, force=False):
         return False
     delta = snapshot_difference(before, current)
     if delta['head_changed'] or any(_forbidden(name) for name in delta['paths']):
-        raise Blocked('Protected inputs changed before verification checkpoint')
+        raise Blocked('Saved execution candidate changed: protected inputs before verification checkpoint')
     for name, expected in value.get('evidence_files', {}).items():
         path = Path(name)
         if path.is_symlink() or not path.is_file() or digest(path) != expected:
