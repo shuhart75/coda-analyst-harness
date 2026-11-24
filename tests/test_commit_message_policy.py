@@ -24,6 +24,48 @@ def binding(key='RSCON-123', kind='delivery', quarter='2026-Q4'):
 
 
 class CommitMessagePolicyTests(unittest.TestCase):
+    def test_removed_delivery_keeps_task_with_empty_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(project), *args], text=True)
+            git('init', '-b', 'main')
+            git('config', 'user.name', 'Test')
+            git('config', 'user.email', 'test@example.invalid')
+            root = 'quarters/2026-Q4/features/demo/deliveries/demo'
+            owner = project / root
+            owner.mkdir(parents=True)
+            assoc = owner / 'analysis-task.json'
+            req = owner / 'requirements.md'
+            assoc.write_text(json.dumps(binding()))
+            req.write_text('Requirements')
+            index = project / 'delivery-index.json'
+            entries = {'approvals': {'path': 'quarters/2026-Q2/features/approvals/deliveries/approvals'},
+                       'demo': {'path': root}}
+            index.write_text(json.dumps({'schema_version': 1, 'deliveries': entries}))
+            git('add', '.')
+            git('commit', '-m', 'Initial fixture')
+            assoc.unlink()
+            # Removing a binding while keeping its requirements is forbidden.
+            with self.assertRaisesRegex(ValueError, 'сохранив материалы'):
+                working_keys(project, [root + '/analysis-task.json'])
+            req.unlink()
+            replacement = owner / 'replacement.md'
+            replacement.write_text('New material still needs its binding')
+            with self.assertRaisesRegex(ValueError, 'сохранив материалы'):
+                working_keys(project, [root + '/analysis-task.json', root + '/requirements.md'])
+            replacement.unlink()
+            del entries['demo']
+            index.write_text(json.dumps({'schema_version': 1, 'deliveries': entries}))
+            paths = ['delivery-index.json', root + '/analysis-task.json', root + '/requirements.md']
+            self.assertTrue(owner.is_dir())
+            self.assertEqual(working_keys(project, paths), {'RSCON-123'})
+            git('add', '--', *paths)
+            self.assertEqual(staged_keys(project), {'RSCON-123'})
+            index.unlink()
+            with self.assertRaisesRegex(ValueError, 'Нельзя удалить delivery-index'):
+                working_keys(project, paths)
+
     def test_registry_delta_ignores_unchanged_unbound_deliveries(self):
         old = {'delivery-index.json': json.dumps({'schema_version': 1, 'deliveries': {
             'legacy': {'path': 'features/legacy'}}})}

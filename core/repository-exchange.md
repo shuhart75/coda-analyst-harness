@@ -16,6 +16,14 @@ The first bootstrap prepares all configured roles. After that, the analyst may r
 
 ## Synchronization transaction
 
+`delivery-index.json` is authored analytical content, not a local cache.
+Synchronization carries its accepted changes through the same reviewed Git
+merge as other analytical files. Do not regenerate it from `migration-layout.json`,
+rewrite paths for the current computer, or normalize formatting as a sync repair.
+An ownership error requires checking the actual harness script and the affected
+registry entries, not editing unrelated deliveries or assigning the whole index
+to one task. Preserve a conflicting registry in the isolated import for review.
+
 The command `repository-exchange.py sync` performs one guarded transaction:
 
 1. Acquire the workspace lock so a second exchange cannot run concurrently.
@@ -102,7 +110,7 @@ Retry uses the saved clone, candidate and branch. A failed push retains `prepare
 
 New source commits do not silently replace an open import: `source_has_newer_commit` exposes the difference, and the current request remains bound to its original source commit. New documents/main commits may fast-forward the ordinary checkout while review is pending; they do not authorize accepting the import. Acceptance must retain the import commit as an ancestor. **Source imports require merge-commit acceptance, not squash or rebase.** Tree equality alone does not prove acceptance or preserve shared source history. The verified-return exception above requires archived evidence, not just equality.
 
-A source conflict returns `source-analytics-merge-conflict`, `import_checkout` and a protective snapshot. The conflict remains active only in the isolated checkout; ordinary documents/main retains its accepted content. `inspect-source-analytics-conflict` reports the exact pending base/source pair and saved file versions. Request one path-level analyst decision at a time, resolve only the selected paths in `import_checkout`, create a semantic merge commit there, then repeat sync and complete human PR/MR review. Never resolve the import by editing main.
+A source conflict returns `source-analytics-merge-conflict`, `import_checkout` and a protective snapshot before task binding or JSON parsing. The conflict remains active only in the isolated checkout; ordinary documents/main retains its accepted content. `inspect-source-analytics-conflict` reports the exact pending base/source pair and saved file versions. Request one path-level analyst decision at a time, resolve and stage only the selected paths in `import_checkout`, then repeat sync. Sync checks tasks and creates the semantic merge commit before human PR/MR review. If a task is missing, `bind-import-task` accepts the resolved, fully staged merge for the exact saved base/source pair; unmerged paths, unstaged changes and untracked files block it. Never resolve the import by editing main or create a manual commit to bypass task binding.
 
 `inspect-analytics-origin-conflict` remains available to inspect diverged documents histories and archive file versions without modifying the ordinary checkout. A pre-existing user merge returns `analytics-origin-merge-in-progress`; the harness neither aborts nor restarts it. Any local resolution still requires the separate branch and PR/MR route before sync can accept it into main.
 

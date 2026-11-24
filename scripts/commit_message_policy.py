@@ -247,12 +247,27 @@ def require_preserved_planning_bindings(current, previous) -> None:
 
 def working_keys(project: Path, paths) -> set[str]:
     paths = list(paths)
+    removed = git_output(project, 'diff', 'HEAD', '--name-only', '--diff-filter=D', '-z')
+    if removed is None:
+        raise ValueError('Не удалось проверить удалённые материалы перед сохранением')
+    deleted = set(filter(None, removed.split('\0')))
     def read(path):
         from project_layout import safe_path
         candidate = safe_path(project, path)
         if candidate.is_file():
             return candidate.read_text(encoding='utf-8')
-        if not candidate.parent.exists():
+        if path in deleted:
+            if path == 'delivery-index.json':
+                return None
+            if path == PLANNING_BINDINGS:
+                raise ValueError('Нельзя удалить реестр задач квартального планирования перед сохранением')
+            if path.endswith('/' + BINDING_FILE) or path.endswith('/manifest.json'):
+                tracked = git_output(project, 'ls-files', '--cached', '--others',
+                                     '--exclude-standard', '-z', '--', path.rsplit('/', 1)[0] + '/')
+                if tracked is None:
+                    raise ValueError('Не удалось проверить оставшиеся материалы поставки')
+                if set(filter(None, tracked.split('\0'))) - deleted:
+                    raise ValueError('Нельзя удалить связь с задачей, сохранив материалы поставки: ' + path)
             return git_output(project, 'show', 'HEAD:' + path)
         return None
     if PLANNING_BINDINGS in paths:

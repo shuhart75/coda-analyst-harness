@@ -17,6 +17,12 @@ class ReceiverTaskSyncTests(unittest.TestCase):
         return json.loads(result.stdout)['analytics_exchange']['source_import']
 
     def test_request_blocks_push_then_binding_resumes_same_import(self):
+        self.request_binding_roundtrip()
+
+    def test_conflicted_registry_resumes_binding_after_staged_resolution(self):
+        self.request_binding_roundtrip(conflict=True)
+
+    def request_binding_roundtrip(self, conflict=False):
         r = request()
         base = 'quarters/2026-Q4/features/demo/deliveries/demo'
         folder = self.source / base
@@ -30,6 +36,24 @@ class ReceiverTaskSyncTests(unittest.TestCase):
         self.git(self.source, 'commit', '-m', 'RSCON-123: Request receiver task')
         self.git(self.source, 'push', 'origin', 'main')
         before = self.git(self.documents, 'rev-parse', 'HEAD')
+        if conflict:
+            (self.documents / 'delivery-index.json').write_text(json.dumps(
+                {'schema_version': 1, 'deliveries': {}}) + '\n')
+            self.git(self.documents, 'add', 'delivery-index.json')
+            self.git(self.documents, 'commit', '-m', 'RSCON-123: Independent registry')
+            self.git(self.documents, 'push', 'origin', 'main')
+            before = self.git(self.documents, 'rev-parse', 'HEAD')
+            failed = fixture.run('python3', str(fixture.ROOT / 'scripts/workspace.py'),
+                                '--root', str(self.workspace), 'sync', env=self.environment)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn('source-analytics-merge-conflict', failed.stdout)
+            self.assertNotIn('Expecting property name', failed.stdout)
+            state = json.loads((self.workspace / '.workspace-state/source-import.json').read_text())
+            checkout = Path(state['checkout'])
+            self.assertTrue((checkout / '.git/MERGE_HEAD').exists())
+            self.assertEqual(self.git(self.documents, 'rev-parse', 'HEAD'), before)
+            (checkout / 'delivery-index.json').write_text(json.dumps(index) + '\n')
+            self.git(checkout, 'add', 'delivery-index.json')
         first = self.sync()
         self.assertEqual(first['status'], 'awaiting-analysis-task')
         self.assertEqual(first['next_action'], 'resolve-commit-task')
@@ -57,6 +81,12 @@ class ReceiverTaskSyncTests(unittest.TestCase):
                 '--expected-source', source, '--expected-base', first['base_commit'], env=self.environment)
         self.assertNotEqual(bind('0' * 40).returncode, 0)
         self.assertFalse(Path(first['task_decisions_file']).exists())
+        if conflict:
+            registry = checkout / 'delivery-index.json'
+            saved_registry = registry.read_bytes()
+            registry.write_text('Unstaged change')
+            self.assertNotEqual(bind().returncode, 0)
+            registry.write_bytes(saved_registry)
         result = bind()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         saved = Path(first['task_decisions_file']).read_bytes()

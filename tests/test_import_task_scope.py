@@ -62,12 +62,15 @@ class ImportTaskScopeTests(unittest.TestCase):
         self.git('commit', '-m', message)
 
     def test_diverged_return_requires_only_net_quarter_task(self):
+        registry_bytes = (self.repo / 'delivery-index.json').read_bytes()
         self.assertNotEqual(self.common, self.base)
         source_paths = self.git('diff', '--name-only', self.common, self.incoming)
         self.assertIn('delivery-index.json', source_paths)
         keys, files = EXCHANGE.import_task_context(self.repo, self.state)
         self.assertEqual(keys, {'RSCON-8222'})
         self.assertEqual(files, {})
+        self.assertEqual(EXCHANGE.import_task_context(self.repo, self.state)[0], keys)
+        self.assertEqual((self.repo / 'delivery-index.json').read_bytes(), registry_bytes)
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.base)
         self.assertEqual(self.git('status', '--porcelain'), '')
         self.git('merge', '--no-ff', '--no-commit', self.incoming)
@@ -75,12 +78,14 @@ class ImportTaskScopeTests(unittest.TestCase):
         self.assertEqual(EXCHANGE.import_task_context(self.repo, self.state)[0], keys)
         self.git('commit', '-m', 'RSCON-8222: Import planning')
         candidate = self.git('rev-parse', 'HEAD')
+        self.assertEqual((self.repo / 'delivery-index.json').read_bytes(), registry_bytes)
         from commit_message_policy import keys_for_paths, git_output
         paths = self.git('diff', '--name-only', self.base, candidate).splitlines()
         self.assertEqual(keys_for_paths(paths, lambda path: git_output(self.repo, 'show', candidate + ':' + path)), keys)
 
     def test_real_requirement_change_still_needs_delivery_task(self):
         self.git('switch', 'source')
+        self.git('merge', '--no-edit', 'main')
         self.put(self.owner + '/requirements.md', 'Changed requirements\n')
         self.commit('Change real delivery scope')
         self.state['source_commit'] = self.git('rev-parse', 'HEAD')
