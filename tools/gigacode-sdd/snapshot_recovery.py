@@ -50,9 +50,14 @@ def recover(runner, folder, scope):
                 or not work.resolve().is_relative_to((runner.root / 'workers').resolve())):
             raise Blocked('Snapshot recovery workspace is outside managed workers')
         roots.append(work)
-        if (value.get('snapshot_recovery') or {}).get('fatal_sha256') == fatal_sha:
+        resumed = (value.get('snapshot_recovery') or {}).get('fatal_sha256') == fatal_sha
+        if resumed:
+            saved = Path(value['snapshot_recovery']['previous_candidate'])
+            if (saved.parent != candidate.parent or saved.is_symlink() or not saved.is_file()
+                    or digest(saved) != value['snapshot_recovery'].get('previous_candidate_sha256')):
+                raise Blocked('Snapshot recovery archive changed')
+            value = read(saved)
             already_recovered = True
-            continue
         if value.get('stage') != 'review' or value.get('status') == 'accepted':
             continue
         before = value.get('workspace_snapshot')
@@ -66,7 +71,8 @@ def recover(runner, folder, scope):
             evidence = Path(name)
             if evidence.is_symlink() or not evidence.is_file() or digest(evidence) != expected:
                 raise Blocked('Saved controller evidence changed: ' + name)
-        updates.append((candidate, value, delta))
+        if not resumed:
+            updates.append((candidate, value, delta))
     if not updates and not already_recovered:
         return False
     runner.guard()
@@ -76,7 +82,8 @@ def recover(runner, folder, scope):
         saved = candidate.with_name('candidate-before-snapshot-recovery-' + uuid.uuid4().hex + '.json')
         save(saved, value)
         value.update(stage='execute', status='pending', feedback=repair_instruction(saved))
-        value['snapshot_recovery'] = {'previous_candidate': str(saved), 'difference': delta, 'fatal_sha256': fatal_sha}
+        value['snapshot_recovery'] = {'previous_candidate': str(saved), 'previous_candidate_sha256': digest(saved),
+                                      'difference': delta, 'fatal_sha256': fatal_sha}
         for key in ('recovered_review', 'review_resolution', 'review', 'pending_session'):
             value.pop(key, None)
         save(candidate, value)

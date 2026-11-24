@@ -1097,7 +1097,11 @@ def execute_task(runner, task, record):
                 if isinstance(exc, SnapshotChanged):
                     from snapshot_recovery import repair_instruction
                     report = path.parent / ('snapshot-conflict-' + uuid.uuid4().hex + '.json')
-                    save(report, read(exc.report))
+                    save(report, {**read(exc.report), 'previous_checks': value.get('checks', []),
+                                  'previous_workspace_snapshot': value.get('workspace_snapshot')})
+                    # This is a new unverified checkpoint, never an updated old receipt.
+                    value['checks'] = []
+                    value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
                     value.setdefault('snapshot_conflicts', []).append(str(report))
                     value['stage'] = 'checks' if getattr(exc, 'stabilized', False) else 'execute'
                     value.pop('recovered_review', None)
