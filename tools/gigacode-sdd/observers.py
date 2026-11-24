@@ -4,7 +4,7 @@ Observers receive immutable telemetry packets, never product workspaces. A
 capability probe must advertise an empty tool registry before observations run.
 This is a CLI capability check, not an operating-system sandbox.
 """
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -14,7 +14,7 @@ import time
 import uuid
 
 from prior_context import redact
-from progress_io import write_projection
+from progress_io import write_projection, read_projection
 from transport import run_session
 
 ROLES = {
@@ -237,8 +237,18 @@ class Manager:
         self.last_hash = None
         self.last_run = 0
         self.retry_pending = False
+        saved_health = read_projection(self.root/'health.json', []) if (self.root/'health.json').is_file() else {}
+        self.health = {k: v for k, v in saved_health.items() if k in ROLES and isinstance(v, dict)} if isinstance(saved_health, dict) else {}
+        self.health_lock = threading.Lock()
+
+    def health_update(self, role, **changes):
+        with self.health_lock:
+            self.health.setdefault(role, {}).update(changes)
+            write_projection(self.root/'health.json', self.health)
 
     def __enter__(self):
+        for role in self.health:
+            self.health_update(role, phase='waiting', next_attempt_at=None)
         write_projection(self.root/'latest.json', {'snapshot_at': time.time(), 'status': 'unknown',
             'summary': 'Новых наблюдений после запуска пока нет.', 'advisory_only': True})
         if self.runner.cfg.get('observers_enabled', True):
@@ -330,6 +340,7 @@ class Manager:
             'context': {'fileName': 'OBSERVER-CONTEXT.md'},
         }):
             raise OSError('Cannot write isolated observer profile')
+        self.health_update(role, phase='probe' if probe else 'assessment', session_started_at=time.time())
         label = LABELS[role] + (' · проверка режима наблюдения' if probe else ' · оценка снимка')
         log = self.runner.root/'logs'/('observer-'+role+'-'+uuid.uuid4().hex[:12])
         with self.runner.activity(label, title=label, timeout=180,
@@ -338,7 +349,7 @@ class Manager:
                 def is_set(inner):
                     return self.stop.is_set() or self.runner.stop.is_set()
             result = run_session([*self.runner.cfg['cli'], '--model', model], folder, prompt, log,
-                approval_mode='plan', timeout_seconds=180, idle_timeout_seconds=90,
+                approval_mode='default', timeout_seconds=180, idle_timeout_seconds=90,
                 env=self.runner.env, stop_event=Cancellation(), cleanup_guard=self.cleanup_guard,
                 activity_callback=lambda data: self.runner._display.telemetry(token, data))
         write_projection(log/'observer-result.json', result)
@@ -387,22 +398,44 @@ class Manager:
         snapshot = self.root/'snapshots'/(name+'.json')
         if not write_projection(snapshot, value):
             raise OSError('Cannot persist observation snapshot')
+        for role, model in zip(ROLES, models):
+            self.health_update(role, model=model, attempt=self.health.get(role, {}).get('attempt', 0)+1,
+                               phase='starting', started_at=time.time(), next_attempt_at=None)
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = {role: pool.submit(self.evaluate, role, model, value)
                        for role, model in zip(ROLES, models)}
             results = {}
-            for role, future in futures.items():
+            roles = {future: role for role, future in futures.items()}
+            for future in as_completed(roles):
+                role = roles[future]
                 try:
                     results[role] = {**future.result(), 'model': models[list(ROLES).index(role)]}
                 except Exception as exc:
                     results[role] = {'status': 'unavailable', 'summary': 'ошибка сессии',
                         'errors': [type(exc).__name__ + ': ' + str(exc)],
                         'model': models[list(ROLES).index(role)]}
-                if results[role]['status'] == 'unavailable':
-                    self.probed.discard(results[role]['model'])
+                failed = results[role]['status'] == 'unavailable'
+                updates = {'phase': 'waiting', 'finished_at': time.time(),
+                           'failure': results[role].get('summary') if failed else None,
+                           'consecutive_failures': self.health[role].get('consecutive_failures', 0)+1 if failed else 0}
+                if not failed:
+                    updates['last_success_at'] = time.time()
+                self.health_update(role, **updates)
+                # Publish a completed peer immediately; an unfinished session is
+                # not evidence and cannot hide the available assessment.
+                pending = {r: {'status': 'unavailable', 'summary': 'оценка ещё выполняется',
+                              'model': models[list(ROLES).index(r)]} for r in ROLES if r not in results}
+                status, summary = combined({**results, **pending})
+                write_projection(self.root/'latest.json', {
+                    'snapshot_at': value['snapshot_at'], 'status': status, 'summary': summary,
+                    'results': dict(results), 'partial': bool(pending) or failed,
+                    'in_progress': bool(pending), 'advisory_only': True,
+                    'snapshot': str(snapshot)})
         status, summary = combined(results)
         errors = {role: result for role, result in results.items() if result['status'] == 'unavailable'}
         self.retry_pending = bool(errors)
+        for role in ROLES:
+            self.health_update(role, next_attempt_at=time.time()+180 if errors else None)
         projection = {'snapshot_at': value['snapshot_at'], 'completed_at': time.time(),
                       'status': status, 'summary': summary, 'results': results,
                       'partial': len(errors) == 1, 'audit_errors': errors, 'retry_pending': self.retry_pending,

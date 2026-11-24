@@ -113,6 +113,7 @@ def snapshot(root, state=None):
         observation['stale'] = time.time()-captured > 900
     return {'service_stop': service_stop, 'session_attempts': attempts, 'jobs': config.get('jobs'),
             'observation': observation,
+            'observer_health': read_projection(root/'observer/health.json', []) if (root/'observer/health.json').is_file() else {},
             'operations': runtime.get('operations', []), 'telemetry_stale': stale,
             'telemetry_incomplete': bool(problems),
             'status': state.get('status'), 'tasks': rows,
@@ -282,6 +283,26 @@ def observation_lines(value):
         lines.append('Ошибка аудита: ' + failed + '.')
         if observation.get('retry_pending') and not stopped:
             lines.append('Следующее задание аудиторам запустится автоматически.')
+    health = value.get('observer_health') or {}
+    for role in ('progress', 'scope'):
+        item = health.get(role, {})
+        if not isinstance(item, dict) or not item:
+            continue
+        def clock(stamp):
+            try:
+                return time.strftime('%H:%M:%S', time.localtime(stamp)) if isinstance(stamp, (int, float)) else 'ещё не было'
+            except (ValueError, OverflowError, OSError):
+                return 'время неизвестно'
+        phase = {'starting': 'запускается', 'probe': 'проверка режима',
+                 'assessment': 'оценивает снимок', 'waiting': 'ожидание следующего снимка'}.get(item.get('phase'), 'состояние неизвестно')
+        line = ('Аудитор ' + model_label(item.get('model')) + ': попытка ' + str(item.get('attempt', '?'))
+                + '; ' + ('исполнение остановлено' if stopped else phase)
+                + '; последний успех ' + clock(item.get('last_success_at')))
+        if item.get('failure'):
+            line += '; ' + (sentence(item['failure']) or 'ошибка аудита')
+        if item.get('next_attempt_at') and not stopped:
+            line += '; повтор не раньше ' + clock(item['next_attempt_at'])
+        lines.append(line + '.')
     return lines
 
 

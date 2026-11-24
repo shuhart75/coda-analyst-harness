@@ -35,5 +35,6 @@ def classify(result, role):
         action = 'check' if salvage or execution_result_usable(result) else 'retry'
     else:
         action = ('validate' if not incomplete and
-                  (review_diagnostic_errors(result) is not None) else 'retry')
+                  (review_diagnostic_errors(result) is not None) else
+                  'validate-feedback' if not incomplete and execution_result_usable(result) else 'retry')
     return {'action': action, 'cause': cause, 'incomplete': bool(incomplete)}

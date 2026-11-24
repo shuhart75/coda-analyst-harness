@@ -8,7 +8,7 @@ def read_response(result, model=None):
     from session_outcome import classify
     from planning_cycle import verify_model
     outcome = classify(result, 'review')
-    if outcome['action'] != 'validate':
+    if outcome['action'] not in ('validate', 'validate-feedback'):
         raise RetryableSessionError('Reviewer session failed: ' + outcome['cause'], result, cause=outcome['cause'])
     if model:
         verify_model(result, model)
@@ -16,7 +16,10 @@ def read_response(result, model=None):
         report = parse_json(result['text'])
         if not isinstance(report, dict):
             raise ValueError('Review response must be an object')
-        return normalize(report)
+        report = normalize(report)
+        if outcome['action'] == 'validate-feedback' and report.get('verdict') != 'changes':
+            raise RetryableSessionError('Unresolved tool errors permit negative feedback only', result, cause='tool-errors')
+        return report
     except (ValueError, TypeError, Blocked) as exc:
         raise RetryableSessionError('Malformed reviewer JSON: ' + str(exc), result) from exc
 

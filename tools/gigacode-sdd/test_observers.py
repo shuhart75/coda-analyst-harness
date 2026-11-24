@@ -194,7 +194,7 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(call['profile']['mcp']['allowed'], [])
             self.assertTrue(call['profile']['disableAllHooks'])
             self.assertEqual(call['profile']['context']['fileName'], 'OBSERVER-CONTEXT.md')
-            self.assertEqual(call['kwargs']['approval_mode'], 'plan')
+            self.assertEqual(call['kwargs']['approval_mode'], 'default')
             self.assertFalse(call['kwargs']['stop_event'].is_set())
             self.assertIsNot(call['kwargs']['stop_event'], self.runner.stop)
         latest = json.loads((self.manager.root / 'latest.json').read_text())
@@ -205,6 +205,29 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(self.runner.state['tasks']['task']['status'], 'running')
         self.assertEqual(len(self.activities), 4)
         self.assertTrue(all(a[1]['metadata']['purpose'] == 'observation' for a in self.activities))
+
+    def test_peer_is_published_before_slow_observer_finishes(self):
+        def evaluate(role, model, value):
+            if role == 'scope':
+                import time
+                until = time.monotonic()+3
+                while time.monotonic() < until:
+                    path = self.manager.root/'latest.json'
+                    if path.exists():
+                        latest = json.loads(path.read_text())
+                        if latest.get('results', {}).get('progress', {}).get('status') == 'waiting':
+                            self.assertTrue(latest['in_progress'])
+                            return {'status': 'unavailable', 'summary': 'timeout'}
+                    time.sleep(.01)
+                raise AssertionError('Completed peer was hidden')
+            return {'status': 'waiting', 'summary': 'Tests running'}
+        with patch.object(self.manager, 'evaluate', side_effect=evaluate):
+            self.manager.observe(self.packet())
+        health = json.loads((self.manager.root/'health.json').read_text())
+        self.assertEqual(health['scope']['failure'], 'timeout')
+        self.assertEqual(health['scope']['attempt'], 1)
+        self.assertGreater(health['scope']['next_attempt_at'], health['scope']['finished_at'])
+        self.assertIn('last_success_at', health['progress'])
 
     def test_wrong_reported_model_requests_next_round_without_changing_acceptance(self):
         transport, calls = self.fake_transport(reported_model='unexpected-model')
@@ -275,6 +298,7 @@ class ObserverTests(unittest.TestCase):
                 self.assertEqual(set(failed['audit_errors']), {failed_role})
                 self.assertTrue(failed['audit_errors'][failed_role]['timed_out'])
                 self.assertTrue(manager.retry_pending)
+                self.assertEqual(manager.probed, {'model-a', 'model-b'})
                 second = copy.deepcopy(first)
                 second['snapshot_at'] += 180
                 second['done'] = 1
