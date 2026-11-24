@@ -88,6 +88,45 @@ class ExecutionPortfolioTests(unittest.TestCase):
     def records(self):
         return [read(p) for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')]
 
+    def test_review_copy_race_repairs_candidate_without_fatal(self):
+        from workspace import SnapshotChanged
+        self.primary_only = True
+        calls = []
+        def copying(runner, work, task):
+            calls.append(work)
+            if len(calls) == 1:
+                report = runner.root / 'copy-conflict.json'
+                save(report, {'usable': False, 'difference': {'paths': ['backend/value.txt']}})
+                raise SnapshotChanged(str(report))
+            return _review_copy(runner, work, task)
+        with patch('execution_cycle._review_copy', side_effect=copying):
+            accepted = self.run_task()
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual(self.check_count, 2)
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn('snapshot', [item['kind'] for item in accepted['history']])
+        self.assertEqual(list((self.runner.root/'execution-cycles').glob('*/fatal.json')), [])
+        self.assertTrue(Path(accepted['snapshot_conflicts'][0]).is_file())
+
+    def test_settled_review_copy_rechecks_without_reexecuting_model(self):
+        from workspace import SnapshotChanged
+        self.primary_only = True
+        calls = []
+        def copying(runner, work, task):
+            calls.append(work)
+            if len(calls) == 1:
+                report = runner.root / 'copy-conflict.json'
+                save(report, {'usable': False, 'difference': {'paths': ['backend/value.txt']}})
+                error = SnapshotChanged(str(report))
+                error.stabilized = True
+                raise error
+            return _review_copy(runner, work, task)
+        with patch('execution_cycle._review_copy', side_effect=copying):
+            accepted = self.run_task()
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual(self.check_count, 2)
+        self.assertEqual(len(self.calls), 1)
+
     def test_resume_execution_without_snapshot_preserves_work_and_rechecks(self):
         self.resume_incomplete_result(json.dumps({'operator_question': {
             'topic': 'stand', 'question': 'Start the stand?'}}))

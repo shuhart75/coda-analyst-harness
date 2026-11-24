@@ -21,7 +21,7 @@ import uuid
 import review_resolution
 from dynamic_scope import ScopeWait
 
-from workspace import clone_snapshot, export_patch, snapshot
+from workspace import clone_snapshot, export_patch, snapshot, SnapshotChanged
 from session_outcome import classify as session_outcome
 
 MODELS = ('DeepSeek-V4.1-Flash-1017', 'GLM-5.3-Flash')
@@ -111,6 +111,8 @@ def _diagnosis(kind, detail):
                      'do not repeat already completed edits blindly.',
         'model': 'Model identity was not confirmed. Use this exact configured model and do not delegate '
                  'implementation to another model or claim completion without terminal evidence.',
+        'snapshot': 'The review input changed while copying. Prepare consistent source and evidence; '
+                    'keep all requirements and rerun checks before review.',
         'checks': 'The controller acceptance checks failed. Use their exact commands and logs to locate '
                   'the defect; keep check commands, assertions and required coverage unchanged.',
         'review': 'The independent reviewer found an implementation gap. Address the cited requirement '
@@ -259,7 +261,13 @@ def _adjudicated_report(root, task, original, report):
 def _review_copy(runner, work, task):
     from controller import save
     root = runner.root / 'reviews' / uuid.uuid4().hex
-    clone_snapshot(work, root, include_dirty=True)
+    copied = clone_snapshot(work, root, include_dirty=True, attempts=3)
+    if copied['retry_reports']:
+        # The settled copy differs from the one whose checks were recorded.
+        # Never attach old green checks to a new version of the workspace.
+        error = SnapshotChanged(copied['retry_reports'][-1])
+        error.stabilized = True
+        raise error
     target = root / '.review-input'
     target.mkdir(mode=0o700)
     shutil.copytree(runner.root / 'input', target / 'packet')
@@ -472,6 +480,8 @@ def execute_task(runner, task, record):
     folder = runner.root / 'execution-cycles' / scope
     folder.mkdir(parents=True, exist_ok=True)
     fatal_path = folder/'fatal.json'
+    from snapshot_recovery import recover
+    recover(runner, folder, scope)
     runner.scopes.recover_fatal(folder)
     from dependency_recovery import recover_static_gate
     recover_static_gate(runner, folder, scope)
@@ -1084,6 +1094,20 @@ def execute_task(runner, task, record):
                 interrupted()
             except Exception as exc:
                 from dependency_audit import DependencyConfigurationError
+                if isinstance(exc, SnapshotChanged):
+                    from snapshot_recovery import repair_instruction
+                    report = path.parent / ('snapshot-conflict-' + uuid.uuid4().hex + '.json')
+                    save(report, {**read(exc.report), 'previous_checks': value.get('checks', []),
+                                  'previous_workspace_snapshot': value.get('workspace_snapshot')})
+                    # This is a new unverified checkpoint, never an updated old receipt.
+                    value['checks'] = []
+                    value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
+                    value.setdefault('snapshot_conflicts', []).append(str(report))
+                    value['stage'] = 'checks' if getattr(exc, 'stabilized', False) else 'execute'
+                    value.pop('recovered_review', None)
+                    value.pop('review_resolution', None)
+                    fail('snapshot', repair_instruction(report))
+                    continue
                 if isinstance(exc, DependencyConfigurationError):
                     value['stage'] = 'execute'
                     value['feedback'] = {'dependency_configuration': exc.report['blocking'],

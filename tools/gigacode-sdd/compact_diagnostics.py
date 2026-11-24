@@ -489,7 +489,7 @@ def collect_compact(config, destination=None, error=None):
         groups.sort(key=lambda group: (0 if group in str(error) else 1))
         selected_groups = groups[:MAX_CYCLES]
         queues = [[p for p in ordered if p.relative_to(base).parts[0] == group
-                   and (p.name.startswith('attempt-') or p.name in
+                   and (p.name.startswith(('attempt-', 'snapshot-conflict-')) or p.name in
                         ('candidate.json', 'fatal.json', 'operational.json', 'operational-recovery.json', 'recovery-attempts.json',
                          'selection.json', 'generation.json', 'plan.json',
                          'failure.json', 'comparison.json'))] for group in selected_groups]
