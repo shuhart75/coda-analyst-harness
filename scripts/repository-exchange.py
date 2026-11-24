@@ -49,6 +49,7 @@ ALLOWED_CONTENT_ROOTS = frozenset({
     "work-task-bindings.json",
     "migration-layout.json",
     "releases",
+    "requirements-exchange",
 })
 FORBIDDEN_LOCAL_COMPONENTS = frozenset({
     ".codex",
@@ -250,6 +251,9 @@ def analytics_content_violations(
     for path in tracked_paths(repository, commit):
         parts = Path(path).parts
         root = parts[0]
+        if Path(path).suffix.lower() == ".zip":
+            violations.append({"path": path, "reason": "ZIP запрещён корпоративными правилами; передавай обычные файлы"})
+            continue
         if allow_legacy_harness and forbidden_content_path(path):
             continue
         if root not in ALLOWED_CONTENT_ROOTS:

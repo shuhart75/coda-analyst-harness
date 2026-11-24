@@ -934,6 +934,23 @@ class CodaWorkspaceTests(unittest.TestCase):
                 remote_before,
             )
 
+    def test_sync_imports_plain_documents_exchange_materials(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workspace, source_work, _, environment = self.prepare_workspace(Path(temp))
+            material = source_work / "requirements-exchange/preparation.md"
+            material.parent.mkdir(parents=True)
+            material.write_text("# Preparation only, not a published revision\n", encoding="utf-8")
+            for args in (("add", "--", "requirements-exchange/preparation.md"),
+                         ("commit", "-m", "RSCON-123: prepare documents exchange"),
+                         ("push", "origin", "main")):
+                result = run("git", "-C", str(source_work), *args)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = run(sys.executable, str(ROOT / "scripts/repository-exchange.py"),
+                         "--root", str(workspace), "sync", "--no-push", env=environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("source-import-pending", result.stdout)
+            self.assertFalse((workspace / "documents/requirements-exchange/preparation.md").exists())
+
     def test_sync_blocks_invalid_paths_introduced_by_source_before_merge(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
