@@ -172,8 +172,10 @@ class ReviewDenialTests(unittest.TestCase):
                 self.assertEqual(report['verdict'], 'changes')
                 self.assertIn('Tool run_shell_command (shell) returned an error', report['tool_warnings'])
                 result['terminal_result'] = False
-            with self.assertRaises(RetryableSessionError):
+            with self.assertRaises(RetryableSessionError) as caught:
                 self.runner.validate_review_result(self.work, result, self.task['requirements'], 'be-review', MODELS[1])
+            if verdict != 'changes':
+                self.assertEqual(caught.exception.cause, 'tool-errors')
 
     def test_object_findings_keep_text_without_protocol_retry(self):
         self.report_override = {'verdict': 'changes', 'findings': [{'id': 'issue-1', 'text': 'Fix **значние**'}]}

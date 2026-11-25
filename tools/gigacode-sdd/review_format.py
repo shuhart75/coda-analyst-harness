@@ -17,11 +17,11 @@ def read_response(result, model=None):
         if not isinstance(report, dict):
             raise ValueError('Review response must be an object')
         report = normalize(report)
-        if outcome['action'] == 'validate-feedback' and report.get('verdict') != 'changes':
-            raise RetryableSessionError('Unresolved tool errors permit negative feedback only', result, cause='tool-errors')
-        return report
     except (ValueError, TypeError, Blocked) as exc:
         raise RetryableSessionError('Malformed reviewer JSON: ' + str(exc), result) from exc
+    if outcome['action'] == 'validate-feedback' and report.get('verdict') != 'changes':
+        raise RetryableSessionError('Unresolved tool errors permit negative feedback only', result, cause='tool-errors')
+    return report
 
 
 def label(value):

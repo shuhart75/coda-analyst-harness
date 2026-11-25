@@ -47,11 +47,22 @@ def validate_deferred(plan, task, items):
     if not isinstance(items, list):
         raise ValueError('Deferred evidence must be a list')
     later = descendants(plan, task['id']) if task['id'] != 'integration' else set()
-    for item in items:
-        if (not isinstance(item, dict) or item.get('requirement') not in task['requirements']
-                or item.get('owner') not in later
-                or not all(isinstance(item.get(k), str) and item[k].strip() for k in ('evidence', 'reason'))):
-            raise ValueError('Deferred proof needs an assigned requirement, downstream owner and explanation')
+    owners = {t['id']: t for t in plan['tasks']}
+    for index, item in enumerate(items):
+        prefix = f'Deferred evidence item {index + 1}: '
+        if not isinstance(item, dict):
+            raise ValueError(prefix + 'expected an object')
+        requirement, owner = item.get('requirement'), item.get('owner')
+        if not isinstance(owner, str) or owner not in later:
+            raise ValueError(prefix + 'owner must be a downstream task: ' + ', '.join(sorted(later)))
+        # A reference to an obligation already assigned to the named downstream
+        # owner does not transfer new scope or waive any current deliverable.
+        if (requirement not in task['requirements']
+                and requirement not in owners[owner].get('requirements', [])):
+            raise ValueError(prefix + str(requirement) + ' is assigned to neither this task nor owner ' + owner)
+        missing = [k for k in ('evidence', 'reason') if not isinstance(item.get(k), str) or not item[k].strip()]
+        if missing:
+            raise ValueError(prefix + 'missing nonempty fields: ' + ', '.join(missing))
     return items
 
 
