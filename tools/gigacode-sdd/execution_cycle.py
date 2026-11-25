@@ -100,6 +100,11 @@ def _receipt_valid(record):
         raise Blocked('Saved execution candidate has no completed workspace receipt')
     if snapshot(record['workspace'], normalize_settings=True) != record['workspace_snapshot']:
         raise Blocked('Saved execution candidate changed outside its recorded step')
+    _receipt_evidence_valid(record)
+
+
+def _receipt_evidence_valid(record):
+    from controller import Blocked, digest
     for path, expected in record.get('evidence_files', {}).items():
         if not Path(path).is_file() or digest(path) != expected:
             raise Blocked('Saved execution evidence changed: ' + path)
@@ -120,8 +125,7 @@ def _reconcile_candidate(runner, value, slot):
     if current == previous:
         return False
     # Receipts are immutable even when working files are legitimately mutable.
-    probe = dict(value, workspace_snapshot=current)
-    _receipt_valid(probe)
+    _receipt_evidence_valid(value)
     changed = sorted(p for p in set(previous['files']) | set(current['files'])
                      if previous['files'].get(p) != current['files'].get(p))
     if current['head'] != previous['head'] or any(_forbidden(p) for p in changed):
