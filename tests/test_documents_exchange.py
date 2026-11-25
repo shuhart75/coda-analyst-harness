@@ -282,3 +282,85 @@ class DocumentsExchangeTests(unittest.TestCase):
         self.assertEqual(entries[0]['returns_contract_version'],2)
         self.assertEqual(entries[1]['returns_contract_version'],3)
         self.assertEqual((self.code/'requirements-exchange/demo/revisions/001/requirements.md').read_bytes(),original)
+
+    def test_moved_delivery_migration_preserves_history_and_accepts_legacy_wording(self):
+        import layoutctl
+        import project_layout
+        self.git(self.project, 'switch', '-c', 'feature/layout')
+        assignments = {'demo': {'feature_id': 'demo', 'delivery_id': 'demo', 'quarter': '2026-Q4'}}
+        layoutctl.apply(self.project, layoutctl.plan(self.project, assignments), True)
+        self.feature = project_layout.feature_root(self.project, 'demo')
+        self.git(self.project, 'add', '--all'); self.git(self.project, 'commit', '-m', 'Register layout')
+        fixtures.SddExchangeTests.enable_code_exchange(self)
+        self.authorize()
+        old = self.cli(fixtures.legacy.SCRIPT, 'prepare', self.project, 'demo', '--analyst', 'owner')
+        remote = self.remote; self.remote = self.code_remote
+        self.accept(old); self.remote = remote
+        old = self.cli(fixtures.legacy.SCRIPT, 'prepare', self.project, 'demo', '--analyst', 'owner')
+        self.state('mark-published', '--revision', '1', '--manifest', old['manifest'], '--destination-role', 'code')
+        self.git(self.code, 'pull', '--ff-only')
+        packet = self.code / 'requirements-exchange/demo'
+        manifest_path = packet / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        historical_binding = manifest['delivery_binding']
+        tasks = manifest['requested_returns']['tasks']
+        tasks['jira_key'] = tasks.pop('sbertrek_key')
+        tasks['meaning'] = 'Historical human wording'
+        manifest_path.write_text(json.dumps(manifest))
+        self.git(self.code, 'add', '--all'); self.git(self.code, 'commit', '-m', 'Historical wording')
+        self.git(self.code, 'push', 'origin', 'main')
+        original = (packet / 'revisions/001/requirements.md').read_bytes()
+        with (self.code / '.git/info/exclude').open('a') as stream:
+            stream.write('\n.DS_Store\n')
+        (packet / '.DS_Store').write_bytes(b'Finder metadata')
+        index = self.project / 'delivery-index.json'
+        value = json.loads(index.read_text())
+        old_path = value['deliveries']['demo']['path']
+        new_path = old_path.replace('/features/demo/', '/features/renamed/')
+        value['deliveries']['demo'].update(feature_id='renamed', path=new_path)
+        index.write_text(json.dumps(value))
+        (self.project / new_path).parent.mkdir(parents=True)
+        (self.project / old_path).rename(self.project / new_path)
+        self.feature = self.project / new_path
+        self.git(self.project, 'add', '--all'); self.git(self.project, 'commit', '-m', 'Move delivery owner')
+        self.authorize()
+        self.assertIn('documents-migration', self.prepare(success=False))
+        self.write_context()
+        migrated = self.cli(SCRIPT, 'migrate-code-exchange', self.project, 'demo', '--analyst-confirmed', '--reason', 'Preserve accepted history')
+        self.assertEqual(migrated['status'], 'copied')
+        copied = self.project / 'requirements-exchange/demo'
+        self.assertFalse((copied / '.DS_Store').exists())
+        self.assertEqual((copied / 'revisions/001/requirements.md').read_bytes(), original)
+        self.assertIn('jira_key', json.loads((copied/'manifest.json').read_text())['requested_returns']['tasks'])
+        self.git(self.project, 'add', '--all'); self.git(self.project, 'commit', '-m', 'Preserve migration')
+        self.git(self.project, 'push', 'origin', 'HEAD:main')
+        self.authorize()
+        new = self.prepare()
+        manifest = self.manifest(new)
+        self.assertEqual(new['revision'], 2)
+        self.assertEqual(manifest['delivery_binding']['feature_id'], 'renamed')
+        self.assertEqual(manifest['revisions'][0]['delivery_binding'], historical_binding)
+        self.assertEqual(manifest['revisions'][1]['delivery_binding']['feature_id'], 'renamed')
+        self.assertEqual(manifest['requested_returns'], {'required': False, 'results': 'analyst-owned-evidence-review-v1'})
+        self.assertEqual((packet / 'revisions/001/requirements.md').read_bytes(), original)
+
+    def test_status_distinguishes_publication_registration_and_new_authoring(self):
+        absent = self.cli(SCRIPT, 'status', self.project, 'demo', '--refresh')
+        self.assertEqual(absent['status'], 'not-published')
+        result = self.publish()
+        pending = self.cli(SCRIPT, 'status', self.project, 'demo', '--refresh')
+        self.assertEqual(pending['publication'], 'accepted')
+        self.assertEqual(pending['registration'], 'local-only')
+        self.git(self.project, 'push', 'origin', 'HEAD:main')
+        status = self.cli(SCRIPT, 'status', self.project, 'demo', '--refresh')
+        self.assertEqual(status['status'], 'published')
+        self.assertEqual(status['registration'], 'accepted')
+        self.assertTrue(status['current_requirements_match'])
+        self.assertTrue(status['current_sdd_match'])
+        self.assertEqual(status['tracker_updates'], 'not-checked')
+        source = self.feature / 'requirements.md'
+        source.write_text(source.read_text() + '\nNew authoring after delivery.\n')
+        changed = self.cli(SCRIPT, 'status', self.project, 'demo')
+        self.assertEqual(changed['status'], 'published')
+        self.assertFalse(changed['current_requirements_match'])
+        self.assertEqual(changed['evidence_source'], 'cached-origin/main')

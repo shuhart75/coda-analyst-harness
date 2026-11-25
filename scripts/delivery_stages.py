@@ -164,6 +164,10 @@ def require_manifest_history(state: dict[str, Any], manifest: dict[str, Any]) ->
     stages = {stage["stage_id"]: stage for stage in value["stages"]}
     for entry in manifest.get("revisions", []):
         previous = known.get(entry["revision"])
+        if entry.get('delivery_binding') not in (None, manifest.get('delivery_binding')):
+            if (not previous or previous.get('publication_confirmed') is not True
+                    or immutable_entry(previous['entry']) != immutable_entry(entry)):
+                raise ValueError('Historical delivery owner requires a confirmed identical revision')
         if not entry.get("stage_id"):
             if not previous or "legacy_overlay" not in previous:
                 raise ValueError("legacy-stage-migration-required: прежние редакции нельзя автоматически привязать к этапу")

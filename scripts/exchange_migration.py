@@ -12,6 +12,10 @@ def validate(api, project, feature, state, *, root=None):
     if not records:
         return
     root = root or project / api.EXCHANGE_DIR / feature
+    if not (root / 'documents-migration.json').is_file():
+        raise ValueError('documents-migration-required: история ранее опубликована в code; '
+                         'выполни requirements-exchange.py migrate-code-exchange для этой поставки '
+                         'и прими перенос в documents перед prepare')
     proof = api.load_json(root / 'documents-migration.json')
     if (proof.get('schema_version') != 1 or proof.get('feature') != feature
             or not proof.get('analyst_confirmed') or not proof.get('reason')
@@ -41,7 +45,10 @@ def command(api, args):
     if latest['destination_role'] != 'code':
         raise ValueError('This delivery is already in documents')
     source = api.publication_root(project, args.feature, latest)
-    errors = api.validate_manifest(api.load_json(source / 'manifest.json'), source)
+    manifest = api.load_json(source / 'manifest.json')
+    api.require_manifest_binding(project, args.feature, manifest, historical=api.registered_bindings(records))
+    delivery_stages.require_manifest_history(state, manifest)
+    errors = api.validate_manifest(manifest, source)
     if errors:
         raise ValueError('; '.join(errors))
     api.require_plain_exchange(source.parent)
@@ -54,7 +61,7 @@ def command(api, args):
     destination.parent.mkdir(parents=True, exist_ok=True)
     api.install_root_contract(destination.parent)
     try:
-        shutil.copytree(source, destination)
+        shutil.copytree(source, destination, ignore=shutil.ignore_patterns(".DS_Store"))
         if sdd_bundle._files(source) != before or sdd_bundle._files(destination) != before:
             raise ValueError('Migration source changed during copy')
         # Manifest state can evolve in new revisions; immutable history stays pinned.

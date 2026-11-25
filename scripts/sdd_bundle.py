@@ -64,7 +64,7 @@ def _files(root):
     for path in sorted(root.rglob("*")):
         if path.is_symlink() or not (path.is_dir() or path.is_file()):
             _fail("non-regular bundle entry: " + str(path))
-        if path.is_file():
+        if path.is_file() and path.name != ".DS_Store":
             result[_path(path.relative_to(root).as_posix())] = _hash(path.read_bytes())
     return result
 
@@ -543,12 +543,12 @@ def copy_snapshot(src: Path, dst: Path, expected: dict, requirements_text: str) 
             _fail("auxiliary snapshot destination already exists")
     created = []
     try:
-        shutil.copytree(src, dst, symlinks=True)
+        shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns(".DS_Store"))
         for name, target in destinations.items():
             if name in expected:
                 target.mkdir()
                 created.append(target)
-                shutil.copytree(Path(src).parent / name, target, symlinks=True, dirs_exist_ok=True)
+                shutil.copytree(Path(src).parent / name, target, symlinks=True, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".DS_Store"))
         verify_descriptor(dst, requirements_text, expected)
         verify_descriptor(src, requirements_text, expected)
     except Exception:

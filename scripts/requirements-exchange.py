@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from project_layout import (feature_root as layout_feature_root, exchange_binding,
-                            validate_exchange_binding, require_audit_binding, require_manifest_binding)
+                            validate_exchange_binding, require_audit_binding, require_manifest_binding, same_delivery_stream)
 
 import argparse
 import publication_cancellation as cancellation
@@ -535,6 +535,32 @@ def revision_processing_status(feature_root: Path, entry: dict[str, Any]) -> dic
     }
 
 
+def contract_matches(actual, expected, *, legacy=False):
+    """Validate protocol fields independently of descriptive human wording."""
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        actual = dict(actual)
+        if legacy and 'sbertrek_key' in expected and 'jira_key' in actual:
+            if 'sbertrek_key' in actual and actual['sbertrek_key'] != actual['jira_key']:
+                return False
+            actual['sbertrek_key'] = actual.pop('jira_key')
+        prose = {'meaning', 'contour_rule', 'frequency', 'chain'} & set(expected)
+        if set(actual) - set(expected) or (set(expected) - prose) - set(actual):
+            return False
+        return all((isinstance(value, str) and bool(value.strip())) if key in prose
+                   else contract_matches(value, expected[key], legacy=legacy)
+                   for key, value in actual.items())
+    return type(actual) is type(expected) and actual == expected
+
+
+def registered_bindings(records):
+    # Never use the candidate manifest as evidence of its own identity.
+    return [record['entry']['delivery_binding'] for record in records
+            if record.get('publication_confirmed') is True
+            and isinstance(record.get('entry', {}).get('delivery_binding'), dict)]
+
+
 def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
     errors: list[str] = []
     schema_version = manifest.get("schema_version")
@@ -559,11 +585,11 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
     owner = manifest.get("owner")
     if not isinstance(owner, dict) or not isinstance(owner.get("analyst_id"), str) or not owner["analyst_id"]:
         errors.append("в manifest.json отсутствует владелец-аналитик")
-    if manifest.get("requested_returns") != requested_returns_contract(schema_version):
+    if not contract_matches(manifest.get("requested_returns"), requested_returns_contract(schema_version), legacy=schema_version < 6):
         errors.append("manifest.json содержит неподдерживаемый договор возвратов")
-    if manifest.get("traceability") != traceability_contract(schema_version):
+    if not contract_matches(manifest.get("traceability"), traceability_contract(schema_version)):
         errors.append("manifest.json содержит неподдерживаемый договор трассировки")
-    if schema_version >= 2 and manifest.get("developer_sdd") != developer_sdd_contract(schema_version):
+    if schema_version >= 2 and not contract_matches(manifest.get("developer_sdd"), developer_sdd_contract(schema_version)):
         errors.append("manifest.json не содержит договор преобразования в локальную SDD")
     contract = root.parent / "AGENTS.md"
     if root.parent.name == "exchange-archive":
@@ -604,7 +630,7 @@ def validate_manifest(manifest: dict[str, Any], root: Path) -> list[str]:
             errors.append(f"редакция {item.get('revision')} имеет неизвестное состояние")
         if schema_version == 4 or (schema_version in {5, 6} and binding is not None):
             if item.get("delivery_binding") is not None:
-                if item["delivery_binding"] != binding:
+                if item["delivery_binding"] != binding and not (item["revision"] <= ceiling and same_delivery_stream(item["delivery_binding"], binding)):
                     errors.append("Revision belongs to another delivery")
             elif item["revision"] > ceiling:
                 errors.append("New revision has no delivery binding")
@@ -732,7 +758,7 @@ def prepare_in_exchange(
         "developer_sdd": developer_sdd_contract(CURRENT_MANIFEST_SCHEMA),
         "sdd_contract": "../AGENTS.md",
     }
-    require_manifest_binding(project, feature, manifest)
+    require_manifest_binding(project, feature, manifest, historical=registered_bindings(records))
     if manifest.get("feature") != feature:
         raise ValueError("Существующий manifest.json относится к другой функциональности")
     revisions = manifest.get("revisions")
@@ -774,6 +800,10 @@ def prepare_in_exchange(
     if binding is not None:
         if manifest.get("schema_version") not in {4, 5, 6}:
             manifest["legacy_revision_ceiling"] = max((entry["revision"] for entry in revisions), default=0)
+        historical_numbers = [entry['revision'] for entry in revisions
+                              if entry.get('delivery_binding') not in (None, binding)]
+        if historical_numbers:
+            manifest['legacy_revision_ceiling'] = max(manifest.get('legacy_revision_ceiling', 0), *historical_numbers)
         manifest.update(schema_version=manifest["schema_version"] if manifest.get("schema_version") in {5, 6} else 4, delivery_binding=binding)
     known_entries = [dict(stages.record_entry(record), **({"state": "cancelled"} if cancellation.cancelled(record) else {})) for record in records]
     effective = {item["revision"]: item for item in known_entries}
@@ -963,6 +993,21 @@ def configured_delivery_target() -> str | None:
     return None
 
 
+class DisposablePublicationClone(tempfile.TemporaryDirectory):
+    """Report temporary cleanup separately from the verified publication result."""
+    def __init__(self, *args, cleanup_warnings, **kwargs):
+        self.cleanup_warnings = cleanup_warnings
+        super().__init__(*args, **kwargs)
+
+    def cleanup(self):
+        try:
+            super().cleanup()
+        except OSError as exc:
+            self.cleanup_warnings.append({'path': self.name, 'error': str(exc),
+                                          'action': 'remove-disposable-clone-after-review'})
+            print(f'WARNING: temporary clone cleanup failed: {self.name}: {exc}', file=sys.stderr)
+
+
 def publish_to_code(
     project: Path,
     code_root: Path,
@@ -1003,7 +1048,8 @@ def publish_to_code(
     legacy_branch = f"requirements/{feature}/{target_key}-{input_digest(current_hash, sdd)}"
     branch_ref = f"refs/heads/{branch}"
     compatible_refs = {branch_ref, f"refs/heads/{legacy_branch}"}
-    with tempfile.TemporaryDirectory(prefix="requirements-exchange-") as temporary:
+    cleanup_warnings = []
+    with DisposablePublicationClone(prefix="requirements-exchange-", cleanup_warnings=cleanup_warnings) as temporary:
         clone = Path(temporary) / "code"
         cloned = subprocess.run(
             ("git", "clone", "--quiet", "--single-branch", "--branch", target, before["remote"], str(clone)),
@@ -1057,6 +1103,7 @@ def publish_to_code(
                 "repository_path": f"{EXCHANGE_DIR}/{feature}",
                 "requirements_repository_path": f"{EXCHANGE_DIR}/{feature}/revisions/{prepared['revision']:03d}/requirements.md",
                 "publication_confirmed": merged, "published_commit": target_commit if merged else None,
+                "cleanup_warnings": cleanup_warnings,
                 "request_commit": request_commit, "merge_request_created": False,
                 "merge_request_create_url": link.group(0) if link else None,
                 "merge_request_title": "Предложить редакцию требований для разработки",
@@ -1064,6 +1111,9 @@ def publish_to_code(
                 "publication_strategy": "review-branch", "target_branch_push_allowed": False,
                 "selection_reason": "Проверена целевая ветка" if merged else "Редакция предложена через отдельную ветку",
                 "next_action": "mark-published" if merged else "create-or-review-merge-request",
+                "next_command": (["python3", str(Path(__file__).with_name("requirementsctl.py")), "mark-published",
+                                  str(project), feature, "--manifest", str(cached), "--revision", str(prepared["revision"]),
+                                  "--destination-role", destination_role] if merged else None),
                 "message": (
                     f"Редакция {prepared['revision']:03d} найдена в целевой ветке {target}: {EXCHANGE_DIR}/{feature}"
                     if merged else
@@ -1094,7 +1144,7 @@ def publish_to_code(
         accepted_revisions = {}
         if manifest_path.is_file():
             manifest = load_json(manifest_path)
-            require_manifest_binding(project, feature, manifest)
+            require_manifest_binding(project, feature, manifest, historical=registered_bindings(stages.registry(state)["revisions"]))
             errors = validate_manifest(manifest, manifest_path.parent)
             if errors:
                 raise ValueError("; ".join(errors))
@@ -1436,7 +1486,7 @@ def publication_root(project: Path, feature: str, record: dict[str, Any]) -> Pat
         return archived
     manifest_path = Path(record["manifest_path"]).resolve()
     manifest = load_json(manifest_path)
-    require_manifest_binding(project, feature, manifest)
+    require_manifest_binding(project, feature, manifest, historical=registered_bindings([record]))
     if not record.get("publication_confirmed"):
         raise ValueError("Место передачи ещё не подтверждено")
     if record["destination_role"] == "analytics":
@@ -1691,9 +1741,21 @@ def migration_command(args):
     return 0
 
 
+def status_command(args):
+    import delivery_status
+    result = delivery_status.inspect(SimpleNamespace(**globals()), args.project, args.feature, refresh=args.refresh)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 1 if result['errors'] else 0
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Обмен требованиями и результатами разработки")
     commands = result.add_subparsers(dest="command", required=True)
+    status = commands.add_parser("status", help="Проверить принятие пакета и регистрацию публикации без подготовки новой редакции")
+    status.add_argument("project")
+    status.add_argument("feature")
+    status.add_argument("--refresh", action="store_true", help="Обновить origin/main перед проверкой")
+    status.set_defaults(handler=status_command)
     prepare = commands.add_parser("prepare")
     prepare.add_argument("project")
     prepare.add_argument("feature")

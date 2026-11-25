@@ -675,7 +675,7 @@ def finish_command(args: argparse.Namespace) -> int:
         "branch": work["branch"],
         "current_branch": BRANCH,
         "main_update": main_update,
-        "next_action": "разрешено сформировать пакет для разработки из актуальной main",
+        "next_action": "проверить состояние передачи через requirements-exchange.py status; finish подтверждает слияние, а не необходимость новой передачи",
     }, ensure_ascii=False, indent=2))
     return 0
 
