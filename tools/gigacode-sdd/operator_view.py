@@ -24,13 +24,13 @@ def project(value, *, observed_at=None):
         tasks.append({
             'id': task['id'], 'title': task.get('title', task['id']), 'status': status,
             'accepted': status == 'done', 'depends_on': list(task.get('depends_on', [])),
-            'waiting_for': list(task.get('waiting_for', [])),
+            'waiting_for': list(task.get('waiting_for', [])), 'error': task.get('error'),
             'attention': project_attention({
                 'pending_input': task['id'] in question_tasks,
                 'pending_guidance': status == 'blocked' and task['id'] not in question_tasks,
                 'interrupted': status == 'interrupted',
             }),
-            'candidates': [{key: c.get(key) for key in ('model', 'stage', 'status', 'updated_at')}
+            'candidates': [{key: c.get(key) for key in ('model', 'stage', 'status', 'updated_at', 'resource_wait')}
                            for c in task.get('candidates', [])],
         })
     status = value.get('status')
@@ -40,7 +40,7 @@ def project(value, *, observed_at=None):
     # These are controller observations, not OS process-exit proofs. A stopped
     # controller or an empty list must never imply that all services have exited.
     operations = [{key: op.get(key) for key in (
-        'task', 'model', 'candidate_model', 'stage', 'role', 'title',
+        'task', 'task_id', 'model', 'candidate_model', 'stage', 'phase', 'role', 'title', 'kind', 'purpose',
         'elapsed_seconds', 'timeout_seconds', 'idle_seconds')}
         for op in value.get('operations', [])]
     for operation in operations:

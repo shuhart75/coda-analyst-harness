@@ -163,21 +163,42 @@ def questions(root, pending_only=False):
         return result
 
 
-def answer(root, question_id, text, explanation=''):
+def question_revision(question):
+    """Bind browser answers to the exact decision and context displayed."""
+    return fingerprint({k: question.get(k) for k in (
+        'id', 'binding', 'task', 'topic', 'question', 'options', 'requests', 'action', 'manual_check')})
+
+
+def answer(root, question_id, text, explanation='', *, idempotent=False, expected_revision=None):
     from controller import save
     if not isinstance(text, str) or not text.strip() or len(text) > 32000:
         raise ValueError('Answer must be nonempty and at most 32000 characters')
+    if not isinstance(explanation, str) or len(explanation) > 32000:
+        raise ValueError('Explanation must be text of at most 32000 characters')
     current = {q['id']: q for q in questions(root)}
     if question_id not in current:
         raise ValueError('Question is stale or belongs to different inputs')
     with locked(root) as folder:
+        question = _load(folder / (question_id + '.json'))
+        if question.get('binding') != binding(root):
+            raise ValueError('Question is stale or belongs to different inputs')
+        if expected_revision is not None and question_revision(question) != expected_revision:
+            raise ValueError('Question changed; refresh before answering')
         path = folder / (question_id + '-answer.json')
+        if idempotent and path.exists():
+            previous = _load(path)
+            if (previous.get('binding') == question['binding']
+                    and previous.get('text') == text.strip()
+                    and previous.get('explanation', '') == explanation.strip()
+                    and previous.get('action_sha256') == (
+                        fingerprint(question['action']) if question.get('action') is not None else None)):
+                return previous
         if path.exists() or (folder / (question_id + '-resolved.json')).exists():
             raise ValueError('Question already answered/resolved; previous decision preserved')
-        value = {'question': question_id, 'binding': current[question_id]['binding'],
+        value = {'question': question_id, 'binding': question['binding'],
                  'text': text.strip(), 'explanation': explanation.strip(), 'answered_at': time.time()}
-        if current[question_id].get('action') is not None:
-            value['action_sha256'] = fingerprint(current[question_id]['action'])
+        if question.get('action') is not None:
+            value['action_sha256'] = fingerprint(question['action'])
         save(path, value)
     return value
 
