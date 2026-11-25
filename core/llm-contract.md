@@ -12,7 +12,7 @@ returns относятся только к прежним редакциям. Н
 
 ## Grooming before delivery
 
-Follow `core/grooming.md` for explicit grooming commands. Confirm tasks one at a time using requirement titles, infer FE/BE from the task prefix, and use person-days exclusively. Include confirmed task documents in the audited SDD input. Create or update SberTrack Story records only after confirmed publication, with `RSCON_dev` on every new story and a revision-bound document link. The receiver preserves groomed story scope and owns technical design/tasks within it. Legacy inputs without grooming retain their previous decomposition contract.
+Follow `core/grooming.md` for explicit grooming commands. Confirm tasks one at a time using requirement titles, infer FE/BE from the task prefix, and use person-days exclusively. Include confirmed task documents in the audited SDD input. After confirmed publication, follow `core/delivery-stories.md`: update explicitly identified tasks and create only Story for tasks without keys. A delivery request authorizes these operations for the agreed scope. Every task needs the feature epic, RSCON_dev, the specified configuration item, architecture and load-test values, three revision-bound links and an SDD prompt/input folder. Estimates are optional. The receiver preserves groomed story scope and owns technical design/tasks within it. Legacy inputs without grooming retain their previous decomposition contract.
 
 
 This is the operation contract for the GigaCode variant of the AS KODA harness.
