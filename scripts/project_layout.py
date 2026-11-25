@@ -176,9 +176,23 @@ def require_audit_binding(project: Path, key: str, audit: dict) -> None:
         raise ValueError('delivery-audit-binding-required: повтори аудит для текущей фичи, поставки и квартала')
 
 
-def require_manifest_binding(project: Path, key: str, manifest: dict) -> None:
+def same_delivery_stream(first, second) -> bool:
+    """Only the feature owner may change within a registered delivery stream."""
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return False
+    try:
+        validate_exchange_binding(first, second['delivery_key'])
+        validate_exchange_binding(second, second['delivery_key'])
+    except (ValueError, KeyError):
+        return False
+    return all(first[field] == second[field] for field in ('delivery_id', 'delivery_key', 'quarter'))
+
+
+def require_manifest_binding(project: Path, key: str, manifest: dict, *, historical=()) -> None:
     binding = exchange_binding(project, key)
-    if manifest.get('schema_version') in {4, 5, 6} and manifest.get('delivery_binding') != binding:
-        raise ValueError('Exchange manifest belongs to a different feature or delivery')
-    if manifest.get('schema_version') not in {4, 5, 6} and manifest.get('delivery_binding') is not None:
+    current = manifest.get('delivery_binding')
+    if manifest.get('schema_version') in {4, 5, 6} and current != binding:
+        if not (same_delivery_stream(current, binding) and current in historical):
+            raise ValueError('Exchange manifest belongs to a different feature or delivery')
+    if manifest.get('schema_version') not in {4, 5, 6} and current is not None:
         raise ValueError('Delivery binding requires exchange schema 4')
