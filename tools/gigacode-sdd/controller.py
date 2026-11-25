@@ -440,6 +440,11 @@ class Runner:
         path = self.root / 'preserved-processes' / (str(cleanup['process_group']) + '.json')
         previous = read(path) if path.is_file() else {}
         save(path, {**previous, **cleanup})
+        save(self.root / 'service-stop.json', {
+            'kind': 'process-cleanup', 'report': str(path), 'at': time.time(),
+            'reason': 'Не подтверждено завершение процессов LLM-сессии. '
+                      'Проверенные варианты сохранены; требуется сверка процессов перед продолжением.',
+            'trigger': cleanup.get('trigger'), 'diagnostic': cleanup.get('diagnostic', {})})
 
     def cleanup_guard(self, group):
         # Most completed sessions have no remaining group. Avoid an expensive
@@ -470,7 +475,6 @@ class Runner:
         except Exception as exc:
             diagnostic = {'reason': 'Cannot inspect process group: ' + type(exc).__name__}
         if diagnostic:
-            self.stop.set()
             path = self.root / 'preserved-processes' / (str(group) + '.json')
             save(path, {'process_group': group, 'member_pids': members or [],
                         'member_identities': identities, **diagnostic})
@@ -1188,6 +1192,17 @@ executed test names/counts, not just a successful command or test compilation.
             self.state['status'] = 'blocked'
             self.persist()
             raise Blocked('Some tasks are blocked; inspect status/logs, resolve cause, then run --retry-blocked')
+        # A peer may finish implementation while another candidate requested a
+        # manual check. Acceptance cannot silently resolve this human obligation.
+        while any(q.get('manual_check') for q in operator_questions.questions(self.root, pending_only=True)):
+            self.state['status'] = 'waiting-user'
+            self.persist()
+            run_status.publish(self)
+            if self.stop.wait(.5):
+                self.state['status'] = 'interrupted'
+                self.persist()
+                return
+        self.state['status'] = 'running'
         # Final full integration checks and a fresh review use the same repair loop.
         final = {'id': 'integration', 'cwd': '.', 'writes': sorted({p for t in tasks for p in self.scopes.effective(t)['writes']}),
                  'depends_on': [], 'resources': sorted({r for t in tasks for r in t.get('resources', [])}), 'requirements': self.cfg['requirements'],
@@ -1225,6 +1240,9 @@ executed test names/counts, not just a successful command or test compilation.
                 try:
                     accepted = rec if rec.get('status') == 'accepted' or 'integration_base' in rec else self.worker(final, rec.copy())
                     break
+                except dynamic_scope.ScopeWait:
+                    # Human evidence changed after review; revalidate the saved variant.
+                    continue
                 except operator_questions.WaitingForOperator as exc:
                     self.state['integration'].update(status='waiting-user', error=str(exc))
                     self.persist()

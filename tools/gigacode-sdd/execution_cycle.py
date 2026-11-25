@@ -44,11 +44,13 @@ class StopScope:
     def __init__(self, parent):
         self.parent = parent
         self.local = threading.Event()
+        self.reason = None
 
     def is_set(self):
         return self.parent.is_set() or self.local.is_set()
 
-    def set(self):
+    def set(self, reason="local-stop"):
+        self.reason = self.reason or reason
         self.local.set()
 
     def wait(self, timeout=None):
@@ -553,6 +555,12 @@ def execute_task(runner, task, record):
             _receipt_valid(value)
         if runner.scopes.refresh(task, value, slot):
             save(path, value)
+        if value.get('status') == 'accepted' and value.get('manual_review_state') != questions.manual_state(runner.root, task['id']):
+            # Keep implementation and checks; new human evidence needs fresh review.
+            value.update(status='pending', stage='review')
+            value.pop('recovered_review', None)
+            value.pop('review_draft', None)
+            save(path, value)
         candidates.append((path, value))
     _recover_permission_fatal(runner, task, candidates, folder, scope)
     for path, value in candidates:
@@ -637,6 +645,10 @@ def execute_task(runner, task, record):
         run_status.candidate(runner, task, value)
         runner.progress(task['id'] + ': восстановлен вопрос из сохранённого результата; повтор исполнения не нужен')
     def select(value, failures):
+        if task['id'] == 'integration':
+            questions.require_manual_answers(runner.root)
+        if value.get('manual_review_state') != questions.manual_state(runner.root, task['id']):
+            raise ScopeWait('Обновились результаты ручной проверки; требуется повторное ревью')
         effective = scope_repair.effective_task(runner, task, value)
         if runner.scopes.data['tasks'].get(task['id'], {}).get('paths') and value.get('checked_scope') != fingerprint(
                 {'writes': effective['writes'], 'checks': effective['checks']}):
@@ -1043,7 +1055,10 @@ def execute_task(runner, task, record):
                                    'do not retry it via another tool. A failed optional probe alone is not a product defect.')
                     detail += _review_repair(review_copy, value, value['stage'])
                     detail += task_acceptance.instructions(runner, task)
-                    detail += '\nOperator answers:\n' + json.dumps(value.get('operator_answers', []), ensure_ascii=False)
+                    value['manual_review_state'] = questions.manual_state(runner.root, task['id'])
+                    value['operator_answers'] = questions.replies(
+                        runner.root, None if task['id'] == 'integration' else task['id'])
+                    detail += '\nOperator answers:\n' + json.dumps(value['operator_answers'], ensure_ascii=False)
                     if not recovered:
                         review = runner.review(review_copy, task['cwd'], detail, task['requirements'],
                                                task['id'] + '-review', model=reviewer_model, stop_event=stop)
@@ -1257,7 +1272,7 @@ def execute_task(runner, task, record):
                     raise
             if deadline is not None and time.monotonic() >= deadline:
                 for index in pending.values():
-                    stops[index].set()
+                    stops[index].set("comparison-complete")
             if runner.stop.is_set():
                 for stop in stops:
                     stop.set()

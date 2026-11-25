@@ -72,7 +72,39 @@ def _load(path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
-def request(root, task, topic, question, *, options=None, details=None, generation='', model=None, action=None):
+def validate_manual_check(value):
+    """A human check is reproducible evidence, never a blanket permission."""
+    if value is None:
+        return None
+    from urllib.parse import urlsplit
+    if not isinstance(value, dict):
+        raise ValueError('manual_check must be an object')
+    for field in ('url', 'artifact', 'preconditions'):
+        text = value.get(field)
+        if not isinstance(text, str) or not text.strip() or len(text) > 4000 or any(ord(c) < 32 for c in text):
+            raise ValueError('manual_check needs readable ' + field)
+    try:
+        url = urlsplit(value['url'])
+        valid_url = url.scheme in ('http', 'https') and url.hostname and not url.username and not url.password
+        url.port
+    except ValueError:
+        valid_url = False
+    if not valid_url:
+        raise ValueError('manual_check.url must be an http(s) page URL without credentials')
+    requirements = value.get('requirements')
+    if not isinstance(requirements, list) or not requirements or any(not isinstance(r, str) or not r.strip() for r in requirements):
+        raise ValueError('manual_check needs requirement identifiers')
+    steps = value.get('steps')
+    if not isinstance(steps, list) or not 1 <= len(steps) <= 20:
+        raise ValueError('manual_check needs 1 to 20 steps')
+    for step in steps:
+        if not isinstance(step, dict) or any(not isinstance(step.get(k), str) or not step[k].strip()
+                                            or len(step[k]) > 4000 for k in ('action', 'expected')):
+            raise ValueError('Each manual step needs action and expected result')
+    return {k: value[k] for k in ('url', 'artifact', 'preconditions', 'requirements', 'steps')}
+
+
+def request(root, task, topic, question, *, options=None, details=None, generation='', model=None, action=None, manual_check=None):
     from controller import save
     if not all(isinstance(v, str) and v.strip() for v in (task, topic, question)):
         raise ValueError('Question needs a task, topic and readable question')
@@ -81,9 +113,10 @@ def request(root, task, topic, question, *, options=None, details=None, generati
     options = options or []
     if not isinstance(options, list) or any(not isinstance(v, str) or not v.strip() for v in options):
         raise ValueError('Invalid question options')
+    manual_check = validate_manual_check(manual_check)
     bound = binding(root)
     key = fingerprint({'binding': bound, 'task': task, 'topic': topic.strip().casefold(),
-                       'generation': generation})[:24]
+                       'generation': generation, **({'manual_check': manual_check} if manual_check else {})})[:24]
     with locked(root) as folder:
         path = folder / (key + '.json')
         if path.exists():
@@ -98,9 +131,14 @@ def request(root, task, topic, question, *, options=None, details=None, generati
             value = {'id': key, 'binding': bound, 'task': task, 'topic': topic,
                      'question': question, 'options': options, 'created_at': time.time(),
                      'requests': [{'model': model, 'question': question, 'details': details}]}
+            if manual_check:
+                value['manual_check'] = manual_check
             if action is not None:
                 value['action'] = action
             save(path, value)
+    # Delivery is best effort; the durable mailbox remains the source of truth.
+    from desktop_notifications import notify_question
+    notify_question(root, key)
     return key
 
 
@@ -145,8 +183,22 @@ def answer(root, question_id, text, explanation=''):
 
 
 def replies(root, task):
-    return [{'id': q['id'], 'topic': q['topic'], 'question': q['question'], 'answer': q['answer']}
+    return [{'id': q['id'], 'topic': q['topic'], 'question': q['question'], 'answer': q['answer'],
+             **({'manual_check': q['manual_check']} if q.get('manual_check') else {})}
             for q in questions(root) if q['answer'] and (task is None or q['task'] == task)]
+
+
+def manual_state(root, task):
+    records = [{'id': q['id'], 'check': q['manual_check'], 'answer': q['answer']}
+               for q in questions(root) if q.get('manual_check')
+               and (task == 'integration' or q['task'] == task)]
+    return fingerprint(records) if records else None
+
+
+def require_manual_answers(root):
+    pending = [q['id'] for q in questions(root, pending_only=True) if q.get('manual_check')]
+    if pending:
+        raise WaitingForOperator('Нужны результаты ручной проверки; откройте вопросы в отдельном терминале', pending)
 
 
 def response(root, key):
@@ -156,7 +208,7 @@ def response(root, key):
 def resolve_task(root, task):
     from controller import save
     for q in questions(root, pending_only=True):
-        if q['task'] == task:
+        if q['task'] == task and not q.get('manual_check'):
             with locked(root) as folder:
                 save(folder / (q['id'] + '-resolved.json'),
                      {'reason': 'Task accepted through a verified candidate', 'resolved_at': time.time()})
@@ -239,8 +291,12 @@ def control_result(text):
     topic = value.get('topic') or value.get('subject')
     if not isinstance(topic, str) or not topic.strip():
         topic = 'question-' + fingerprint(question)[:20]
+    try:
+        validate_manual_check(value.get('manual_check'))
+    except ValueError as exc:
+        raise InvalidControlRequest(str(exc)) from exc
     value.update(topic=topic, question=question)
-    extra = {k: v for k, v in original.items() if k not in ('question', 'request', 'message', 'topic', 'subject', 'options', 'details')}
+    extra = {k: v for k, v in original.items() if k not in ('question', 'request', 'message', 'topic', 'subject', 'options', 'details', 'manual_check')}
     if extra:
         value['details'] = {'details': original.get('details'), 'context': extra}
     return kind, value
@@ -280,10 +336,13 @@ def register(runner, task, value, control):
                 details={'reason': str(exc), 'model_request': request_data,
                          'rule': 'Этот ответ не расширяет область записи; защищённые пути и независимые задачи сохраняют свои границы.'},
                 model=value['model'])
+    if request_data.get('manual_check') is not None:
+        validate_manual_check(request_data['manual_check'])
     try:
         return request(runner.root, task['id'], request_data.get('topic'), request_data.get('question'),
             options=request_data.get('options'), details=request_data.get('details'),
-            generation=value.get('answer_generation', ''), model=value['model'])
+            generation=value.get('answer_generation', ''), model=value['model'],
+            manual_check=request_data.get('manual_check'))
     except (ValueError, TypeError) as exc:
         return request(runner.root, task['id'], 'clarify-question-' + fingerprint(request_data)[:20],
             'Модель запросила решение. Уточните, как следует продолжить.',
@@ -294,6 +353,20 @@ PROMPT = '''If a required business/environment fact needs a human answer, do not
 Finish independent permitted work, then return JSON
 {"operator_question":{"topic":"stable-short-topic","question":"clear question in Russian",
 "options":["choice 1","choice 2"],"details":"why this answer is needed"}}.
+When browser automation is unavailable and manual verification is chosen, use the SAME operator_question
+with an additional "manual_check" object:
+{"url":"http://actual-stand/page","artifact":"actual build/manifest identity",
+"requirements":["actual requirement ID"],"preconditions":"role, test record and necessary setup",
+"steps":[{"action":"specific action in Russian","expected":"observable expected result in Russian"}]}.
+Provide the real reachable page URL from stand evidence, not a guessed route or a filesystem path.
+Never fabricate build identity or test credentials. If these facts are missing, request them first.
+Ask whether ALL listed results match; offer success, mismatch and unable-to-check answers.
+Ask for the failing step and observation on mismatch. If screenshots are required, state exactly
+which views to capture and where to save them; a yes answer does not create image evidence.
+An agreement to check later is NOT a successful check. Honor an existing decision for final manual
+control: finish independent work, keep the obligation open, and prepare this question at final integration.
+Do not retry denied browser automation after that decision. Final review must inspect recorded manual
+results and any required artifacts, retaining gaps and failures rather than treating permission as proof.
 Use the same topic for the same decision across attempts. A question is not a failure or acceptance.
 For a necessary repair outside task.writes, report an explicit request:
 {"scope_request":{"paths":["exact/repository-relative/existing-file"],"reason":"defect and failed check"}}.
