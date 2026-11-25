@@ -1366,7 +1366,9 @@ def execute_task(runner, task, record):
         # while the peer was being checked. Both resume against the new base.
         for path, value in candidates:
             if value.get('status') not in ('waiting-user', 'quarantined', 'external-blocker', 'stalled'):
-                value.update(status='waiting-scope', stage=value['stage'] if isinstance(scope_wait, CandidateDrift) else 'execute')
+                value.update(status='waiting-scope', stage=(
+                    'checks' if value['stage'] == 'accepted' else value['stage'])
+                    if isinstance(scope_wait, CandidateDrift) else 'execute')
             save(path, value)
             run_status.candidate(runner, task, value)
         raise scope_wait
@@ -1375,6 +1377,10 @@ def execute_task(runner, task, record):
         if waiting:
             raise questions.WaitingForOperator('Нужен ответ пользователя; выполненные шаги сохранены', waiting)
         raise Blocked('No verified execution candidate: ' + '; '.join(failures))
+    winner_path = next(path for path, value in candidates if value is winner)
+    if _reconcile_candidate(runner, winner, winner_path.parent):
+        save(winner_path, winner)
+        raise CandidateDrift('Изменения перед приёмкой сохранены; требуется повторная проверка')
     _receipt_valid(winner)
     select(winner, failures)
     runner.progress(task['id'] + ': выбран ' + winner['model'] + '; изменения готовы к интеграции')
