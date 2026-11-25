@@ -111,7 +111,7 @@ class Manager:
                     return False
             self.active[task['id']] = task
             if task['id'] in self.data['tasks']:
-                self.data['tasks'][task['id']]['queued'] = False
+                self.data['tasks'][task['id']].update(queued=False, waiting_for=[])
                 self.save()
             return True
 

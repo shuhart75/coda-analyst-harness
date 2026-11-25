@@ -71,6 +71,40 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.addCleanup(self.audit.stop)
         self.runner.progress = lambda message: None
 
+    def test_workspace_drift_preserves_old_proof_and_requires_new_checks(self):
+        from execution_cycle import _reconcile_candidate
+        old = snapshot(self.work, normalize_settings=True)
+        value = {'workspace': str(self.work), 'workspace_snapshot': old,
+                 'status': 'pending', 'stage': 'review', 'checks': [{'ok': True}],
+                 'review': {'verdict': 'pass'}, 'evidence_files': {}}
+        (self.work/'backend/value.txt').write_text('changed externally')
+        self.assertTrue(_reconcile_candidate(self.runner, value, self.runner.root))
+        self.assertEqual(value['stage'], 'checks')
+        self.assertNotIn('review', value)
+        archived = read(Path(value['drift_recoveries'][0]))
+        self.assertEqual(archived['candidate']['workspace_snapshot'], old)
+        self.assertEqual(archived['changed_paths'], ['backend/value.txt'])
+        self.assertFalse(_reconcile_candidate(self.runner, value, self.runner.root))
+
+    def test_workspace_drift_does_not_hide_corrupted_receipts(self):
+        from execution_cycle import _reconcile_candidate
+        evidence = self.runner.root/'receipt.log'
+        evidence.write_text('original')
+        value = {'workspace': str(self.work), 'workspace_snapshot': snapshot(self.work, normalize_settings=True),
+                 'status': 'pending', 'stage': 'review', 'evidence_files': {str(evidence): digest(evidence)}}
+        (self.work/'backend/value.txt').write_text('changed')
+        evidence.write_text('corrupted')
+        with self.assertRaisesRegex(Blocked, 'evidence changed'):
+            _reconcile_candidate(self.runner, value, self.runner.root)
+
+    def test_workspace_drift_does_not_adopt_instruction_changes(self):
+        from execution_cycle import _reconcile_candidate
+        value = {'workspace': str(self.work), 'workspace_snapshot': snapshot(self.work, normalize_settings=True),
+                 'status': 'pending', 'stage': 'review', 'evidence_files': {}}
+        (self.work/'AGENTS.md').write_text('new instructions')
+        with self.assertRaisesRegex(Blocked, 'protected files'):
+            _reconcile_candidate(self.runner, value, self.runner.root)
+
     def result(self, root, model, reported=None):
         folder = self.runner.logdir('portfolio-test')
         folder.mkdir(parents=True)
@@ -454,6 +488,27 @@ class ExecutionPortfolioTests(unittest.TestCase):
         first = next(v for v in self.records() if v['model'] == MODELS[0])
         self.assertEqual(first['failures'], 6)
         self.assertEqual(first['status'], 'stalled')
+
+    def test_legacy_drift_failure_resumes_checks_without_repeating_execution(self):
+        self.primary_only = True
+        accepted = self.run_task()
+        folder = next((self.runner.root/'execution-cycles').iterdir())
+        path = next(p for p in folder.glob('*/candidate.json') if read(p)['model'] == MODELS[0])
+        value = read(path)
+        value.update(status='pending', stage='review')
+        save(path, value)
+        (Path(accepted['workspace'])/'backend/notes.txt').write_text('additional evidence')
+        save(folder/'fatal.json', {'scope': folder.name, 'type': 'Blocked',
+             'error': 'Saved execution candidate changed outside its recorded step'})
+        before = self.check_count
+        def no_execution(*args, **kwargs):
+            raise AssertionError('preserved implementation must go directly to checks')
+        result = self.run_task(session=no_execution)
+        self.assertEqual(result['status'], 'accepted')
+        self.assertGreater(self.check_count, before)
+        self.assertFalse((folder/'fatal.json').exists())
+        self.assertTrue(list(folder.glob('recovered-drift-fatal-*.json')))
+        self.assertTrue(result['drift_recoveries'])
 
     def test_cache_and_review_evidence_integrity(self):
         self.task['resources'] = ['database']

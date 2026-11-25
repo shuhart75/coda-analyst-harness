@@ -57,6 +57,8 @@ class DynamicScopeTests(unittest.TestCase):
         restored = Manager(self.runner)
         self.assertFalse(restored.try_start(other))
         self.assertTrue(restored.try_start(self.task))
+        self.assertFalse(restored.data['tasks'][self.task['id']]['queued'])
+        self.assertEqual(restored.data['tasks'][self.task['id']]['waiting_for'], [])
         self.assertFalse(restored.try_start(other))
 
     def test_mutual_expansion_releases_holdings_and_has_one_winner(self):
