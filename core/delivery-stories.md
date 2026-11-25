@@ -96,6 +96,7 @@ python3 scripts/grooming_tracker.py preview PROJECT_ROOT DELIVERY --web-url URL 
 python3 scripts/grooming_tracker.py status PROJECT_ROOT DELIVERY --web-url URL [--task-keys FILE]
 python3 scripts/grooming_tracker.py resolve PROJECT_ROOT DELIVERY --web-url URL --task ID --evidence RAW --mapping POINTERS [--task-keys FILE]
 python3 scripts/grooming_tracker.py claim PROJECT_ROOT DELIVERY --web-url URL --task ID --confirmed-batch HASH [--task-keys FILE]
+python3 scripts/grooming_tracker.py record-created PROJECT_ROOT DELIVERY --web-url URL --task ID --evidence RAW --mapping POINTERS [--task-keys FILE]
 python3 scripts/grooming_tracker.py bind PROJECT_ROOT DELIVERY --web-url URL --task ID --evidence RAW --mapping POINTERS [--task-keys FILE]
 ```
 
@@ -108,6 +109,13 @@ HASH берётся из текущего preview. Это проверка не�
 затем claim допускает обновление. Для новой задачи после поиска claim допускает
 одну попытку создания. Внешние действия выполняет LLM через доступные средства
 SberTrack; утилита сама в сеть не обращается.
+
+Если создание возвращает только ключ, сразу сохрани исходный ответ через
+record-created с указателем key. Это закрепляет номер, но не подтверждает
+обязательные поля. Прочитай созданную карточку, выполни resolve и дозаполни
+её штатными вызовами. Если API разделяет изменение полей, меток и связи эпика,
+используй необходимые операции над тем же номером; повторно create не вызывай.
+При сбое между ними перечитай карточку и продолжи через resolve.
 
 После записи перечитай карточку и передай полный неизменённый JSON в bind.
 JSON_POINTERS указывает поля key (родной ключ, не внешнее issue_key), type,

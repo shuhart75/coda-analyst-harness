@@ -213,10 +213,24 @@ def operate(area, batch, action, task_id, *, confirmation=None, evidence=None, m
                     'complete' if prior.get('state') == 'bound' and prior.get('payload_sha256') == payload_hash else
                     'claim-update' if prior.get('state') == 'resolved' and prior.get('source_sha256') == payload_hash else
                     'read-existing-task' if prior.get('key') or task.get('tracker_key') else 'search-request-id-before-create'}
+        if action == 'record-created':
+            if prior.get('state') != 'attempted' or prior.get('operation') != 'create':
+                raise ValueError('A creation response requires an outstanding create attempt')
+            raw = Path(evidence).read_bytes()
+            key = pointer(json.loads(raw), read(mapping)['key'])
+            if not grooming.KEY.fullmatch(str(key)) or (prior.get('key') and prior['key'] != key):
+                raise ValueError('Invalid or conflicting created task key')
+            unique_key(area, ledger, key)
+            record = {**prior, 'key': key, 'creation_evidence_sha256': grooming.digest(raw)}
+            save(ledger, record)
+            return {**record, 'next_action': 'read-created-task-and-resolve',
+                    'create_allowed': False, 'complete': False}
         if action == 'resolve':
             raw = Path(evidence).read_bytes()
             paths = read(mapping)
             fields = observe(raw, paths)
+            if prior.get('state') == 'attempted' and prior.get('operation') == 'create' and fields['type'] != 'Story':
+                raise ValueError('Created task must be Story; creation is not complete')
             expected = prior.get('key') or task.get('tracker_key')
             if expected and fields['key'] != expected:
                 raise ValueError('Read the exact supplied or previously resolved SberTrack task')
@@ -292,7 +306,7 @@ def batch_status(area, batch):
 
 def main():
     p = argparse.ArgumentParser(description='SberTrack grooming Story journal, no network calls')
-    p.add_argument('action', choices=['preview', 'status', 'resolve', 'claim', 'bind'])
+    p.add_argument('action', choices=['preview', 'status', 'resolve', 'claim', 'record-created', 'bind'])
     p.add_argument('project', type=Path)
     p.add_argument('feature')
     p.add_argument('--web-url', required=True)

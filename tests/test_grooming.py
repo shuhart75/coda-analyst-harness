@@ -536,6 +536,25 @@ class GroomingTrackerTests(unittest.TestCase):
         self.evidence.write_text(json.dumps({'data': data}))
         self.op('bind', evidence=self.evidence, mapping=self.mapping)
 
+    def test_short_creation_response_records_key_before_followup_updates(self):
+        self.op('claim', confirmation='b'*64)
+        created = self.root/'created.json'
+        created.write_text(json.dumps({'key': 'RSCON-123'}))
+        mapping = self.root/'created-mapping.json'
+        mapping.write_text(json.dumps({'key': '/key'}))
+        result = self.op('record-created', evidence=created, mapping=mapping)
+        self.assertFalse(result['complete'])
+        self.assertFalse(result['create_allowed'])
+        self.write_evidence(description=None, labels=None)
+        self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+        self.assertTrue(self.op('claim', confirmation='b'*64)['update_allowed'])
+
+    def test_wrong_type_after_creation_cannot_be_accepted_as_existing_task(self):
+        self.op('claim', confirmation='b'*64)
+        self.write_evidence(type='Task')
+        with self.assertRaisesRegex(ValueError, 'Created task must be Story'):
+            self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+
 
 class StoryDeliveryContentTests(unittest.TestCase):
     def setUp(self):
