@@ -36,7 +36,18 @@ def render_question(root, question):
     lines = ['\nЗадача: ' + question['task']]
     action = question.get('action') or {}
     details = [r.get('details') for r in question.get('requests', []) if r.get('details')]
-    if action.get('kind') == 'scope-repair-v1':
+    if question.get('manual_check'):
+        check = question['manual_check']
+        lines.extend([question['question'], 'Откройте в браузере: ' + check['url'],
+                      'Проверяемая сборка: ' + check['artifact'],
+                      'Требования: ' + ', '.join(check['requirements']),
+                      'Перед проверкой: ' + check['preconditions']])
+        for index, step in enumerate(check['steps'], 1):
+            lines.append(str(index) + '. ' + step['action'])
+            lines.append('   Ожидаемый результат: ' + step['expected'])
+        lines.append('Совпали ли все результаты? При расхождении укажите номер шага и что произошло.')
+        lines.append('Если пока не проверяли, выберите «Ответить позже». Это не подтверждает проверку.')
+    elif action.get('kind') == 'scope-repair-v1':
         lines.append('Разрешить исправить следующие файлы за пределами текущей задачи?')
         for item in action['files']:
             lines.append('Файл: ' + item['path'])

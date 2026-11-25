@@ -9,7 +9,7 @@ from pathlib import Path
 import threading
 import time
 
-from platform_support import launch_process, stop_process_scope
+from platform_support import launch_process, stop_process_scope, process_scope_exists
 
 
 def _text(value):
@@ -323,6 +323,15 @@ def _private_file(path: Path):
     return os.fdopen(os.open(path, flags, 0o600), "wb", buffering=0)
 
 
+def cleanup_observation(process):
+    observation = {'leader_returncode': process.poll()}
+    try:
+        observation['scope_state'] = 'present-or-inaccessible' if process_scope_exists(process.pid) else 'absent'
+    except OSError as exc:
+        observation.update(scope_state='unknown', inspection_error=type(exc).__name__)
+    return observation
+
+
 def finish_process(process, cleanup_guard=None):
     """Preserve a service-bearing group rather than blindly terminating it.
 
@@ -336,15 +345,21 @@ def finish_process(process, cleanup_guard=None):
         except Exception as exc:
             diagnostic = {"reason": "Cannot verify process cleanup: " + type(exc).__name__}
         if diagnostic:
-            process.poll()
-            return {"preserved": True, "process_group": process.pid, "diagnostic": diagnostic}
+            observation = cleanup_observation(process)
+            if isinstance(observation['leader_returncode'], int) and observation['scope_state'] == 'absent':
+                return {"preserved": False, "process_group": process.pid, "observation": observation}
+            return {"preserved": True, "process_group": process.pid, "diagnostic": diagnostic,
+                    "observation": observation}
     try:
         stop_process_scope(process)
         process.wait(timeout=5)
     except (OSError, subprocess.TimeoutExpired) as exc:
         # Preserve ownership and the partial stream instead of losing both to
         # a cleanup exception. Do not try another signalling mechanism.
-        return {"preserved": True, "process_group": process.pid,
+        observation = cleanup_observation(process)
+        if isinstance(observation['leader_returncode'], int) and observation['scope_state'] == 'absent':
+            return {"preserved": False, "process_group": process.pid, "observation": observation}
+        return {"preserved": True, "process_group": process.pid, "observation": observation,
                 "diagnostic": {"reason": "Process cleanup failed", "operation": "stop_process_scope",
                                "error_type": type(exc).__name__, "errno": getattr(exc, 'errno', None)}}
     return {"preserved": False, "process_group": process.pid}
@@ -436,7 +451,12 @@ def run_session(cli: list[str], cwd: Path, prompt: str, log_dir: Path,
         result['activity'] = summary
     result.update(returncode=process.returncode if process is not None else None,
                   timed_out=timed_out, idle_timeout=idle_timeout, cancelled=cancelled, cleanup=cleanup)
+    if cancelled:
+        reason = getattr(stop_event, 'reason', None)
+        result['cancellation_reason'] = reason if isinstance(reason, str) else 'stop-requested'
     if cleanup and cleanup['preserved']:
+        cleanup['trigger'] = (result.get('cancellation_reason') if cancelled else
+                              'idle-timeout' if idle_timeout else 'timeout' if timed_out else 'session-exit')
         result['errors'].append('Process group preserved: service cleanup requires inspection')
     if launch_error:
         result["errors"].append(launch_error)

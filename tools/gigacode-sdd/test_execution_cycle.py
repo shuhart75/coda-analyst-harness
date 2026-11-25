@@ -488,6 +488,58 @@ class ExecutionPortfolioTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, 'Preserved safety failure'):
             self.run_task()
 
+    def test_final_peer_pass_waits_for_manual_answer_then_rechecks_review(self):
+        import operator_questions as oq
+        from test_manual_verification import CHECK
+        self.primary_only = True
+        self.task['id'] = 'integration'
+        key = oq.request(self.runner.root, 'ui', 'manual', 'Проверка?', manual_check=CHECK)
+        with self.assertRaises(oq.WaitingForOperator):
+            self.run_task()
+        calls_before = len(self.calls)
+        oq.answer(self.runner.root, key, 'Да', 'Все шаги совпали')
+        def review(root, cwd, detail, *args, **kwargs):
+            self.assertIn('Все шаги совпали', detail)
+            return self.review(root, cwd, detail, *args, **kwargs)
+        self.assertEqual(self.run_task(review=review)['status'], 'accepted')
+        self.assertEqual(len(self.calls), calls_before)
+
+    def test_manual_answer_invalidates_review_but_preserves_implementation(self):
+        import operator_questions as oq
+        from test_manual_verification import CHECK
+        self.primary_only = True
+        self.run_task()
+        key = oq.request(self.runner.root, self.task['id'], 'manual', 'Проверка?', manual_check=CHECK)
+        oq.answer(self.runner.root, key, 'Нет', 'Поле отсутствует')
+        calls_before = len(self.calls)
+        reviews = []
+        def review(root, cwd, detail, *args, **kwargs):
+            self.assertIn('Поле отсутствует', detail)
+            self.assertIn(CHECK['artifact'], detail)
+            reviews.append(detail)
+            return self.review(root, cwd, detail, *args, **kwargs)
+        self.run_task(review=review)
+        self.assertEqual(len(self.calls), calls_before)
+        self.assertEqual(len(reviews), 1)
+
+    def test_comparison_cleanup_preserves_winner_for_resume(self):
+        from controller import OperationalBlocked
+        def session(*args, **kwargs):
+            if kwargs['model'] == MODELS[1]:
+                self.assertTrue(kwargs['stop_event'].wait(30))
+                self.assertEqual(kwargs['stop_event'].reason, 'comparison-complete')
+                raise OperationalBlocked('Process cleanup incomplete')
+            return self.session(*args, **kwargs)
+        with self.assertRaisesRegex(OperationalBlocked, 'cleanup incomplete'):
+            self.run_task(session=session)
+        accepted = [r for r in self.records() if r['status'] == 'accepted']
+        self.assertEqual(len(accepted), 1)
+        self.assertFalse((self.work.parent/(self.work.name+'-checkpoint.json')).exists())
+        def forbidden(*args, **kwargs):
+            raise AssertionError('Verified work must not repeat after reconciliation')
+        result = self.run_task(session=forbidden, checks=forbidden, review=forbidden)
+        self.assertEqual(result['patch'], accepted[0]['patch'])
+
     def test_cleanup_failure_cannot_replace_peer_safety_failure(self):
         from controller import OperationalBlocked
         barrier = threading.Barrier(2)

@@ -81,7 +81,10 @@ class ControllerServiceGuardTests(unittest.TestCase):
                 patch('controller.inspect_services', return_value=self.inventory([self.service()])):
             report = self.runner.cleanup_guard(54320)
             self.assertIsNotNone(report)
+            self.assertFalse(self.runner.stop.is_set())
+            self.runner.preserve_cleanup({'preserved': True, 'process_group': 54320, 'diagnostic': report})
             self.assertTrue(self.runner.stop.is_set())
+            self.assertEqual(controller.read(self.runner.root/'service-stop.json')['kind'], 'process-cleanup')
             self.assertTrue(Path(report['report']).is_file())
             with self.assertRaisesRegex(controller.Blocked, 'still present'):
                 self.runner.check_preserved_processes()
