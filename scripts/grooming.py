@@ -101,12 +101,17 @@ def validate(plan, text, package, *, confirmed=True, complete=True):
     tasks = plan.get('tasks')
     if not isinstance(tasks, list) or not tasks:
         raise ValueError('Grooming: tasks required')
-    ids, covered, scenarios, change_coverage = set(), set(), set(), set()
+    ids, tracker_keys, covered, scenarios, change_coverage = set(), set(), set(), set(), set()
     for task in tasks:
         task_id = task.get('id', '')
         if not SLUG.fullmatch(task_id) or task_id in ids:
             raise ValueError('Grooming: invalid or duplicate task ID')
         ids.add(task_id)
+        tracker_key = task.get('tracker_key')
+        if tracker_key is not None:
+            if not KEY.fullmatch(str(tracker_key)) or tracker_key in tracker_keys:
+                raise ValueError('Grooming: invalid or duplicate native tracker key')
+            tracker_keys.add(tracker_key)
         summary = nonempty(task.get('summary'), 'summary')
         prefix = re.match(r'^(AN|BE|FE|QA)(?=\s|:)', summary)
         if not prefix or task.get('role') != prefix[1]:

@@ -12,6 +12,7 @@
       "id": "fe-01",
       "summary": "FE Настройка параметров",
       "role": "FE",
+      "tracker_key": null,
       "source_sha256": "<grooming.task_source_hash(task, requirement_blocks)>",
       "estimate": 3,
       "description": "<short agreed description>",

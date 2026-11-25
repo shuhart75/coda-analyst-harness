@@ -11,6 +11,7 @@ import test_sdd_receive as receive_tests
 import test_sdd_bundle as fixtures
 import grooming
 import grooming_tracker as tracker
+import story_delivery
 import sdd_bundle
 import sdd_audit
 from write_context_fixture import configure_write_context
@@ -80,6 +81,13 @@ class GroomingUnitTests(unittest.TestCase):
         self.assertEqual(result['next_action'], 'confirm-one-task')
         with self.assertRaises(ValueError):
             grooming.validate(plan, self.text, self.package)
+
+    def test_grooming_native_tracker_key_is_optional_but_validated(self):
+        self.plan['tasks'][0]['tracker_key'] = 'RSCON-8201'
+        grooming.validate(confirm(self.plan), self.text, self.package)
+        self.plan['tasks'][0]['tracker_key'] = 'not-a-key'
+        with self.assertRaisesRegex(ValueError, 'tracker key'):
+            grooming.validate(confirm(self.plan), self.text, self.package)
 
     def test_grooming_link_rebasing_preserves_code(self):
         text = '[Example](example.json) and `[code](keep.json)`\n```text\n[code](keep.json)\n```'
@@ -348,12 +356,14 @@ class GroomingTrackerTests(unittest.TestCase):
                      'summary': 'BE Изменение', 'epic_key': 'RSCON-10', 'estimate': 2.5,
                      'estimate_unit': 'person-days', 'labels': ['RSCON_dev'],
                      'requirements_url': 'https://example.invalid/?path=revision-1',
-                     'description': 'Изменение\nhttps://example.invalid/?path=revision-1\ngrooming/' + 'a'*64}
+                     'description': 'Изменение\nhttps://example.invalid/?path=revision-1\ngrooming/' + 'a'*64,
+                     **story_delivery.REQUIRED_FIELDS}
         self.batch = {'tasks': [self.task], 'confirmation_sha256': 'b'*64}
         self.evidence = self.root / 'raw.json'
         self.mapping = self.root / 'mapping.json'
         self.mapping.write_text(json.dumps({name: '/data/' + name for name in
-            ('key', 'type', 'summary', 'epic_key', 'estimate', 'labels', 'description', 'requirements_url')}))
+            ('key', 'type', 'summary', 'epic_key', 'estimate', 'labels', 'description', 'requirements_url',
+             *story_delivery.REQUIRED_FIELDS)}))
         self.write_evidence()
 
     def write_evidence(self, **changes):
@@ -393,12 +403,15 @@ class GroomingTrackerTests(unittest.TestCase):
         self.op('claim', confirmation='b'*64)
         old = deepcopy(self.task)
         self.task['estimate'] = 4
+        self.task['description'] += '\nNew requirements'
         self.assertFalse(self.op('claim', confirmation='b'*64)['create_allowed'])
         self.op('bind', evidence=self.evidence, mapping=self.mapping)
+        self.assertEqual(self.op('claim', confirmation='b'*64)['status'], 'read-existing-task')
+        self.op('resolve', evidence=self.evidence, mapping=self.mapping)
         next_attempt = self.op('claim', confirmation='b'*64)
         self.assertTrue(next_attempt['update_allowed'])
         self.assertEqual(next_attempt['key'], 'RSCON-123')
-        self.write_evidence()
+        self.evidence.write_text(json.dumps({'data': {**next_attempt['payload'], 'key': 'RSCON-123'}}))
         self.op('bind', evidence=self.evidence, mapping=self.mapping)
 
     def test_grooming_wrong_epic_label_estimate_and_link_block_binding(self):
@@ -410,6 +423,154 @@ class GroomingTrackerTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.op('bind', evidence=self.evidence, mapping=self.mapping)
         self.assertEqual(self.op('status')['next_action'], 'reconcile-required')
+
+    def test_supplied_key_requires_read_then_updates_without_create(self):
+        self.task['tracker_key'] = 'RSCON-123'
+        result = self.op('claim', confirmation='b'*64)
+        self.assertFalse(result['create_allowed'])
+        self.assertEqual(result['key'], 'RSCON-123')
+        self.write_evidence(summary='Existing title', description='Useful analyst text',
+                            labels=['keep-me'], estimate=11)
+        self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+        result = self.op('claim', confirmation='b'*64)
+        self.assertTrue(result['update_allowed'])
+        self.assertFalse(result['create_allowed'])
+        self.assertEqual(result['payload']['summary'], 'Existing title')
+        self.assertEqual(result['write_fields']['labels'], ['keep-me', 'RSCON_dev'])
+        self.assertTrue(result['write_fields']['description'].startswith('Useful analyst text'))
+        self.assertNotIn('estimate', result['write_fields'])
+        self.assertNotIn('summary', result['write_fields'])
+        self.assertNotIn('type', result['write_fields'])
+        self.evidence.write_text(json.dumps({'data': {**result['payload'], 'key': 'RSCON-123', 'estimate': 11}}))
+        self.op('bind', evidence=self.evidence, mapping=self.mapping)
+        self.assertEqual(tracker.batch_status(self.root/'journal', self.batch)['completed'], 1)
+
+    def test_wrong_supplied_key_is_rejected_and_existing_type_is_preserved(self):
+        self.task['tracker_key'] = 'RSCON-456'
+        with self.assertRaisesRegex(ValueError, 'exact supplied'):
+            self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+        self.write_evidence(key='RSCON-456', type='Task')
+        result = self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+        self.assertEqual(result['payload']['type'], 'Task')
+        self.assertNotIn('type', result['write_fields'])
+        self.assertFalse(self.op('claim', confirmation='b'*64)['create_allowed'])
+
+    def test_mandatory_fields_are_read_back_and_verified(self):
+        self.op('claim', confirmation='b'*64)
+        for field, value in [('configuration_item', 'CI99999999'),
+                             ('architecture_changes', 'Влияет на архитектуру'),
+                             ('load_testing_required', 'Да')]:
+            self.write_evidence(**{field: value})
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'mandatory field'):
+                self.op('bind', evidence=self.evidence, mapping=self.mapping)
+        self.write_evidence(configuration_item='CI07642362', load_testing_required=False)
+        self.op('bind', evidence=self.evidence, mapping=self.mapping)
+
+    def test_cross_machine_search_binds_existing_story_without_creating(self):
+        self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+        self.assertEqual(self.op('claim', confirmation='b'*64)['status'], 'already-bound')
+        self.assertEqual(self.op('status')['record']['key'], 'RSCON-123')
+
+    def test_partial_unknown_creation_is_reconciled_to_update_same_key(self):
+        self.op('claim', confirmation='b'*64)
+        self.write_evidence(labels=[])
+        self.assertEqual(self.op('claim', confirmation='b'*64)['status'], 'reconcile-required')
+        self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+        result = self.op('claim', confirmation='b'*64)
+        self.assertFalse(result['create_allowed'])
+        self.assertTrue(result['update_allowed'])
+        self.assertEqual(result['key'], 'RSCON-123')
+
+    def test_search_without_marker_cannot_adopt_unrelated_task(self):
+        self.write_evidence(description='Same title is not identity')
+        with self.assertRaisesRegex(ValueError, 'stable request marker'):
+            self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+
+    def test_dictionary_ids_are_verified_against_unchanged_metadata(self):
+        metadata = self.root/'options.json'
+        metadata.write_text(json.dumps({'values': [{'id': 73, 'code': 'CI07642362'}]}))
+        mapping = json.loads(self.mapping.read_text())
+        mapping['configuration_item'] = {'path': '/data/configuration_item',
+            'lookup': {'evidence': str(metadata), 'id': '/values/0/id', 'value': '/values/0/code'}}
+        self.mapping.write_text(json.dumps(mapping))
+        self.op('claim', confirmation='b'*64)
+        self.write_evidence(configuration_item=99)
+        with self.assertRaisesRegex(ValueError, 'metadata evidence'):
+            self.op('bind', evidence=self.evidence, mapping=self.mapping)
+        self.write_evidence(configuration_item=73)
+        result = self.op('bind', evidence=self.evidence, mapping=self.mapping)
+        self.assertEqual(result['metadata_evidence'][str(metadata)], grooming.digest(metadata.read_bytes()))
+
+    def test_unread_mandatory_field_and_lost_label_cannot_finish(self):
+        self.task['tracker_key'] = 'RSCON-123'
+        self.write_evidence(labels=['keep-me'], description='Existing text')
+        self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+        claimed = self.op('claim', confirmation='b'*64)
+        self.evidence.write_text(json.dumps({'data': {**claimed['payload'], 'key': 'RSCON-123'}}))
+        paths = json.loads(self.mapping.read_text())
+        del paths['architecture_changes']
+        self.mapping.write_text(json.dumps(paths))
+        with self.assertRaisesRegex(ValueError, 'Read back the mandatory field'):
+            self.op('bind', evidence=self.evidence, mapping=self.mapping)
+        paths['architecture_changes'] = '/data/architecture_changes'
+        self.mapping.write_text(json.dumps(paths))
+        data = json.loads(self.evidence.read_text())
+        data['data']['labels'] = ['RSCON_dev']
+        self.evidence.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, 'labels were lost'):
+            self.op('bind', evidence=self.evidence, mapping=self.mapping)
+        self.assertEqual(tracker.batch_status(self.root/'journal', self.batch)['status'], 'tasks-pending')
+
+    def test_creation_payload_is_story_only(self):
+        self.task['type'] = 'Task'
+        with self.assertRaisesRegex(ValueError, 'must be Story'):
+            self.op('claim', confirmation='b'*64)
+
+    def test_existing_empty_card_fields_are_valid_and_line_endings_are_not_a_gate(self):
+        self.task['tracker_key'] = 'RSCON-123'
+        self.write_evidence(description=None, labels=None)
+        self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+        claimed = self.op('claim', confirmation='b'*64)
+        data = {**claimed['payload'], 'key': 'RSCON-123'}
+        data['description'] = data['description'].replace('\n', '\r\n')
+        self.evidence.write_text(json.dumps({'data': data}))
+        self.op('bind', evidence=self.evidence, mapping=self.mapping)
+
+
+class StoryDeliveryContentTests(unittest.TestCase):
+    def setUp(self):
+        self.task = {'id': 'be-01', 'summary': 'BE Получение эффектов', 'description': 'Получить эффекты.',
+                     'acceptance': 'Эффекты доступны.', 'sdd_changes': ['backend/effects']}
+
+    def test_three_commented_links_and_sdd_input_pin_exact_revision(self):
+        from urllib.parse import parse_qs, urlsplit
+        result = story_delivery.delivery_content(self.task, 'effects', 2, 'c'*40,
+                                                'https://onework.sigma.sbrf.ru/sc/RSCON/documents', 'a'*64)
+        for field, suffix in [('revision_url', ''), ('general_requirements_url', '/requirements.md'),
+                              ('task_folder_url', '/tasks/be-01')]:
+            self.assertEqual(parse_qs(urlsplit(result[field]).query)['path'],
+                             ['requirements-exchange/effects/revisions/002' + suffix])
+            self.assertIn(result[field], result['description'])
+        self.assertEqual(result['sdd_input_url'], result['revision_url'])
+        self.assertIn('--packet <локальный documents>/requirements-exchange/effects --revision 2', result['sdd_prompt'])
+        self.assertIn('backend/effects', result['sdd_prompt'])
+        self.assertIn('tasks/be-01/requirements.md', result['sdd_prompt'])
+        self.assertIn('c'*40, result['sdd_prompt'])
+
+    def test_revision_update_replaces_block_and_preserves_user_text(self):
+        old = story_delivery.delivery_content(self.task, 'effects', 1, 'c'*40, 'https://example.test/documents', 'a'*64)
+        new = story_delivery.delivery_content(self.task, 'effects', 2, 'd'*40, 'https://example.test/documents', 'a'*64)
+        existing = 'User prefix\n\n' + old['description'] + '\n\nUser suffix'
+        result = story_delivery.merge_description(existing, {**new, 'request_id': 'a'*64})
+        self.assertEqual(result, 'User prefix\n\n' + new['description'] + '\n\nUser suffix')
+        self.assertEqual(story_delivery.merge_description(result, {**new, 'request_id': 'a'*64}), result)
+
+    def test_task_keys_mixed_existing_and_new_and_conflicts(self):
+        plan = {'tasks': [{'id': 'be', 'tracker_key': 'RSCON-123'}, {'id': 'fe'}, {'id': 'qa'}]}
+        self.assertEqual(story_delivery.task_keys(plan, {'fe': 'RSCON-456'}), {'be': 'RSCON-123', 'fe': 'RSCON-456'})
+        for keys in ({'missing': 'RSCON-1'}, {'be': 'RSCON-999'}, {'fe': 'RSCON-123'}):
+            with self.subTest(keys=keys), self.assertRaises(ValueError):
+                story_delivery.task_keys(plan, keys)
 
 
 if __name__ == '__main__':

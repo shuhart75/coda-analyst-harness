@@ -163,6 +163,13 @@ class DocumentsExchangeTests(unittest.TestCase):
         self.assertEqual(batch['tasks'][0]['local_id'], self.plan['tasks'][0]['id'])
         self.assertIn('documents?path=', batch['tasks'][0]['requirements_url'])
         self.assertIn(sent['published_commit'], batch['tasks'][0]['description'])
+        self.assertEqual(batch['tasks'][0]['configuration_item'], 'ПКАП1200 АС КОДА (CI07642362)')
+        self.assertEqual(batch['tasks'][0]['architecture_changes'], 'Не влияет на архитектуру')
+        self.assertEqual(batch['tasks'][0]['load_testing_required'], 'Нет')
+        supplied = grooming_tracker.prepare(self.project, 'demo', 'https://example.test/team/documents',
+                                            {self.plan['tasks'][0]['id']: 'RSCON-123'})
+        self.assertEqual(supplied['tasks'][0]['tracker_key'], 'RSCON-123')
+        self.assertIn('revisions%2F001', supplied['tasks'][0]['sdd_input_url'])
         with self.assertRaises(ValueError):
             grooming_tracker.prepare(self.project, 'demo', 'https://example.test/team/coda')
         root = self.project/'requirements-exchange/demo'
