@@ -39,6 +39,64 @@ class ExecutionDenialTests(unittest.TestCase):
         receipt.update(result=parsed, events_sha256=digest(events)); save(receipt_path, receipt)
         return parsed
 
+    def service_session(self, *args, **kwargs):
+        result = self.denied_session(*args, **kwargs)
+        events = Path(result['events_path'])
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        rows[-1]['result'] = json.dumps({'service_request': {'id': 'stand'}})
+        events.write_text('\n'.join(map(json.dumps, rows)) + '\n')
+        result = parse_events(events)
+        result.update(returncode=0, cleanup={'preserved': False})
+        receipt_path = events.parent/'session-receipt.json'
+        receipt = read(receipt_path)
+        receipt.update(result=result, events_sha256=digest(events))
+        save(receipt_path, receipt)
+        return result
+
+    def test_completed_tool_failures_do_not_hide_service_prerequisite(self):
+        from operator_questions import WaitingForOperator
+        with patch.object(self.runner.services, 'prepare', return_value={'identity': 'service-id', 'question_id': 'q'}) as prepare:
+            with self.assertRaises(WaitingForOperator):
+                self.run_task(session=self.service_session)
+        prepare.assert_called_once()
+        self.assertEqual((self.check_count, self.review_count), (0, 0))
+        self.assertTrue(any(v.get('pending_control', [None])[0] == 'service_request' for v in self.records()))
+
+    def test_resume_returns_previously_ignored_prerequisite_to_executor(self):
+        self.run_task(session=self.denied_session)
+        path = next(p for p in (self.runner.root/'execution-cycles').glob('*/*/candidate.json')
+                    if read(p)['model'] == MODELS[0])
+        value = read(path)
+        events = Path(value['session_result']['events_path'])
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        rows[-1]['result'] = json.dumps({'service_request': {'id': 'stand'}})
+        events.write_text('\n'.join(map(json.dumps, rows))+'\n')
+        restored = parse_events(events)
+        restored.update(returncode=0, cleanup={'preserved': False})
+        value.update(status='stalled', stage='review', session_result=restored)
+        value['evidence_files'][str(events)] = digest(events)
+        save(path, value)
+        previous = (self.check_count, self.review_count)
+        from operator_questions import WaitingForOperator
+        with patch.object(self.runner.services, 'prepare', return_value={'identity': 'service-id', 'question_id': 'q'}) as prepare:
+            with self.assertRaises(WaitingForOperator):
+                self.run_task(session=self.service_session)
+        prepare.assert_called_once()
+        self.assertEqual((self.check_count, self.review_count), previous)
+        self.assertTrue(read(path)['control_recovery'])
+
+    def test_transport_failure_cannot_launch_service_or_skip_to_checks(self):
+        self.runner.cfg['recovery_retry_seconds'] = .001
+        def broken(*args, **kwargs):
+            result = self.service_session(*args, **kwargs)
+            result['errors'].append('Unaccounted transport failure')
+            return result
+        with patch.object(self.runner.services, 'prepare') as prepare:
+            with self.assertRaises(Blocked):
+                self.run_task(session=broken)
+        prepare.assert_not_called()
+        self.assertEqual((self.check_count, self.review_count), (0, 0))
+
     def old_gate(self, *args, **kwargs):
         result = self.denied_session(*args, **kwargs)
         raise Blocked('Permission preflight/runtime denial; inspect ' + result['events_path'])

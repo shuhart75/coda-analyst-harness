@@ -88,6 +88,21 @@ class ContributionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ta.validate_deferred(plan, {'id': 'integration', 'requirements': ['REQ-LIVE']}, [proof])
 
+    def test_existing_downstream_assignment_can_be_referenced_without_scope_transfer(self):
+        task = {'id': 'frontend', 'requirements': ['REQ-UI'], 'depends_on': []}
+        owner = {'id': 'experiment', 'requirements': ['REQ-EXPERIMENT'], 'depends_on': ['frontend']}
+        other = {'id': 'other', 'requirements': ['REQ-OTHER'], 'depends_on': []}
+        plan = {'tasks': [task, owner, other]}
+        proof = {'requirement': 'REQ-EXPERIMENT', 'owner': 'experiment',
+                 'evidence': 'Whole experiment', 'reason': 'Already assigned by pinned plan'}
+        self.assertEqual(ta.validate_deferred(plan, task, [proof]), [proof])
+        self.assertEqual(task['requirements'], ['REQ-UI'])
+        for requirement in ('REQ-OTHER', 'REQ-UNKNOWN'):
+            with self.assertRaisesRegex(ValueError, 'assigned to neither'):
+                ta.validate_deferred(plan, task, [{**proof, 'requirement': requirement}])
+        with self.assertRaisesRegex(ValueError, 'missing nonempty fields: reason'):
+            ta.validate_deferred(plan, task, [{**proof, 'reason': ''}])
+
     def test_legacy_missing_requirement_is_carried_to_named_owner_without_changing_plan(self):
         from types import SimpleNamespace
         task = {'id': 'e2e', 'prompt': 'Live test', 'requirements': ['REQ-OTHER']}

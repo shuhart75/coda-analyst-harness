@@ -9,6 +9,7 @@ from execution_scheduling import ResourceLane, choose, quality
 import hashlib
 import json
 from evidence import bind_quote
+from transport import execution_result_usable
 from retry_budget import renew, runtime_revision
 from step_recovery import record_failure, REVIEW_STRATEGIES
 from recovery_policy import decide as recovery_decision, retry_at, wait_until
@@ -471,7 +472,7 @@ def _recover_permission_fatal(runner, task, candidates, folder, scope):
     raise Blocked('Saved permission failure has no matching usable execution receipt; inspect ' + str(path))
 
 def execute_task(runner, task, record):
-    from controller import Blocked, Interrupted, digest, read, save
+    from controller import Blocked, Interrupted, RetryableSessionError, digest, read, save
     import operator_questions as questions
     import task_acceptance
     import run_status
@@ -595,6 +596,20 @@ def execute_task(runner, task, record):
             runner.progress(task['id'] + ': сохранённая сессия не прошла фиксацию; продолжу рабочие файлы с проверками')
             continue
         control = questions.execution_control(result.get('text', ''))
+        if (control and control[0] in ('service_request', 'service_action', 'isolated_check_request')
+                and not result.get('ok') and value.get('stage') in ('checks', 'review')):
+            identity = fingerprint([result.get('events_path'), result.get('text')])
+            if value.get('control_recovery') != identity and value.get('handled_question_result') != identity:
+                _receipt_valid(value)
+                value['control_recovery'] = identity
+                value['feedback'] = {'previous_review': value.get('review'), 'pending_prerequisite': control,
+                    'instruction': 'The controller previously skipped this prerequisite after tool errors. '
+                                   'Recheck whether it is still needed and return one current control object. '
+                                   'Preserve completed work; do not repeat the full investigation or bypass denied tools.'}
+                value.update(stage='execute', status='pending')
+                value.pop('recovered_review', None)
+                save(path, value)
+            continue
         if not control or control[0] not in ('operator_question', 'scope_request'):
             continue
         identity = fingerprint([result.get('events_path'), result.get('text')])
@@ -857,8 +872,15 @@ def execute_task(runner, task, record):
                         control = (questions.execution_control(result.get('text', ''))
                                    if result.get('terminal_result') and not result.get('timed_out')
                                    and not (result.get('cleanup') or {}).get('preserved') else None)
-                        if control and control[0] in ('service_request', 'service_action', 'isolated_check_request') and not result.get('ok'):
-                            control = None
+                        if (control and control[0] in ('service_request', 'service_action', 'isolated_check_request')
+                                and not result.get('ok') and not execution_result_usable(result)):
+                            # Keep an explicit prerequisite visible. A transport failure
+                            # cannot authorize it, and checks must not silently skip it.
+                            value['pending_control'] = control
+                            persist()
+                            fail('transport', {'errors': result.get('errors', []),
+                                               'pending_control': control, 'log': result['events_path']})
+                            continue
                         value['pending_control'] = control
                         persist()
                         if control:
@@ -1026,11 +1048,21 @@ def execute_task(runner, task, record):
                         review = runner.review(review_copy, task['cwd'], detail, task['requirements'],
                                                task['id'] + '-review', model=reviewer_model, stop_event=stop)
                     value.pop('recovered_review', None)
-                    value.pop('review_draft', None)
                     if stop.is_set():
                         interrupted()
                     value['review'] = review
-                    task_acceptance.check_report(runner, task, review)
+                    try:
+                        task_acceptance.check_report(runner, task, review)
+                    except RetryableSessionError:
+                        # Transport and verdict validation already completed. Keep
+                        # this answer if the contribution contract needs repair.
+                        text = json.dumps(review, ensure_ascii=False)
+                        value['review_draft'] = {'stage': 'review', 'text': text[:16000],
+                            'truncated': len(text) > 16000, 'completed': True,
+                            'input_binding': fingerprint({'snapshot': value.get('workspace_snapshot'),
+                                                          'checks': value.get('checks')})}
+                        raise
+                    value.pop('review_draft', None)
                     if review.get('events_path'):
                         value['evidence_files'][review['events_path']] = digest(review['events_path'])
                     value['review_workspace'] = str(review_copy)

@@ -30,6 +30,25 @@ class ExecutionPortfolioTests(unittest.TestCase):
                 _review_repair(root, value, 'review')
                 self.assertEqual((root/'.review-input/output-repair.json').exists(), eligible)
 
+    def test_contribution_error_retains_completed_review_for_focused_repair(self):
+        self.primary_only = True
+        calls = []
+        def review(root, *args, **kwargs):
+            calls.append(root)
+            report = self.review(root, *args, **kwargs)
+            if len(calls) == 1:
+                report['deferred_evidence'] = [{'requirement': 'REQ-BE', 'owner': 'missing',
+                                               'evidence': 'proof', 'reason': 'explanation'}]
+            else:
+                draft = read(Path(root)/'.review-input/output-repair.json')
+                self.assertTrue(draft['completed'])
+                self.assertEqual(json.loads(draft['text'])['deferred_evidence'][0]['owner'], 'missing')
+            return report
+        result = self.run_task(review=review)
+        self.assertEqual(result['status'], 'accepted')
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((len(self.calls), self.check_count), (1, 1))
+
     def setUp(self):
         self.fixture = fixtures.ControllerE2E('test_init_preserves_source_and_rejects_changed_packet')
         self.fixture.setUp()
