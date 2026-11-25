@@ -35,6 +35,10 @@ STRATEGIES = (
 )
 
 
+class CandidateDrift(ScopeWait):
+    """Recheck preserved work without restarting implementation."""
+
+
 class CandidateStalled(RuntimeError):
     """Exhausted evidence-based strategies, not a safety or permission failure."""
 
@@ -103,6 +107,51 @@ def _receipt_valid(record):
         patch = record['patch']
         if not Path(patch['patch']).is_file() or digest(patch['patch']) != patch['sha256']:
             raise Blocked('Saved accepted execution patch changed')
+
+
+def _reconcile_candidate(runner, value, slot):
+    """Preserve drift evidence and revalidate work, never reuse stale acceptance."""
+    from controller import Blocked, save
+    from workspace import _forbidden
+    previous = value.get('workspace_snapshot')
+    if not previous:
+        return False
+    current = snapshot(value['workspace'], normalize_settings=True)
+    if current == previous:
+        return False
+    # Receipts are immutable even when working files are legitimately mutable.
+    probe = dict(value, workspace_snapshot=current)
+    _receipt_valid(probe)
+    changed = sorted(p for p in set(previous['files']) | set(current['files'])
+                     if previous['files'].get(p) != current['files'].get(p))
+    if current['head'] != previous['head'] or any(_forbidden(p) for p in changed):
+        raise Blocked('Saved execution candidate changed: identity or protected files; inspect preserved workspace')
+    runner.audit(Path(value['workspace']))
+    archive = slot / ('drift-' + uuid.uuid4().hex + '.json')
+    save(archive, {'candidate': value, 'observed_snapshot': current, 'changed_paths': changed})
+    value.setdefault('drift_recoveries', []).append(str(archive))
+    # Existing finite captures preserve append-only evidence without racing live writers.
+    # Adopt no new acceptance: both checks and independent review run on the new copy.
+    if value.get('status') != 'waiting-user' and value.get('stage') != 'execute':
+        from verification_checkpoint import prepare
+        value['status'] = 'pending'
+        if prepare(runner, value, slot/'candidate.json', force=True):
+            return True
+    waiting = value.get('status') == 'waiting-user'
+    value.update(workspace_snapshot=current, status='waiting-user' if waiting else 'pending',
+                 stage='execute' if waiting or value.get('stage') == 'execute' else 'checks')
+    for key in ('patch', 'checks', 'checked_scope', 'review', 'review_draft', 'recovered_review',
+                'review_resolution', 'accepted_at', 'recovery_wait'):
+        value.pop(key, None)
+    runner.progress('Изменения рабочей копии сохранены; результат будет проверен повторно: '
+                    + ', '.join(changed[:8]))
+    return True
+
+
+def _drift_failure(fatal):
+    errors = [fatal, *fatal.get('related_failures', [])]
+    return all(e.get('type') == 'Blocked' and e.get('error') ==
+               'Saved execution candidate changed outside its recorded step' for e in errors)
 
 
 def _diagnosis(kind, detail):
@@ -504,7 +553,7 @@ def execute_task(runner, task, record):
             raise Blocked('Preserved safety failure in execution portfolio; inspect ' + str(fatal_path))
         fatal = read(fatal_path)
         if (fatal.get('scope') != scope
-                or not (operational_recovery.eligible(fatal) or
+                or not (operational_recovery.eligible(fatal) or _drift_failure(fatal) or
                         (fatal.get('type') == 'Blocked' and str(fatal.get('error', '')).startswith(
                             'Permission preflight/runtime denial; inspect ')))
                 or any(not (folder/fingerprint(model)[:16]/'candidate.json').is_file() for model in models)):
@@ -537,6 +586,8 @@ def execute_task(runner, task, record):
                 value['status'] = 'pending'
                 runner.progress(task['id'] + ' / ' + model + ': обновлена обвязка; новый лимит, рабочие файлы сохранены')
             save(path, value)
+        if _reconcile_candidate(runner, value, slot):
+            save(path, value)
         # One-time semantic migration: preserve code/checks, re-evaluate an old
         # external verdict using the original plan's task contribution contract.
         if value.get('acceptance_protocol') != task_acceptance.PROTOCOL:
@@ -562,6 +613,8 @@ def execute_task(runner, task, record):
             value.pop('review_draft', None)
             save(path, value)
         candidates.append((path, value))
+    if fatal_path.exists() and _drift_failure(read(fatal_path)):
+        fatal_path.rename(folder / ('recovered-drift-fatal-' + uuid.uuid4().hex + '.json'))
     _recover_permission_fatal(runner, task, candidates, folder, scope)
     for path, value in candidates:
         if (value.get('stage') == 'adjudicate' and not value.get('review_resolution')
@@ -1233,6 +1286,13 @@ def execute_task(runner, task, record):
         token = CANDIDATE_MODEL.set(candidates[index][1]['model'])
         try:
             return one(index)
+        except Blocked as exc:
+            if str(exc) != 'Saved execution candidate changed outside its recorded step':
+                raise
+            path, value = candidates[index]
+            _reconcile_candidate(runner, value, path.parent)
+            save(path, value)
+            raise CandidateDrift('Рабочая копия изменилась; сохранена для повторной проверки') from exc
         finally:
             CANDIDATE_MODEL.reset(token)
             if lane:
@@ -1253,6 +1313,8 @@ def execute_task(runner, task, record):
                                         'сравниваю со вторым, ожидание не более ' + str(grace) + ' с')
                 except ScopeWait as exc:
                     scope_wait = exc
+                    candidates[index][1]['workspace_snapshot'] = snapshot(
+                        candidates[index][1]['workspace'], normalize_settings=True)
                     candidates[index][1]['status'] = 'waiting-scope'
                     save(*candidates[index])
                     run_status.candidate(runner, task, candidates[index][1])
@@ -1300,7 +1362,7 @@ def execute_task(runner, task, record):
         # while the peer was being checked. Both resume against the new base.
         for path, value in candidates:
             if value.get('status') not in ('waiting-user', 'quarantined', 'external-blocker', 'stalled'):
-                value.update(status='waiting-scope', stage='execute')
+                value.update(status='waiting-scope', stage=value['stage'] if isinstance(scope_wait, CandidateDrift) else 'execute')
             save(path, value)
             run_status.candidate(runner, task, value)
         raise scope_wait

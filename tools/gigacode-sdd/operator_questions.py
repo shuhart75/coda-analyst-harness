@@ -350,7 +350,11 @@ def register(runner, task, value, control):
 
 
 PROMPT = '''If a required business/environment fact needs a human answer, do not guess or spin.
-Finish independent permitted work, then return JSON
+First check the pinned task acceptance contract. If it explicitly permits this fact to remain
+unknown without blocking this task, record the unresolved decision and its impact in the task report,
+complete the permitted work and submit it for independent review. Do not invent an answer or mark
+the requirement satisfied. This exception does not apply to required proof or mandatory decisions.
+Otherwise finish independent permitted work, then return JSON
 {"operator_question":{"topic":"stable-short-topic","question":"clear question in Russian",
 "options":["choice 1","choice 2"],"details":"why this answer is needed"}}.
 When browser automation is unavailable and manual verification is chosen, use the SAME operator_question
