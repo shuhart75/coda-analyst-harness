@@ -945,6 +945,18 @@ executed test names/counts, not just a successful command or test compilation.
     def checks(self, root, checks, name, stop_event=None):
         stopping = stop_event if stop_event is not None else self.stop
         reports = []
+        from execution_inputs import missing_prerequisites, PREPARE
+        missing = missing_prerequisites(root, checks, self.env)
+        if missing:
+            self.guard()
+            folder = self.logdir(name)
+            folder.mkdir(parents=True, mode=0o700)
+            log = folder / 'output.log'
+            log.write_text(json.dumps({'missing': missing, 'instruction': PREPARE}, ensure_ascii=False, indent=2), encoding='utf-8')
+            log.chmod(0o600)
+            return [{'check': item['check'], 'ok': False, 'returncode': None,
+                     'timed_out': False, 'category': 'environment', 'prerequisite': item,
+                     'log': str(log)} for item in missing]
         for check in checks:
             self.progress('Проверка ' + name + ': ' + str(len(reports) + 1) + '/' + str(len(checks)))
             self.guard()
@@ -1203,13 +1215,17 @@ executed test names/counts, not just a successful command or test compilation.
                 self.persist()
                 return
         self.state['status'] = 'running'
+        # Retain full history on disk; never recursively embed it in model input.
+        from execution_inputs import accepted_tasks, prompt_value
+        evidence_path = prompt_value(self.root, self.state['tasks'], limit=0)['full_input_file']
         # Final full integration checks and a fresh review use the same repair loop.
         final = {'id': 'integration', 'cwd': '.', 'writes': sorted({p for t in tasks for p in self.scopes.effective(t)['writes']}),
                  'depends_on': [], 'resources': sorted({r for t in tasks for r in t.get('resources', [])}), 'requirements': self.cfg['requirements'],
-                 'checks': plan['integration_checks'],
+                 'checks': plan['integration_checks'], 'prior_evidence': evidence_path,
                  'prompt': 'Verify the entire integrated PoC against every pinned requirement and SDD. '
                            'Fix cross-task integration defects. Preserve all accepted behavior. Do not weaken tests. '
-                           'Previous task check/review evidence: ' + json.dumps(self.state['tasks'], ensure_ascii=False)}
+                           'Accepted task index (historical, not final acceptance): ' + json.dumps(accepted_tasks(self.state['tasks']), ensure_ascii=False)
+                           + '\nFull prior evidence, read only as needed: ' + str(evidence_path)}
         rec = self.state.get('integration')
         if rec and rec.get('operator_revision') != self.state['operator_revision']['id']:
             self.state.setdefault('integration_history', []).append(rec)

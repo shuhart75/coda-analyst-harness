@@ -15,6 +15,9 @@ def decide(stage, cause):
         return {'action': 'block', 'kind': None, 'instruction_change': False}
     if cause in ('transport', 'timeout'):
         return {'action': 'retry-later', 'kind': 'transport', 'instruction_change': False}
+    if cause in ('environment', 'execute-context'):
+        return {'action': 'repair-environment' if cause == 'environment' else 'repair-response',
+                'kind': cause, 'instruction_change': True}
     if cause == 'resource-busy':
         return {'action': 'wait-resource', 'kind': None, 'instruction_change': False}
     if cause == 'request-protocol':
