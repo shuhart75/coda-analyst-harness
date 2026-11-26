@@ -843,6 +843,9 @@ executed test names/counts, not just a successful command or test compilation.
                   'Optional improvements may be listed separately as optional_findings objects with status=optional, '
                   'requirements=[], outside_required_scope=true, text, reason, evidence=[{path,quote}]. They MUST NOT waive a pinned requirement or failing check. '
                   'Required identifiers: ' + json.dumps(requirements))
+        if name != 'plan-review':
+            from acceptance_wait import INSTRUCTIONS
+            prompt += INSTRUCTIONS
         repair = Path(root) / '.review-input/output-repair.json'
         if name != 'plan-review' and repair.is_file():
             prompt += ('\nOUTPUT_REPAIR_ONLY: the controller retained a completed review on the same '
@@ -1278,6 +1281,10 @@ executed test names/counts, not just a successful command or test compilation.
                     while not any(operator_questions.response(self.root, key) for key in exc.question_ids):
                         if self.stop.wait(.5):
                             raise Interrupted('Ожидание ответа остановлено; вопрос и рабочие файлы сохранены')
+                    self.state['integration'].update(status='running')
+                    self.state['integration'].pop('error', None)
+                    self.persist()
+                    run_status.publish(self)
             accepted['operator_revision'] = self.state['operator_revision']['id']
             self.state['integration'] = accepted
             self.persist()

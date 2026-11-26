@@ -35,6 +35,8 @@ def project(value, *, observed_at=None):
         })
     from run_status import health_summary
     from operator_stages import stages
+    stage_rows = stages(value)
+    integration = next(p['status'] for p in stage_rows if p['id'] == 'integration')
     status = value.get('status')
     ready = value.get('ready') is True and status == 'complete'
     stale = bool(value.get('telemetry_stale'))
@@ -50,7 +52,7 @@ def project(value, *, observed_at=None):
     attention = project_attention({
         'is_root': True, 'outcome': 'succeeded' if ready else None,
         'pending_input': bool(questions),
-        'pending_guidance': status == 'blocked' or value.get('integration') == 'blocked' or any(t['status'] == 'blocked' for t in tasks),
+        'pending_guidance': status == 'blocked' or integration == 'blocked' or any(t['status'] == 'blocked' for t in tasks),
         'interrupted': status == 'interrupted',
     })
     if stale:
@@ -59,12 +61,12 @@ def project(value, *, observed_at=None):
         attention['categories'].append('unverifiable')
         attention['requires_action'] = True
     return {
-        'summary': health_summary(value), 'stages': stages(value),
+        'summary': health_summary(value), 'stages': stage_rows,
         'controller_events': value.get('controller_events', []),
         'schema': SCHEMA, 'projected_at': time.time() if observed_at is None else observed_at,
         'run': {'status': status, 'accepted_tasks': sum(t['accepted'] for t in tasks),
                 'total_tasks': len(tasks), 'ready': ready,
-                'integration': value.get('integration'), 'attention': attention},
+                'integration': integration, 'saved_integration': value.get('integration'), 'attention': attention},
         'tasks': tasks, 'questions': questions,
         'execution': {'operations': operations, 'telemetry_stale': stale,
                       'telemetry_incomplete': incomplete, 'process_exit': 'not_observed'},

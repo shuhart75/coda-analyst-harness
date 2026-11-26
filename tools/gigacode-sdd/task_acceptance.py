@@ -1,7 +1,7 @@
 """Task contribution contracts; whole-product evidence remains a final gate."""
 import json
 
-PROTOCOL = 1
+PROTOCOL = 2
 
 
 def with_incoming(runner, task):
@@ -69,7 +69,10 @@ def validate_deferred(plan, task, items):
 def instructions(runner, task, *, focused=False):
     from controller import read
     if task['id'] == 'integration':
-        return '\nFINAL_ACCEPTANCE: every pinned requirement and all deferred evidence must be satisfied. No deferrals allowed.'
+        return ('\nFINAL_ACCEPTANCE: every pinned requirement and all deferred evidence must be satisfied for pass. '
+                'Recorded deferrals remain open, not implementation defects or satisfied requirements. '
+                'Route missing analyst decisions and manual proof through EXTERNAL_ACCEPTANCE_GAPS; '
+                'never repeat development merely to reverse an operator decision.')
     path = runner.root / 'plan.json'
     if not path.is_file():
         return ''
@@ -102,6 +105,8 @@ def instructions(runner, task, *, focused=False):
 def check_report(runner, task, report):
     from controller import read, RetryableSessionError
     from review_format import deferred
+    from acceptance_wait import validate
+    validate(runner.root, task, report)
     path = runner.root / 'plan.json'
     try:
         items = deferred(report.get('deferred_evidence', []))

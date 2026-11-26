@@ -38,6 +38,9 @@ def stages(value):
               phase('tasks', 'Выполнение задач', 'done' if done else 'blocked' if any(t.get('status') == 'blocked' for t in tasks) else 'interrupted' if tasks and value.get('status') == 'interrupted' else 'running' if active and tasks else 'pending',
                     f"Принято {sum(t.get('status') == 'done' for t in tasks)} из {len(tasks)} задач. Разработка, проверки и независимое ревью каждой задачи.")]
     integration = value.get('integration') or 'pending'
+    if (integration == 'blocked' and active and value.get('status') == 'running'
+            and any(o.get('task_id') == 'integration' and o.get('purpose') != 'observation' for o in ops)):
+        integration = 'running'
     if value.get('status') == 'interrupted' and integration == 'running':
         integration = 'interrupted'
     result.append(phase('integration', 'Итоговая приёмка всего решения', integration,
@@ -48,8 +51,13 @@ def stages(value):
         result[-1]['description'] += f' Сохранённый результат проверок: {passed} из {len(checks)} успешны.'
     if value.get('integration_attempts') is not None:
         result[-1]['description'] += ' Попыток исполнения: ' + str(value['integration_attempts']) + '.'
-    if value.get('integration_error'):
+    if value.get('integration_error') and integration != 'running':
         result[-1]['error'] = value['integration_error']
+    waits = value.get('integration_waits', []) if integration not in ('done', 'running') else []
+    if waits:
+        pending = list(dict.fromkeys(', '.join(item['requirements']) + ': ' + item['next_step']
+                       for wait in waits for item in wait.get('items', [])))
+        result[-1]['description'] += ' Незакрытые обязательства: ' + '; '.join(pending)
     result.append(phase('readiness', 'Подтверждение готовности результата', 'done' if value.get('ready') else 'pending',
                         'Закрепление проверенного результата и разрешение экспорта. Принятие задач само по себе не означает готовность.'))
     return result

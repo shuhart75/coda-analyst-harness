@@ -54,6 +54,7 @@ def candidate(runner, task, value):
     write_projection(runner.root / 'progress' / (name + '.json'), {
         'task': task['id'], 'model': value['model'], 'stage': value['stage'],
         'status': value['status'], 'resource_wait': value.get('resource_wait'), 'history': history,
+        'acceptance_wait': value.get('acceptance_wait'),
         'checks': [{'ok': c.get('ok'), 'log': c.get('log')} for c in value.get('checks', [])],
         'updated_at': time.time()})
 
@@ -123,6 +124,8 @@ def snapshot(root, state=None):
             'preflight_passed': (state.get('preflight') or {}).get('passed') is True,
             'plan_pinned': bool(state.get('plan_sha256')),
             'integration_error': state.get('integration', {}).get('error'),
+            'integration_waits': [p['acceptance_wait'] for p in progress if p['task'] == 'integration'
+                                  and p['status'] == 'external-blocker' and p.get('acceptance_wait')],
             'integration_attempts': state.get('integration', {}).get('attempts'),
             'integration_checks': [{'returncode': c.get('returncode'), 'timed_out': c.get('timed_out', False)}
                                    for c in state.get('integration', {}).get('checks', []) if isinstance(c, dict)],
@@ -328,6 +331,8 @@ def health_summary(value):
             q.get('task') == 'service-handoff' for q in questions) else 'Нужен ваш ответ: вопросов ' + str(len(questions)) + '.'
     elif value.get('service_stop'):
         health = value['service_stop']['reason']
+    elif value.get('integration_waits') and value.get('status') == 'blocked' and not questions:
+        health = 'Итоговая приёмка ожидает внешних данных или проверки. Повторная разработка не запущена.'
     elif value.get('console_error'):
         health = 'Запуск остановлен с ошибкой. Нужна проверка журнала.'
     elif value.get('ready'):
@@ -338,6 +343,10 @@ def health_summary(value):
         health = 'Нужен ваш ответ: вопросов ' + str(len(questions)) + '.'
         if execution_operations:
             health += ' Независимая работа продолжается.'
+    elif (value.get('status') == 'running' and value.get('integration') == 'blocked' and not blocked
+          and not value.get('telemetry_stale') and not value.get('telemetry_incomplete')
+          and any(op.get('task_id') == 'integration' for op in execution_operations)):
+        health = 'Итоговая проверка продолжается; сохранённая блокировка относится к предыдущей попытке.'
     elif blocked or value.get('integration') == 'blocked' or value.get('status') == 'blocked':
         health = 'Есть блокировка. Требуется вмешательство; подробности в журнале.'
     elif value.get('telemetry_incomplete'):
@@ -392,6 +401,10 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
         active = [t['id'] for t in tasks if t['status'] == 'running']
         current = ['Сейчас: ' + (', '.join(active[:3]) + '; подготовка следующего шага.' if active else 'подготовка следующего шага.')]
     lines.extend(current)
+    if value.get('integration') in ('blocked', 'waiting-user'):
+        obligations = list(dict.fromkeys(', '.join(item['requirements']) + ': ' + item['next_step']
+            for wait in value.get('integration_waits', []) for item in wait.get('items', [])))
+        lines.extend('Ожидается: ' + item for item in obligations[:2] if compact or include_overview)
     if not compact and value.get('service_stop', {}).get('report'):
         lines.append('Отчёт об остановке: ' + value['service_stop']['report'])
     stopped = value.get('status') == 'interrupted' or bool(value.get('console_error'))

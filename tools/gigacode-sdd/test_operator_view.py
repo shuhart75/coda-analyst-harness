@@ -65,6 +65,20 @@ class OperatorViewTests(unittest.TestCase):
         self.assertFalse(result['tasks'][1]['accepted'])
         self.assertEqual(result['execution']['process_exit'], 'not_observed')
 
+    def test_active_final_retry_does_not_request_unneeded_intervention(self):
+        value = self.value()
+        value['integration'] = 'blocked'
+        value['operations'] = [{'task_id': 'integration', 'kind': 'check', 'elapsed_seconds': 30}]
+        result = operator_view.project(value)
+        self.assertEqual(result['run']['integration'], 'running')
+        self.assertEqual(result['run']['saved_integration'], 'blocked')
+        self.assertFalse(result['run']['attention']['requires_action'])
+        self.assertFalse(result['run']['ready'])
+        value['telemetry_stale'] = True
+        result = operator_view.project(value)
+        self.assertEqual(result['run']['integration'], 'blocked')
+        self.assertTrue(result['run']['attention']['requires_action'])
+
     def test_stopped_controller_does_not_prove_service_exit(self):
         value = self.value()
         value['status'] = 'interrupted'

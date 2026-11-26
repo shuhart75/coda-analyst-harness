@@ -14,11 +14,18 @@ class StageTests(unittest.TestCase):
                  'elapsed_seconds': 50, 'model': 'GLM', 'phase': 'разработка'}], 'ready': False}
         phases = {p['id']: p for p in stages(value)}
         self.assertEqual(phases['tasks']['status'], 'done')
-        self.assertEqual(phases['integration']['status'], 'blocked')
+        self.assertEqual(phases['integration']['status'], 'running')
         self.assertEqual(phases['readiness']['status'], 'pending')
         self.assertTrue(dashboard(value).startswith(health_summary(value)))
-        self.assertIn('Есть блокировка', health_summary(value))
+        self.assertIn('проверка продолжается', health_summary(value))
         self.assertIn('Итоговая приёмка всего решения', dashboard(value))
+        value['telemetry_stale'] = True
+        self.assertEqual(next(p for p in stages(value) if p['id'] == 'integration')['status'], 'blocked')
+        self.assertNotIn('проверка продолжается', health_summary(value))
+        value.update(status='blocked', console_error=True, integration_waits=[{'items': [{
+            'requirements': ['REQ-1'], 'next_step': 'Выбрать источник'}]}])
+        self.assertIn('Повторная разработка не запущена', health_summary(value))
+        self.assertIn('Ожидается: REQ-1: Выбрать источник', dashboard(value))
 
     def test_dates_explain_yesterday_future_and_previous_controller(self):
         now = 1800000000
