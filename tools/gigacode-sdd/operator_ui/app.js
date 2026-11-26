@@ -11,14 +11,15 @@ let token = fragment.get('token') || storage.get('operator-token') || '';
 if (fragment.has('token')) { storage.set('operator-token', token); history.replaceState(null, '', location.pathname); }
 const cards = new Map();
 let latest, refreshing = false, toastTimer;
-const statuses = {done:'Принято', running:'В работе', pending:'Ожидает', blocked:'Заблокировано', 'waiting-user':'Нужен ответ', 'waiting-scope':'Ожидает область работы', 'waiting-retry':'Повтор позже', interrupted:'Остановлено', complete:'Завершено', accepted:'Вариант проверен', stalled:'Приостановлено', 'not-observed':'Нет наблюдения', 'external-blocker':'Нужны внешние данные'};
+const statuses = {idle:'Создайте или выберите запуск',done:'Принято', running:'В работе', pending:'Ожидает', blocked:'Заблокировано', 'waiting-user':'Нужен ответ', 'waiting-scope':'Ожидает область работы', 'waiting-retry':'Повтор позже', interrupted:'Остановлено', complete:'Завершено', accepted:'Вариант проверен', stalled:'Приостановлено', 'not-observed':'Нет наблюдения', 'external-blocker':'Нужны внешние данные'};
 const phases = {execute:'Разработка', review:'Независимое ревью', checks:'Проверки', adjudicate:'Разбор замечаний', accepted:'Проверен'};
 const label = s => statuses[s] || s || 'Состояние неизвестно';
 const duration = value => {if(!Number.isFinite(value)) return '—'; const n=Math.max(0,Math.floor(value)); return [Math.floor(n/3600),Math.floor(n/60)%60,n%60].map(v=>String(v).padStart(2,'0')).join(':');};
 const date = stamp => typeof stamp==='number' ? new Date(stamp*1000).toLocaleString('ru-RU') : 'Время неизвестно';
 function toast(text) {$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,7000);}
-async function api(path, body) {
+async function api(path, body, runKey) {
   const headers={Authorization:'Bearer '+token}; const options={headers,cache:'no-store'};
+  if(path==='/api/answers')headers['X-Operator-Run']=runKey||latest?.run.key||'';
   if(body!==undefined){options.method='POST';headers['Content-Type']='application/json';options.body=JSON.stringify(body);}
   const response=await fetch(path,options); const value=await response.json();
   if(!response.ok) throw new Error(value.error || 'Не удалось выполнить запрос.');
@@ -38,9 +39,9 @@ function renderSummary(value) {
   $('nav-questions').textContent=String(count);$('question-count').textContent=String(count);
   $('session-note').textContent=uncertain?'Наблюдение требует обновления':run.requires_resume?'Контроллер не выполняет работу':'Включая аудиторов';
   let title,description;
-  if(count){title='Нужен ваш ответ';description=`Открытых вопросов: ${count}. ${run.requires_resume?'После ответа продолжите сохранённый запуск в мастере.':'Независимая работа может продолжаться.'}`;}
+  if(count){title='Нужен ваш ответ';description=`Открытых вопросов: ${count}. ${run.requires_resume?'После ответа нажмите «Продолжить / запустить».':'Независимая работа может продолжаться.'}`;}
   else if(run.ready){title='Работа принята';description='Все задачи и итоговая проверка завершены.';}
-  else if(run.requires_resume){title=label(run.status);description='Для продолжения используйте мастер запуска в терминале. Сохранённая работа остаётся на месте.';}
+  else if(run.requires_resume){const waiting=value.management?.operations.some(op=>op.status==='waiting');title=waiting?'Мастер ждёт подтверждения':run.status==='running'?'Контроллер остановлен':label(run.status);description=waiting?'Ответьте на вопрос мастера в блоке управления выше.':'Продолжите работу кнопкой выше. Мастер откроется на этой странице.';}
   else if(uncertain){title='Состояние требует обновления';description='Текущие сессии нельзя достоверно определить по последнему наблюдению.';}
   else {title='В работе';description='Открытых вопросов нет. Приёмка результатов подтверждается проверками.';}
   $('status-heading').textContent=title;$('status-description').textContent=description;
@@ -106,7 +107,7 @@ function questionCard(q){
   const actions=node('div','question-actions');const submit=node('button','button','Сохранить ответ');submit.type='submit';
   const later=node('button','button secondary','Ответить позже');later.type='button';later.onclick=()=>{details.open=false;message.textContent='Вопрос остаётся открытым. Ответ можно дать позже.';};
   actions.append(submit,later);form.append(fieldset,customLabel,custom,explanationLabel,explanation,actions,message);card.append(form);
-  const entry={card,q,form,submit,message};
+  const entry={card,q,form,submit,message,runKey:latest.run.key};
   function selected(){return form.querySelector('input:checked')?.value;}
   function changed(){const isCustom=selected()===String(options.length-1);custom.hidden=!isCustom;customLabel.hidden=!isCustom;custom.required=isCustom;storage.set(draftKey(q),JSON.stringify({selected:selected(),custom:custom.value,explanation:explanation.value}));}
   try{const draft=JSON.parse(storage.get(draftKey(q))||'null');if(draft){const radio=[...form.querySelectorAll('input')].find(i=>i.value===draft.selected);if(radio)radio.checked=true;custom.value=draft.custom||'';explanation.value=draft.explanation||'';changed();}}catch{}
@@ -118,8 +119,8 @@ function questionCard(q){
     if(!text){message.textContent='Введите ответ.';return;}
     entry.pending=true;submit.disabled=true;fieldset.disabled=true;custom.disabled=true;explanation.disabled=true;later.disabled=true;message.textContent='Сохраняем ответ…';
     const payload={id:q.id,revision:q.revision,text,explanation:explanation.value.trim()};
-    try{const receipt=await api('/api/answers',payload);if(!receipt.saved||receipt.question_id!==q.id)throw new Error('Сохранение ответа не подтверждено.');
-      storage.remove(draftKey(q));toast('Ответ сохранён: '+receipt.answer.text+(latest.run.requires_resume?' Продолжите запуск в мастере.':''));await refresh();
+    try{const receipt=await api('/api/answers',payload,entry.runKey);if(!receipt.saved||receipt.question_id!==q.id)throw new Error('Сохранение ответа не подтверждено.');
+      storage.remove(draftKey(q));toast('Ответ сохранён: '+receipt.answer.text+(latest.run.requires_resume?' Нажмите «Продолжить / запустить».':''));await refresh();
     }catch(error){message.textContent=error.message;}finally{entry.pending=false;submit.disabled=Boolean(entry.changed);fieldset.disabled=false;custom.disabled=false;explanation.disabled=false;later.disabled=false;if(latest)renderQuestions(latest);}
   };
   return entry;
@@ -145,11 +146,78 @@ function renderAnswers(value){
 }
 async function refresh(){
   if(refreshing)return;refreshing=true;$('refresh').disabled=true;
-  try{latest=await api('/api/state');renderSummary(latest);renderRoute(latest);renderSessions(latest);renderObservers(latest);renderQuestions(latest);renderAnswers(latest);
+  try{const next=await api('/api/state');if(latest&&latest.run.key!==next.run.key){cards.clear();$('question-list').replaceChildren();}latest=next;renderManagement(latest);renderSummary(latest);renderRoute(latest);renderSessions(latest);renderObservers(latest);renderQuestions(latest);renderAnswers(latest);
     $('connection-error').hidden=true;$('connection').textContent='Подключено';$('connection-dot').classList.add('connected');$('updated').textContent='Получено '+new Date().toLocaleTimeString('ru-RU');
   }catch(error){$('connection-error').hidden=false;$('connection-error').textContent=error.message+' Данные на экране не обновляются.';$('connection').textContent='Нет связи';$('connection-dot').classList.remove('connected');}
   finally{refreshing=false;$('refresh').disabled=false;}
 }
+const actionNames={resume:'Продолжение работы',new:'Новая работа',stop:'Остановка',restart:'Перезапуск',diagnostics:'Диагностика',export:'Экспорт результата'};
+const operationStates={queued:'В очереди',running:'Выполняется',waiting:'Нужен ответ в мастере',succeeded:'Операция завершена',failed:'Не выполнено',stopped:'Работа остановлена'};
+let wizardKey='', actionPending=false;
+async function sendAction(action, revision=latest?.management.revision){
+  if(actionPending||!latest)return;
+  actionPending=true;
+  const payload={id:crypto.randomUUID().replaceAll('-',''),action,revision};
+  storage.set('operator-pending-action',JSON.stringify(payload));
+  try{await api('/api/actions',payload);storage.remove('operator-pending-action');$('control-confirm').hidden=true;await refresh();}
+  catch(error){toast(error.message+' Если связь прервалась, повторите ту же операцию кнопкой ниже.');showRetry(payload);}
+  finally{actionPending=false;}
+}
+function showRetry(payload){
+  const panel=$('control-confirm');panel.hidden=false;panel.replaceChildren(node('p',null,'Подтверждение операции не получено. Повторная отправка не создаёт второй запуск.'));
+  const retry=node('button','button','Проверить / повторить отправку');retry.onclick=async()=>{retry.disabled=true;try{await api('/api/actions',payload);storage.remove('operator-pending-action');panel.hidden=true;await refresh();}catch(error){toast(error.message);}finally{retry.disabled=false;}};
+  const dismiss=node('button','button secondary','Закрыть');dismiss.onclick=()=>{panel.hidden=true;storage.remove('operator-pending-action');};panel.append(retry,dismiss);
+}
+function chooseAction(action){
+  if(!['stop','restart'].includes(action)){sendAction(action);return;}
+  const revision=latest.management.revision;
+  const panel=$('control-confirm');panel.hidden=false;panel.replaceChildren(node('h3',null,actionNames[action]+' · '+latest.run.name),node('p',null,action==='stop'?'Остановить выполнение текущего запуска с сохранением результатов? Состояние служб будет проверено штатным механизмом.':'Остановить текущий контроллер и продолжить этот же запуск после подтверждения остановки? Если остановка не подтвердится, новый контроллер не запустится.'));
+  const yes=node('button','button danger',action==='stop'?'Остановить':'Перезапустить');yes.onclick=()=>sendAction(action,revision);
+  const no=node('button','button secondary','Отмена');no.onclick=()=>panel.hidden=true;panel.append(yes,no);
+}
+async function downloadArtifact(op){
+  try{const response=await fetch('/api/artifact/'+op.id,{headers:{Authorization:'Bearer '+token},cache:'no-store'});if(!response.ok){const error=await response.json();throw new Error(error.error);}
+    const url=URL.createObjectURL(await response.blob());const link=node('a');link.href=url;link.download=op.action==='export'?'sdd-result.patch':'sdd-diagnostics.txt';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }catch(error){toast(error.message);}
+}
+function renderManagement(value){
+  const m=value.management;if(!m)return;const runtime=m.runtime;
+  const picker=$('run-picker');const signature=JSON.stringify(m.runs.map(r=>[r.key,r.name,r.status]));
+  if(picker.dataset.signature!==signature){picker.replaceChildren();if(!m.runs.length){const option=node('option',null,'Сохранённых запусков нет');option.value='';picker.append(option);}for(const run of m.runs){const option=node('option',null,run.name+' · '+label(run.status));option.value=run.key;picker.append(option);}picker.dataset.signature=signature;}
+  picker.value=m.runs.length?m.selected:'';
+  const busy=m.operations.some(op=>['queued','running','waiting'].includes(op.status)&&['new','resume','restart','export'].includes(op.action));
+  $('controller-state').textContent=runtime.active?(runtime.stop_requested?'ОСТАНАВЛИВАЕТСЯ':'КОНТРОЛЛЕР РАБОТАЕТ'):'КОНТРОЛЛЕР ОСТАНОВЛЕН';
+  const selected=m.runs.some(r=>r.key===m.selected);
+  $('action-resume').disabled=!selected||runtime.active||busy;
+  $('action-new').disabled=runtime.active||busy;
+  $('action-stop').disabled=!runtime.controllable||runtime.stop_requested;
+  $('action-restart').disabled=!runtime.controllable||runtime.stop_requested||m.operations.some(op=>['queued','running','waiting'].includes(op.status)&&op.action==='restart');
+  $('action-diagnostics').disabled=!selected;
+  $('action-export').disabled=!selected||runtime.active||busy||!value.run.ready;
+  $('control-note').textContent=runtime.reason||(runtime.stop_requested?'Запрос принят. Ожидаем завершения работы и освобождения блокировки.':'Закрытие вкладки не останавливает работу. Все подтверждения мастера появятся здесь.');
+  const brief=$('operation-latest');brief.replaceChildren();const recent=m.operations.find(op=>['queued','running','waiting'].includes(op.status))||m.operations[0];if(recent){brief.append(node('p','muted',(actionNames[recent.action]||recent.action)+' · '+(operationStates[recent.status]||recent.status)));if(recent.notice)brief.append(node('p','muted',recent.notice));if(recent.error)brief.append(node('p','question-message',recent.error));if(recent.artifact&&recent.status==='succeeded'){const button=node('button','button secondary','Скачать результат операции');button.onclick=()=>downloadArtifact(recent);brief.append(button);}}
+  const list=$('operation-list');list.replaceChildren();
+  for(const op of m.operations){const row=node('div','operation-row');row.append(node('strong',null,(actionNames[op.action]||op.action)+' · '+(operationStates[op.status]||op.status)));if(op.error)row.append(node('p','question-message',op.error));if(op.notice)row.append(node('p','muted',op.notice));if(op.artifact&&op.status==='succeeded'){const button=node('button','button secondary','Скачать файл');button.onclick=()=>downloadArtifact(op);row.append(button);}list.append(row);}
+  const op=m.operations.find(o=>o.status==='waiting'&&o.question);
+  const key=op?op.id+':'+op.question.id:'';
+  if(key===wizardKey)return;wizardKey=key;const area=$('wizard');area.replaceChildren();if(!op)return;
+  const q=op.question, card=node('article','question-card wizard-card'),form=node('form');
+  card.append(node('div','question-task',actionNames[op.action]),node('h3','wizard-question',q.title));
+  for(const message of op.messages||[])card.append(node('p','context',message));
+  const choices=node('fieldset','options');choices.append(node('legend',null,q.kind==='confirm'?'Подтвердите действие':'Выберите вариант'));
+  let input;
+  if(q.options.length){for(const [i,text] of q.options.entries()){const wrapper=node('label','option'),radio=node('input');radio.type='radio';radio.name='wizard-choice';radio.value=String(i);radio.required=true;wrapper.append(radio,node('span',null,text));choices.append(wrapper);}form.append(choices);}
+  else {const caption=node('label','field-label','Полный путь на компьютере, где запущена обвязка');input=node('input','wizard-path');input.id='wizard-path';caption.htmlFor=input.id;input.type='text';input.required=true;input.maxLength=4096;form.append(caption,input);}
+  const draftKey='operator-wizard:'+key;try{const draft=JSON.parse(storage.get(draftKey)||'null');if(draft!==null){if(input)input.value=draft;else{const radio=[...choices.querySelectorAll('input')].find(r=>Number(r.value)===draft);if(radio)radio.checked=true;}}}catch{}
+  const valueOf=()=>input?input.value:Number(choices.querySelector('input:checked')?.value);
+  form.oninput=()=>storage.set(draftKey,JSON.stringify(valueOf()));
+  const submit=node('button','button',q.kind==='confirm'?'Подтвердить выбор':'Продолжить'),cancel=node('button','button secondary','Отменить мастер'),message=node('p','question-message');submit.type='submit';cancel.type='button';const actions=node('div','question-actions');actions.append(submit,cancel);form.append(actions,message);card.append(form);area.append(card);
+  form.onsubmit=async event=>{event.preventDefault();submit.disabled=true;cancel.disabled=true;choices.disabled=true;if(input)input.disabled=true;try{await api('/api/wizard/reply',{operation:op.id,question:q.id,value:valueOf()});storage.remove(draftKey);message.textContent='Ответ сохранён. Мастер продолжает работу.';await refresh();}catch(error){message.textContent=error.message;submit.disabled=false;cancel.disabled=false;choices.disabled=false;if(input)input.disabled=false;}};
+  cancel.onclick=async()=>{try{await api('/api/wizard/cancel',{operation:op.id});await refresh();}catch(error){message.textContent=error.message;}};
+}
+for(const action of Object.keys(actionNames))$('action-'+action).onclick=()=>chooseAction(action);
+$('run-picker').onchange=async event=>{try{await api('/api/select',{key:event.target.value});await refresh();}catch(error){toast(error.message);}};
+try{const pending=JSON.parse(storage.get('operator-pending-action')||'null');if(pending)showRetry(pending);}catch{}
 $('refresh').onclick=refresh;
 $('show-log').onclick=async()=>{const button=$('show-log');button.disabled=true;try{const result=await api('/api/log');$('log').textContent=result.text;$('log').hidden=false;$('log-note').textContent=result.truncated?'Показаны последние 64 КБ. Полный журнал находится по пути выше.':'Последние записи журнала.';}catch(error){$('log-note').textContent=error.message;}finally{button.disabled=false;}};
 refresh();setInterval(()=>{if(!document.hidden)refresh();},3000);

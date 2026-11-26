@@ -283,6 +283,7 @@ class Runner:
             lock.__enter__()
         except BlockingIOError:
             raise Blocked('Another controller owns this run') from None
+        control = None
         try:
             if digest(self.config_path) != self._config_digest:
                 raise Blocked('Configuration changed while acquiring lock')
@@ -296,6 +297,9 @@ class Runner:
                 operator_input.reconcile(self)
                 self.guard()
                 self.check_preserved_processes()
+                from operator_control import ControllerControl
+                control = ControllerControl(self.root, self.stop)
+                control.start()
                 yield
             except BaseException as exc:
                 failure = exc
@@ -315,7 +319,11 @@ class Runner:
                                         and not isinstance(failure, operator_questions.WaitingForOperator))
                     diagnostics.report(self.config_path, error=failure)
         finally:
-            lock.__exit__(None, None, None)
+            try:
+                if control is not None:
+                    control.close()
+            finally:
+                lock.__exit__(None, None, None)
 
     def guard(self):
         if digest(self.config_path) != self._config_digest:

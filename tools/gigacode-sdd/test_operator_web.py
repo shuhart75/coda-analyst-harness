@@ -18,6 +18,9 @@ class OperatorWebTests(unittest.TestCase):
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
+        app = patch('bootstrap.app_root', return_value=self.root/'app')
+        app.start()
+        self.addCleanup(app.stop)
         save(self.root/'config.json', {'requirements_sha256': 'pinned'})
         save(self.root/'plan.json', {'tasks': [{'id': 'be', 'title': 'Backend', 'depends_on': []}]})
         save(self.root/'state.json', {'status': 'running', 'tasks': {'be': {'status': 'running'}}})
@@ -35,6 +38,7 @@ class OperatorWebTests(unittest.TestCase):
     def request(self, method, path, payload=None, headers=None, auth=True):
         values = {'Authorization': 'Bearer '+self.server.token} if auth else {}
         if method == 'POST':
+            values['X-Operator-Run'] = self.server.run_key()
             values.update({'Origin': self.server.origin, 'Content-Type': 'application/json'})
         values.update(headers or {})
         connection = HTTPConnection('127.0.0.1', self.server.server_port, timeout=5)
@@ -122,6 +126,49 @@ class OperatorWebTests(unittest.TestCase):
         for value in ([], {'id': payload['id']}, {**payload, 'id': '../state'}, {**payload, 'text': ''}):
             self.assertIn(self.request('POST', '/api/answers', value)[0], (400, 409))
         self.assertIsNone(oq.response(self.root, payload['id']))
+
+    def test_actions_require_same_origin_and_token(self):
+        from unittest.mock import Mock
+        payload = {'id': 'a'*32, 'action': 'resume',
+                   'revision': self.server.management()['revision']}
+        with patch('operator_actions.subprocess.Popen', return_value=Mock()) as launch:
+            self.assertEqual(self.request('POST', '/api/actions', payload, auth=False)[0], 401)
+            self.assertEqual(self.request('POST', '/api/actions', payload,
+                                         headers={'Origin': 'https://foreign.example'})[0], 403)
+            launch.assert_not_called()
+            self.assertEqual(self.request('POST', '/api/actions', payload)[0], 200)
+            self.assertEqual(self.request('POST', '/api/actions', payload)[0], 200)
+            launch.assert_called_once()
+
+    def test_old_question_form_cannot_answer_newly_selected_run(self):
+        payload = self.question()
+        self.assertEqual(self.request('POST', '/api/answers', payload,
+                                     headers={'X-Operator-Run': 'old-run'})[0], 409)
+        self.assertIsNone(oq.response(self.root, payload['id']))
+
+    def test_empty_launcher_can_create_work_without_a_saved_run(self):
+        other = OperatorServer()
+        try:
+            view = other.view()
+            self.assertEqual(view['management']['runs'], [])
+            self.assertEqual(view['run']['status'], 'idle')
+            self.assertTrue(view['capabilities']['manage_controller'])
+            self.assertFalse(view['capabilities']['answer_questions'])
+        finally:
+            other.server_close()
+
+    def test_reopened_server_retains_operation_history_without_selecting_old_result(self):
+        folder = self.server.actions.path('a'*32)
+        folder.mkdir()
+        save(folder/'request.json', {'action': 'new', 'created_at': time.time(), 'config': None})
+        save(folder/'state.json', {'status': 'succeeded', 'config': str(self.root/'config.json')})
+        other = OperatorServer()
+        try:
+            self.assertIsNone(other.config)
+            self.assertEqual(len(other.management()['operations']), 1)
+            self.assertIsNone(other.config)
+        finally:
+            other.server_close()
 
 
 if __name__ == '__main__':
