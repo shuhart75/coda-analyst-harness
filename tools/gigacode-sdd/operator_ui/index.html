@@ -11,6 +11,22 @@
   </aside>
   <main id="overview">
     <header class="topbar"><div><span class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h1>Ход работы</h1></div><div class="top-actions"><span id="updated" class="muted">Состояние ещё не получено</span><button id="refresh" class="button secondary" type="button">Обновить</button></div></header>
+    <section class="panel control-panel" aria-labelledby="control-title">
+      <div class="section-heading"><h2 id="control-title">Управление работой</h2><span id="controller-state" class="tag">ПРОВЕРКА</span></div>
+      <label class="field-label" for="run-picker">Сохранённый запуск</label><select id="run-picker" aria-label="Сохранённый запуск"></select>
+      <div class="control-actions">
+        <button id="action-resume" class="button" type="button">Продолжить / запустить</button>
+        <button id="action-stop" class="button secondary" type="button">Остановить работу</button>
+        <button id="action-restart" class="button secondary" type="button">Перезапустить</button>
+        <button id="action-new" class="button secondary" type="button">Новая работа</button>
+        <button id="action-diagnostics" class="button secondary" type="button">Снять диагностику</button>
+        <button id="action-export" class="button secondary" type="button">Экспорт результата</button>
+      </div>
+      <p id="control-note" class="muted"></p><div id="operation-latest" role="status"></div>
+      <div id="control-confirm" class="question-card" hidden></div>
+      <div id="wizard" aria-live="polite"></div>
+      <details class="operation-history"><summary>Операции управления</summary><div id="operation-list"></div></details>
+    </section>
     <div id="connection-error" class="banner danger" role="alert" hidden></div>
     <section class="status-banner" aria-labelledby="status-heading"><div><span class="eyebrow" id="status-kicker">СОСТОЯНИЕ ЗАПУСКА</span><h2 id="status-heading">Подключаемся к контроллеру</h2><p id="status-description" class="muted">Считываем сохранённое состояние.</p></div><a href="#questions" id="answer-shortcut" class="button" hidden>Перейти к вопросам ↗</a></section>
     <section class="metrics" aria-label="Основные показатели"><article><span class="muted">Принято задач</span><strong id="accepted">—</strong><progress id="progress" max="1" value="0" aria-label="Принятые задачи"></progress></article><article><span class="muted">LLM-сессии сейчас</span><strong id="session-count">—</strong><span class="metric-note" id="session-note">Ожидаем сведения</span></article><article><span class="muted">Осталось</span><strong id="remaining">—</strong><span class="metric-note" id="remaining-note">И итоговая проверка</span></article></section>

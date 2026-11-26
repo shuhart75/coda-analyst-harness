@@ -1,4 +1,4 @@
-"""Local operator UI. Python stdlib only; never starts the SDD controller."""
+"""Local operator UI with fixed, guarded controller actions. Python stdlib only."""
 import argparse
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import secrets
+import threading
+import hashlib
 from urllib.parse import urlsplit
 
 import operator_questions as questions
@@ -22,10 +24,21 @@ MAX_BODY = 150000
 class OperatorServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, config, port=0):
-        self.root = Path(config).resolve(strict=True).parent
-        if Path(config).name != 'config.json' or not (self.root/'state.json').is_file():
+    def __init__(self, config=None, port=0):
+        from bootstrap import app_root, known_runs
+        from operator_actions import Actions
+        self.state_lock = threading.RLock()
+        if config is None:
+            runs = known_runs(app_root())
+            config = runs[0]['config'] if runs else None
+        self.config = Path(config).resolve(strict=True) if config else None
+        self.root = self.config.parent if self.config else app_root()/'operator'
+        self.root.mkdir(parents=True, exist_ok=True)
+        if self.config and (self.config.name != 'config.json' or not (self.root/'state.json').is_file()):
             raise ValueError('Expected config.json of an initialized run')
+        self.actions = Actions(app_root()/'operator-control')
+        # Reopening a server must not select an old wizard result over --config.
+        self.adopted = {op['id'] for op in self.actions.operations() if op.get('config')}
         self.token = secrets.token_urlsafe(32)
         super().__init__(('127.0.0.1', port), Handler)
         self.origin = 'http://127.0.0.1:' + str(self.server_port)
@@ -50,10 +63,48 @@ class OperatorServer(ThreadingHTTPServer):
             self.log_handler.close()
             self.log_stream.close()
 
+    def run_key(self):
+        return hashlib.sha256(str(self.config).encode()).hexdigest()
+
+    def runs(self):
+        from bootstrap import app_root
+        from controller import read
+        paths = set((app_root()/'runs').glob('*/config.json'))
+        if self.config:
+            paths.add(self.config)
+        result = []
+        for path in sorted(paths, reverse=True):
+            if path.is_symlink():
+                continue
+            try:
+                config = read(path)
+                state = read(path.parent/'state.json')
+                key = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+                result.append({'key': key, 'name': path.parent.name, 'source': config.get('source', ''),
+                               'status': state.get('status'), 'config': str(path.resolve())})
+            except (OSError, ValueError, KeyError):
+                continue
+        return result
+
+    def management(self):
+        from operator_actions import revision
+        import operator_control
+        operations = self.actions.operations()
+        for op in reversed(operations):
+            if op['action'] == 'new' and op.get('config') and op['id'] not in self.adopted:
+                path = Path(op['config'])
+                if path.is_file() and (path.parent/'state.json').is_file():
+                    self.config, self.root = path.resolve(), path.resolve().parent
+                    self.adopted.add(op['id'])
+        runtime = operator_control.status(self.root) if self.config else {'active': False, 'controllable': False}
+        return {'revision': revision(self.config), 'runtime': runtime, 'operations': operations,
+                'runs': self.runs(), 'selected': self.run_key()}
+
     def view(self):
-        state = snapshot(self.root)
+        management = self.management()
+        state = snapshot(self.root) if self.config else {'status': 'idle', 'tasks': [], 'operations': []}
         # One mailbox read supplies both pending questions and history.
-        records = questions.questions(self.root)
+        records = questions.questions(self.root) if self.config else []
         state['questions'] = [q for q in records if not q.get('answer') and not q.get('resolved')]
         view = operator_view.project(state)
         view['questions'] = []
@@ -72,10 +123,13 @@ class OperatorServer(ThreadingHTTPServer):
             operation['label'] = operation_label(raw, state.get('tasks', []))
         view['observers'] = {'lines': observation_lines(state),
                              'snapshot_at': (state.get('observation') or {}).get('snapshot_at')}
-        view['capabilities']['answer_questions'] = True
-        view['run']['name'] = self.root.name
+        view['capabilities']['answer_questions'] = bool(self.config)
+        view['capabilities']['manage_controller'] = True
+        view['management'] = management
+        view['run']['key'] = self.run_key()
+        view['run']['name'] = self.root.name if self.config else 'Запуск не выбран'
         view['run']['log_path'] = str(self.root/'logs'/'controller.log')
-        view['run']['requires_resume'] = state.get('status') != 'running'
+        view['run']['requires_resume'] = not management['runtime']['active']
         return view
 
 
@@ -126,7 +180,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == '/api/state':
-                self.json(200, self.server.view())
+                with self.server.state_lock:
+                    self.json(200, self.server.view())
+            elif path.startswith('/api/artifact/'):
+                artifact = self.server.actions.artifact(path.rsplit('/', 1)[-1])
+                self.send_data(200, artifact.read_bytes(), 'application/octet-stream')
             elif path == '/api/log':
                 log = self.server.root/'logs'/'controller.log'
                 if log.is_symlink() or not log.resolve().is_relative_to(self.server.root):
@@ -157,7 +215,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized(api=True, mutation=True):
             return
-        if self.path != '/api/answers':
+        if self.path not in ('/api/answers', '/api/actions', '/api/wizard/reply', '/api/wizard/cancel', '/api/select'):
             self.json(404, {'error': 'Команда не поддерживается.'})
             return
         try:
@@ -169,6 +227,34 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(415, {'error': 'Ожидается JSON.'})
                 return
             payload = json.loads(self.rfile.read(size))
+            with self.server.state_lock:
+                if self.path != '/api/answers':
+                    try:
+                        if self.path == '/api/actions':
+                            result = self.server.actions.submit(self.server.config, payload)
+                        elif self.path == '/api/wizard/reply':
+                            result = self.server.actions.reply(payload)
+                        elif self.path == '/api/wizard/cancel':
+                            if not isinstance(payload, dict) or set(payload) != {'operation'}:
+                                raise ValueError('Некорректный запрос отмены.')
+                            result = self.server.actions.cancel(payload['operation'])
+                        else:
+                            if not isinstance(payload, dict) or set(payload) != {'key'}:
+                                raise ValueError('Некорректный выбор запуска.')
+                            selected = next((r for r in self.server.runs() if r['key'] == payload['key']), None)
+                            if not selected:
+                                raise ValueError('Запуск не найден.')
+                            self.server.config = Path(selected['config'])
+                            self.server.root = self.server.config.parent
+                            result = {'selected': selected['key']}
+                        self.json(200, result)
+                    except (ValueError, KeyError, TypeError) as exc:
+                        self.json(409, {'error': str(exc)})
+                    return
+                if not self.server.config or self.headers.get('X-Operator-Run') != self.server.run_key():
+                    self.json(409, {'error': 'Выбранный запуск изменился. Обновите страницу перед ответом.'})
+                    return
+                answer_root = self.server.root
             if (not isinstance(payload, dict) or set(payload) != {'id', 'revision', 'text', 'explanation'}
                     or not all(isinstance(payload[k], str) for k in payload)
                     or not re.fullmatch(r'[0-9a-f]{24}', payload['id'])
@@ -176,7 +262,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(400, {'error': 'Некорректный формат ответа.'})
                 return
             try:
-                result = questions.answer(self.server.root, payload['id'], payload['text'], payload['explanation'],
+                result = questions.answer(answer_root, payload['id'], payload['text'], payload['explanation'],
                                           idempotent=True, expected_revision=payload['revision'])
             except ValueError:
                 self.json(409, {'error': 'Вопрос изменился, уже закрыт или имеет другой ответ. Обновите данные; ваш текст сохранён в форме.'})
@@ -184,20 +270,20 @@ class Handler(BaseHTTPRequestHandler):
             self.json(200, {'question_id': result['question'], 'saved': True, 'answer': {
                 k: result.get(k) for k in ('text', 'explanation', 'answered_at')}})
         except (ValueError, UnicodeError):
-            self.json(400, {'error': 'Не удалось прочитать ответ.'})
+            self.json(400, {'error': 'Не удалось прочитать запрос.'})
         except (OSError, RuntimeError):
-            self.server.logger.exception('Unable to save operator answer')
-            self.json(503, {'error': 'Ответ не подтверждён. Повторите отправку; уже сохранённый ответ не будет записан дважды.'})
+            self.server.logger.exception('Unable to complete operator request')
+            self.json(503, {'error': 'Операция не подтверждена. Повторите отправку той же команды; сохранённая квитанция предотвращает дублирование.'})
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--config', type=Path, help='Saved run; omit to open the launcher')
     parser.add_argument('--port', type=int, default=0, help='Local port; 0 chooses an available port')
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error('Invalid port')
-    server = OperatorServer(args.config.expanduser(), args.port)
+    server = OperatorServer(args.config.expanduser() if args.config else None, args.port)
     print(server.origin + '/#token=' + server.token, flush=True)
     try:
         server.serve_forever(poll_interval=.2)

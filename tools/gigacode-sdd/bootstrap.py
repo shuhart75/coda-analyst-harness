@@ -428,7 +428,31 @@ def require_handoff(root, repo):
     return output
 
 
-def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False):
+def resume(ui, config, *, root=None, dry_run=False, on_config=None):
+    config = Path(config).resolve(strict=True)
+    config_sha = digest(config)
+    saved = read(config)
+    state = read(config.parent / 'state.json')
+    require_handoff(app_root() if root is None else root, saved['source'])
+    ui.confirm('Продолжить ровно этот запуск?\nПроект: ' + saved['source']
+               + '\nSHA256 требований: ' + saved['requirements_sha256']
+               + '\nСостояние: ' + state['status']
+               + '\nИсходный PoC и работающие сервисы не переключаются.', 'Продолжить')
+    if dry_run:
+        print('Подготовлен прежний запуск: ' + str(config))
+        return 0
+    if digest(config) != config_sha:
+        raise Blocked('Конфигурация изменилась после подтверждения. Повторите выбор запуска.')
+    if on_config is not None:
+        on_config(str(config))
+    runner = Runner(config)
+    with runner.locked():
+        runner.start(retry_blocked=True)
+    print('Состояние: ' + runner.state['status'] + '\nРезультат: ' + str(runner.main))
+    return 130 if runner.stop.is_set() else 0
+
+
+def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False, *, new=False, on_config=None):
     ui = ConsoleUI() if ui is None else ui
     home = Path.home() if home is None else Path(home)
     root = app_root(home)
@@ -439,7 +463,7 @@ def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False
         if report['handoff']:
             print(json.dumps(report['handoff'], ensure_ascii=False, indent=2))
         return 0
-    previous = known_runs(root)
+    previous = [] if new else known_runs(root)
     if previous:
         import operator_questions
         import run_status
@@ -463,23 +487,7 @@ def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False
         if mode == 2:
             return launch(ui, home, diagnose_only=True, repo_arg=previous[0]['source'])
         if mode == 0:
-            saved = previous[0]
-            require_handoff(root, saved['source'])
-            ui.confirm('Продолжить ровно этот запуск?\nПроект: ' + saved['source']
-                       + '\nSHA256 требований: ' + saved['requirements_sha256']
-                       + '\nСостояние: ' + saved['status']
-                       + '\nИсходный PoC и работающие сервисы не переключаются.', 'Продолжить')
-            if dry_run:
-                print('Подготовлен прежний запуск: ' + saved['config'])
-                return 0
-            runner = Runner(saved['config'])
-            with runner.locked():
-                # A run may be interrupted while another task is already
-                # blocked. Explicit resume retries both; their own guards and
-                # receipts still decide whether work can continue.
-                runner.start(retry_blocked=True)
-            print('Состояние: ' + runner.state['status'] + '\nРезультат: ' + str(runner.main))
-            return 130 if runner.stop.is_set() else 0
+            return resume(ui, previous[0]['config'], root=root, dry_run=dry_run, on_config=on_config)
     roots = workspace_roots(home)
     candidates, protected = discover_repositories(roots)
     repo = Path(repo_arg).resolve() if repo_arg else choose_repository(ui, candidates)
@@ -525,6 +533,8 @@ def launch(ui=None, home=None, diagnose_only=False, repo_arg=None, dry_run=False
                       + '. Не обходите hook. Отчёт может содержать чувствительные данные; '
                       'не отправляйте его целиком без проверки.') from None
     save(root / 'last-run.json', {'config': config})
+    if on_config is not None:
+        on_config(config)
     runner = Runner(config)
     with runner.locked():
         runner.start()
