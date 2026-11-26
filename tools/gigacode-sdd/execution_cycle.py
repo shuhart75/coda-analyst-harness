@@ -546,6 +546,7 @@ def execute_task(runner, task, record):
     from controller import Blocked, Interrupted, RetryableSessionError, digest, read, save
     import operator_questions as questions
     import task_acceptance
+    import acceptance_wait
     import run_status
     import scope_repair
     models = models_for(runner)
@@ -625,6 +626,8 @@ def execute_task(runner, task, record):
         if value.get('stage') != 'execute':
             _receipt_valid(value)
         if runner.scopes.refresh(task, value, slot):
+            save(path, value)
+        if acceptance_wait.refresh(runner.root, task, value):
             save(path, value)
         if value.get('status') == 'accepted' and value.get('manual_review_state') != questions.manual_state(runner.root, task['id']):
             # Keep implementation and checks; new human evidence needs fresh review.
@@ -808,6 +811,8 @@ def execute_task(runner, task, record):
                           else 'bounded step retry budget exhausted: ')
                 raise CandidateStalled(value['model'] + ': ' + reason + retry['step'])
 
+        if acceptance_wait.refresh(runner.root, task, value):
+            persist()
         if value.get('status') == 'waiting-user':
             reply = questions.response(runner.root, value['question_id'])
             if not reply:
@@ -826,6 +831,8 @@ def execute_task(runner, task, record):
                                  'Preserve existing implementation; request controller services if needed. '
                                  'The answer itself is not evidence that checks passed.'}
             persist()
+        if value.get('status') == 'external-blocker' and value.get('acceptance_wait'):
+            raise CandidateStalled(acceptance_wait.summary(value))
         if value.get('status') in ('stalled', 'external-blocker', 'quarantined'):
             raise CandidateStalled(value['model'] + ': preserved no-progress result; new evidence or instructions required')
         if value['stage'] != 'execute':
@@ -1160,8 +1167,8 @@ def execute_task(runner, task, record):
                         # Transport and verdict validation already completed. Keep
                         # this answer if the contribution contract needs repair.
                         text = json.dumps(review, ensure_ascii=False)
-                        value['review_draft'] = {'stage': 'review', 'text': text[:16000],
-                            'truncated': len(text) > 16000, 'completed': True,
+                        value['review_draft'] = {'stage': 'review', 'text': text,
+                            'truncated': False, 'completed': True,
                             'input_binding': fingerprint({'snapshot': value.get('workspace_snapshot'),
                                                           'checks': value.get('checks')})}
                         raise
@@ -1170,6 +1177,12 @@ def execute_task(runner, task, record):
                         value['evidence_files'][review['events_path']] = digest(review['events_path'])
                     value['review_workspace'] = str(review_copy)
                     value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
+                    if review['verdict'] == 'blocked':
+                        items = acceptance_wait.validate(runner.root, task, review)
+                        message = acceptance_wait.park(runner.root, task, value, review, items)
+                        persist()
+                        runner.progress(message)
+                        raise CandidateStalled(message)
                     if review['verdict'] == 'pass':
                         latest_task = runner.scopes.effective(task)
                         if latest_task['writes'] != task['writes'] or latest_task['checks'] != task['checks']:
@@ -1282,8 +1295,8 @@ def execute_task(runner, task, record):
                         result = getattr(exc, 'result', None)
                         if result and isinstance(result.get('text'), str):
                             value['review_draft'] = {'stage': value['stage'],
-                                'text': result['text'][:16000],
-                                'truncated': len(result['text']) > 16000,
+                                'text': result['text'],
+                                'truncated': False,
                                 'completed': cause == 'protocol' and session_outcome(result, 'review')['action'] == 'validate',
                                 'input_binding': fingerprint({'snapshot': value.get('workspace_snapshot'),
                                                               'checks': value.get('checks')})}
@@ -1377,8 +1390,10 @@ def execute_task(runner, task, record):
             # the waiting candidate; do not make the user wait for that peer.
             if pending and deadline is None and not fatal and not runner.stop.is_set():
                 for index, (_, value) in enumerate(candidates):
-                    if (index not in pending.values() and value.get('status') == 'waiting-user'
-                            and questions.response(runner.root, value['question_id'])):
+                    if (index not in pending.values() and (
+                            (value.get('status') == 'waiting-user' and questions.response(runner.root, value['question_id']))
+                            or (value.get('status') == 'external-blocker' and value.get('acceptance_wait')
+                                and value['acceptance_wait']['answers_sha256'] != questions.fingerprint(acceptance_wait.answers(runner.root, task))))):
                         pending[pool.submit(guarded_one, index)] = index
     if verified:
         winner = choose(verified, models)
@@ -1405,8 +1420,12 @@ def execute_task(runner, task, record):
         raise scope_wait
     if winner is None:
         waiting = [v['question_id'] for _, v in candidates if v.get('status') == 'waiting-user']
+        waiting += acceptance_wait.pending(runner.root, candidates)
         if waiting:
             raise questions.WaitingForOperator('Нужен ответ пользователя; выполненные шаги сохранены', waiting)
+        external = [acceptance_wait.summary(v) for _, v in candidates if v.get('acceptance_wait')]
+        if external:
+            raise Blocked('; '.join(dict.fromkeys(external)))
         raise Blocked('No verified execution candidate: ' + '; '.join(failures))
     winner_path = next(path for path, value in candidates if value is winner)
     if _reconcile_candidate(runner, winner, winner_path.parent):

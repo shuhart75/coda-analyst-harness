@@ -14,6 +14,77 @@ from workspace import clone_snapshot, git, snapshot
 
 
 class ExecutionPortfolioTests(unittest.TestCase):
+    def test_deferred_decision_parks_without_code_retry_or_duplicate_question(self):
+        import operator_questions as oq
+        self.primary_only = True
+        self.task['id'] = 'integration'
+        key = oq.request(self.runner.root, 'source-task', 'cohort', 'Какой источник?')
+        oq.answer(self.runner.root, key, 'Решение отложено')
+        def review(*args, **kwargs):
+            report = self.review(*args, **kwargs)
+            report.update(verdict='blocked', findings=['Источник не выбран'], acceptance_blockers=[{
+                'finding_index': 0, 'kind': 'analyst-decision', 'requirements': ['REQ-BE'],
+                'next_step': 'Выбрать источник', 'answer_refs': [{'id': key, 'quote': 'Решение отложено'}]}])
+            return report
+        with self.assertRaisesRegex(Blocked, 'Выбрать источник'):
+            self.run_task(review=review)
+        first = next(v for v in self.records() if v['model'] == MODELS[0])
+        self.assertEqual((len(self.calls), self.check_count, first['failures']), (1, 1, 0))
+        self.assertEqual(first['status'], 'external-blocker')
+        def forbidden(*args, **kwargs):
+            raise AssertionError('Unchanged parked work must not run again')
+        with self.assertRaisesRegex(Blocked, 'Выбрать источник'):
+            self.run_task(session=forbidden, checks=forbidden, review=forbidden)
+        self.assertEqual(len(oq.questions(self.runner.root)), 1)
+        update = oq.request(self.runner.root, 'integration', 'new-source', 'Уточнение источника')
+        oq.answer(self.runner.root, update, 'Использовать подтверждённый источник')
+        result = self.run_task(session=forbidden, checks=forbidden)
+        self.assertEqual(result['status'], 'accepted')
+        self.assertEqual(len(self.calls), 1)
+
+    def test_manual_review_blocker_asks_once_and_rechecks_answer(self):
+        import operator_questions as oq
+        from test_manual_verification import CHECK
+        self.primary_only = True
+        self.task['id'] = 'integration'
+        def review(*args, **kwargs):
+            report = self.review(*args, **kwargs)
+            report.update(verdict='blocked', findings=['Нужен результат проверки страницы'], acceptance_blockers=[{
+                'finding_index': 0, 'kind': 'manual-check', 'requirements': ['REQ-BE'],
+                'next_step': 'Проверить страницу', 'answer_refs': [], 'question': 'Совпадает ли результат?',
+                'manual_check': {**CHECK, 'requirements': ['REQ-BE']}}])
+            return report
+        with self.assertRaises(oq.WaitingForOperator):
+            self.run_task(review=review)
+        pending = oq.questions(self.runner.root, pending_only=True)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['manual_check']['url'], CHECK['url'])
+        with self.assertRaises(oq.WaitingForOperator):
+            self.run_task(review=review)
+        self.assertEqual(len(self.calls), 1)
+        oq.answer(self.runner.root, pending[0]['id'], 'Да', 'Проверено на указанной сборке')
+        result = self.run_task()
+        self.assertEqual(result['status'], 'accepted')
+        self.assertEqual((len(self.calls), self.check_count), (1, 1))
+
+    def test_large_completed_review_is_retained_for_output_only_repair(self):
+        self.primary_only = True
+        calls = []
+        text = json.dumps({'verdict': 'pass', 'coverage': {'REQ-BE': 'evidence ' * 4000}})
+        def review(root, *args, **kwargs):
+            calls.append(root)
+            if len(calls) == 1:
+                result = self.result(root, kwargs['model'])
+                result['text'] = text
+                raise RetryableSessionError('Malformed reviewer verdict', result)
+            draft = read(Path(root)/'.review-input/output-repair.json')
+            self.assertEqual(draft['text'], text)
+            self.assertFalse(draft['truncated'])
+            return self.review(root, *args, **kwargs)
+        result = self.run_task(review=review)
+        self.assertEqual(result['status'], 'accepted')
+        self.assertEqual((len(self.calls), self.check_count, len(calls)), (1, 1, 2))
+
     def test_output_repair_is_bound_to_complete_draft_and_checked_inputs(self):
         from execution_cycle import _review_repair
         import tempfile

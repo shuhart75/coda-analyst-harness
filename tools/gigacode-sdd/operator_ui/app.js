@@ -11,7 +11,7 @@ let token = fragment.get('token') || storage.get('operator-token') || '';
 if (fragment.has('token')) { storage.set('operator-token', token); history.replaceState(null, '', location.pathname); }
 const cards = new Map();
 let latest, refreshing = false, toastTimer;
-const statuses = {idle:'Создайте или выберите запуск',done:'Принято', running:'В работе', pending:'Ожидает', blocked:'Заблокировано', 'waiting-user':'Нужен ответ', 'waiting-scope':'Ожидает область работы', 'waiting-retry':'Повтор позже', interrupted:'Остановлено', complete:'Завершено', accepted:'Вариант проверен', stalled:'Приостановлено', 'not-observed':'Нет наблюдения', 'external-blocker':'Нужны внешние данные'};
+const statuses = {unknown:'Нет подтверждения',idle:'Создайте или выберите запуск',done:'Принято', running:'В работе', pending:'Ожидает', blocked:'Заблокировано', 'waiting-user':'Нужен ответ', 'waiting-scope':'Ожидает область работы', 'waiting-retry':'Повтор позже', interrupted:'Остановлено', complete:'Завершено', accepted:'Вариант проверен', stalled:'Приостановлено', 'not-observed':'Нет наблюдения', 'external-blocker':'Нужны внешние данные'};
 const phases = {execute:'Разработка', review:'Независимое ревью', checks:'Проверки', adjudicate:'Разбор замечаний', accepted:'Проверен'};
 const label = s => statuses[s] || s || 'Состояние неизвестно';
 const duration = value => {if(!Number.isFinite(value)) return '—'; const n=Math.max(0,Math.floor(value)); return [Math.floor(n/3600),Math.floor(n/60)%60,n%60].map(v=>String(v).padStart(2,'0')).join(':');};
@@ -38,18 +38,19 @@ function renderSummary(value) {
   $('nav-sessions').textContent=uncertain?'?':String(active.length);
   $('nav-questions').textContent=String(count);$('question-count').textContent=String(count);
   $('session-note').textContent=uncertain?'Наблюдение требует обновления':run.requires_resume?'Контроллер не выполняет работу':'Включая аудиторов';
-  let title,description;
-  if(count){title='Нужен ваш ответ';description=`Открытых вопросов: ${count}. ${run.requires_resume?'После ответа нажмите «Продолжить / запустить».':'Независимая работа может продолжаться.'}`;}
-  else if(run.ready){title='Работа принята';description='Все задачи и итоговая проверка завершены.';}
-  else if(run.requires_resume){const waiting=value.management?.operations.some(op=>op.status==='waiting');title=waiting?'Мастер ждёт подтверждения':run.status==='running'?'Контроллер остановлен':label(run.status);description=waiting?'Ответьте на вопрос мастера в блоке управления выше.':'Продолжите работу кнопкой выше. Мастер откроется на этой странице.';}
-  else if(uncertain){title='Состояние требует обновления';description='Текущие сессии нельзя достоверно определить по последнему наблюдению.';}
-  else {title='В работе';description='Открытых вопросов нет. Приёмка результатов подтверждается проверками.';}
-  $('status-heading').textContent=title;$('status-description').textContent=description;
-  document.querySelector('.status-banner').classList.toggle('attention',Boolean(count||uncertain||run.status==='blocked'||run.status==='interrupted'));
+  $('status-heading').textContent=value.summary||label(run.status);
+  const finalStage=value.stages?.find(s=>s.id==='integration');
+  $('status-description').textContent=run.ready?'Все задачи и итоговая приёмка завершены.':
+    run.accepted_tasks===run.total_tasks&&run.total_tasks?'Задачи приняты по отдельности. Итоговая приёмка всего решения ещё не завершена.':
+    run.requires_resume?'Контроллер остановлен. Продолжите работу через мастер выше.':'Подробности текущей работы показаны в этапах и сессиях ниже.';
+  document.querySelector('.status-banner').classList.toggle('attention',Boolean(count||uncertain||run.attention.requires_action||run.status==='interrupted'));
+  if(!run.ready&&run.accepted_tasks===run.total_tasks&&run.total_tasks){$('remaining').textContent='Итоговая приёмка';$('remaining-note').textContent=label(finalStage?.status);}
   $('answer-shortcut').hidden=!count;
   $('log-path').textContent=run.log_path;
 }
 function renderRoute(value) {
+  const events=$('controller-events');events.replaceChildren();for(const event of value.controller_events||[])events.append(node('p','context',date(event.at)+' · '+event.message));if(!events.childNodes.length)events.append(node('p','muted','Подробные события контроллера ещё не получены.'));
+  const stages=$('stage-list');stages.replaceChildren();for(const stage of value.stages||[]){const row=node('li','route-item '+stage.status);row.append(node('span','route-symbol',stage.status==='done'?'✓':stage.status==='running'?'▶':stage.status==='blocked'?'!':'○'));const body=node('div');body.append(node('div','route-title',stage.title+' · '+label(stage.status)),node('p','context',stage.description));if(stage.error)body.append(node('p','question-message',stage.error));row.append(body);stages.append(row);}
   const list=$('route');list.replaceChildren();
   if(!value.tasks.length){list.append(node('li','empty','План ещё не закреплён.'));return;}
   for(const task of value.tasks){
@@ -82,6 +83,13 @@ function renderSessions(value){
     if(!op.current)row.append(node('div','session-detail','Последнее наблюдение, не текущая сессия'));
     const details=node('details');details.dataset.key=[op.task_id,op.model,op.phase,op.purpose,index].join(':');details.open=opened.has(details.dataset.key);
     details.append(node('summary',null,'Подробности'),node('p','session-detail',`Без новых событий: ${duration(op.idle_seconds)} · Лимит: ${duration(op.timeout_seconds)}`));
+    const activity=op.activity||{};
+    details.append(node('p','context',op.task_id==='integration'?'Цель: проверить весь собранный результат по требованиям, устранить межкомпонентные дефекты и пройти независимое ревью.':'Этап: '+(op.phase||op.stage||op.title||'не указан')));
+    if(Number.isFinite(activity.tool_calls))details.append(node('p','session-detail',`Вызовов инструментов: ${activity.tool_calls}; ответов: ${activity.tool_results}; ожидают ответа: ${activity.pending_calls}.`));
+    for(const action of activity.pending_actions||[])details.append(node('p','context','Ожидается результат: '+action));
+    if(!(activity.recent_events||[]).length)details.append(node('p','muted','Подробные события этой сессии ещё не получены. По одному времени работы нельзя определить, что делает модель.'));
+    for(const event of activity.recent_events||[])details.append(node('p','context',date(event.at)+' · '+event.action+' · '+event.outcome));
+    details.append(node('p','muted','События показывают действия, но не подтверждают прохождение проверок.'));
     row.append(details);list.append(row);
   }
 }

@@ -46,12 +46,38 @@ class OperatorViewTests(unittest.TestCase):
                            'candidates': [{'model': 'model-a', 'status': 'accepted', 'stage': 'accepted'}]}],
                 'questions': [], 'operations': [{'task': 'check', 'model': 'model-b', 'role': 'review'}]}
 
+    def test_web_preserves_final_blocker_and_session_event_details(self):
+        value = self.value()
+        value['integration'] = 'blocked'
+        value['operations'][0]['activity'] = {'pending_actions': ['Read: frontend/page.tsx']}
+        result = operator_view.project(value)
+        from run_status import health_summary
+        self.assertEqual(result['summary'], health_summary(value))
+        self.assertIn('Есть блокировка', result['summary'])
+        self.assertTrue(result['run']['attention']['requires_action'])
+        self.assertEqual(result['execution']['operations'][0]['activity']['pending_actions'], ['Read: frontend/page.tsx'])
+        self.assertEqual(next(p for p in result['stages'] if p['id']=='integration')['status'], 'blocked')
+
     def test_candidate_acceptance_is_not_task_or_run_acceptance(self):
         result = operator_view.project(self.value(), observed_at=10)
         self.assertEqual(result['run']['accepted_tasks'], 1)
         self.assertFalse(result['run']['ready'])
         self.assertFalse(result['tasks'][1]['accepted'])
         self.assertEqual(result['execution']['process_exit'], 'not_observed')
+
+    def test_active_final_retry_does_not_request_unneeded_intervention(self):
+        value = self.value()
+        value['integration'] = 'blocked'
+        value['operations'] = [{'task_id': 'integration', 'kind': 'check', 'elapsed_seconds': 30}]
+        result = operator_view.project(value)
+        self.assertEqual(result['run']['integration'], 'running')
+        self.assertEqual(result['run']['saved_integration'], 'blocked')
+        self.assertFalse(result['run']['attention']['requires_action'])
+        self.assertFalse(result['run']['ready'])
+        value['telemetry_stale'] = True
+        result = operator_view.project(value)
+        self.assertEqual(result['run']['integration'], 'blocked')
+        self.assertTrue(result['run']['attention']['requires_action'])
 
     def test_stopped_controller_does_not_prove_service_exit(self):
         value = self.value()

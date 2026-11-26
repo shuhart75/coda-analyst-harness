@@ -247,8 +247,9 @@ class Manager:
             write_projection(self.root/'health.json', self.health)
 
     def __enter__(self):
-        for role in self.health:
-            self.health_update(role, phase='waiting', next_attempt_at=None)
+        started = time.time()
+        for role in ROLES:
+            self.health_update(role, phase='waiting', next_attempt_at=None, controller_started_at=started)
         write_projection(self.root/'latest.json', {'snapshot_at': time.time(), 'status': 'unknown',
             'summary': 'Новых наблюдений после запуска пока нет.', 'advisory_only': True})
         if self.runner.cfg.get('observers_enabled', True):
