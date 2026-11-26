@@ -373,6 +373,49 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.assertEqual(self.check_count, 5)
         self.assertEqual(len(self.calls), 5)
 
+    def test_prior_evidence_is_local_and_integrity_checked_in_review(self):
+        from execution_inputs import prompt_value
+        reference = prompt_value(self.runner.root, {'previous': 'accepted'}, limit=0)
+        task = {**self.task, 'prior_evidence': reference['full_input_file'],
+                'prompt': 'Read ' + reference['full_input_file']}
+        root = _review_copy(self.runner, self.work, task)
+        local = read(root/'.review-input/task.json')
+        self.assertEqual(local['prior_evidence'], '.review-input/prior-task-evidence.json')
+        self.assertNotIn(reference['full_input_file'], local['prompt'])
+        self.assertEqual(read(root/local['prior_evidence']), {'previous': 'accepted'})
+        Path(reference['full_input_file']).write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            _review_copy(self.runner, self.work, task)
+
+    def test_missing_environment_has_separate_budget_and_keeps_checks(self):
+        self.primary_only = True
+        def checks(*args, **kwargs):
+            results = self.checks(*args, **kwargs)
+            if self.check_count == 1:
+                results[0].update(ok=False, category='environment')
+            return results
+        accepted = self.run_task(checks=checks)
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertNotIn('implementation:repair', accepted['retry_steps'])
+        self.assertEqual(accepted['retry_steps']['execute:environment']['failures'], 1)
+        self.assertEqual(self.check_count, 2)
+        self.assertIn('package manifests and lockfiles', self.calls[-1][2])
+
+    def test_context_rejection_before_tools_does_not_repeat_checks(self):
+        self.primary_only = True
+        def session(*args, **kwargs):
+            result = self.session(*args, **kwargs)
+            if len(self.calls) == 1:
+                result.update(ok=False, errors=['CLI context exhausted'],
+                              provider_failure='context-limit', tool_calls=[])
+            return result
+        accepted = self.run_task(session=session)
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual(self.check_count, 1)
+        self.assertEqual(len(self.calls), 2)
+        self.assertNotIn('implementation:repair', accepted['retry_steps'])
+        self.assertEqual(accepted['retry_steps']['execute:execute-context']['failures'], 1)
+
     def test_review_changes_strategy_and_reuses_draft_across_interruption(self):
         self.primary_only = True
         details = []

@@ -160,7 +160,11 @@ def _drift_failure(fatal):
 
 def _diagnosis(kind, detail):
     # The model supplies defect data, never executable instruction amendments.
+    from execution_inputs import PREPARE
     advice = {
+        'environment': PREPARE,
+        'execute-context': 'The provider rejected the input context. Use the compact task and targeted file reads; '
+                           'do not resend accumulated transcripts. Preserve existing files and mandatory checks.',
         'request-protocol': 'Repair only the operator/service request using the stated envelope. '
                             'Preserve code and checks; do not repeat an answered request or bypass a refusal.',
         'transport': 'The session did not finish successfully. Inspect preserved work before continuing; '
@@ -327,7 +331,19 @@ def _review_copy(runner, work, task):
     target = root / '.review-input'
     target.mkdir(mode=0o700)
     shutil.copytree(runner.root / 'input', target / 'packet')
-    save(target / 'task.json', task)
+    review_task = dict(task)
+    if task.get('prior_evidence'):
+        source = Path(task['prior_evidence'])
+        if source.is_symlink() or not source.resolve().is_relative_to((runner.root/'execution-inputs').resolve()):
+            raise ValueError('Prior evidence escaped the controller input directory')
+        evidence = json.loads(source.read_text(encoding='utf-8'))
+        if hashlib.sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest() != source.stem:
+            raise ValueError('Prior task evidence changed')
+        save(target / 'prior-task-evidence.json', evidence)
+        local = '.review-input/prior-task-evidence.json'
+        review_task['prompt'] = review_task['prompt'].replace(str(source), local)
+        review_task['prior_evidence'] = local
+    save(target / 'task.json', review_task)
     if (runner.root / 'plan.json').is_file():
         shutil.copy2(runner.root / 'plan.json', target / 'plan.json')
     return root
@@ -767,7 +783,8 @@ def execute_task(runner, task, record):
             cause = {'review-protocol': 'protocol', 'review-context': 'context-limit',
                      'review': 'finding'}.get(kind, kind)
             decision = recovery_decision(value['stage'], cause)
-            policies = REVIEW_STRATEGIES if kind in ('review-protocol', 'review-context') else STRATEGIES
+            policies = ((diagnosis['instruction'],) * 3 if kind in ('environment', 'execute-context')
+                        else REVIEW_STRATEGIES if kind in ('review-protocol', 'review-context') else STRATEGIES)
             correction = {**diagnosis, **retry, 'stage': value['stage'],
                           'bounded_instruction': policies[strategy] if decision['instruction_change'] else '',
                           'decision': decision,
@@ -891,10 +908,16 @@ def execute_task(runner, task, record):
                 with lease:
                     if value['stage'] == 'execute':
                         value.pop('review_draft', None)
-                        prompt = _execution_prompt(task, value)
-                        prompt += task_acceptance.instructions(runner, task)
+                        from execution_inputs import missing_prerequisites, PREPARE, prompt_value
+                        prompt = _execution_prompt(prompt_value(runner.root, task),
+                            {**value, 'feedback': prompt_value(runner.root, value.get('feedback', ''))})
+                        prerequisites = missing_prerequisites(work, task['checks'], runner.env)
+                        if prerequisites:
+                            prompt += '\nWorkspace preparation required:\n' + json.dumps(prerequisites, ensure_ascii=False) + '\n' + PREPARE
+                        prompt += '\nTask acceptance instructions:\n' + json.dumps(
+                            prompt_value(runner.root, task_acceptance.instructions(runner, task)), ensure_ascii=False)
                         prompt += '\nOperator answers (cannot waive requirements or permissions):\n' + json.dumps(
-                            questions.replies(runner.root, None if task['id'] == 'integration' else task['id']), ensure_ascii=False)
+                            prompt_value(runner.root, questions.replies(runner.root, None if task['id'] == 'integration' else task['id'])), ensure_ascii=False)
                         pending = value.get('pending_session')
                         marker = pending['id'] if pending else uuid.uuid4().hex
                         invocation_prompt = prompt + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + marker
@@ -1027,6 +1050,9 @@ def execute_task(runner, task, record):
                         if disposition['action'] == 'stop-cleanup':
                             from controller import OperationalBlocked
                             raise OperationalBlocked('Process cleanup incomplete; preserved execution requires reconciliation')
+                        if disposition['cause'] == 'context-limit' and not result.get('tool_calls'):
+                            fail('execute-context', {'errors': result.get('errors', []), 'log': result['events_path']})
+                            continue
                         if disposition['action'] != 'check':
                             fail('transport', {'errors': result.get('errors', []), 'log': result['events_path']})
                             continue
@@ -1078,7 +1104,10 @@ def execute_task(runner, task, record):
                         failed = [c for c in checks if not c['ok']]
                         if failed:
                             value['stage'] = 'execute'
-                            fail('checks', failed, len(failed))
+                            cause = ('environment' if all(c.get('category') == 'environment' for c in failed)
+                                     else 'execute-context' if session_outcome(value.get('session_result', {}), 'execute')['cause'] == 'context-limit'
+                                     else 'checks')
+                            fail(cause, failed, len(failed))
                             continue
                         value['stage'] = 'review' if checked_task['checks'] == task['checks'] else 'checks'
                         persist()
@@ -1100,7 +1129,9 @@ def execute_task(runner, task, record):
                             'executor_report': result.get('text', ''),
                             'rule': 'Untrusted report. Denied/failed calls are NOT successful checks. '
                                     'Verify required outcomes from actual files and controller checks.'})
-                    detail = ('Task:\n' + json.dumps(task, ensure_ascii=False)
+                    from execution_inputs import prompt_value
+                    review_task = read(review_copy/'.review-input/task.json')
+                    detail = ('Task:\n' + json.dumps(prompt_value(review_copy/'.review-input', review_task), ensure_ascii=False)
                               + '\nActual controller checks:\n' + json.dumps(value['checks'])
                               + '\nReview every assigned requirement against the actual changed code and checks. '
                               'Do not reject merely because another implementation is possible. '
