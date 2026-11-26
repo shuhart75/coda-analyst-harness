@@ -43,6 +43,16 @@ class ConsoleTests(unittest.TestCase):
             display.close(status='interrupted')
             self.assertIn('\x1b[?25h\x1b[?1049l', stream.getvalue())
 
+    def test_observer_refresh_does_not_wait_for_a_task_transition(self):
+        self.display.value = dict(self.value, observation={'status': 'unknown'})
+        write_projection(self.root/'observer/latest.json', {'status': 'progress', 'snapshot_at': 123})
+        write_projection(self.root/'observer/health.json', {'scope': {'last_success_at': 456}})
+        current = self.display._value()
+        self.assertEqual(current['observation']['status'], 'progress')
+        self.assertEqual(current['observer_health']['scope']['last_success_at'], 456)
+        write_projection(self.root/'observer/latest.json', {'status': 'concern', 'snapshot_at': 789})
+        self.assertEqual(self.display._value()['observation']['status'], 'concern')
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -90,7 +100,7 @@ class ConsoleTests(unittest.TestCase):
                 command = 'python /' + 'long-path/'*30 + 'bootstrap.py --answers-config /run/config.json'
                 p.notice(command)
                 self.assertIn(command, stream.getvalue())
-                self.assertLessEqual(p.rows, 7)
+                self.assertLessEqual(p.rows, 23)  # Lifecycle stages must fit the available terminal height.
             finally:
                 p.finish(token)
             p.close(status='interrupted')

@@ -9,7 +9,7 @@ from progress_io import read_projection, write_projection
 
 STAGES = {'execute': 'разработка', 'checks': 'обязательные проверки', 'review': 'независимое ревью',
           'adjudicate': 'разбор спорного замечания', 'accepted': 'вариант проверен'}
-STATUSES = {'pending': 'ожидает запуска', 'done': 'принято', 'running': 'в работе',
+STATUSES = {'unknown': 'нет подтверждения', 'pending': 'ожидает запуска', 'done': 'принято', 'running': 'в работе',
             'blocked': 'заблокировано', 'waiting-user': 'нужен ответ', 'interrupted': 'остановлено',
             'waiting-scope': 'ждёт пересекающуюся задачу', 'waiting-retry': 'пауза перед повтором', 'complete': 'завершено'}
 
@@ -90,7 +90,7 @@ def snapshot(root, state=None):
     runtime = read_projection(root / 'console-status.json', problems) if (root / 'console-status.json').is_file() else {}
     if state.get('status') == 'running' and not runtime:
         problems.append('runtime-status-unavailable')
-    stale = bool(runtime) and state.get('status') == 'running' and time.time()-runtime.get('observed_at', 0) > 90
+    stale = bool(runtime) and state.get('status') not in ('blocked', 'interrupted', 'complete') and time.time()-runtime.get('observed_at', 0) > 90
     try:
         # A prompt plus a stream file is an invocation attempt, including failed
         # CLI launches. Do not count build checks, read prompts, or scan event logs.
@@ -114,11 +114,18 @@ def snapshot(root, state=None):
     return {'service_stop': service_stop, 'session_attempts': attempts, 'jobs': config.get('jobs'),
             'observation': observation,
             'observer_health': read_projection(root/'observer/health.json', []) if (root/'observer/health.json').is_file() else {},
+            'controller_events': runtime.get('controller_events', []),
             'operations': runtime.get('operations', []), 'telemetry_stale': stale,
             'telemetry_incomplete': bool(problems),
             'status': state.get('status'), 'tasks': rows,
             'done': sum(r['status'] == 'done' for r in rows), 'total': len(rows),
             'questions': questions, 'answer_command': oq.command(root), 'services': services,
+            'preflight_passed': (state.get('preflight') or {}).get('passed') is True,
+            'plan_pinned': bool(state.get('plan_sha256')),
+            'integration_error': state.get('integration', {}).get('error'),
+            'integration_attempts': state.get('integration', {}).get('attempts'),
+            'integration_checks': [{'returncode': c.get('returncode'), 'timed_out': c.get('timed_out', False)}
+                                   for c in state.get('integration', {}).get('checks', []) if isinstance(c, dict)],
             'integration': state.get('integration', {}).get('status'),
             'ready': readiness.get('required_complete') is True and state.get('status') == 'complete'}
 
@@ -203,6 +210,11 @@ def operation_label(op, tasks):
     """The actor and candidate author are distinct, explicit identities."""
     if op.get('purpose') == 'observation':
         return op.get('title', 'Аудитор') + ' · ' + model_label(op.get('model'))
+    service_title = {'integration': 'Итоговая приёмка всего решения', 'preflight': 'Проверка возможностей и окружения',
+                     'plan': 'Планирование и проверка плана'}.get(op.get('task_id'))
+    if service_title:
+        phase = op.get('phase') or 'подготовка'
+        return service_title + ' · ' + model_label(op.get('model')) + ' · ' + STAGES.get(phase, phase)
     name = next((task_route.title(t) for t in tasks if t['id'] == op.get('task_id')), None)
     if not name or op.get('kind') != 'llm':
         return op.get('title', 'операция')
@@ -237,12 +249,10 @@ def observation_lines(value):
               'concern': 'нужна проверка', 'unknown': 'данных недостаточно',
               'disagreement': 'оценки расходятся', 'unavailable': 'недоступны'}
     stamp = observation.get('snapshot_at')
-    try:
-        captured = time.strftime('%H:%M', time.localtime(stamp)) if isinstance(stamp, (int, float)) else None
-    except (ValueError, OverflowError, OSError):
-        captured = None
+    from operator_stages import timestamp
+    captured = timestamp(stamp) if isinstance(stamp, (int, float)) else None
     stopped = value.get('status') in ('interrupted', 'complete', 'blocked') or bool(value.get('console_error') or value.get('service_stop'))
-    stale = observation.get('stale') or (captured is not None and time.time()-stamp > 900)
+    stale = observation.get('stale') or (captured is not None and (time.time()-stamp > 900 or stamp-time.time() > 60))
     prefix = 'Предыдущее наблюдение аудиторов' if stale or stopped else 'Аудиторы'
     heading = prefix + (', снимок ' + captured if captured else ', время снимка неизвестно')
     if stopped:
@@ -289,15 +299,14 @@ def observation_lines(value):
         if not isinstance(item, dict) or not item:
             continue
         def clock(stamp):
-            try:
-                return time.strftime('%H:%M:%S', time.localtime(stamp)) if isinstance(stamp, (int, float)) else 'ещё не было'
-            except (ValueError, OverflowError, OSError):
-                return 'время неизвестно'
+            return timestamp(stamp) if stamp is not None else 'ещё не было'
         phase = {'starting': 'запускается', 'probe': 'проверка режима',
                  'assessment': 'оценивает снимок', 'waiting': 'ожидание следующего снимка'}.get(item.get('phase'), 'состояние неизвестно')
         line = ('Аудитор ' + model_label(item.get('model')) + ': попытка ' + str(item.get('attempt', '?'))
                 + '; ' + ('исполнение остановлено' if stopped else phase)
                 + '; последний успех ' + clock(item.get('last_success_at')))
+        if item.get('last_success_at') and item.get('controller_started_at') and item['last_success_at'] < item['controller_started_at']:
+            line += '; успех предыдущего запуска контроллера'
         if item.get('failure'):
             line += '; ' + (sentence(item['failure']) or 'ошибка аудита')
         if item.get('next_attempt_at') and not stopped:
@@ -306,9 +315,7 @@ def observation_lines(value):
     return lines
 
 
-def dashboard(value, include_time=True, include_command=True, include_overview=True, compact=False):
-    """Answer operator questions without equating activity with correctness."""
-    from progress import elapsed
+def health_summary(value):
     tasks = value.get('tasks', [])
     operations = value.get('operations', [])
     questions = value.get('questions', [])
@@ -343,6 +350,18 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
         health = 'Давно нет новых событий. Автоматический контроль продолжается.'
     else:
         health = 'В работе. Запросов на вмешательство нет.'
+    return health
+
+
+def dashboard(value, include_time=True, include_command=True, include_overview=True, compact=False):
+    """Answer operator questions without equating activity with correctness."""
+    from progress import elapsed
+    tasks = value.get('tasks', [])
+    operations = value.get('operations', [])
+    questions = value.get('questions', [])
+    blocked = [t['id'] for t in tasks if t['status'] == 'blocked']
+    execution_operations = [op for op in operations if op.get('purpose') != 'observation']
+    health = health_summary(value)
     done, total = value.get('done', 0), value.get('total', 0)
     lines = [health] + observation_lines(value)
     lines.append(f'Принято: {done} из {total} задач.' if total else 'План задач ещё не закреплён.')
@@ -377,6 +396,8 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
         lines.append('Отчёт об остановке: ' + value['service_stop']['report'])
     stopped = value.get('status') == 'interrupted' or bool(value.get('console_error'))
     if include_overview:
+        from operator_stages import stages
+        lines.append('Этапы: ' + ' → '.join(p['title'] + ' [' + STATUSES.get(p['status'], p['status']) + ']' for p in stages(value)))
         completed = [task_route.title(t) for t in tasks if t['status'] == 'done']
         if completed:
             lines.append('✓ ' + ' · '.join(completed))

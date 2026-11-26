@@ -1254,9 +1254,13 @@ executed test names/counts, not just a successful command or test compilation.
             clone_snapshot(self.main, work)
             rec = {'workspace': str(work), 'base': git(work, 'rev-parse', 'HEAD'), 'status': 'running', 'attempts': 0,
                    'operator_revision': self.state['operator_revision']['id']}
+        if rec.get('status') in ('blocked', 'waiting-user'):
+            rec['status'] = 'running'
+            rec.pop('error', None)
         rec['operator_revision'] = self.state['operator_revision']['id']
         self.state['integration'] = rec
         self.persist()
+        run_status.publish(self)
         try:
             if 'integration_base' not in rec:
                 rec = self.checkpoint(rec)

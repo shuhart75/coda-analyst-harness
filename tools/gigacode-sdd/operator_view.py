@@ -33,6 +33,8 @@ def project(value, *, observed_at=None):
             'candidates': [{key: c.get(key) for key in ('model', 'stage', 'status', 'updated_at', 'resource_wait')}
                            for c in task.get('candidates', [])],
         })
+    from run_status import health_summary
+    from operator_stages import stages
     status = value.get('status')
     ready = value.get('ready') is True and status == 'complete'
     stale = bool(value.get('telemetry_stale'))
@@ -41,14 +43,14 @@ def project(value, *, observed_at=None):
     # controller or an empty list must never imply that all services have exited.
     operations = [{key: op.get(key) for key in (
         'task', 'task_id', 'model', 'candidate_model', 'stage', 'phase', 'role', 'title', 'kind', 'purpose',
-        'elapsed_seconds', 'timeout_seconds', 'idle_seconds')}
+        'elapsed_seconds', 'timeout_seconds', 'idle_seconds', 'activity')}
         for op in value.get('operations', [])]
     for operation in operations:
-        operation['current'] = status == 'running' and not stale and not incomplete
+        operation['current'] = status not in ('blocked', 'interrupted', 'complete') and not stale and not incomplete
     attention = project_attention({
         'is_root': True, 'outcome': 'succeeded' if ready else None,
         'pending_input': bool(questions),
-        'pending_guidance': status == 'blocked' or any(t['status'] == 'blocked' for t in tasks),
+        'pending_guidance': status == 'blocked' or value.get('integration') == 'blocked' or any(t['status'] == 'blocked' for t in tasks),
         'interrupted': status == 'interrupted',
     })
     if stale:
@@ -57,6 +59,8 @@ def project(value, *, observed_at=None):
         attention['categories'].append('unverifiable')
         attention['requires_action'] = True
     return {
+        'summary': health_summary(value), 'stages': stages(value),
+        'controller_events': value.get('controller_events', []),
         'schema': SCHEMA, 'projected_at': time.time() if observed_at is None else observed_at,
         'run': {'status': status, 'accepted_tasks': sum(t['accepted'] for t in tasks),
                 'total_tasks': len(tasks), 'ready': ready,

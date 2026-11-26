@@ -16,6 +16,7 @@ class ConsoleProgress(Progress):
         self.log_path = Path(log_path)
         self.runtime_path = self.log_path.parent.parent / 'console-status.json'
         self.value = None
+        self.controller_events = []
         self.last_plain = None
         self.last_notice = float('-inf')
         self.last_save = float('-inf')
@@ -41,6 +42,8 @@ class ConsoleProgress(Progress):
 
     def message(self, message):
         with self.lock:
+            from prior_context import redact
+            self.controller_events = (self.controller_events + [{'at': time.time(), 'message': clipped(redact(str(message))[0], 600)}])[-8:]
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open('a', encoding='utf-8') as stream:
                 os.chmod(self.log_path, 0o600)
@@ -55,7 +58,7 @@ class ConsoleProgress(Progress):
     def operations(self):
         with self.lock:
             now = self.clock()
-            return [{**entry.get('metadata', {}), 'title': entry['label'], 'elapsed_seconds': max(0, now-entry['start']),
+            return [{**entry.get('metadata', {}), 'activity': entry.get('activity', {}), 'title': entry['label'], 'elapsed_seconds': max(0, now-entry['start']),
                      'timeout_seconds': entry.get('timeout'),
                      'idle_seconds': (entry['idle'] + now-entry['observed']) if 'idle' in entry else None}
                     for entry in self.active.values()]
@@ -63,17 +66,27 @@ class ConsoleProgress(Progress):
     def telemetry(self, token, data):
         with self.lock:
             if token in self.active:
-                self.active[token].update(idle=data['idle_seconds'], observed=self.clock())
+                self.active[token].update(idle=data['idle_seconds'], observed=self.clock(), activity={
+                    key: data[key] for key in ('events', 'tool_calls', 'tool_results', 'pending_calls',
+                    'oldest_pending_seconds', 'recent_events', 'pending_actions', 'terminal_result') if key in data})
 
     def _value(self):
-        return dict(self.value or {}, operations=self.operations(), telemetry_stale=False,
+        from run_status import read_projection
+        current = dict(self.value or {})
+        for key, filename in (('observation', 'latest.json'), ('observer_health', 'health.json')):
+            path = self.log_path.parent.parent/'observer'/filename
+            if path.is_file():
+                data = read_projection(path, [])
+                if data:
+                    current[key] = data
+        return dict(current, controller_events=list(self.controller_events), operations=self.operations(), telemetry_stale=False,
                     telemetry_incomplete=self.runtime_error or (self.value or {}).get('telemetry_incomplete', False))
 
     def _save_runtime(self):
         if self.clock()-self.last_save < 30:
             return
         self.runtime_error = not write_projection(self.runtime_path,
-            {'observed_at': time.time(), 'operations': self.operations()})
+            {'observed_at': time.time(), 'operations': self.operations(), 'controller_events': list(self.controller_events)})
         from run_status import dashboard
         temporary = None
         try:
