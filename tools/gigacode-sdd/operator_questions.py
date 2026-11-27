@@ -216,15 +216,19 @@ def replies(root, task):
             for q in questions(root) if q['answer'] and (task is None or q['task'] == task)]
 
 
+def is_verification(question):
+    return bool(question.get("manual_check") or question.get("automation", {}).get("verification"))
+
+
 def manual_state(root, task):
-    records = [{'id': q['id'], 'check': q['manual_check'], 'answer': q['answer'], 'automation': q.get('automation', {})}
-               for q in questions(root) if q.get('manual_check')
+    records = [{'id': q['id'], 'check': q.get('manual_check'), 'answer': q['answer'], 'automation': q.get('automation', {})}
+               for q in questions(root) if is_verification(q)
                and (task == 'integration' or q['task'] == task)]
     return fingerprint(records) if records else None
 
 
 def require_manual_answers(root):
-    pending = [q['id'] for q in questions(root, pending_only=True) if q.get('manual_check')]
+    pending = [q['id'] for q in questions(root, pending_only=True) if is_verification(q)]
     if pending:
         raise WaitingForOperator('Нужны результаты ручной проверки; откройте вопросы в отдельном терминале', pending)
 
@@ -236,7 +240,7 @@ def response(root, key):
 def resolve_task(root, task):
     from controller import save
     for q in questions(root, pending_only=True):
-        if q['task'] == task and not q.get('manual_check'):
+        if q['task'] == task and not is_verification(q):
             with locked(root) as folder:
                 save(folder / (q['id'] + '-resolved.json'),
                      {'reason': 'Task accepted through a verified candidate', 'resolved_at': time.time()})
@@ -402,6 +406,9 @@ control: finish independent work, keep the obligation open, and prepare this que
 Do not retry an actual denied action without changed conditions. A historic tooling limitation alone
 does not prohibit a newly available approved browser; preserve genuine human decisions. Final review must inspect recorded manual
 results and any required artifacts, retaining gaps and failures rather than treating permission as proof.
+For follow-ups to a browser checklist, keep its topic and include the complete updated manual_check.
+The controller routes same-task/topic verification follow-ups to the executor even if that field is omitted.
+Keep business decisions and access prerequisites under their own distinct topics.
 Use the same topic for the same decision across attempts. A question is not a failure or acceptance.
 For a necessary repair outside task.writes, report an explicit request:
 {"scope_request":{"paths":["exact/repository-relative/existing-file"],"reason":"defect and failed check"}}.

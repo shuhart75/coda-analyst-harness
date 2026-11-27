@@ -1228,7 +1228,7 @@ executed test names/counts, not just a successful command or test compilation.
             raise Blocked('Some tasks are blocked; inspect status/logs, resolve cause, then run --retry-blocked')
         # A peer may finish implementation while another candidate requested a
         # manual check. Acceptance cannot silently resolve this human obligation.
-        while any(q.get('manual_check') for q in operator_questions.questions(self.root, pending_only=True)):
+        while any(operator_questions.is_verification(q) for q in operator_questions.questions(self.root, pending_only=True)):
             self.state['status'] = 'waiting-user'
             self.persist()
             run_status.publish(self)

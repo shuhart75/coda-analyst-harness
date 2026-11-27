@@ -52,7 +52,14 @@ function renderRoute(value) {
   const browserChecks=value.browser_checks||[], browserList=$('browser-check-list');
   const expandedChecks=new Set([...browserList.querySelectorAll('details[open]')].map(row=>row.dataset.checkId));
   $('browser-check-panel').hidden=!browserChecks.length;browserList.replaceChildren();
-  for(const item of browserChecks){const row=node('details','answer-item');row.dataset.checkId=item.id;row.open=expandedChecks.has(item.id);row.append(node('summary',null,item.check.requirements.join(', ')+' · '+item.task),node('p','context',item.check.url),node('p','context','Сборка: '+item.check.artifact),node('p','context',item.check.preconditions));for(const step of item.check.steps)row.append(node('p','context',step.action+' → '+step.expected));browserList.append(row);}
+  for(const item of browserChecks){
+    const row=node('details','answer-item');row.dataset.checkId=item.id;row.open=expandedChecks.has(item.id);
+    row.append(node('summary',null,item.check.requirements.join(', ')+' · '+item.task));
+    if(item.clarification)row.append(node('p','context','Уточнение сценария: '+item.clarification.followup),node('p','muted','Исходный чек-лист ниже дан для справки. Исполнитель проверит актуальные условия.'));
+    row.append(node('p','context',item.check.url),node('p','context','Сборка: '+item.check.artifact),node('p','context',item.check.preconditions));
+    for(const step of item.check.steps)row.append(node('p','context',step.action+' → '+step.expected));
+    browserList.append(row);
+  }
 
   const events=$('controller-events');events.replaceChildren();for(const event of value.controller_events||[])events.append(node('p','context',date(event.at)+' · '+event.message));if(!events.childNodes.length)events.append(node('p','muted','Подробные события контроллера ещё не получены.'));
   const stages=$('stage-list');stages.replaceChildren();for(const stage of value.stages||[]){const row=node('li','route-item '+stage.status);row.append(node('span','route-symbol',stage.status==='done'?'✓':stage.status==='running'?'▶':stage.status==='blocked'?'!':'○'));const body=node('div');body.append(node('div','route-title',stage.title+' · '+label(stage.status)),node('p','context',stage.description));if(stage.error)body.append(node('p','question-message',stage.error));row.append(body);stages.append(row);}
@@ -167,14 +174,21 @@ async function refresh(){
 const actionNames={resume:'Продолжение работы',new:'Новая работа',stop:'Остановка',restart:'Перезапуск',diagnostics:'Диагностика',export:'Экспорт результата'};
 const operationStates={queued:'В очереди',running:'Выполняется',waiting:'Нужен ответ в мастере',succeeded:'Операция завершена',failed:'Не выполнено',stopped:'Работа остановлена'};
 let wizardKey='', actionPending=false;
+const diagnosticDownloads=new Map();
+const activeOperation=op=>['queued','running','waiting'].includes(op.status);
+function diagnosticFilename(op){return 'sdd-diagnostics-'+new Date(op.created_at*1000).toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z')+'-'+op.id.slice(0,8)+'.txt';}
+function pendingDiagnostic(){try{return JSON.parse(storage.get('operator-diagnostic-download')||'null');}catch{return null;}}
+function trackDiagnostic(payload){if(payload.action==='diagnostics')storage.set('operator-diagnostic-download',JSON.stringify({id:payload.id,selected:latest.management.selected}));}
 async function sendAction(action, revision=latest?.management.revision){
   if(actionPending||!latest)return;
   actionPending=true;
+  renderManagement(latest);
   const payload={id:crypto.randomUUID().replaceAll('-',''),action,revision};
   storage.set('operator-pending-action',JSON.stringify(payload));
+  trackDiagnostic(payload);
   try{await api('/api/actions',payload);storage.remove('operator-pending-action');$('control-confirm').hidden=true;await refresh();}
   catch(error){toast(error.message+' Если связь прервалась, повторите ту же операцию кнопкой ниже.');showRetry(payload);}
-  finally{actionPending=false;}
+  finally{actionPending=false;if(latest)renderManagement(latest);}
 }
 function showRetry(payload){
   const panel=$('control-confirm');panel.hidden=false;panel.replaceChildren(node('p',null,'Подтверждение операции не получено. Повторная отправка не создаёт второй запуск.'));
@@ -190,8 +204,38 @@ function chooseAction(action){
 }
 async function downloadArtifact(op){
   try{const response=await fetch('/api/artifact/'+op.id,{headers:{Authorization:'Bearer '+token},cache:'no-store'});if(!response.ok){const error=await response.json();throw new Error(error.error);}
-    const url=URL.createObjectURL(await response.blob());const link=node('a');link.href=url;link.download=op.action==='export'?'sdd-result.patch':'sdd-diagnostics.txt';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
-  }catch(error){toast(error.message);}
+    const url=URL.createObjectURL(await response.blob());const link=node('a');link.href=url;link.download=op.action==='export'?'sdd-result.patch':diagnosticFilename(op);document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);return true;
+  }catch(error){toast(error.message);return false;}
+}
+async function downloadDiagnostic(op){
+  if(diagnosticDownloads.get(op.id)==='loading')return;
+  diagnosticDownloads.set(op.id,'loading');
+  if(latest)renderDiagnostics(latest.management);
+  const success=await downloadArtifact(op);
+  diagnosticDownloads.set(op.id,success?'sent':'failed');
+  if(pendingDiagnostic()?.id===op.id)storage.remove('operator-diagnostic-download');
+  if(latest)renderDiagnostics(latest.management);
+}
+function renderDiagnostics(m){
+  const panel=$('diagnostics-result'), selected=m.runs.find(run=>run.key===m.selected);
+  const reports=m.operations.filter(op=>op.action==='diagnostics'&&op.config===selected?.config);
+  const pending=pendingDiagnostic(), requested=pending?.selected===m.selected?pending:null;
+  const op=requested?reports.find(item=>item.id===requested.id):reports[0];
+  panel.hidden=!op&&!requested;panel.replaceChildren();
+  if(panel.hidden)return;
+  if(!op){panel.append(node('strong',null,'Запрашиваем диагностику…'),node('p','muted','Ожидаем подтверждение сервера. Повторное нажатие не требуется.'));return;}
+  const state=diagnosticDownloads.get(op.id);
+  const title=activeOperation(op)?'Собираем диагностику…':op.status==='succeeded'?'Диагностика готова':'Диагностику собрать не удалось';
+  panel.append(node('strong',null,title),node('p','muted','Создана: '+date(op.created_at)));
+  if(op.error)panel.append(node('p','question-message',op.error));
+  if(activeOperation(op)){panel.append(node('p','muted','После подготовки файл будет передан браузеру для скачивания. Работа запуска продолжается.'));return;}
+  if(op.status==='succeeded'&&op.artifact){
+    panel.append(node('p','path',diagnosticFilename(op)));
+    const button=node('button','button',state==='loading'?'Передаём файл…':state==='failed'?'Повторить скачивание':'Скачать этот отчёт');
+    button.disabled=state==='loading';button.onclick=()=>downloadDiagnostic(op);panel.append(button);
+    panel.append(node('p','muted',state==='sent'?'Файл передан браузеру. Если скачивание заблокировано, нажмите «Скачать этот отчёт».':state==='failed'?'Не удалось передать файл. Отчёт сохранён; попробуйте скачать его ещё раз.':'Это последний отчёт выбранного запуска. Дата отличает его от прежних снимков.'));
+    if(requested?.id===op.id&&!state)downloadDiagnostic(op);
+  }else if(requested?.id===op.id)storage.remove('operator-diagnostic-download');
 }
 function renderManagement(value){
   const m=value.management;if(!m)return;const runtime=m.runtime;
@@ -205,12 +249,15 @@ function renderManagement(value){
   $('action-new').disabled=runtime.active||busy;
   $('action-stop').disabled=!runtime.controllable||runtime.stop_requested;
   $('action-restart').disabled=!runtime.controllable||runtime.stop_requested||m.operations.some(op=>['queued','running','waiting'].includes(op.status)&&op.action==='restart');
-  $('action-diagnostics').disabled=!selected;
+  const collecting=m.operations.some(op=>op.action==='diagnostics'&&activeOperation(op));
+  $('action-diagnostics').disabled=!selected||actionPending||collecting;
+  $('action-diagnostics').textContent=collecting?'Собираем диагностику…':'Снять диагностику';
+  renderDiagnostics(m);
   $('action-export').disabled=!selected||runtime.active||busy||!value.run.ready;
   $('control-note').textContent=runtime.reason||(runtime.stop_requested?'Запрос принят. Ожидаем завершения работы и освобождения блокировки.':'Закрытие вкладки не останавливает работу. Все подтверждения мастера появятся здесь.');
   const brief=$('operation-latest');brief.replaceChildren();const recent=m.operations.find(op=>['queued','running','waiting'].includes(op.status))||m.operations[0];if(recent){brief.append(node('p','muted',(actionNames[recent.action]||recent.action)+' · '+(operationStates[recent.status]||recent.status)));if(recent.notice)brief.append(node('p','muted',recent.notice));if(recent.error)brief.append(node('p','question-message',recent.error));if(recent.artifact&&recent.status==='succeeded'){const button=node('button','button secondary','Скачать результат операции');button.onclick=()=>downloadArtifact(recent);brief.append(button);}}
   const list=$('operation-list');list.replaceChildren();
-  for(const op of m.operations){const row=node('div','operation-row');row.append(node('strong',null,(actionNames[op.action]||op.action)+' · '+(operationStates[op.status]||op.status)));if(op.error)row.append(node('p','question-message',op.error));if(op.notice)row.append(node('p','muted',op.notice));if(op.artifact&&op.status==='succeeded'){const button=node('button','button secondary','Скачать файл');button.onclick=()=>downloadArtifact(op);row.append(button);}list.append(row);}
+  for(const op of m.operations){const row=node('div','operation-row');row.append(node('strong',null,(actionNames[op.action]||op.action)+' · '+(operationStates[op.status]||op.status)),node('p','muted',date(op.created_at)));if(op.error)row.append(node('p','question-message',op.error));if(op.notice)row.append(node('p','muted',op.notice));if(op.artifact&&op.status==='succeeded'){const button=node('button','button secondary',op.action==='diagnostics'?'Скачать отчёт от '+date(op.created_at):'Скачать файл');button.onclick=()=>op.action==='diagnostics'?downloadDiagnostic(op):downloadArtifact(op);row.append(button);}list.append(row);}
   const op=m.operations.find(o=>o.status==='waiting'&&o.question);
   const key=op?op.id+':'+op.question.id:'';
   if(key===wizardKey)return;wizardKey=key;const area=$('wizard');area.replaceChildren();if(!op)return;
