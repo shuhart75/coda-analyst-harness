@@ -404,13 +404,13 @@ def _execution_prompt(task, value):
             + review_resolution.execution_hint(value))
 
 
-def _recover_execution_session(runner, task, value, prompt):
+def _recover_execution_session(runner, task, value, prompt, *, cancelled_receipts=None):
     """Recover only the audited receipt for this exact unfinished invocation.
 
     A unique controller marker is pinned before launch. Neither timestamps nor
     a previous successful execution of the same task identify an invocation.
     """
-    from controller import Blocked, digest, read, git_controls
+    from controller import Blocked, digest, read, git_controls, protected_context
     pending = value.get('pending_session')
     if not pending or pending.get('prompt_sha256') != hashlib.sha256(prompt.encode()).hexdigest():
         return None
@@ -437,14 +437,34 @@ def _recover_execution_session(runner, task, value, prompt):
                 or result.get('events_path') != str(events)
                 or events.is_symlink() or not events.is_file()
                 or digest(events) != receipt.get('events_sha256')
-                or ('git_controls' in receipt and receipt['git_controls'] != git_controls(value['workspace']))
-                or snapshot(value['workspace'], normalize_settings=True) != receipt.get('workspace_snapshot')):
+                or ('git_controls' in receipt and receipt['git_controls'] != git_controls(value['workspace']))):
             raise Blocked('Saved execution session receipt changed; preserve and inspect ' + str(path))
         if (result.get('cleanup') or {}).get('preserved'):
             raise Blocked('Saved execution session has a cleanup denial')
-        # A cancelled invocation retains its working files, but its incomplete
-        # transport result cannot be promoted to a completed execution step.
-        if result.get('cancelled'):
+        current = snapshot(value['workspace'], normalize_settings=True)
+        previous = receipt.get('workspace_snapshot')
+        # Ordinary WIP may evolve after cancellation (including live check logs).
+        # This never licenses replay of old results or changes to protected inputs.
+        cancelled = result.get('cancelled') is True
+        if (not isinstance(previous, dict) or not isinstance(previous.get('files'), dict)
+                or (not cancelled and current != previous)
+                or (cancelled and current != previous and 'git_controls' not in receipt)
+                or (cancelled and (
+                    {k: v for k, v in current.items() if k not in ('files', 'status')} !=
+                    {k: v for k, v in previous.items() if k not in ('files', 'status')}
+                    or protected_context(current) != protected_context(previous)))):
+            raise Blocked('Saved execution session receipt changed; preserve and inspect ' + str(path))
+        if cancelled:
+            work = Path(value['workspace'])
+            if work.is_symlink() or not work.resolve().is_relative_to(runner.root.resolve()):
+                raise Blocked('Cancelled receipt workspace is outside the managed run')
+            runner.audit(work)
+            if cancelled_receipts is not None:
+                changed = sorted(p for p in previous['files'].keys() | current['files'].keys()
+                                 if previous['files'].get(p) != current['files'].get(p))
+                cancelled_receipts.append({'receipt': str(path), 'receipt_sha256': digest(path),
+                    'changed_files': changed[:100], 'changed_count': len(changed),
+                    'disposition': 'new-execution-required'})
             continue
         from transport import revalidate_saved_result
         try:
@@ -478,6 +498,45 @@ def _pending_prompt(task, value, fallback):
     return fallback
 
 
+RECEIPT_CHANGED = 'Saved execution session receipt changed; preserve and inspect '
+
+
+def _cancelled_receipt_failure(fatal):
+    failures = [fatal, *fatal.get('related_failures', [])]
+    return all(isinstance(item, dict) and item.get('type') == 'Blocked'
+               and str(item.get('error', '')).startswith(RECEIPT_CHANGED) for item in failures)
+
+
+def _recover_cancelled_receipt_fatal(runner, task, candidates, folder, scope, fatal):
+    """Archive the old gate only after every referenced cancelled receipt is audited.
+
+    No receipt, pending invocation, check result or accepted state is rewritten.
+    Normal execution creates a new invocation and still performs checks/review.
+    """
+    from controller import Blocked, digest, save
+    path = folder/'fatal.json'
+    if fatal.get('scope') != scope or path.is_symlink():
+        raise Blocked('Preserved safety failure in execution portfolio; inspect ' + str(path))
+    required = {item['error'][len(RECEIPT_CHANGED):] for item in [fatal, *fatal.get('related_failures', [])]}
+    audited = []
+    for candidate_path, value in candidates:
+        if value.get('stage') != 'execute' or not value.get('pending_session'):
+            continue
+        receipts = []
+        result = _recover_execution_session(runner, task, value, _pending_prompt(task, value, ''),
+                                            cancelled_receipts=receipts)
+        if result is None:
+            audited.extend(receipts)
+    if not required.issubset({item['receipt'] for item in audited}):
+        raise Blocked('Saved receipt failure has no matching audited cancelled invocation; inspect ' + str(path))
+    archived = folder/('recovered-cancelled-fatal-' + digest(path) + '.json')
+    save(folder/'cancelled-session-recovery.json', {'source': path.name, 'archived': archived.name,
+         'receipts': audited, 'method': 'cancelled invocation inputs revalidated; preserve WIP, execute anew'})
+    path.replace(archived)
+    runner.progress(task['id'] + ': отменённая попытка проверена; рабочие файлы сохранены, '
+                    'для этой попытки требуется новое исполнение с проверками и ревью')
+
+
 def _recover_permission_fatal(runner, task, candidates, folder, scope):
     """Archive only the old denial gate after exact audited invocation revalidation."""
     from controller import Blocked, read, digest, save
@@ -485,6 +544,8 @@ def _recover_permission_fatal(runner, task, candidates, folder, scope):
     if not path.exists():
         return
     fatal = read(path)
+    if _cancelled_receipt_failure(fatal):
+        return _recover_cancelled_receipt_fatal(runner, task, candidates, folder, scope, fatal)
     import operational_recovery
     if not path.is_symlink() and operational_recovery.eligible(fatal):
         return operational_recovery.recover(runner, task, candidates, folder, scope)
@@ -575,7 +636,7 @@ def execute_task(runner, task, record):
             raise Blocked('Preserved safety failure in execution portfolio; inspect ' + str(fatal_path))
         fatal = read(fatal_path)
         if (fatal.get('scope') != scope
-                or not (operational_recovery.eligible(fatal) or _drift_failure(fatal) or
+                or not (operational_recovery.eligible(fatal) or _drift_failure(fatal) or _cancelled_receipt_failure(fatal) or
                         (fatal.get('type') == 'Blocked' and str(fatal.get('error', '')).startswith(
                             'Permission preflight/runtime denial; inspect ')))
                 or any(not (folder/fingerprint(model)[:16]/'candidate.json').is_file() for model in models)):
