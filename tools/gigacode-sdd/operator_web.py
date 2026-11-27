@@ -28,6 +28,8 @@ class OperatorServer(ThreadingHTTPServer):
         from bootstrap import app_root, known_runs
         from operator_actions import Actions
         self.state_lock = threading.RLock()
+        from operator_project import ProjectLinks
+        self.project_links = ProjectLinks()
         if config is None:
             runs = known_runs(app_root())
             config = runs[0]['config'] if runs else None
@@ -58,6 +60,7 @@ class OperatorServer(ThreadingHTTPServer):
 
     def server_close(self):
         super().server_close()
+        self.project_links.close()
         if hasattr(self, 'log_handler'):
             self.logger.removeHandler(self.log_handler)
             self.log_handler.close()
@@ -66,7 +69,7 @@ class OperatorServer(ThreadingHTTPServer):
     def run_key(self):
         return hashlib.sha256(str(self.config).encode()).hexdigest()
 
-    def runs(self):
+    def runs(self, selected_state=None):
         from bootstrap import app_root
         from controller import read
         paths = set((app_root()/'runs').glob('*/config.json'))
@@ -78,7 +81,7 @@ class OperatorServer(ThreadingHTTPServer):
                 continue
             try:
                 config = read(path)
-                state = read(path.parent/'state.json')
+                state = selected_state if path == self.config and selected_state is not None else read(path.parent/'state.json')
                 key = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
                 result.append({'key': key, 'name': path.parent.name, 'source': config.get('source', ''),
                                'status': state.get('status'), 'config': str(path.resolve())})
@@ -96,13 +99,17 @@ class OperatorServer(ThreadingHTTPServer):
                 if path.is_file() and (path.parent/'state.json').is_file():
                     self.config, self.root = path.resolve(), path.resolve().parent
                     self.adopted.add(op['id'])
+        from controller import read
+        self._snapshot_state = read(self.root/'state.json') if self.config else None
         runtime = operator_control.status(self.root) if self.config else {'active': False, 'controllable': False}
         return {'revision': revision(self.config), 'runtime': runtime, 'operations': operations,
-                'runs': self.runs(), 'selected': self.run_key()}
+                'runs': self.runs(self._snapshot_state), 'selected': self.run_key(),
+                'startup': next((op for op in operations if op['action'] in ('resume', 'restart', 'new')
+                                 and op.get('config') == str(self.config)), None)}
 
     def view(self):
         management = self.management()
-        state = snapshot(self.root) if self.config else {'status': 'idle', 'tasks': [], 'operations': []}
+        state = snapshot(self.root, state=self._snapshot_state) if self.config else {'status': 'idle', 'tasks': [], 'operations': []}
         # One mailbox read supplies both pending questions and history.
         records = questions.questions(self.root) if self.config else []
         from browser_workflow import obligations
@@ -111,6 +118,7 @@ class OperatorServer(ThreadingHTTPServer):
         state['questions'] = [q for q in records if not q.get('answer') and not q.get('resolved') and q['id'] not in delegated_ids]
         view = operator_view.project(state)
         view['browser_checks'] = browser_checks
+        view['project_links'] = self.project_links.view(self.run_key(), records)
         view['questions'] = []
         view['answers'] = []
         for question in records:

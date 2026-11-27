@@ -57,6 +57,25 @@ class OperatorWebTests(unittest.TestCase):
         q = oq.questions(self.root)[0]
         return {'id': key, 'revision': oq.question_revision(q), 'text': 'Отложить', 'explanation': ''}
 
+    def test_startup_failure_is_preserved_after_diagnostics_and_scoped_to_run(self):
+        failed = {'id': 'resume', 'action': 'resume', 'status': 'failed',
+                  'config': str(self.server.config), 'error': 'Existing process requires handoff'}
+        unrelated = {**failed, 'id': 'other', 'config': '/other/config.json'}
+        diagnostic = {**failed, 'id': 'diag', 'action': 'diagnostics', 'status': 'succeeded'}
+        with patch.object(self.server.actions, 'operations', return_value=[diagnostic, unrelated, failed]):
+            self.assertEqual(self.server.view()['management']['startup'], failed)
+        newer = {**failed, 'id': 'new', 'status': 'running'}
+        with patch.object(self.server.actions, 'operations', return_value=[newer, failed]):
+            self.assertEqual(self.server.view()['management']['startup'], newer)
+
+    def test_status_loads_selected_state_only_once(self):
+        import controller
+        original = controller.read
+        with patch('controller.read', wraps=original) as read:
+            self.server.view()
+        reads = [call for call in read.call_args_list if Path(call.args[0]).resolve() == (self.root/'state.json').resolve()]
+        self.assertEqual(len(reads), 1)
+
     def test_delegated_browser_check_is_work_not_a_human_question(self):
         from unittest.mock import Mock
         import browser_workflow

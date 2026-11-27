@@ -100,6 +100,22 @@ class Export:
             return None
         return text
 
+    def tail(self, path, limit=32768):
+        """Read a bounded tail even when a long-lived journal exceeds read limits."""
+        if not self.safe(path):
+            return None
+        try:
+            with path.open('rb') as stream:
+                size = os.fstat(stream.fileno()).st_size
+                stream.seek(max(0, size-limit))
+                data = stream.read(limit)
+            text = data.decode('utf-8', 'replace')
+            return {'projection': True, 'source_bytes': size, 'tail_bytes': len(data),
+                    'truncated': size > len(data), 'tail': text}
+        except OSError as exc:
+            self.skip(str(path), 'tail read failed: ' + type(exc).__name__)
+            return None
+
     def add(self, name, text):
         data = text.encode('utf-8')
         identity = sha(data)
@@ -386,6 +402,49 @@ def current_candidates(out, tasks):
     return list(dict.fromkeys(sessions))
 
 
+def startup_records(out, config, home):
+    # Startup can fail before a new controller instance or model session exists.
+    for name in ('controller-runtime.json',):
+        if (out.root/name).is_file():
+            out.json_file(out.root/name)
+    for path in newest(list((out.root/'controller-instances').glob('*.json')))[:4]:
+        out.json_file(path)
+    for path in newest(list((out.root/'logs').glob('*-existing-processes-*.json')))[:8]:
+        out.json_file(path)
+    for name in ('controller.log', 'operator-web.log'):
+        value = out.tail(out.root/'logs'/name)
+        if value is not None:
+            out.add('compact/logs/' + name + '.tail.json', encoded(value))
+    # Web command receipts live beside runs, not inside them. Only fixed control
+    # directories and receipts bound to this config may enter the bundle.
+    base = home/'operator-control'
+    if base.is_symlink() or not base.is_dir():
+        return
+    controls = Export(base, None)
+    selected = 0
+    for folder in newest([p for p in base.iterdir() if re.fullmatch(r'[a-f0-9]{32}', p.name)
+                          and p.is_dir() and not p.is_symlink()]):
+        try:
+            request = json.loads(controls.read(folder/'request.json') or '{}')
+            state = json.loads(controls.read(folder/'state.json') or '{}')
+            if not isinstance(request, dict) or not isinstance(state, dict):
+                continue
+            if state.get('config', request.get('config')) != str(config):
+                continue
+        except (ValueError, OSError):
+            continue
+        if selected >= 8:
+            break
+        selected += 1
+        prefix = 'compact/operator-control/' + folder.name + '/'
+        out.add(prefix + 'receipt.json', encoded({'projection': True,
+            'request': {key: request.get(key) for key in ('action', 'created_at', 'config')},
+            'state': out.thin(state)}))
+        value = controls.tail(folder/'worker.log')
+        if value is not None:
+            out.add(prefix + 'worker.log.tail.json', encoded(value))
+
+
 def collect_compact(config, destination=None, error=None):
     config = Path(config).absolute()
     root = config.parent
@@ -400,6 +459,7 @@ def collect_compact(config, destination=None, error=None):
     state = state if isinstance(state, dict) else {}
     out.failure_sessions(state)
     out.failure_sessions({'error': str(error)})
+    startup_records(out, config, home)
     for name in ('browser-automation.json', 'progress.json', 'console-status.json', 'service-stop.json', 'dynamic-scopes.json', 'observer/latest.json', 'observer/health.json', 'observer/findings.json'):
         if (root/name).is_file():
             out.json_file(root/name)

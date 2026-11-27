@@ -15,11 +15,12 @@ class PermissionsTests(unittest.TestCase):
                 folder = root / role
                 (folder / '.gigacode').mkdir(parents=True)
                 path = folder / '.gigacode/settings.json'
-                deny = ['mcp__playwright__browser_navigate']
+                deny = ['mcp__playwright__browser_navigate', 'mcp__playwright__browser_find']
                 path.write_text(json.dumps({'permissions': {'deny': deny}}))
                 policy.prepare_permissions(folder, role)
                 permissions = json.loads(path.read_text())['permissions']
                 self.assertEqual(permissions['deny'], deny)
+                self.assertEqual('mcp__playwright__browser_find' in permissions['allow'], role == 'execute')
                 self.assertEqual(set(policy.BROWSER_INTERACTION_ALLOW) <= set(permissions['allow']), role == 'execute')
                 self.assertEqual(set(policy.BROWSER_OBSERVATION_ALLOW) <= set(permissions['allow']), role == 'execute')
                 for name in ('tool_call', 'mcp__playwright__*', 'mcp__playwright__browser_evaluate',

@@ -4,7 +4,7 @@ import math
 import time
 
 
-def timestamp(stamp, *, now=None):
+def timestamp(stamp, *, now=None, scheduled=False):
     if not isinstance(stamp, (int, float)) or isinstance(stamp, bool) or not math.isfinite(stamp):
         return 'время неизвестно'
     now = time.time() if now is None else now
@@ -12,6 +12,8 @@ def timestamp(stamp, *, now=None):
         text = datetime.fromtimestamp(stamp).astimezone().strftime('%d.%m.%Y %H:%M:%S %z')
     except (ValueError, OverflowError, OSError):
         return 'время неизвестно'
+    if scheduled:
+        return text
     seconds = now-stamp
     if seconds < -60:
         return text + ' (в будущем относительно часов сервера; проверьте часы)'

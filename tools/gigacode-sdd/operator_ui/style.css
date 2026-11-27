@@ -4,3 +4,5 @@
 
 /* Tasks belong to execution; final acceptance remains a separate lifecycle stage. */
 .stage-body{min-width:0}.stage-tasks{margin-top:12px}.stage-tasks>summary{cursor:pointer;font-size:12px;color:var(--text);padding:7px 0}.task-route{margin:12px 0 0 4px;padding-left:12px;border-left:2px solid var(--line)}.task-route .route-title{font-size:12px}.task-route .route-item{padding-bottom:16px}.stage-operation{font-size:12px;line-height:1.6;overflow-wrap:anywhere;color:var(--accent);margin:8px 0}.route-item.done .task-route .route-symbol{box-shadow:none}.route-panel>details{margin-top:20px;font-size:12px}.stage-tasks>summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:3px}
+
+.project-links{margin-bottom:20px;padding:16px 20px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.project-link{display:flex;align-items:center;gap:18px;flex-wrap:wrap}.project-link+.project-link{margin-top:12px}.project-link .muted{font-size:12px;overflow-wrap:anywhere}.project-links p{margin:0;font-size:13px}

@@ -26,6 +26,16 @@ async function api(path, body, runKey) {
   return value;
 }
 function renderSummary(value) {
+  const links=$('project-links'), focusedUrl=links.contains(document.activeElement)?document.activeElement.href:null;links.replaceChildren();
+  for(const item of value.project_links||[]){
+    const row=node('div','project-link');
+    if(item.available){const a=node('a','button','Открыть проект ↗');a.href=item.url;a.target='_blank';a.rel='noopener noreferrer';row.append(a);}
+    else row.append(node('strong',null,item.checking?'Проверяем сервер проекта…':'Сервер проекта недоступен'));
+    row.append(node('span','muted',item.url+(item.checked_at?' · Проверено '+date(item.checked_at):'')));links.append(row);
+  }
+  if(focusedUrl){const link=[...links.querySelectorAll('a')].find(a=>a.href===focusedUrl);link?.focus({preventScroll:true});}
+  if(!links.childNodes.length)links.append(node('p','muted','Ссылка на проект появится, когда исполнитель укажет адрес стенда для браузерной проверки.'));
+
   const run=value.run, count=value.questions.length;
   $('run-name').textContent=run.name;
   $('accepted').textContent=run.accepted_tasks+' / '+run.total_tasks;
@@ -303,6 +313,13 @@ function renderDiagnostics(m){
 }
 function renderManagement(value){
   const m=value.management;if(!m)return;const runtime=m.runtime;
+  const startup=$('startup-result'), attempt=m.startup;
+  startup.replaceChildren();startup.hidden=!attempt||runtime.active||!['queued','running','waiting','failed'].includes(attempt.status);
+  if(!startup.hidden){
+    startup.append(node('strong',null,attempt.status==='failed'?'Не удалось запустить работу':attempt.status==='waiting'?'Запуск ожидает вашего ответа':'Запуск выполняется…'));
+    startup.append(node('p',null,attempt.error||attempt.notice||'Подтверждение принято. Ожидаем результат запуска контроллера.'));
+    startup.append(node('p','muted','Попытка от '+date(attempt.created_at)));
+  }
   const picker=$('run-picker');const signature=JSON.stringify(m.runs.map(r=>[r.key,r.name,r.status]));
   if(picker.dataset.signature!==signature){picker.replaceChildren();if(!m.runs.length){const option=node('option',null,'Сохранённых запусков нет');option.value='';picker.append(option);}for(const run of m.runs){const option=node('option',null,run.name+' · '+label(run.status));option.value=run.key;picker.append(option);}picker.dataset.signature=signature;}
   picker.value=m.runs.length?m.selected:'';
@@ -320,6 +337,7 @@ function renderManagement(value){
   $('action-export').disabled=!selected||runtime.active||busy||!value.run.ready;
   $('control-note').textContent=runtime.reason||(runtime.stop_requested?'Запрос принят. Ожидаем завершения работы и освобождения блокировки.':'Закрытие вкладки не останавливает работу. Все подтверждения мастера появятся здесь.');
   const brief=$('operation-latest');brief.replaceChildren();const recent=m.operations.find(op=>['queued','running','waiting'].includes(op.status))||m.operations[0];if(recent){brief.append(node('p','muted',(actionNames[recent.action]||recent.action)+' · '+(operationStates[recent.status]||recent.status)));if(recent.notice)brief.append(node('p','muted',recent.notice));if(recent.error)brief.append(node('p','question-message',recent.error));if(recent.artifact&&recent.status==='succeeded'){const button=node('button','button secondary','Скачать результат операции');button.onclick=()=>downloadArtifact(recent);brief.append(button);}}
+  brief.hidden=!startup.hidden&&recent?.id===attempt?.id;
   const list=$('operation-list');list.replaceChildren();
   for(const op of m.operations){const row=node('div','operation-row');row.append(node('strong',null,(actionNames[op.action]||op.action)+' · '+(operationStates[op.status]||op.status)),node('p','muted',date(op.created_at)));if(op.error)row.append(node('p','question-message',op.error));if(op.notice)row.append(node('p','muted',op.notice));if(op.artifact&&op.status==='succeeded'){const button=node('button','button secondary',op.action==='diagnostics'?'Скачать отчёт от '+date(op.created_at):'Скачать файл');button.onclick=()=>op.action==='diagnostics'?downloadDiagnostic(op):downloadArtifact(op);row.append(button);}list.append(row);}
   const op=m.operations.find(o=>o.status==='waiting'&&o.question);
