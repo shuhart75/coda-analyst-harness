@@ -73,7 +73,7 @@ class OperatorWebTests(unittest.TestCase):
         original = controller.read
         with patch('controller.read', wraps=original) as read:
             self.server.view()
-        reads = [call for call in read.call_args_list if call.args[0] == self.root/'state.json']
+        reads = [call for call in read.call_args_list if Path(call.args[0]).resolve() == (self.root/'state.json').resolve()]
         self.assertEqual(len(reads), 1)
 
     def test_delegated_browser_check_is_work_not_a_human_question(self):

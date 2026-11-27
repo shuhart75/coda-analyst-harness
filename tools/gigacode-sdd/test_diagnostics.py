@@ -49,7 +49,7 @@ class BundleTests(unittest.TestCase):
             tail = json.loads(sections['compact/logs/controller.log.tail.json'])
             self.assertTrue(tail['truncated'])
             self.assertLessEqual(tail['tail_bytes'], 32768)
-            self.assertTrue(tail['tail'].endswith('current failure\n'))
+            self.assertEqual(tail['tail'].splitlines()[-1], 'current failure')
             receipts = [key for key in sections if key.startswith('compact/operator-control/')]
             self.assertEqual(len(receipts), 2)
             self.assertTrue(all('%032x' % 1 in key for key in receipts))
