@@ -23,7 +23,7 @@ READ_ALLOW = (
 # Explicit browser observation and interaction; no wildcard dispatcher, scripting or uploads.
 # Existing ask/deny rules remain authoritative. Auditors and reviewers do not receive these grants.
 BROWSER_OBSERVATION_ALLOW = tuple("mcp__playwright__browser_" + name for name in
-                                  ("navigate", "snapshot", "take_screenshot", "close"))
+                                  ("navigate", "snapshot", "find", "take_screenshot", "close"))
 BROWSER_INTERACTION_ALLOW = tuple("mcp__playwright__browser_" + name for name in
     ("resize", "click", "type", "fill_form", "press_key", "select_option", "hover",
      "tabs", "wait_for", "console_messages", "network_requests"))
