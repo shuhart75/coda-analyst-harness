@@ -119,7 +119,8 @@ class CancelledReceiptTests(unittest.TestCase):
 
     def test_cancelled_head_change_remains_blocked(self):
         self.prepare_receipt()
-        git(self.work, 'commit', '--allow-empty', '-m', 'Unrecorded commit after cancellation')
+        git(self.work, '-c', 'user.name=SDD Test', '-c', 'user.email=sdd-test@example.invalid',
+            'commit', '--allow-empty', '-m', 'Unrecorded commit after cancellation')
         with self.assertRaises(Blocked):
             self.run_task(session=self.forbidden_execution)
 
