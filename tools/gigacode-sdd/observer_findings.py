@@ -6,6 +6,7 @@ The observer is the sole ledger writer; executor delivery receipts are separate.
 """
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import time
@@ -15,15 +16,22 @@ from progress_io import read_projection, write_projection
 LIMIT = 24
 
 
+def valid_evidence(value):
+    return isinstance(value, list) and 1 <= len(value) <= 4 and all(
+        isinstance(fact, dict) and isinstance(fact.get('ref'), str) and
+        isinstance(fact.get('excerpt'), str) and len(fact['ref']) <= 300
+        and len(fact['excerpt']) <= 600 for fact in value)
+
+
 def read(root):
     path = Path(root)/'observer/findings.json'
-    if not path.exists():
-        return {}
     try:
+        if not path.exists():
+            return {}
         if path.is_symlink() or path.stat().st_size > 1024*1024:
             raise ValueError('Invalid ledger file')
         value = read_projection(path, [])
-        if value.get('schema') != 1 or not isinstance(value.get('items'), list):
+        if value.get('schema') != 1 or not isinstance(value.get('items'), list) or len(value['items']) > LIMIT+8:
             raise ValueError('Invalid ledger schema')
         for item in value['items']:
             if (not isinstance(item, dict) or item.get('state') not in ('open', 'resolved')
@@ -31,8 +39,15 @@ def read(root):
                     or not re.fullmatch(r'[a-f0-9]{24}', str(item.get('id', '')))
                     or not re.fullmatch(r'[a-f0-9]{16}', str(item.get('revision', '')))
                     or any(not isinstance(item.get(k), str) for k in
-                           ('task_id', 'problem', 'recommendation', 'expected_result'))
-                    or not isinstance(item.get('last_seen'), (int, float))):
+                           ('task_id', 'key', 'problem', 'recommendation', 'expected_result', 'report'))
+                    or any(len(item[k]) > 400 for k in ('problem', 'recommendation', 'expected_result'))
+                    or item.get('confidence') not in ('low', 'medium', 'high')
+                    or any(not isinstance(item.get(k), (int, float)) or isinstance(item[k], bool)
+                           or not math.isfinite(item[k]) for k in ('last_seen', 'first_seen', 'observations'))
+                    or not valid_evidence(item.get('evidence'))
+                    or not isinstance(item.get('history'), list)
+                    or any(not isinstance(h, dict) or not isinstance(h.get('problem'), str)
+                           or not valid_evidence(h.get('evidence')) for h in item['history'])):
                 raise ValueError('Invalid ledger item')
         return value
     except (OSError, ValueError):

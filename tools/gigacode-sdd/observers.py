@@ -463,17 +463,23 @@ class Manager:
                     'results': dict(results), 'partial': bool(pending) or failed,
                     'in_progress': bool(pending), 'advisory_only': True,
                     'snapshot': str(snapshot)})
-        finding_context = observer_findings.update(self.runner.root, results, value, str(report))
+        memory_error = None
+        try:
+            finding_context = observer_findings.update(self.runner.root, results, value, str(report))
+        except OSError as exc:
+            # Storage failure is not a model outage; keep both completed assessments.
+            memory_error = str(exc)
+            finding_context = observer_findings.context(self.runner.root)
         status, summary = combined(results)
         errors = {role: result for role, result in results.items() if result['status'] == 'unavailable'}
-        self.retry_pending = bool(errors)
+        self.retry_pending = bool(errors) or bool(memory_error)
         for role in ROLES:
-            self.health_update(role, next_attempt_at=time.time()+180 if errors else None)
+            self.health_update(role, next_attempt_at=time.time()+180 if self.retry_pending else None)
         projection = {'snapshot_at': value['snapshot_at'], 'completed_at': time.time(),
                       'status': status, 'summary': summary, 'results': results,
                       'partial': len(errors) == 1, 'audit_errors': errors, 'retry_pending': self.retry_pending,
                       'report': str(report), 'snapshot': str(snapshot), 'advisory_only': True,
-                      'findings': finding_context['items']}
+                      'findings': finding_context['items'], 'memory_error': memory_error}
         if not write_projection(report, projection):
             raise OSError('Cannot persist observation report')
         write_projection(self.root/'latest.json', projection)

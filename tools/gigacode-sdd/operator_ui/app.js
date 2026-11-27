@@ -148,7 +148,7 @@ function renderObservers(value){
   list.replaceChildren();
   for(const line of value.observers.lines||[])list.append(node('p','observer-line',line));
   for(const [role,result] of Object.entries(value.observers.results||{})){
-    if(!(result.evidence||[]).length)continue;
+    if(!result || !Array.isArray(result.evidence) || !result.evidence.length)continue;
     const details=node('details','answer-item');details.dataset.finding='evidence-'+role;details.open=opened.has(details.dataset.finding);
     details.append(node('summary',null,'Основания: '+(role==='progress'?'прогресс':'соответствие задаче')));
     for(const fact of result.evidence)details.append(node('p','context',fact.ref+' · '+fact.excerpt));

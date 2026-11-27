@@ -280,6 +280,7 @@ def observation_lines(value):
         # Never expose a cut-off instruction or half a model conclusion.
         return text if len(text) <= 400 else 'Подробности в отчёте.'
     results = observation.get('results') or {}
+    results = {k: v for k, v in results.items() if isinstance(v, dict)} if isinstance(results, dict) else {}
     if results and isinstance(results, dict):
         for role, title in (('progress', 'Прогресс'), ('scope', 'Соответствие задаче')):
             result = results.get(role) or {}
@@ -296,8 +297,9 @@ def observation_lines(value):
         summary = summary or sentence(observation.get('summary'))
         if summary:
             lines.append('Основание: ' + summary)
-    for finding in (observation.get('findings') or [])[:6]:
-        if finding.get('state') != 'open':
+    findings = observation.get('findings') or []
+    for finding in (findings if isinstance(findings, list) else [])[:6]:
+        if not isinstance(finding, dict) or finding.get('state') != 'open':
             continue
         recommendation = sentence(finding.get('recommendation'))
         if recommendation:
@@ -311,6 +313,8 @@ def observation_lines(value):
             if finding.get('delivery') else 'сохранено; перед передачей нужно свежее наблюдение.'
             if time.time()-finding.get('last_seen', 0) > 900 else 'сохранено для следующего шага исполнителя.'
             if finding.get('confidence') in ('medium', 'high') else 'недостаточная уверенность; требуется новое наблюдение.'))
+    if observation.get('memory_error'):
+        lines.append('Память замечаний недоступна; текущие оценки сохранены, рекомендации не потеряны в отчёте.')
     errors = observation.get('audit_errors') or {}
     if errors:
         failed = ', '.join(model_label(r.get('model')) + ': ' + (sentence(r.get('summary')) or 'ошибка аудита')

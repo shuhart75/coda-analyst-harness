@@ -104,6 +104,20 @@ class FindingTests(unittest.TestCase):
             self.save()
         self.assertEqual(path.read_text(), '{broken')
 
+    def test_partial_or_wrongly_typed_ledger_never_blocks_executor(self):
+        self.save()
+        path = self.root/'observer/findings.json'
+        original = json.loads(path.read_text())
+        for field in ('evidence', 'report', 'confidence', 'last_seen', 'history', 'observations'):
+            with self.subTest(field=field):
+                for malformed in (None, [None], {}):
+                    value = copy.deepcopy(original)
+                    value['items'][0][field] = malformed
+                    path.write_text(json.dumps(value))
+                    self.assertEqual(findings.guidance(self.root, 'test'), ('', []))
+        path.write_text(json.dumps(original))
+        self.assertEqual(len(findings.guidance(self.root, 'test')[1]), 1)
+
     def test_dimensions_are_not_votes(self):
         status, summary = observers.combined({'progress': {'status': 'progress'}, 'scope': {'status': 'concern'}})
         self.assertEqual(status, 'concern')
