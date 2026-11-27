@@ -195,6 +195,14 @@ class ConsoleProgress(Progress):
 
     def close(self, status=None, failed=False):
         with self.lock:
+            # A startup guard may fail before the first progress publication.
+            # Preserve saved progress rather than displaying an empty new run.
+            if self.value is None and (self.log_path.parent.parent/'state.json').is_file():
+                try:
+                    from run_status import snapshot
+                    self.value = snapshot(self.log_path.parent.parent)
+                except (OSError, ValueError, KeyError, TypeError):
+                    self.runtime_error = True
             self.value = dict(self.value or {}, status=status or (self.value or {}).get('status'))
             if failed:
                 self.value.update(ready=False, console_error=True)

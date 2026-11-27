@@ -28,6 +28,33 @@ def read_sections(path):
 
 
 class BundleTests(unittest.TestCase):
+    def test_startup_receipts_handoff_and_bounded_journal_tails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            root = home/'runs/run'; root.mkdir(parents=True)
+            config = root/'config.json'; config.write_text('{}')
+            (root/'state.json').write_text('{}')
+            (root/'logs').mkdir()
+            handoff = {'workspace': str(root/'work/main'), 'agents': [{'pid': 123}], 'services': []}
+            (root/'logs/resume-existing-processes-abc.json').write_text(json.dumps(handoff))
+            (root/'logs/controller.log').write_text('old log\n'*2000000 + 'current failure\n')
+            (root/'controller-runtime.json').write_text('{"instance":"abc"}')
+            for number, owner in ((1, str(config)), (2, '/another/run/config.json')):
+                folder = home/'operator-control'/('%032x' % number); folder.mkdir(parents=True)
+                (folder/'request.json').write_text(json.dumps({'config': owner, 'action': 'resume', 'created_at': number}))
+                (folder/'state.json').write_text(json.dumps({'status': 'failed', 'error': 'handoff needed'}))
+                (folder/'worker.log').write_text('operation failure')
+            sections = read_sections(diagnostics.collect(config))
+            self.assertEqual(json.loads(sections['compact/logs/resume-existing-processes-abc.json']), handoff)
+            tail = json.loads(sections['compact/logs/controller.log.tail.json'])
+            self.assertTrue(tail['truncated'])
+            self.assertLessEqual(tail['tail_bytes'], 32768)
+            self.assertTrue(tail['tail'].endswith('current failure\n'))
+            receipts = [key for key in sections if key.startswith('compact/operator-control/')]
+            self.assertEqual(len(receipts), 2)
+            self.assertTrue(all('%032x' % 1 in key for key in receipts))
+            self.assertIn('compact/controller-runtime.json', sections)
+
     def test_browser_assignment_policy_is_in_compact_report(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

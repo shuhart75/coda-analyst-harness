@@ -237,6 +237,15 @@ class ConsoleTests(unittest.TestCase):
         self.assertIn('Запуск остановлен с ошибкой', self.stream.getvalue())
         self.assertNotIn('Запросов на вмешательство нет', self.stream.getvalue())
 
+    def test_startup_failure_preserves_saved_progress_before_first_publication(self):
+        save(self.root/'state.json', {'status': 'blocked', 'tasks': {'task': {'status': 'done'}}})
+        save(self.root/'plan.json', {'tasks': [{'id': 'task', 'title': 'Accepted task', 'depends_on': []}]})
+        self.display.close(status='blocked', failed=True)
+        self.assertIn('Принято: 1 из 1 задач.', self.stream.getvalue())
+        self.assertNotIn('План задач ещё не закреплён.', self.stream.getvalue())
+        self.assertFalse(self.display.value['ready'])
+        self.assertTrue(self.display.value['console_error'])
+
     def test_failed_close_does_not_claim_success(self):
         self.display.summary(dict(self.value, ready=True, done=9))
         self.display.close(status='blocked', failed=True)

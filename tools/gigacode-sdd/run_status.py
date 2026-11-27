@@ -339,7 +339,7 @@ def observation_lines(value):
         if item.get('failure'):
             line += '; ' + (sentence(item['failure']) or 'ошибка аудита')
         if item.get('next_attempt_at') and not stopped:
-            line += '; повтор не раньше ' + clock(item['next_attempt_at'])
+            line += '; повтор не раньше ' + timestamp(item['next_attempt_at'], scheduled=True)
         lines.append(line + '.')
     return lines
 

@@ -11,6 +11,7 @@
   </aside>
   <main id="overview">
     <header class="topbar"><div><span class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h1>Ход работы</h1></div><div class="top-actions"><span id="updated" class="muted">Состояние ещё не получено</span><button id="refresh" class="button secondary" type="button">Обновить</button></div></header>
+    <section id="project-links" class="project-links" aria-label="Живой проект" aria-live="polite"></section>
     <section class="panel control-panel" aria-labelledby="control-title">
       <div class="section-heading"><h2 id="control-title">Управление работой</h2><span id="controller-state" class="tag">ПРОВЕРКА</span></div>
       <label class="field-label" for="run-picker">Сохранённый запуск</label><select id="run-picker" aria-label="Сохранённый запуск"></select>
@@ -23,6 +24,7 @@
         <button id="action-export" class="button secondary" type="button">Экспорт результата</button>
       </div>
       <p id="control-note" class="muted"></p><section id="diagnostics-result" class="question-card" aria-live="polite" aria-atomic="true" hidden></section><div id="operation-latest" role="status"></div>
+      <div id="startup-result" class="banner" role="status" hidden></div>
       <div id="control-confirm" class="question-card" hidden></div>
       <div id="wizard" aria-live="polite"></div>
       <details class="operation-history"><summary>Операции управления</summary><div id="operation-list"></div></details>

@@ -61,6 +61,8 @@ class StageTests(unittest.TestCase):
             self.assertIn('24 ч', timestamp(yesterday))
             self.assertIn(time.strftime('%d.%m.%Y', time.localtime(yesterday)), timestamp(yesterday))
             self.assertIn('в будущем', timestamp(now+600))
+            self.assertNotIn('проверьте часы', timestamp(now+600, scheduled=True))
+            self.assertNotIn('назад', timestamp(now+600, scheduled=True))
             lines = observation_lines({'status': 'running', 'observation': {'snapshot_at': now, 'status': 'unknown'},
                 'observer_health': {'scope': {'model': 'GLM', 'phase': 'waiting',
                     'last_success_at': yesterday, 'controller_started_at': now-100}}})
