@@ -62,10 +62,32 @@ def activate(runner):
             delegate(runner.root, question)
 
 
+def verification_context(root, question):
+    """Use explicit task/topic lineage, never classify business prose by keywords."""
+    if question.get('manual_check'):
+        return {'check': question['manual_check'], 'source_question': question['id']}
+    import operator_questions as questions
+    related = [q for q in questions.questions(root) if q.get('manual_check')
+               and all(q.get(k) == question.get(k) for k in ('binding', 'task', 'topic'))
+               and q.get('created_at', 0) <= question.get('created_at', 0)]
+    if not related:
+        return None
+    source = max(related, key=lambda q: (q.get('created_at', 0), q['id']))
+    return {'check': source['manual_check'], 'source_question': source['id'],
+            'followup': (question.get('requests') or [{}])[-1].get('question', question['question']),
+            'requests': question.get('requests', []),
+            'rule': 'Earlier checklist is context, not a current verdict. Read the follow-up and current '
+                    'scenario before testing; verify current build/preconditions. Preserve previous '
+                    'human observations. Do not claim the old expectations or answers prove this check.'}
+
+
 def delegate(root, question):
     from controller import save
     import operator_questions as questions
-    if not enabled(root) or not question.get('manual_check') or question.get('answer') or question.get('resolved'):
+    if not enabled(root) or question.get('answer') or question.get('resolved') or question.get('action'):
+        return False
+    context = verification_context(root, question)
+    if context is None:
         return False
     with questions.locked(root) as folder:
         if any((folder/(question['id']+suffix)).exists() for suffix in ('-answer.json', '-resolved.json')):
@@ -73,8 +95,13 @@ def delegate(root, question):
         path = folder/(question['id']+'-automation.json')
         if not path.exists():
             save(path, {'status': 'assigned', 'assigned_at': time.time(),
-                        'binding': question['binding'], 'rule': 'Assigned to executor, not accepted or answered'})
-        return json.loads(path.read_text()).get('status') == 'assigned'
+                        'binding': question['binding'], 'verification': context,
+                        'rule': 'Assigned to executor, not accepted or answered'})
+        record = json.loads(path.read_text())
+        if record.get('status') == 'assigned' and record.get('verification') != context:
+            record.update(verification=context, updated_at=time.time())
+            save(path, record)
+        return record.get('status') == 'assigned'
 
 
 def assigned(root, key):
@@ -90,7 +117,10 @@ def obligations(root, task=None):
     import operator_questions as questions
     if not enabled(root):
         return []
-    return [{'id': q['id'], 'task': q['task'], 'check': q['manual_check']}
+    return [{'id': q['id'], 'task': q['task'],
+             'check': q.get('manual_check') or q['automation']['verification']['check'],
+             **({'clarification': q['automation']['verification']}
+                if q.get('automation', {}).get('verification', {}).get('followup') else {})}
             for q in questions.questions(root) if q.get('automation', {}).get('status') == 'assigned'
             and not q.get('answer') and not q.get('resolved')
             and (task in (None, 'integration') or q['task'] == task)]
@@ -216,7 +246,10 @@ def missing_evidence(root, task, work, value):
     if not checks:
         return []
     captured = {item['url'] for item in captures(work, value)}
-    return [item for item in checks if item['check']['url'] not in captured]
+    # A follow-up may change route or preconditions. Its historical checklist is
+    # context; independent review must check the current scenario and build.
+    return [item for item in checks if not captured
+            or (not item.get('clarification') and item['check']['url'] not in captured)]
 
 
 def complete(root, record):

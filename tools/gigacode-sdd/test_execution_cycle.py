@@ -21,11 +21,14 @@ class ExecutionPortfolioTests(unittest.TestCase):
         self.primary_only = True
         browser.activate(self.runner)
         check = {**CHECK, 'requirements': ['REQ-BE']}
+        if getattr(self, 'legacy_browser_followup', False):
+            original = oq.request(self.runner.root, self.task['id'], 'page', 'Original checklist?', manual_check=check)
+            oq.answer(self.runner.root, original, 'Mismatch', 'Actual badge differs')
         def session(root, *args, **kwargs):
             result = self.session(root, *args, **kwargs)
             if len(self.calls) == 1:
                 result['text'] = json.dumps({'operator_question': {'topic': 'page', 'question': 'Check page?',
-                    'manual_check': check}})
+                    **({} if getattr(self, 'legacy_browser_followup', False) else {'manual_check': check})}})
                 return result
             image = Path(root)/'backend/screen.png'
             image.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
@@ -45,10 +48,14 @@ class ExecutionPortfolioTests(unittest.TestCase):
         with patch('bootstrap.app_root', return_value=self.runner.root/'app'):
             accepted = self.run_task(session=session, review=review)
         self.assertEqual(accepted['status'], 'accepted')
-        key = oq.questions(self.runner.root)[0]['id']
+        key = next(q['id'] for q in oq.questions(self.runner.root) if not q['answer'])
         self.assertIsNone(oq.response(self.runner.root, key))
         self.assertEqual(oq.questions(self.runner.root, pending_only=True), [])
         self.assertEqual((len(self.calls), self.review_count), (2, 1))
+
+    def test_unstructured_verification_followup_is_executed_without_operator_answer(self):
+        self.legacy_browser_followup = True
+        self.test_delegated_check_runs_browser_and_reaches_independent_review_without_answer()
 
     def test_deferred_decision_parks_without_code_retry_or_duplicate_question(self):
         import operator_questions as oq

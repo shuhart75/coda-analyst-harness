@@ -28,6 +28,15 @@ def read_sections(path):
 
 
 class BundleTests(unittest.TestCase):
+    def test_browser_assignment_policy_is_in_compact_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'config.json').write_text('{}')
+            policy = {'protocol': 1, 'enabled': True}
+            (root/'browser-automation.json').write_text(json.dumps(policy))
+            sections = read_sections(diagnostics.collect(root/'config.json'))
+            self.assertEqual(json.loads(sections['compact/browser-automation.json']), policy)
+
     def test_activity_counts_and_task_errors_survive_projection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

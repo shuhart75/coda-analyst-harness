@@ -157,3 +157,59 @@ class BrowserWorkflowTests(unittest.TestCase):
                     raise ValueError('session failed')
             with browser.session_lease(self.runner, task, stop):
                 pass
+
+    def test_legacy_followup_keeps_corrected_scenario_and_old_human_observation(self):
+        original = self.question()
+        questions.answer(self.root, original, 'Mismatch', 'Badge shows completed')
+        followup = questions.request(self.root, 'ui', 'browser', 'Read actual badge first; skip inapplicable steps',
+                                     generation='followup', details={'scenario': 'current-check.md section 5'})
+        unrelated = questions.request(self.root, 'ui', 'business-source', 'Which source?')
+        before = (self.root/'operator-questions'/(followup+'.json')).read_bytes()
+        browser.activate(self.runner)
+        work = browser.obligations(self.root)
+        self.assertEqual([q['id'] for q in work], [followup])
+        self.assertEqual(work[0]['clarification']['source_question'], original)
+        self.assertIn('actual badge', work[0]['clarification']['followup'])
+        self.assertEqual((self.root/'operator-questions'/(followup+'.json')).read_bytes(), before)
+        self.assertEqual(questions.response(self.root, original)['text'], 'Mismatch')
+        self.assertIsNone(questions.response(self.root, followup))
+        self.assertEqual([q['id'] for q in questions.questions(self.root, pending_only=True)], [unrelated])
+        fingerprint = questions.manual_state(self.root, 'ui')
+        failure = {'events_path': 'log', 'resolved_tool_calls': {'a': 'mcp__playwright__browser_navigate'},
+                   'tool_results': [{'tool_use_id': 'a', 'is_error': True}]}
+        self.assertTrue(browser.release(self.root, followup, failure))
+        self.assertNotEqual(questions.manual_state(self.root, 'ui'), fingerprint)
+        questions.resolve_task(self.root, 'ui')
+        self.assertFalse((self.root/'operator-questions'/(followup+'-resolved.json')).exists())
+        with self.assertRaises(questions.WaitingForOperator):
+            questions.require_manual_answers(self.root)
+
+    def test_same_topic_in_other_task_and_explicit_actions_are_not_inherited(self):
+        self.question()
+        browser.activate(self.runner)
+        other = questions.request(self.root, 'another', 'browser', 'Business decision')
+        action = questions.request(self.root, 'ui', 'browser', 'Approve service', generation='action', action={'kind':'service'})
+        self.assertFalse(browser.assigned(self.root, other))
+        self.assertFalse(browser.assigned(self.root, action))
+
+    def test_followup_does_not_force_a_historical_page_route(self):
+        original = self.question()
+        questions.answer(self.root, original, 'Mismatch')
+        questions.request(self.root, 'ui', 'browser', 'Use the corrected route', generation='new-route')
+        browser.activate(self.runner)
+        with patch.object(browser, 'captures', return_value=[]):
+            self.assertEqual(len(browser.missing_evidence(self.root, {'id':'ui'}, self.root, {})), 1)
+        with patch.object(browser, 'captures', return_value=[{'url':'http://127.0.0.1:3002/new-route'}]):
+            self.assertEqual(browser.missing_evidence(self.root, {'id':'ui'}, self.root, {}), [])
+
+    def test_corrected_followup_invalidates_prior_assignment_without_answering(self):
+        original = self.question()
+        questions.answer(self.root, original, 'Mismatch')
+        browser.activate(self.runner)
+        key = questions.request(self.root, 'ui', 'browser', 'First followup', generation='followup')
+        before = questions.manual_state(self.root, 'ui')
+        same = questions.request(self.root, 'ui', 'browser', 'Corrected expectations', generation='followup')
+        self.assertEqual(same, key)
+        self.assertNotEqual(before, questions.manual_state(self.root, 'ui'))
+        self.assertEqual(browser.obligations(self.root)[0]['clarification']['followup'], 'Corrected expectations')
+        self.assertIsNone(questions.response(self.root, key))
