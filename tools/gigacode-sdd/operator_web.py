@@ -126,6 +126,8 @@ class OperatorServer(ThreadingHTTPServer):
         for operation, raw in zip(view['execution']['operations'], state.get('operations', [])):
             operation['label'] = operation_label(raw, state.get('tasks', []))
         view['observers'] = {'lines': observation_lines(state),
+                             'findings': (state.get('observation') or {}).get('findings', []),
+                             'results': (state.get('observation') or {}).get('results', {}),
                              'snapshot_at': (state.get('observation') or {}).get('snapshot_at')}
         view['capabilities']['answer_questions'] = bool(self.config)
         view['capabilities']['manage_controller'] = True

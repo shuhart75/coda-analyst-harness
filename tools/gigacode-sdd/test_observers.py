@@ -206,6 +206,20 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(len(self.activities), 4)
         self.assertTrue(all(a[1]['metadata']['purpose'] == 'observation' for a in self.activities))
 
+    def test_memory_failure_does_not_discard_completed_assessments(self):
+        transport, calls = self.fake_transport()
+        with patch.object(observers, 'run_session', side_effect=transport), \
+                patch.object(observers.observer_findings, 'update', side_effect=OSError('ledger unreadable')):
+            self.manager.observe(self.packet())
+        latest = json.loads((self.manager.root/'latest.json').read_text())
+        self.assertEqual(latest['status'], 'waiting')
+        self.assertEqual(len(latest['results']), 2)
+        self.assertEqual(latest['memory_error'], 'ledger unreadable')
+        self.assertTrue(Path(latest['report']).is_file())
+        self.assertTrue(latest['retry_pending'])
+        self.assertEqual(latest['audit_errors'], {})
+        self.assertFalse(self.runner.stop.is_set())
+
     def test_peer_is_published_before_slow_observer_finishes(self):
         def evaluate(role, model, value):
             if role == 'scope':

@@ -23,7 +23,7 @@ def timestamp(stamp, *, now=None):
 def stages(value):
     tasks = value.get('tasks', [])
     done = bool(tasks) and all(t.get('status') == 'done' for t in tasks)
-    ops = value.get('operations', [])
+    ops = [o for o in value.get('operations', []) if o.get('purpose') != 'observation']
     active = value.get('status') not in ('blocked', 'interrupted', 'complete') and not value.get('telemetry_stale') and not value.get('telemetry_incomplete')
     def phase(key, title, status, description):
         return {'id': key, 'title': title, 'status': status, 'description': description}
@@ -58,6 +58,28 @@ def stages(value):
         pending = list(dict.fromkeys(', '.join(item['requirements']) + ': ' + item['next_step']
                        for wait in waits for item in wait.get('items', [])))
         result[-1]['description'] += ' Незакрытые обязательства: ' + '; '.join(pending)
-    result.append(phase('readiness', 'Подтверждение готовности результата', 'done' if value.get('ready') else 'pending',
+    result[-1]['operations'] = []
+    for op in ops:
+        if op.get('task_id') != 'integration':
+            continue
+        raw = op.get('phase') or op.get('stage')
+        activity = {
+            'execute': 'Разработка и исправления итогового решения',
+            'разработка': 'Разработка и исправления итогового решения',
+            'repair': 'Исправление замечаний итоговой приёмки',
+            'review': 'Независимое ревью итогового решения',
+            'независимое ревью': 'Независимое ревью итогового решения',
+            'checks': 'Обязательные проверки итогового решения',
+            'обязательные проверки': 'Обязательные проверки итогового решения',
+            'adjudicate': 'Разбор замечаний итоговой приёмки',
+            'разбор спорного замечания': 'Разбор замечаний итоговой приёмки',
+        }.get(raw, 'Обязательные проверки итогового решения' if op.get('kind') == 'check'
+              else raw or 'Подготовка итоговой приёмки')
+        result[-1]['operations'].append({
+            'activity': activity, 'model': op.get('model'),
+            'elapsed_seconds': op.get('elapsed_seconds'),
+            'current': active and integration == 'running',
+        })
+    result.append(phase('readiness', 'Завершение и выдача результата', 'done' if value.get('ready') else 'pending',
                         'Закрепление проверенного результата и разрешение экспорта. Принятие задач само по себе не означает готовность.'))
     return result

@@ -942,6 +942,9 @@ def execute_task(runner, task, record):
                             prompt_value(runner.root, task_acceptance.instructions(runner, task)), ensure_ascii=False)
                         prompt += '\nOperator answers (cannot waive requirements or permissions):\n' + json.dumps(
                             prompt_value(runner.root, questions.replies(runner.root, None if task['id'] == 'integration' else task['id'])), ensure_ascii=False)
+                        import observer_findings
+                        advice, advised = observer_findings.guidance(runner.root, task['id'])
+                        prompt += advice
                         pending = value.get('pending_session')
                         marker = pending['id'] if pending else uuid.uuid4().hex
                         invocation_prompt = prompt + '\nCONTROLLER_EXECUTION_ATTEMPT: ' + marker
@@ -957,9 +960,11 @@ def execute_task(runner, task, record):
                                 'prompt_sha256': hashlib.sha256(invocation_prompt.encode()).hexdigest(),
                                 'prompt': invocation_prompt}
                             persist()
+                            observer_findings.delivered(runner.root, advised, marker, value['model'])
                             with browser_workflow.session_lease(runner, task, stop):
                                 result = runner.session(work, task['cwd'], invocation_prompt, 'execute', task['id'] + '-execute',
                                                         model=value['model'], stop_event=stop)
+                                observer_findings.delivered(runner.root, advised, marker, value['model'], result)
                         if stop.is_set() or result.get('cancelled'):
                             value['draft_result'] = result
                             interrupted()

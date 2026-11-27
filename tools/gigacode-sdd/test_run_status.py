@@ -202,7 +202,7 @@ class ProgressTests(unittest.TestCase):
             output = run_status.dashboard(value)
             self.assertTrue(output.startswith('В работе. Запросов на вмешательство нет.'))
             self.assertLess(output.index('Аудиторы, снимок'), output.index('Принято:'))
-            self.assertIn('Основание: 25 тестов прошли.', output)
+            self.assertIn('Прогресс: 25 тестов прошли.', output)
             self.assertNotIn('близок лимит', output)
             self.assertNotIn('Давно нет новых событий', output)
             self.assertIn('LLM-сессии сейчас: 1 (GLM: 1)', output)
@@ -211,6 +211,12 @@ class ProgressTests(unittest.TestCase):
             self.assertNotIn('/run/report.json', compact)
             value['questions'] = [{'question': 'Ответ?'}]
             self.assertNotIn('Независимая работа продолжается', run_status.dashboard(value))
+
+    def test_malformed_observer_results_do_not_break_status(self):
+        value = self.value()
+        value['observation'] = {'status': 'unknown', 'results': {'progress': 'broken', 'scope': None},
+                                'findings': ['broken', None]}
+        self.assertIn('В работе.', run_status.dashboard(value))
 
     def test_auditor_disagreement_and_long_text_do_not_hide_factual_stop(self):
         value = self.value()
