@@ -57,6 +57,18 @@ class OperatorWebTests(unittest.TestCase):
         q = oq.questions(self.root)[0]
         return {'id': key, 'revision': oq.question_revision(q), 'text': 'Отложить', 'explanation': ''}
 
+    def test_delegated_browser_check_is_work_not_a_human_question(self):
+        from unittest.mock import Mock
+        import browser_workflow
+        from test_browser_workflow import CHECK
+        browser_workflow.activate(Mock(root=self.root, cfg={}))
+        with patch('desktop_notifications.notify_question'):
+            key = oq.request(self.root, 'be', 'page', 'Check?', manual_check=CHECK)
+        data = self.request('GET', '/api/state')[1]
+        self.assertEqual(data['questions'], [])
+        self.assertEqual(data['browser_checks'][0]['id'], key)
+        self.assertEqual(data['browser_checks'][0]['check'], CHECK)
+
     def test_page_works_without_npm_and_sensitive_reads_need_token(self):
         status, html, headers = self.request('GET', '/', auth=False)
         self.assertEqual(status, 200)

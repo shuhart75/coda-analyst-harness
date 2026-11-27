@@ -46,3 +46,13 @@ class ActivityTests(unittest.TestCase):
                 self.assertLessEqual(len(reader.buffer), 1024 * 1024)
             self.assertTrue(summary['terminal_result'])
 
+
+    def test_browser_dispatcher_shows_tool_name_without_form_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'stdout.jsonl'
+            path.write_text(json.dumps({'message': {'content': [{'type': 'tool_use', 'id': 'b',
+                'name': 'tool_call', 'input': {'name': 'mcp__playwright__browser_fill_form',
+                'arguments': {'password': 'never-export'}}}]}})+'\n')
+            summary = SessionActivity(path).poll()
+            self.assertIn('mcp__playwright__browser_fill_form', json.dumps(summary))
+            self.assertNotIn('never-export', json.dumps(summary))

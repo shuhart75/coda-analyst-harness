@@ -1,6 +1,7 @@
 """Bounded, incremental journal telemetry. Activity is not completion evidence."""
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -74,6 +75,9 @@ class SessionActivity:
                 key = item.get('id')
                 name = item.get('name') if isinstance(item.get('name'), str) else 'инструмент'
                 inputs = item.get('input') if isinstance(item.get('input'), dict) else {}
+                if name == 'tool_call' and isinstance(inputs.get('name'), str) and re.fullmatch(r'mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+', inputs['name']):
+                    name = inputs['name']
+                    inputs = {}  # Names are useful; MCP arguments may contain credentials or form data.
                 # Only selected descriptive fields; never serialize an input/result object.
                 detail = next((inputs[k] for k in ('description', 'file_path', 'path', 'command', 'url')
                                if isinstance(inputs.get(k), str)), '')

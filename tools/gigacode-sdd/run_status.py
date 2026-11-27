@@ -82,6 +82,8 @@ def snapshot(root, state=None):
             'candidates': [next((p for p in progress if p['task'] == task['id'] and p['model'] == model),
                  {'model': model, 'status': 'not-observed', 'stage': 'unknown'}) for model in models]})
     questions = oq.questions(root, pending_only=True)
+    from browser_workflow import obligations
+    browser_checks = obligations(root)
     services = []
     for path in sorted((root / 'managed-services').glob('*/service.json')):
         value = read(path)
@@ -120,7 +122,7 @@ def snapshot(root, state=None):
             'telemetry_incomplete': bool(problems),
             'status': state.get('status'), 'tasks': rows,
             'done': sum(r['status'] == 'done' for r in rows), 'total': len(rows),
-            'questions': questions, 'answer_command': oq.command(root), 'services': services,
+            'questions': questions, 'browser_checks': browser_checks, 'answer_command': oq.command(root), 'services': services,
             'preflight_passed': (state.get('preflight') or {}).get('passed') is True,
             'plan_pinned': bool(state.get('plan_sha256')),
             'integration_error': state.get('integration', {}).get('error'),
@@ -373,6 +375,8 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
     health = health_summary(value)
     done, total = value.get('done', 0), value.get('total', 0)
     lines = [health] + observation_lines(value)
+    if value.get('browser_checks'):
+        lines.append('Браузерные проверки: ' + str(len(value['browser_checks'])) + '. Выполняет система; итоговое ревью ещё впереди.')
     lines.append(f'Принято: {done} из {total} задач.' if total else 'План задач ещё не закреплён.')
     if value.get('ready'):
         current = ['Сейчас: работа завершена.']

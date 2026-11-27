@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from contextlib import nullcontext
 from execution_scheduling import ResourceLane, choose, quality
 import hashlib
+import browser_workflow
 import json
 from evidence import bind_quote
 from transport import execution_result_usable
@@ -629,6 +630,8 @@ def execute_task(runner, task, record):
             save(path, value)
         if acceptance_wait.refresh(runner.root, task, value):
             save(path, value)
+        if browser_workflow.resume_candidate(runner.root, task, value):
+            save(path, value)
         if value.get('status') == 'accepted' and value.get('manual_review_state') != questions.manual_state(runner.root, task['id']):
             # Keep implementation and checks; new human evidence needs fresh review.
             value.update(status='pending', stage='review')
@@ -715,12 +718,24 @@ def execute_task(runner, task, record):
             save(path, value)
             continue
         key = questions.register(runner, task, value, control)
+        if browser_workflow.assigned(runner.root, key):
+            value['question_id'] = key
+            browser_workflow.resume_candidate(runner.root, task, value)
+            value['handled_question_result'] = identity
+            save(path, value)
+            continue
         value.update(status='waiting-user', stage='execute', question_id=key,
                      resource_wait=None, handled_question_result=identity)
         save(path, value)
         run_status.candidate(runner, task, value)
         runner.progress(task['id'] + ': восстановлен вопрос из сохранённого результата; повтор исполнения не нужен')
     def select(value, failures):
+        if browser_workflow.missing_evidence(runner.root, task, Path(value['workspace']), value):
+            for candidate_path, candidate in candidates:
+                if candidate['status'] == 'accepted':
+                    candidate.update(status='pending', stage='checks')
+                    save(candidate_path, candidate)
+            raise ScopeWait('Делегированные браузерные проверки требуют новых доказательств')
         if task['id'] == 'integration':
             questions.require_manual_answers(runner.root)
         if value.get('manual_review_state') != questions.manual_state(runner.root, task['id']):
@@ -813,6 +828,8 @@ def execute_task(runner, task, record):
 
         if acceptance_wait.refresh(runner.root, task, value):
             persist()
+        if browser_workflow.resume_candidate(runner.root, task, value):
+            persist()
         if value.get('status') == 'waiting-user':
             reply = questions.response(runner.root, value['question_id'])
             if not reply:
@@ -864,7 +881,7 @@ def execute_task(runner, task, record):
                 persist()
             if stop.is_set():
                 interrupted()
-            task = scope_repair.effective_task(runner, base_task, value)
+            task = browser_workflow.task_context(runner.root, scope_repair.effective_task(runner, base_task, value))
             from dependency_audit import preserve_generated_private_configs
             inventory = runner.audit(work, operations=task['checks'], inventory_only=True)
             if isinstance(inventory, dict):
@@ -940,8 +957,9 @@ def execute_task(runner, task, record):
                                 'prompt_sha256': hashlib.sha256(invocation_prompt.encode()).hexdigest(),
                                 'prompt': invocation_prompt}
                             persist()
-                            result = runner.session(work, task['cwd'], invocation_prompt, 'execute', task['id'] + '-execute',
-                                                    model=value['model'], stop_event=stop)
+                            with browser_workflow.session_lease(runner, task, stop):
+                                result = runner.session(work, task['cwd'], invocation_prompt, 'execute', task['id'] + '-execute',
+                                                        model=value['model'], stop_event=stop)
                         if stop.is_set() or result.get('cancelled'):
                             value['draft_result'] = result
                             interrupted()
@@ -1048,6 +1066,14 @@ def execute_task(runner, task, record):
                                 value['feedback'] = str(exc)
                                 persist()
                                 continue
+                            if browser_workflow.assigned(runner.root, value['question_id']):
+                                if not browser_workflow.release(runner.root, value['question_id'], result):
+                                    redirected = browser_workflow.resume_candidate(runner.root, task, value)
+                                    value['handled_question_result'] = fingerprint([result.get('events_path'), result.get('text')])
+                                    persist()
+                                    if not redirected:
+                                        fail('request-protocol', 'Perform delegated browser checks; do not repeat a request for a human test without a recorded browser failure.')
+                                    continue
                             value['handled_question_result'] = fingerprint([result.get('events_path'), result.get('text')])
                             value['status'] = 'waiting-user'
                             persist()
@@ -1108,6 +1134,12 @@ def execute_task(runner, task, record):
                         value['workspace_snapshot'] = snapshot(work, normalize_settings=True)
                         for check in checks:
                             value['evidence_files'][check['log']] = digest(check['log'])
+                        missing_browser = browser_workflow.missing_evidence(runner.root, task, work, value)
+                        if missing_browser:
+                            value['stage'] = 'execute'
+                            fail('checks', {'browser_checks': missing_browser,
+                                 'instruction': 'Collect current browser evidence yourself. '+browser_workflow.INSTRUCTIONS})
+                            continue
                         failed = [c for c in checks if not c['ok']]
                         if failed:
                             value['stage'] = 'execute'
@@ -1138,12 +1170,15 @@ def execute_task(runner, task, record):
                                     'Verify required outcomes from actual files and controller checks.'})
                     from execution_inputs import prompt_value
                     review_task = read(review_copy/'.review-input/task.json')
+                    if not recovered:
+                        save(review_copy/'.review-input/browser-captures.json', browser_workflow.captures(work, value))
                     detail = ('Task:\n' + json.dumps(prompt_value(review_copy/'.review-input', review_task), ensure_ascii=False)
                               + '\nActual controller checks:\n' + json.dumps(value['checks'])
                               + '\nReview every assigned requirement against the actual changed code and checks. '
                               'Do not reject merely because another implementation is possible. '
                               'Read pinned requirements from .review-input/packet/ in this workspace; '
-                              'do not search the original run directories.')
+                              'do not search the original run directories. '
+                              'Read .review-input/browser-captures.json when present; successful calls alone are not scenario acceptance.')
                     if (review_copy/'.review-input/execution-limitations.json').is_file():
                         detail += ('\nRead .review-input/execution-limitations.json. Assess whether any failed or denied '
                                    'operation leaves required behavior or evidence unverified. Never treat such a call as successful; '
@@ -1180,9 +1215,18 @@ def execute_task(runner, task, record):
                     if review['verdict'] == 'blocked':
                         items = acceptance_wait.validate(runner.root, task, review)
                         message = acceptance_wait.park(runner.root, task, value, review, items)
+                        if browser_workflow.resume_candidate(runner.root, task, value):
+                            persist()
+                            fail('review', {'findings': review['findings'], 'browser_checks': browser_workflow.obligations(runner.root, task['id']),
+                                            'instruction': browser_workflow.INSTRUCTIONS})
+                            continue
                         persist()
                         runner.progress(message)
                         raise CandidateStalled(message)
+                    if review['verdict'] == 'pass' and browser_workflow.missing_evidence(runner.root, task, work, value):
+                        value['stage'] = 'execute'
+                        fail('checks', 'Delegated browser checks require successful calls and candidate screenshots before final acceptance.')
+                        continue
                     if review['verdict'] == 'pass':
                         latest_task = runner.scopes.effective(task)
                         if latest_task['writes'] != task['writes'] or latest_task['checks'] != task['checks']:
@@ -1239,6 +1283,10 @@ def execute_task(runner, task, record):
                     review = review_resolution.combined(resolution)
                     task_acceptance.check_report(runner, task, review)
                     value['review'] = review
+                    if review['verdict'] == 'pass' and browser_workflow.missing_evidence(runner.root, task, work, value):
+                        value['stage'] = 'execute'
+                        fail('checks', 'Delegated browser checks require successful calls and candidate screenshots before final acceptance.')
+                        continue
                     if review['verdict'] == 'pass':
                         latest_task = runner.scopes.effective(task)
                         if latest_task['writes'] != task['writes'] or latest_task['checks'] != task['checks']:

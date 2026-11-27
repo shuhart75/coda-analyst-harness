@@ -20,9 +20,10 @@ class PermissionsTests(unittest.TestCase):
                 policy.prepare_permissions(folder, role)
                 permissions = json.loads(path.read_text())['permissions']
                 self.assertEqual(permissions['deny'], deny)
+                self.assertEqual(set(policy.BROWSER_INTERACTION_ALLOW) <= set(permissions['allow']), role == 'execute')
                 self.assertEqual(set(policy.BROWSER_OBSERVATION_ALLOW) <= set(permissions['allow']), role == 'execute')
                 for name in ('tool_call', 'mcp__playwright__*', 'mcp__playwright__browser_evaluate',
-                             'mcp__playwright__browser_click', 'mcp__playwright__browser_run_code_unsafe'):
+                             'mcp__playwright__browser_file_upload', 'mcp__playwright__browser_run_code_unsafe'):
                     self.assertNotIn(name, permissions['allow'])
 
     def test_merge_preserves_constraints_and_backup(self):
