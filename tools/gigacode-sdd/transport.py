@@ -29,6 +29,7 @@ def parse_events(path: Path, *, _legacy_denial_text=False) -> dict:
     """
     path = Path(path)
     errors, denials, tool_calls, tool_results = [], [], {}, []
+    resolved_tool_calls = {}
     syntax_errors = []
     missing_path_errors = []
     read_tool_errors = []
@@ -75,6 +76,13 @@ def parse_events(path: Path, *, _legacy_denial_text=False) -> dict:
                         if isinstance(tool_id, str):
                             name = item.get('name')
                             tool_calls[tool_id] = name if isinstance(name, str) else 'unknown'
+                            resolved = name
+                            arguments = item.get('input')
+                            if name == 'tool_call' and isinstance(arguments, dict):
+                                target = arguments.get('name')
+                                if isinstance(target, str) and re.fullmatch(r'mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+', target):
+                                    resolved = target
+                            resolved_tool_calls[tool_id] = resolved if isinstance(resolved, str) else 'unknown'
                     if item.get("type") != "tool_result":
                         continue
                     tool_id = item.get("tool_use_id", "unknown")
@@ -150,7 +158,7 @@ def parse_events(path: Path, *, _legacy_denial_text=False) -> dict:
             "events_path": str(path), "errors": errors,
             "event_count": event_count, "terminal_result": terminal is not None,
             "provider_failure": provider_failure,
-            "tool_calls": tool_calls, "tool_results": tool_results,
+            "tool_calls": tool_calls, "resolved_tool_calls": resolved_tool_calls, "tool_results": tool_results,
             "syntax_errors": syntax_errors, "missing_path_errors": missing_path_errors,
             "read_tool_errors": read_tool_errors}
 
@@ -174,7 +182,7 @@ def revalidate_saved_result(result, events):
         errors = [error for error in errors if error !=
                   'CLI reported denied permissions; interactive approval is unavailable']
     updated = dict(result)
-    for key in ('permission_denials', 'tool_calls', 'tool_results', 'terminal_result',
+    for key in ('permission_denials', 'tool_calls', 'resolved_tool_calls', 'tool_results', 'terminal_result',
                 'syntax_errors', 'missing_path_errors', 'read_tool_errors', 'provider_failure'):
         updated[key] = parsed[key]
     updated['errors'] = list(dict.fromkeys(errors + parsed['errors']))

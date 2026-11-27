@@ -8,6 +8,23 @@ import policy
 
 
 class PermissionsTests(unittest.TestCase):
+    def test_browser_observation_is_executor_only_and_preserves_denials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for role in ('execute', 'review'):
+                folder = root / role
+                (folder / '.gigacode').mkdir(parents=True)
+                path = folder / '.gigacode/settings.json'
+                deny = ['mcp__playwright__browser_navigate']
+                path.write_text(json.dumps({'permissions': {'deny': deny}}))
+                policy.prepare_permissions(folder, role)
+                permissions = json.loads(path.read_text())['permissions']
+                self.assertEqual(permissions['deny'], deny)
+                self.assertEqual(set(policy.BROWSER_OBSERVATION_ALLOW) <= set(permissions['allow']), role == 'execute')
+                for name in ('tool_call', 'mcp__playwright__*', 'mcp__playwright__browser_evaluate',
+                             'mcp__playwright__browser_click', 'mcp__playwright__browser_run_code_unsafe'):
+                    self.assertNotIn(name, permissions['allow'])
+
     def test_merge_preserves_constraints_and_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
