@@ -400,9 +400,11 @@ def collect_compact(config, destination=None, error=None):
     state = state if isinstance(state, dict) else {}
     out.failure_sessions(state)
     out.failure_sessions({'error': str(error)})
-    for name in ('browser-automation.json', 'progress.json', 'console-status.json', 'service-stop.json', 'dynamic-scopes.json', 'observer/latest.json', 'observer/health.json'):
+    for name in ('browser-automation.json', 'progress.json', 'console-status.json', 'service-stop.json', 'dynamic-scopes.json', 'observer/latest.json', 'observer/health.json', 'observer/findings.json'):
         if (root/name).is_file():
             out.json_file(root/name)
+    for path in newest(list((root/'observer/deliveries').glob('*.json')))[:24]:
+        out.json_file(path)
     # Service-audit reports are direct log files, not model session folders.
     # Include the recent reports before large historical payloads use the budget.
     for path in newest(list((root/'logs').glob('*-services-*.json')))[:8]:

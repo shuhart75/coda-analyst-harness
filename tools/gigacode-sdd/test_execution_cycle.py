@@ -14,6 +14,25 @@ from workspace import clone_snapshot, git, snapshot
 
 
 class ExecutionPortfolioTests(unittest.TestCase):
+    def test_observer_advice_reaches_executor_without_changing_acceptance(self):
+        import observer_findings as findings
+        import time
+        self.primary_only = True
+        packet = {'snapshot_at': time.time(), 'tasks': [{'id': self.task['id'], 'status': 'running'}]}
+        raw = {'task_id': self.task['id'], 'key': 'verify-cause', 'confidence': 'high',
+               'problem': 'Причина сбоя ещё не проверена.', 'recommendation': 'Проверь гипотезу AUDIT_PROBE.',
+               'expected_result': 'Сохранён результат проверки.', 'evidence': ['/tasks/0/status']}
+        normalized, errors = findings.normalize([raw], packet)
+        self.assertFalse(errors)
+        findings.update(self.runner.root, {'progress': {'status': 'concern', 'findings': normalized}}, packet, 'report')
+        accepted = self.run_task()
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual(self.review_count, 1)
+        self.assertIn('AUDIT_PROBE', self.calls[0][2])
+        item = findings.context(self.runner.root)['items'][0]
+        self.assertEqual(item['state'], 'open')
+        self.assertEqual(item['delivery']['state'], 'session_completed')
+
     def test_delegated_check_runs_browser_and_reaches_independent_review_without_answer(self):
         import browser_workflow as browser
         import operator_questions as oq

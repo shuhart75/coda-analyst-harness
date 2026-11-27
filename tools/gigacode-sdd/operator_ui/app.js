@@ -41,7 +41,7 @@ function renderSummary(value) {
   $('status-heading').textContent=value.summary||label(run.status);
   const finalStage=value.stages?.find(s=>s.id==='integration');
   $('status-description').textContent=run.ready?'Все задачи и итоговая приёмка завершены.':
-    run.accepted_tasks===run.total_tasks&&run.total_tasks?'Задачи приняты по отдельности. Итоговая приёмка всего решения ещё не завершена.':
+    run.accepted_tasks===run.total_tasks&&run.total_tasks?`Все ${run.total_tasks} задач приняты. ${uncertain?'Текущее исполнение итоговой приёмки не подтверждено.':finalStage?.status==='running'?'Идёт итоговая приёмка результата.':finalStage?.status==='done'?'Итоговая приёмка пройдена, ожидается подтверждение готовности.':'Итоговая приёмка: '+label(finalStage?.status)+'.'}`:
     run.requires_resume?'Контроллер остановлен. Продолжите работу через мастер выше.':'Подробности текущей работы показаны в этапах и сессиях ниже.';
   document.querySelector('.status-banner').classList.toggle('attention',Boolean(count||uncertain||run.attention.requires_action||run.status==='interrupted'));
   if(!run.ready&&run.accepted_tasks===run.total_tasks&&run.total_tasks){$('remaining').textContent='Итоговая приёмка';$('remaining-note').textContent=label(finalStage?.status);}
@@ -62,8 +62,42 @@ function renderRoute(value) {
   }
 
   const events=$('controller-events');events.replaceChildren();for(const event of value.controller_events||[])events.append(node('p','context',date(event.at)+' · '+event.message));if(!events.childNodes.length)events.append(node('p','muted','Подробные события контроллера ещё не получены.'));
-  const stages=$('stage-list');stages.replaceChildren();for(const stage of value.stages||[]){const row=node('li','route-item '+stage.status);row.append(node('span','route-symbol',stage.status==='done'?'✓':stage.status==='running'?'▶':stage.status==='blocked'?'!':'○'));const body=node('div');body.append(node('div','route-title',stage.title+' · '+label(stage.status)),node('p','context',stage.description));if(stage.error)body.append(node('p','question-message',stage.error));row.append(body);stages.append(row);}
-  const list=$('route');list.replaceChildren();
+  const stages=$('stage-list');
+  const operationText=op=>(op.current?'Сейчас: ':'Последнее наблюдение: ')+op.activity+(op.model?' · '+op.model:'')+' · '+duration(op.elapsed_seconds);
+  const routeSignature=JSON.stringify({run:value.run.key,stages:(value.stages||[]).map(stage=>({...stage,operations:(stage.operations||[]).map(({elapsed_seconds,...op})=>op)})),tasks:value.tasks.map(task=>({...task,candidates:(task.candidates||[]).map(({updated_at,...candidate})=>candidate)}))});
+  if(stages.renderSignature===routeSignature){
+    const live=(value.stages||[]).flatMap(stage=>stage.operations||[]);
+    stages.querySelectorAll('.stage-operation').forEach((element,index)=>{element.textContent=operationText(live[index]);});
+    return;
+  }
+  stages.renderSignature=routeSignature;
+  const existing=stages.querySelector('[data-stage-tasks]');
+  const taskListOpen=existing?.open;
+  const runChanged=existing && existing.dataset.runKey!==(value.run.key||'');
+  const focused=stages.contains(document.activeElement)?document.activeElement?.dataset?.focusKey:null;
+  stages.replaceChildren();
+  let list;
+  for(const stage of value.stages||[]){
+    const row=node('li','route-item '+stage.status);row.dataset.stageId=stage.id;
+    row.append(node('span','route-symbol',stage.status==='done'?'✓':stage.status==='running'?'▶':stage.status==='blocked'?'!':'○'));
+    if(stage.status==='running')row.setAttribute('aria-current','step');
+    const body=node('div','stage-body');
+    body.append(node('div','route-title',stage.title+' · '+label(stage.status)),node('p','context',stage.description));
+    if(stage.error)body.append(node('p','question-message',stage.error));
+    for(const op of stage.operations||[]){
+      body.append(node('p','stage-operation',operationText(op)));
+    }
+    if(stage.id==='tasks'){
+      const disclosure=node('details','stage-tasks');disclosure.dataset.stageTasks='true';disclosure.dataset.runKey=value.run.key||'';
+      disclosure.open=taskListOpen===undefined||runChanged?stage.status!=='done':taskListOpen;
+      const toggle=node('summary',null,`Задачи · ${value.run.accepted_tasks} из ${value.run.total_tasks} принято`);toggle.dataset.focusKey='task-toggle';
+      list=node('ol','route task-route');list.id='route';list.setAttribute('aria-label','Задачи этапа выполнения');
+      disclosure.append(toggle,list);body.append(disclosure);
+    }
+    row.append(body);stages.append(row);
+  }
+  if(focused==='task-toggle')stages.querySelector('[data-focus-key="task-toggle"]')?.focus({preventScroll:true});
+  if(!list)return;
   if(!value.tasks.length){list.append(node('li','empty','План ещё не закреплён.'));return;}
   for(const task of value.tasks){
     const item=node('li','route-item '+(task.accepted?'done':task.status));
@@ -105,7 +139,35 @@ function renderSessions(value){
     row.append(details);list.append(row);
   }
 }
-function renderObservers(value){const list=$('observer-list');list.replaceChildren();for(const line of value.observers.lines||[])list.append(node('p','observer-line',line));if(!list.childNodes.length)list.append(node('p','empty','Оценок аудиторов пока нет.'));}
+function renderObservers(value){
+  const list=$('observer-list');
+  const signature=JSON.stringify(value.observers);
+  if(list.renderSignature===signature)return;
+  list.renderSignature=signature;
+  const opened=new Set([...list.querySelectorAll('details[open]')].map(row=>row.dataset.finding));
+  list.replaceChildren();
+  for(const line of value.observers.lines||[])list.append(node('p','observer-line',line));
+  for(const [role,result] of Object.entries(value.observers.results||{})){
+    if(!(result.evidence||[]).length)continue;
+    const details=node('details','answer-item');details.dataset.finding='evidence-'+role;details.open=opened.has(details.dataset.finding);
+    details.append(node('summary',null,'Основания: '+(role==='progress'?'прогресс':'соответствие задаче')));
+    for(const fact of result.evidence)details.append(node('p','context',fact.ref+' · '+fact.excerpt));
+    list.append(details);
+  }
+  for(const finding of value.observers.findings||[]){
+    const details=node('details','answer-item');details.dataset.finding=finding.id;details.open=opened.has(finding.id);
+    details.append(node('summary',null,finding.task_id+' · '+finding.problem),
+      node('p','muted','Замечание аудитора, не подтверждённый дефект. Первое наблюдение: '+date(finding.first_seen)),
+      node('p','context','Предлагаемый шаг: '+finding.recommendation),
+      node('p','context','Ожидаемый результат: '+finding.expected_result));
+    for(const event of finding.history||[]){
+      details.append(node('p','context',date(event.at)+' · '+event.problem));
+      for(const fact of event.evidence||[])details.append(node('p','muted',fact.ref+' · '+fact.excerpt));
+    }
+    list.append(details);
+  }
+  if(!list.childNodes.length)list.append(node('p','empty','Оценок аудиторов пока нет.'));
+}
 function draftKey(q){return 'operator-draft:'+latest.run.name+':'+q.id+':'+q.revision;}
 function questionCard(q){
   const card=node('article','question-card');card.dataset.questionId=q.id;

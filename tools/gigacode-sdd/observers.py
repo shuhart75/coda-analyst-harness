@@ -13,6 +13,8 @@ import threading
 import time
 import uuid
 
+import observer_findings
+
 from prior_context import redact
 from progress_io import write_projection, read_projection
 from transport import run_session
@@ -149,6 +151,7 @@ def packet(root, previous=None):
     # Only the last interval, no recursive growth or previous LLM conclusions.
     current['previous'] = {k: (previous or {}).get(k) for k in
                            ('snapshot_at', 'done', 'tasks', 'operations', 'recent_events', 'integration', 'ready')}
+    current['open_findings'] = observer_findings.packet_context(root)
     encoded = json.dumps(current, ensure_ascii=False)
     if len(encoded) > 64000:
         current['previous'] = None
@@ -188,7 +191,7 @@ def empty_registry(events):
     return found
 
 
-def assessment(result):
+def assessment(result, packet=None):
     if (not result.get('ok') or result.get('tool_calls') or (result.get('cleanup') or {}).get('preserved')
             or not empty_registry(result['events_path'])):
         reason = ('очистка сессии не подтверждена' if (result.get('cleanup') or {}).get('preserved') else
@@ -207,8 +210,22 @@ def assessment(result):
     if isinstance(parsed, dict) and parsed.get('status') in STATUSES:
         summary = parsed.get('summary')
         if isinstance(summary, str) and summary.strip() and len(summary) <= 400:
-            return {'status': parsed['status'], 'summary': bounded_text(summary, 400),
-                    'details': raw}
+            findings, errors = observer_findings.normalize(parsed.get('findings', []), packet or {})
+            evidence = []
+            try:
+                refs = parsed.get('evidence', [])
+                if not isinstance(refs, list) or len(refs) > 4:
+                    raise ValueError('Invalid assessment evidence')
+                for ref in refs:
+                    fact = observer_findings.reference(packet or {}, ref)
+                    evidence.append({'ref': ref, 'excerpt': bounded_text(fact, 600)})
+            except (ValueError, TypeError, KeyError, IndexError):
+                evidence = []
+            status = parsed['status']
+            if status in ('progress', 'concern') and not evidence:
+                status, summary = 'unknown', 'Основание оценки не связано с фактами снимка; вывод сохранён в отчёте.'
+            return {'status': status, 'summary': bounded_text(summary, 400),
+                    'evidence': evidence, 'findings': findings, 'finding_errors': errors, 'details': raw}
     return {'status': 'unknown', 'summary': 'Свободный ответ сохранён в отчёте; краткая оценка не получена.',
             'details': raw}
 
@@ -221,7 +238,9 @@ def combined(results):
     if len(available) == 1:
         return available[0]['status'], available[0]['summary']
     if len(set(statuses)) > 1:
-        return 'disagreement', 'Оценки расходятся; подробности в отчёте.'
+        # Different dimensions are not votes on the same proposition.
+        status = next(s for s in ('concern', 'unknown', 'waiting', 'progress') if s in statuses)
+        return status, 'Прогресс и соответствие задаче оценены отдельно.'
     status = statuses[0]
     return status, STATUSES[status].capitalize() + '.'
 
@@ -383,13 +402,25 @@ class Manager:
             'Замечания ревью являются утверждениями модели, а не подтверждёнными дефектами. '
             'Длительность сама по себе не основание для тревоги. '
             'Верни короткий JSON {"status":"progress|waiting|concern|unknown",'
-            '"summary":"одно предложение с наблюдаемым основанием","evidence":["факты из снимка"]}. '
+            '"summary":"одно предложение с наблюдаемым основанием","evidence":["/tasks/0/status"]}. '
+            'evidence содержит 1-4 проверяемые ссылки JSON pointer на основания оценки. '
+            'Дополнительно верни findings: список до 8 замечаний. Каждое содержит '
+            'task_id (id задачи или integration), key (стабильный короткий ключ латиницей), '
+            'state (open или resolved), confidence (low, medium, high), problem (до 400 символов), '
+            'recommendation (следующий проверяемый шаг, до 400 символов), '
+            'expected_result (как проверить пользу, до 400 символов), '
+            'evidence (1-4 JSON pointer на факты снимка, например /tasks/0/status). '
+            'Для повторной проблемы используй прежний key своей роли из open_findings. '
+            'Закрывай её только явно через resolved с новыми наблюдаемыми основаниями; '
+            'молчание, новая сессия и передача рекомендации не означают устранения. '
+            'Не ссылайся на open_findings как доказательство. При нехватке фактов оставляй unknown. '
+            'Не предлагай менять требования, полномочия, критерии приёмки или обнулять лимиты. '
             'Если подозреваешь цикл, назови повторяющуюся ошибку и отсутствие результата; '
             'не изобретай доказательства, сроки или факт исправления.\nСНИМОК:\n'
             + json.dumps(value, ensure_ascii=False))
         result = self.session(role, model, prompt)
         confirm_model(result, model)
-        return {**assessment(result), 'events_path': result['events_path'], 'model': model}
+        return {**assessment(result, value), 'events_path': result['events_path'], 'model': model}
 
     def observe(self, value):
         from execution_cycle import models_for
@@ -432,6 +463,7 @@ class Manager:
                     'results': dict(results), 'partial': bool(pending) or failed,
                     'in_progress': bool(pending), 'advisory_only': True,
                     'snapshot': str(snapshot)})
+        finding_context = observer_findings.update(self.runner.root, results, value, str(report))
         status, summary = combined(results)
         errors = {role: result for role, result in results.items() if result['status'] == 'unavailable'}
         self.retry_pending = bool(errors)
@@ -440,7 +472,8 @@ class Manager:
         projection = {'snapshot_at': value['snapshot_at'], 'completed_at': time.time(),
                       'status': status, 'summary': summary, 'results': results,
                       'partial': len(errors) == 1, 'audit_errors': errors, 'retry_pending': self.retry_pending,
-                      'report': str(report), 'snapshot': str(snapshot), 'advisory_only': True}
+                      'report': str(report), 'snapshot': str(snapshot), 'advisory_only': True,
+                      'findings': finding_context['items']}
         if not write_projection(report, projection):
             raise OSError('Cannot persist observation report')
         write_projection(self.root/'latest.json', projection)

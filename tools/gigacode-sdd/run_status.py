@@ -111,6 +111,9 @@ def snapshot(root, state=None):
         observation = {}
     if not isinstance(observation, dict):
         observation = {}
+    from observer_findings import context as finding_context
+    if (root/'observer/findings.json').is_file():
+        observation['findings'] = finding_context(root)['items']
     captured = observation.get('snapshot_at')
     if isinstance(captured, (int, float)):
         observation['stale'] = time.time()-captured > 900
@@ -277,12 +280,14 @@ def observation_lines(value):
         # Never expose a cut-off instruction or half a model conclusion.
         return text if len(text) <= 400 else 'Подробности в отчёте.'
     results = observation.get('results') or {}
-    if observation.get('status') == 'disagreement' and isinstance(results, dict):
+    if results and isinstance(results, dict):
         for role, title in (('progress', 'Прогресс'), ('scope', 'Соответствие задаче')):
             result = results.get(role) or {}
             summary = sentence(result.get('summary')) if isinstance(result, dict) else ''
             if summary:
                 lines.append(title + ': ' + summary)
+            if result.get('finding_errors'):
+                lines.append(title + ': часть рекомендаций не прошла проверку оснований или формата; подробности в отчёте.')
     else:
         result = next((r for r in results.values() if r.get('status') != 'unavailable'), {}) if isinstance(results, dict) else {}
         if observation.get('status') == 'unavailable':
@@ -291,6 +296,21 @@ def observation_lines(value):
         summary = summary or sentence(observation.get('summary'))
         if summary:
             lines.append('Основание: ' + summary)
+    for finding in (observation.get('findings') or [])[:6]:
+        if finding.get('state') != 'open':
+            continue
+        recommendation = sentence(finding.get('recommendation'))
+        if recommendation:
+            lines.append('Рекомендация (' + finding.get('task_id', '?') + '): ' + recommendation)
+        expected = sentence(finding.get('expected_result'))
+        if expected:
+            lines.append('Проверить результат: ' + expected)
+        lines.append('Реакция системы: ' + ('сессия не завершилась успешно; рекомендация доступна для повтора.'
+            if (finding.get('delivery') or {}).get('state') == 'session_failed' else
+            'включено в запрос исполнителю; эффект ещё не подтверждён.'
+            if finding.get('delivery') else 'сохранено; перед передачей нужно свежее наблюдение.'
+            if time.time()-finding.get('last_seen', 0) > 900 else 'сохранено для следующего шага исполнителя.'
+            if finding.get('confidence') in ('medium', 'high') else 'недостаточная уверенность; требуется новое наблюдение.'))
     errors = observation.get('audit_errors') or {}
     if errors:
         failed = ', '.join(model_label(r.get('model')) + ': ' + (sentence(r.get('summary')) or 'ошибка аудита')

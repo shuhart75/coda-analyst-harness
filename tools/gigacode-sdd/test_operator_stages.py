@@ -27,6 +27,33 @@ class StageTests(unittest.TestCase):
         self.assertIn('Повторная разработка не запущена', health_summary(value))
         self.assertIn('Ожидается: REQ-1: Выбрать источник', dashboard(value))
 
+    def test_final_acceptance_exposes_actual_parallel_operations(self):
+        value = {'status': 'running', 'tasks': [{'id': 'a', 'status': 'done'}],
+                 'integration': 'running', 'operations': [
+                     {'task_id': 'integration', 'phase': 'разработка', 'model': 'A', 'elapsed_seconds': 80},
+                     {'task_id': 'integration', 'phase': 'review', 'model': 'B', 'elapsed_seconds': 40},
+                     {'task_id': 'integration', 'kind': 'check', 'elapsed_seconds': 10},
+                     {'task_id': 'integration', 'purpose': 'observation', 'model': 'auditor'}]}
+        stage = next(p for p in stages(value) if p['id'] == 'integration')
+        self.assertEqual([op['activity'] for op in stage['operations']], [
+            'Разработка и исправления итогового решения', 'Независимое ревью итогового решения',
+            'Обязательные проверки итогового решения'])
+        self.assertEqual(stage['operations'][0]['elapsed_seconds'], 80)
+        self.assertTrue(all(op['current'] for op in stage['operations']))
+        for change in ({'telemetry_stale': True}, {'telemetry_incomplete': True}, {'status': 'interrupted'}):
+            with self.subTest(change=change):
+                stage = next(p for p in stages({**value, **change}) if p['id'] == 'integration')
+                self.assertTrue(all(not op['current'] for op in stage['operations']))
+
+    def test_observers_cannot_make_a_lifecycle_stage_active(self):
+        value = {'status': 'running', 'tasks': [], 'integration': 'blocked',
+                 'operations': [{'task_id': 'integration', 'purpose': 'observation'},
+                                {'task_id': 'plan', 'purpose': 'observation'}]}
+        phases = {p['id']: p for p in stages(value)}
+        self.assertEqual(phases['integration']['status'], 'blocked')
+        self.assertEqual(phases['plan']['status'], 'pending')
+        self.assertEqual(phases['integration']['operations'], [])
+
     def test_dates_explain_yesterday_future_and_previous_controller(self):
         now = 1800000000
         with patch('time.time', return_value=now):

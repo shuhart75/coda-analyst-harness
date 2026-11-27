@@ -202,7 +202,7 @@ class ProgressTests(unittest.TestCase):
             output = run_status.dashboard(value)
             self.assertTrue(output.startswith('В работе. Запросов на вмешательство нет.'))
             self.assertLess(output.index('Аудиторы, снимок'), output.index('Принято:'))
-            self.assertIn('Основание: 25 тестов прошли.', output)
+            self.assertIn('Прогресс: 25 тестов прошли.', output)
             self.assertNotIn('близок лимит', output)
             self.assertNotIn('Давно нет новых событий', output)
             self.assertIn('LLM-сессии сейчас: 1 (GLM: 1)', output)
