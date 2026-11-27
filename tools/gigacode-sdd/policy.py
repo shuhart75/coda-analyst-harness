@@ -20,6 +20,10 @@ READ_ALLOW = (
     "glob", "grep_search", "Skill", "Agent", "skill", "agent",
     "create_sub_session", "send_message", "list_agents", "task_stop",
 )
+# Browser observation only; no wildcard dispatcher, scripting, clicks or uploads.
+# Existing ask/deny rules remain authoritative. Auditors and reviewers do not receive these grants.
+BROWSER_OBSERVATION_ALLOW = tuple("mcp__playwright__browser_" + name for name in
+                                  ("navigate", "snapshot", "take_screenshot", "close"))
 WRITE_ALLOW = ("Edit", "Write", "write_file", "edit", "replace")
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "target", "dist",
                  "__pycache__", "m2repo", "npm-cache", ".cache"}
@@ -87,7 +91,7 @@ def prepare_permissions(workspace: Path, role="execute", extra_allow=()):
         raise ValueError("Permission workspace must exist")
     if isinstance(extra_allow, str) or not all(isinstance(r, str) and r.strip() for r in extra_allow):
         raise ValueError("extra_allow must contain explicit rule strings")
-    desired = tuple(dict.fromkeys(READ_ALLOW + (WRITE_ALLOW if role == "execute" else ()) + tuple(extra_allow)))
+    desired = tuple(dict.fromkeys(READ_ALLOW + (WRITE_ALLOW + BROWSER_OBSERVATION_ALLOW if role == "execute" else ()) + tuple(extra_allow)))
     path = workspace / ".gigacode" / "settings.json"
     before, data = _settings(path)
     restrictions = _restriction_report(workspace, data)

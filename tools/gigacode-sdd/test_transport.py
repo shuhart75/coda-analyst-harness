@@ -12,6 +12,20 @@ from transport import parse_events, run_session, preflight_session_ok
 
 
 class TransportTests(unittest.TestCase):
+    def test_mcp_dispatcher_keeps_original_identity_and_resolves_target_without_arguments(self):
+        result = self.parse([
+            {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 'a',
+                'name': 'tool_call', 'input': {'name': 'mcp__playwright__browser_navigate',
+                'arguments': {'url': 'https://example.test/?token=SECRET'}}}]}},
+            {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'a',
+                'is_error': True, 'content': 'non-interactive mode cannot prompt'}]}},
+            {'type': 'result', 'subtype': 'success', 'is_error': False}])
+        self.assertEqual(result['tool_calls'], {'a': 'tool_call'})
+        self.assertEqual(result['resolved_tool_calls'], {'a': 'mcp__playwright__browser_navigate'})
+        self.assertFalse(result['ok'])
+        self.assertTrue(result['permission_denials'])
+        self.assertNotIn('SECRET', json.dumps(result))
+
     def test_provider_413_in_success_envelope_is_context_failure(self):
         from session_outcome import classify
         result = self.parse([{'type': 'result', 'subtype': 'success', 'is_error': False,
