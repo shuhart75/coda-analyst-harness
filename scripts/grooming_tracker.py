@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import grooming
 import sdd_bundle
 import story_delivery
+import commit_tasks
 
 
 def read(path):
@@ -99,10 +100,26 @@ def pointer(data, path):
     return data
 
 
-def verify_evidence(raw, mapping, payload):
+def verify_epic(data, mapping, payload, key, memberships):
+    """Подтвердить эпик полем карточки или связью decomposition из link.list."""
+    epic = pointer(data, mapping['epic_key']) if 'epic_key' in mapping else None
+    if epic is not None and epic != payload['epic_key']:
+        raise ValueError('Created Story differs from confirmed payload: epic_key')
+    parents = (memberships or {}).get(key)
+    if parents is not None:
+        if epic is not None and epic not in parents:
+            raise ValueError('Поле эпика противоречит link.list')
+        if payload['epic_key'] not in parents:
+            raise ValueError('Карточка не связана с подтверждённым эпиком через link.list')
+        return
+    if epic is None:
+        raise ValueError('Нет поля эпика: передай полный ответ link.list для задачи ' + key)
+
+
+def verify_evidence(raw, mapping, payload, memberships=None):
     data = json.loads(raw)
     fields = {name: pointer(data, mapping[name]) for name in
-              ('key', 'type', 'summary', 'epic_key', 'labels', 'description')}
+              ('key', 'type', 'summary', 'labels', 'description')}
     if payload.get('estimate') is not None:
         fields['estimate'] = pointer(data, mapping['estimate'])
     if 'requirements_url' in mapping:
@@ -113,7 +130,8 @@ def verify_evidence(raw, mapping, payload):
         raise ValueError('Evidence has no native SberTrack key')
     if payload.get('tracker_key') and fields['key'] != payload['tracker_key']:
         raise ValueError('Evidence does not belong to the supplied SberTrack task')
-    for name in ('type', 'summary', 'epic_key') + (('estimate',) if payload.get('estimate') is not None else ()):
+    verify_epic(data, mapping, payload, str(fields['key']), memberships)
+    for name in ('type', 'summary') + (('estimate',) if payload.get('estimate') is not None else ()):
         if fields[name] != payload[name] or (name == 'estimate' and type(fields[name]) not in (int, float)):
             raise ValueError('Created Story differs from confirmed payload: ' + name)
     if not isinstance(fields['labels'], list) or 'RSCON_dev' not in fields['labels']:
@@ -186,7 +204,14 @@ def evidence_hashes(mapping):
     return result
 
 
-def operate(area, batch, action, task_id, *, confirmation=None, evidence=None, mapping=None):
+def operate(area, batch, action, task_id, *, confirmation=None, evidence=None, mapping=None,
+            links_responses=(), links_text_pointer=None):
+    if bool(links_responses) != bool(links_text_pointer):
+        raise ValueError('Передай links-response вместе с links-text-pointer')
+    link_raw = [(Path(path), Path(path).read_bytes()) for path in links_responses]
+    memberships = (commit_tasks.link_parents([json.loads(raw) for _, raw in link_raw],
+                                            links_text_pointer) if link_raw else None)
+    links_evidence = {str(path): grooming.digest(raw) for path, raw in link_raw}
     task = next((t for t in batch['tasks'] if t['local_id'] == task_id), None)
     if task is None:
         raise ValueError('Unknown grooming task')
@@ -240,9 +265,10 @@ def operate(area, batch, action, task_id, *, confirmation=None, evidence=None, m
             desired = update_payload(task, fields, prior.get('payload'))
             record = {'state': 'resolved', 'request_id': request, 'key': fields['key'],
                       'source_sha256': payload_hash, 'payload': desired,
-                      'evidence_sha256': grooming.digest(raw), 'metadata_evidence': evidence_hashes(paths)}
+                      'evidence_sha256': grooming.digest(raw), 'metadata_evidence': evidence_hashes(paths),
+                      'links_evidence': links_evidence, 'links_text_pointer': links_text_pointer}
             try:
-                verify_evidence(raw, paths, desired)
+                verify_evidence(raw, paths, desired, memberships)
             except (ValueError, KeyError, TypeError, IndexError):
                 pass
             else:
@@ -277,13 +303,14 @@ def operate(area, batch, action, task_id, *, confirmation=None, evidence=None, m
         task = prior['payload']
         raw = Path(evidence).read_bytes()
         paths = read(mapping)
-        key = verify_evidence(raw, paths, task)
+        key = verify_evidence(raw, paths, task, memberships)
         if prior.get('key') and prior['key'] != key:
             raise ValueError('Update cannot replace the existing Story key')
         # Do not let two local tasks bind to the same native story.
         unique_key(area, ledger, key)
         record = {**prior, 'state': 'bound', 'key': key, 'evidence_sha256': grooming.digest(raw),
-                  'metadata_evidence': evidence_hashes(paths)}
+                  'metadata_evidence': evidence_hashes(paths),
+                  'links_evidence': links_evidence, 'links_text_pointer': links_text_pointer}
         save(ledger, record)
         return {**record, 'next_action': 'continue-remaining-stories'}
 
@@ -315,6 +342,9 @@ def main():
     p.add_argument('--evidence', type=Path)
     p.add_argument('--mapping', type=Path)
     p.add_argument('--task-keys', type=Path, help='JSON local task ID -> supplied native SberTrack key')
+    p.add_argument('--links-response', type=Path, action='append', default=[],
+                   help='Дословный ответ link.list для карточки, когда эпик не отдан полем')
+    p.add_argument('--links-text-pointer', help='JSON Pointer к тексту ответа link.list')
     a = p.parse_args()
     try:
         from workspace_paths import state_root
@@ -322,7 +352,8 @@ def main():
         area = state_root() / 'grooming-tracker'
         result = (batch if a.action == 'preview' else batch_status(area, batch) if a.action == 'status' and not a.task
                   else operate(area, batch, a.action, a.task, confirmation=a.confirmed_batch,
-                               evidence=a.evidence, mapping=a.mapping))
+                               evidence=a.evidence, mapping=a.mapping, links_responses=a.links_response,
+                               links_text_pointer=a.links_text_pointer))
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (ValueError, OSError, KeyError, TypeError, IndexError, StopIteration) as exc:
         p.exit(1, str(exc) + '\n')

@@ -133,7 +133,7 @@ def request(owner_type, owner_id, kind, title, epic, confirmation):
                 step_id=uuid.uuid4().hex, attempts=[], evidence=[])
 
 
-def link_epics(responses, text_pointer):
+def link_parents(responses, text_pointer):
     """Read the actual SberTrack link.list text envelope, without inventing epic fields.
 
     Only a complete first page is accepted. The header binds each response to
@@ -155,9 +155,16 @@ def link_epics(responses, text_pointer):
                 raise ValueError('Неподдерживаемый или противоречивый формат link.list')
             if edge[3] == 'decomposition' and edge[4] == key:
                 parents.add(edge[2])
-        if len(parents) > 1 or (key in result and result[key] != parents):
-            raise ValueError('Несколько эпиков или противоречивые ответы link.list')
+        if key in result and result[key] != parents:
+            raise ValueError('Противоречивые ответы link.list')
         result[key] = parents
+    return result
+
+
+def link_epics(responses, text_pointer):
+    result = link_parents(responses, text_pointer)
+    if any(len(parents) > 1 for parents in result.values()):
+        raise ValueError('Несколько эпиков или противоречивые ответы link.list')
     return result
 
 
