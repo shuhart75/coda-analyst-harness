@@ -201,3 +201,15 @@ class BrowserWorkflowTests(unittest.TestCase):
             self.assertEqual(len(browser.missing_evidence(self.root, {'id':'ui'}, self.root, {})), 1)
         with patch.object(browser, 'captures', return_value=[{'url':'http://127.0.0.1:3002/new-route'}]):
             self.assertEqual(browser.missing_evidence(self.root, {'id':'ui'}, self.root, {}), [])
+
+    def test_corrected_followup_invalidates_prior_assignment_without_answering(self):
+        original = self.question()
+        questions.answer(self.root, original, 'Mismatch')
+        browser.activate(self.runner)
+        key = questions.request(self.root, 'ui', 'browser', 'First followup', generation='followup')
+        before = questions.manual_state(self.root, 'ui')
+        same = questions.request(self.root, 'ui', 'browser', 'Corrected expectations', generation='followup')
+        self.assertEqual(same, key)
+        self.assertNotEqual(before, questions.manual_state(self.root, 'ui'))
+        self.assertEqual(browser.obligations(self.root)[0]['clarification']['followup'], 'Corrected expectations')
+        self.assertIsNone(questions.response(self.root, key))

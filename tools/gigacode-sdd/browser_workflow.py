@@ -74,7 +74,8 @@ def verification_context(root, question):
         return None
     source = max(related, key=lambda q: (q.get('created_at', 0), q['id']))
     return {'check': source['manual_check'], 'source_question': source['id'],
-            'followup': question['question'], 'requests': question.get('requests', []),
+            'followup': (question.get('requests') or [{}])[-1].get('question', question['question']),
+            'requests': question.get('requests', []),
             'rule': 'Earlier checklist is context, not a current verdict. Read the follow-up and current '
                     'scenario before testing; verify current build/preconditions. Preserve previous '
                     'human observations. Do not claim the old expectations or answers prove this check.'}
@@ -96,7 +97,11 @@ def delegate(root, question):
             save(path, {'status': 'assigned', 'assigned_at': time.time(),
                         'binding': question['binding'], 'verification': context,
                         'rule': 'Assigned to executor, not accepted or answered'})
-        return json.loads(path.read_text()).get('status') == 'assigned'
+        record = json.loads(path.read_text())
+        if record.get('status') == 'assigned' and record.get('verification') != context:
+            record.update(verification=context, updated_at=time.time())
+            save(path, record)
+        return record.get('status') == 'assigned'
 
 
 def assigned(root, key):
