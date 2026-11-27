@@ -105,8 +105,12 @@ class OperatorServer(ThreadingHTTPServer):
         state = snapshot(self.root) if self.config else {'status': 'idle', 'tasks': [], 'operations': []}
         # One mailbox read supplies both pending questions and history.
         records = questions.questions(self.root) if self.config else []
-        state['questions'] = [q for q in records if not q.get('answer') and not q.get('resolved')]
+        from browser_workflow import obligations
+        browser_checks = obligations(self.root) if self.config else []
+        delegated_ids = {item['id'] for item in browser_checks}
+        state['questions'] = [q for q in records if not q.get('answer') and not q.get('resolved') and q['id'] not in delegated_ids]
         view = operator_view.project(state)
+        view['browser_checks'] = browser_checks
         view['questions'] = []
         view['answers'] = []
         for question in records:
@@ -116,7 +120,7 @@ class OperatorServer(ThreadingHTTPServer):
             if question.get('answer'):
                 item['answer'] = {key: question['answer'].get(key) for key in ('text', 'explanation', 'answered_at')}
                 view['answers'].append(item)
-            elif not question.get('resolved'):
+            elif not question.get('resolved') and question['id'] not in delegated_ids:
                 view['questions'].append(item)
         view['answers'].sort(key=lambda q: q['answer'].get('answered_at') or 0, reverse=True)
         for operation, raw in zip(view['execution']['operations'], state.get('operations', [])):

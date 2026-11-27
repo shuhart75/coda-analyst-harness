@@ -49,6 +49,10 @@ function renderSummary(value) {
   $('log-path').textContent=run.log_path;
 }
 function renderRoute(value) {
+  const browserChecks=value.browser_checks||[], browserList=$('browser-check-list');
+  $('browser-check-panel').hidden=!browserChecks.length;browserList.replaceChildren();
+  for(const item of browserChecks){const row=node('details','answer-item');row.append(node('summary',null,item.check.requirements.join(', ')+' · '+item.task),node('p','context',item.check.url),node('p','context','Сборка: '+item.check.artifact),node('p','context',item.check.preconditions));for(const step of item.check.steps)row.append(node('p','context',step.action+' → '+step.expected));browserList.append(row);}
+
   const events=$('controller-events');events.replaceChildren();for(const event of value.controller_events||[])events.append(node('p','context',date(event.at)+' · '+event.message));if(!events.childNodes.length)events.append(node('p','muted','Подробные события контроллера ещё не получены.'));
   const stages=$('stage-list');stages.replaceChildren();for(const stage of value.stages||[]){const row=node('li','route-item '+stage.status);row.append(node('span','route-symbol',stage.status==='done'?'✓':stage.status==='running'?'▶':stage.status==='blocked'?'!':'○'));const body=node('div');body.append(node('div','route-title',stage.title+' · '+label(stage.status)),node('p','context',stage.description));if(stage.error)body.append(node('p','question-message',stage.error));row.append(body);stages.append(row);}
   const list=$('route');list.replaceChildren();

@@ -589,6 +589,9 @@ class Runner:
                         'External environment availability is unknown unless evidenced in this copy.\n')
         if role == 'review':
             context += '\n' + plan_review.path_instructions(root) + '\n'
+            import browser_workflow
+            if browser_workflow.enabled(self.root):
+                context += browser_workflow.REVIEW
             context += ('\nReview the pinned files and controller check evidence only. '
                         'Do not rerun builds/tests or access mutable shared caches, databases, ports or services: '
                         'another candidate may be using them. Report any missing check evidence for the controller '
@@ -605,6 +608,9 @@ class Runner:
                         'Continue independent permitted work and report missing evidence honestly. '
                         'The controller inspects Git controls and performs commits; do not probe or change Git configuration.\n')
             context += operator_questions.PROMPT
+            import browser_workflow
+            if browser_workflow.enabled(self.root):
+                context += browser_workflow.INSTRUCTIONS
             context += '\nController-managed ready services:\n' + json.dumps(self.services.context(), ensure_ascii=False)
             import service_handoff
             context += '\nOperator-confirmed existing services (readiness and artifacts must be verified):\n' + json.dumps(
@@ -1022,7 +1028,8 @@ executed test names/counts, not just a successful command or test compilation.
 
     def worker(self, task, record):
         from execution_cycle import execute_task
-        return execute_task(self, task_acceptance.with_incoming(self, task), record)
+        import browser_workflow
+        return execute_task(self, browser_workflow.task_context(self.root, task_acceptance.with_incoming(self, task)), record)
 
     def checkpoint(self, record):
         if 'workspace' not in record:
@@ -1109,18 +1116,22 @@ executed test names/counts, not just a successful command or test compilation.
         self.progress('Состояние работы: ' + self.state['status'])
 
     def run(self, retry_blocked=False):
+        import browser_workflow
+        browser_workflow.activate(self)
         operator_input.reconcile(self)
         self.require_preflight()
         plan_path = self.root / 'plan.json'
         if not plan_path.exists() or digest(plan_path) != self.state.get('plan_sha256'):
             raise Blocked('Missing or changed plan; pinned plan is required')
         plan = validate_plan(read(plan_path), self.main, self.cfg['requirements'])
-        tasks = plan['tasks']
+        tasks = [browser_workflow.task_context(self.root, task) for task in plan['tasks']]
         self.services.restore(self.stop)
         import scope_repair
         import dynamic_scope
         for task in tasks:
             record = self.state['tasks'][task['id']]
+            if record['status'] == 'waiting-user' and browser_workflow.obligations(self.root, task['id']):
+                record['status'] = 'pending'
             if record['status'] == 'waiting-user' and (scope_repair.needs_refresh(
                     self.root, record.get('question_ids', [])) or self.scopes.needs_question_refresh(record.get('question_ids', []))):
                 record['status'] = 'pending'
@@ -1244,9 +1255,23 @@ executed test names/counts, not just a successful command or test compilation.
             rec = None
             self.persist()
             self.progress('Новые указания: повторно проверяю весь итог; принятые изменения сохранены')
+        if (rec and browser_workflow.obligations(self.root)
+                and rec.get('manual_review_state') != operator_questions.manual_state(self.root, 'integration')):
+            # Finish an already journaled apply before creating a fresh review base.
+            # New obligations never reuse acceptance from before their assignment.
+            if 'integration_base' in rec and rec.get('status') != 'done':
+                self.integrate(final, rec)
+            if rec.get('status') == 'done':
+                self.state.setdefault('integration_history', []).append(rec)
+                self.state.pop('integration', None)
+                rec = None
+                self.persist()
+            elif rec.get('status') == 'accepted':
+                rec['status'] = 'running'
         if rec and rec.get('status') == 'done':
             if git(self.main, 'rev-parse', 'HEAD') != rec['integrated_head'] or snapshot(self.main)['status']:
                 raise Blocked('Completed integration changed after review')
+            browser_workflow.complete(self.root, rec)
             self.state['status'] = 'complete'
             self.publish_readiness(rec)
             return
@@ -1289,6 +1314,7 @@ executed test names/counts, not just a successful command or test compilation.
             self.state['integration'] = accepted
             self.persist()
             self.integrate(final, accepted)
+            browser_workflow.complete(self.root, accepted)
             operator_questions.resolve_task(self.root, 'integration')
             self.state['status'] = 'complete'
             self.publish_readiness(accepted)

@@ -136,6 +136,9 @@ def request(root, task, topic, question, *, options=None, details=None, generati
             if action is not None:
                 value['action'] = action
             save(path, value)
+    from browser_workflow import delegate
+    if delegate(root, value):
+        return key
     # Delivery is best effort; the durable mailbox remains the source of truth.
     from desktop_notifications import notify_question
     notify_question(root, key)
@@ -149,7 +152,7 @@ def questions(root, pending_only=False):
     with locked(root) as folder:
         result = []
         for path in sorted(folder.glob('*.json')):
-            if path.name.endswith(('-answer.json', '-resolved.json')):
+            if path.name.endswith(('-answer.json', '-resolved.json', '-automation.json')):
                 continue
             value = _load(path)
             if value.get('binding') != bound:
@@ -158,7 +161,11 @@ def questions(root, pending_only=False):
             resolution = folder / (value['id'] + '-resolved.json')
             value['answer'] = _load(answer_path) if answer_path.exists() else None
             value['resolved'] = _load(resolution) if resolution.exists() else None
-            if not pending_only or not (value['answer'] or value['resolved']):
+            automation = folder / (value['id'] + '-automation.json')
+            value['automation'] = _load(automation) if automation.exists() else {}
+            from browser_workflow import enabled
+            delegated = enabled(root) and value['automation'].get('status') == 'assigned'
+            if not pending_only or not (value['answer'] or value['resolved'] or delegated):
                 result.append(value)
         return result
 
@@ -210,7 +217,7 @@ def replies(root, task):
 
 
 def manual_state(root, task):
-    records = [{'id': q['id'], 'check': q['manual_check'], 'answer': q['answer']}
+    records = [{'id': q['id'], 'check': q['manual_check'], 'answer': q['answer'], 'automation': q.get('automation', {})}
                for q in questions(root) if q.get('manual_check')
                and (task == 'integration' or q['task'] == task)]
     return fingerprint(records) if records else None
@@ -378,7 +385,9 @@ the requirement satisfied. This exception does not apply to required proof or ma
 Otherwise finish independent permitted work, then return JSON
 {"operator_question":{"topic":"stable-short-topic","question":"clear question in Russian",
 "options":["choice 1","choice 2"],"details":"why this answer is needed"}}.
-When browser automation is unavailable and manual verification is chosen, use the SAME operator_question
+Use installed browser tools for reproducible UI checks before asking the operator to test.
+A manual_check is assigned to the executor when automatic browser checks are enabled; it is not a human answer.
+After a recorded current browser failure, use the SAME operator_question
 with an additional "manual_check" object:
 {"url":"http://actual-stand/page","artifact":"actual build/manifest identity",
 "requirements":["actual requirement ID"],"preconditions":"role, test record and necessary setup",
@@ -390,7 +399,8 @@ Ask for the failing step and observation on mismatch. If screenshots are require
 which views to capture and where to save them; a yes answer does not create image evidence.
 An agreement to check later is NOT a successful check. Honor an existing decision for final manual
 control: finish independent work, keep the obligation open, and prepare this question at final integration.
-Do not retry denied browser automation after that decision. Final review must inspect recorded manual
+Do not retry an actual denied action without changed conditions. A historic tooling limitation alone
+does not prohibit a newly available approved browser; preserve genuine human decisions. Final review must inspect recorded manual
 results and any required artifacts, retaining gaps and failures rather than treating permission as proof.
 Use the same topic for the same decision across attempts. A question is not a failure or acceptance.
 For a necessary repair outside task.writes, report an explicit request:

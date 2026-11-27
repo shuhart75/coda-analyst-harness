@@ -14,6 +14,42 @@ from workspace import clone_snapshot, git, snapshot
 
 
 class ExecutionPortfolioTests(unittest.TestCase):
+    def test_delegated_check_runs_browser_and_reaches_independent_review_without_answer(self):
+        import browser_workflow as browser
+        import operator_questions as oq
+        from test_browser_workflow import CHECK
+        self.primary_only = True
+        browser.activate(self.runner)
+        check = {**CHECK, 'requirements': ['REQ-BE']}
+        def session(root, *args, **kwargs):
+            result = self.session(root, *args, **kwargs)
+            if len(self.calls) == 1:
+                result['text'] = json.dumps({'operator_question': {'topic': 'page', 'question': 'Check page?',
+                    'manual_check': check}})
+                return result
+            image = Path(root)/'backend/screen.png'
+            image.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
+            events = [{'type': 'system', 'subtype': 'init', 'cwd': str(root), 'model': kwargs['model']}]
+            for i, (name, arguments) in enumerate((('navigate', {'url': check['url']}),
+                    ('snapshot', {}), ('take_screenshot', {'filename': 'backend/screen.png'}))):
+                events.extend([{'message': {'content': [{'type': 'tool_use', 'id': str(i),
+                    'name': 'tool_call', 'input': {'name': 'mcp__playwright__browser_'+name, 'arguments': arguments}}]}},
+                    {'message': {'content': [{'type': 'tool_result', 'tool_use_id': str(i), 'is_error': False}]}}])
+            Path(result['events_path']).write_text('\n'.join(json.dumps(e) for e in events))
+            return result
+        def review(root, *args, **kwargs):
+            captures = read(Path(root)/'.review-input/browser-captures.json')
+            self.assertEqual(captures[0]['screenshot'], 'backend/screen.png')
+            self.assertIn('browser_checks', read(Path(root)/'.review-input/task.json'))
+            return self.review(root, *args, **kwargs)
+        with patch('bootstrap.app_root', return_value=self.runner.root/'app'):
+            accepted = self.run_task(session=session, review=review)
+        self.assertEqual(accepted['status'], 'accepted')
+        key = oq.questions(self.runner.root)[0]['id']
+        self.assertIsNone(oq.response(self.runner.root, key))
+        self.assertEqual(oq.questions(self.runner.root, pending_only=True), [])
+        self.assertEqual((len(self.calls), self.review_count), (2, 1))
+
     def test_deferred_decision_parks_without_code_retry_or_duplicate_question(self):
         import operator_questions as oq
         self.primary_only = True
