@@ -10,7 +10,7 @@ import policy
 class PermissionsTests(unittest.TestCase):
     def test_browser_observation_is_executor_only_and_preserves_denials(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             for role in ('execute', 'review'):
                 folder = root / role
                 (folder / '.gigacode').mkdir(parents=True)
