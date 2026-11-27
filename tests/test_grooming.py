@@ -526,6 +526,37 @@ class GroomingTrackerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'must be Story'):
             self.op('claim', confirmation='b'*64)
 
+    def links(self, *parents):
+        key = 'RSCON-123'
+        edges = '\n'.join(f'{number}. {parent} **decomposition** -> {key}'
+                          for number, parent in enumerate(parents, 1))
+        text = f'Links for {key} ({len(parents)} total, page 0, has_next: False)\n\n' + edges
+        path = self.root / ('links-' + '-'.join(parents) + '.json')
+        path.write_text(json.dumps({'result': [{'type': 'text', 'text': text}]}))
+        return {'links_responses': [path], 'links_text_pointer': '/result/0/text'}
+
+    def test_epic_is_confirmed_through_link_list_when_card_has_no_epic_field(self):
+        mapping = json.loads(self.mapping.read_text())
+        del mapping['epic_key']
+        self.mapping.write_text(json.dumps(mapping))
+        data = json.loads(self.evidence.read_text())
+        del data['data']['epic_key']
+        self.evidence.write_text(json.dumps(data))
+        self.op('claim', confirmation='b'*64)
+        with self.assertRaisesRegex(ValueError, 'подтверждённым эпиком'):
+            self.op('bind', evidence=self.evidence, mapping=self.mapping,
+                    **self.links('RSCON-77'))
+        result = self.op('bind', evidence=self.evidence, mapping=self.mapping,
+                         **self.links('RSCON-77', 'RSCON-10'))
+        self.assertEqual(result['key'], 'RSCON-123')
+        self.assertEqual(self.op('status')['next_action'], 'complete')
+
+    def test_epic_field_contradicting_link_list_blocks_binding(self):
+        self.op('claim', confirmation='b'*64)
+        with self.assertRaisesRegex(ValueError, 'противоречит link.list'):
+            self.op('bind', evidence=self.evidence, mapping=self.mapping,
+                    **self.links('RSCON-77'))
+
     def test_existing_empty_card_fields_are_valid_and_line_endings_are_not_a_gate(self):
         self.task['tracker_key'] = 'RSCON-123'
         self.write_evidence(description=None, labels=None)
@@ -554,6 +585,64 @@ class GroomingTrackerTests(unittest.TestCase):
         self.write_evidence(type='Task')
         with self.assertRaisesRegex(ValueError, 'Created task must be Story'):
             self.op('resolve', evidence=self.evidence, mapping=self.mapping)
+
+
+    def without_epic(self):
+        mapping = json.loads(self.mapping.read_text())
+        mapping.pop('epic_key', None)
+        self.mapping.write_text(json.dumps(mapping))
+        data = json.loads(self.evidence.read_text())
+        data['data'].pop('epic_key', None)
+        self.evidence.write_text(json.dumps(data))
+
+    def test_link_evidence_is_hashed_and_resolve_is_repeatable(self):
+        self.without_epic()
+        links = self.links('RSCON-10', 'RSCON-77')
+        path = links['links_responses'][0]
+        raw = path.read_bytes()
+        self.op('claim', confirmation='b'*64)
+        bound = self.op('bind', evidence=self.evidence, mapping=self.mapping, **links)
+        self.assertEqual(bound['links_evidence'], {str(path): grooming.digest(raw)})
+        self.assertEqual(bound['links_text_pointer'], '/result/0/text')
+        for _ in range(2):
+            result = self.op('resolve', evidence=self.evidence, mapping=self.mapping, **links)
+            self.assertEqual(result['next_action'], 'complete')
+            self.assertEqual(result['links_evidence'], bound['links_evidence'])
+        self.assertEqual(path.read_bytes(), raw)
+        self.assertEqual(self.op('claim', confirmation='b'*64)['status'], 'already-bound')
+
+    def test_wrong_card_epic_cannot_hide_among_other_parents(self):
+        self.write_evidence(epic_key='RSCON-77')
+        self.op('claim', confirmation='b'*64)
+        with self.assertRaisesRegex(ValueError, 'epic_key'):
+            self.op('bind', evidence=self.evidence, mapping=self.mapping,
+                    **self.links('RSCON-77', 'RSCON-10'))
+
+    def test_missing_other_task_reversed_and_incomplete_links_do_not_bind(self):
+        self.without_epic()
+        self.op('claim', confirmation='b'*64)
+        with self.assertRaisesRegex(ValueError, 'Нет поля эпика'):
+            self.op('bind', evidence=self.evidence, mapping=self.mapping)
+        links = self.links('RSCON-10')
+        path = links['links_responses'][0]
+        original = path.read_text()
+        variants = [original.replace('RSCON-123', 'RSCON-999'),
+                    original.replace('RSCON-10 **decomposition** -> RSCON-123',
+                                     'RSCON-123 **decomposition** -> RSCON-10'),
+                    original.replace('**decomposition**', '**release**'),
+                    original.replace('has_next: False', 'has_next: True'),
+                    original.replace('1 total', '2 total')]
+        for raw in variants:
+            with self.subTest(raw=raw):
+                path.write_text(raw)
+                with self.assertRaises(ValueError):
+                    self.op('bind', evidence=self.evidence, mapping=self.mapping, **links)
+                self.assertEqual(self.op('status')['next_action'], 'reconcile-required')
+        path.write_text(original)
+        other = self.links('RSCON-77')['links_responses'][0]
+        with self.assertRaisesRegex(ValueError, 'Противоречивые'):
+            self.op('bind', evidence=self.evidence, mapping=self.mapping,
+                    links_responses=[path, other], links_text_pointer='/result/0/text')
 
 
 class StoryDeliveryContentTests(unittest.TestCase):

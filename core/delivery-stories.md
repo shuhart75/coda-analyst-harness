@@ -94,10 +94,10 @@ preview воспроизводимо формирует ссылки и пром
 ```text
 python3 scripts/grooming_tracker.py preview PROJECT_ROOT DELIVERY --web-url URL [--task-keys FILE]
 python3 scripts/grooming_tracker.py status PROJECT_ROOT DELIVERY --web-url URL [--task-keys FILE]
-python3 scripts/grooming_tracker.py resolve PROJECT_ROOT DELIVERY --web-url URL --task ID --evidence RAW --mapping POINTERS [--task-keys FILE]
+python3 scripts/grooming_tracker.py resolve PROJECT_ROOT DELIVERY --web-url URL --task ID --evidence RAW --mapping POINTERS [--links-response RAW_LINKS --links-text-pointer PTR] [--task-keys FILE]
 python3 scripts/grooming_tracker.py claim PROJECT_ROOT DELIVERY --web-url URL --task ID --confirmed-batch HASH [--task-keys FILE]
 python3 scripts/grooming_tracker.py record-created PROJECT_ROOT DELIVERY --web-url URL --task ID --evidence RAW --mapping POINTERS [--task-keys FILE]
-python3 scripts/grooming_tracker.py bind PROJECT_ROOT DELIVERY --web-url URL --task ID --evidence RAW --mapping POINTERS [--task-keys FILE]
+python3 scripts/grooming_tracker.py bind PROJECT_ROOT DELIVERY --web-url URL --task ID --evidence RAW --mapping POINTERS [--links-response RAW_LINKS --links-text-pointer PTR] [--task-keys FILE]
 ```
 
 HASH берётся из текущего preview. Это проверка неизменности подготовленного
@@ -144,6 +144,19 @@ load_testing_required. Для новой задачи estimate нужен тол
 ID карточки и записи справочника, затем её значение; хеш ответа справочника
 сохраняется в журнале. Это позволяет проверять нативные enum/reference-поля
 без требования несуществующего текстового поля и без исправления сырого ответа.
+
+Если SberTrack не отдаёт эпик полем карточки, а возвращает его отдельным
+`link.list` как `EPIC **decomposition** -> TASK`, не перебирай вымышленные поля
+и не дописывай их в сырой ответ. Передай дословные ответы `link.list` через
+`--links-response` и указатель на текст ответа через `--links-text-pointer`
+(например `/result/0/text`); подтверждённый эпик должен присутствовать среди
+родителей `decomposition` этой карточки. Усечённый, многостраничный,
+противоречивый ответ или отсутствие подтверждённого эпика блокируют привязку.
+Несколько родителей `decomposition` допустимы: часть из них может быть
+документами требований, а не эпиками. Если карточка также содержит поле эпика,
+оно должно совпадать с согласованным эпиком и связями. Сохраняй исходные ответы
+MCP без изменений; журнал записывает хеш каждого ответа `link.list` и указатель
+на его текст при `resolve` и `bind`. Не собирай ответ вручную по желаемым связям.
 Короткого ответа создания с одним ключом недостаточно для подтверждения полей.
 
 claim/bind защищает от повторного создания после неизвестного исхода. При

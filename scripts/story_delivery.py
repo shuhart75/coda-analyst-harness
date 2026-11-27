@@ -46,24 +46,25 @@ def delivery_content(task, delivery, revision, commit, web_url, request_id):
     link = lambda path: web_url.rstrip('/') + '?path=' + quote(path, safe='')
     links = {'revision_url': link(root), 'general_requirements_url': link(root + '/requirements.md'),
              'task_folder_url': link(root + '/tasks/' + task['id'])}
-    prompt = (
-        f"Начни SDD по задаче {task['id']} «{task['summary']}» поставки {delivery}, редакция {revision:03d}.\n"
-        f"Источник: {links['revision_url']}\nКоммит публикации documents: {commit}.\n"
+    prompt = '\n\n'.join([
+        f"Начни SDD по задаче {task['id']} «{task['summary']}» поставки {delivery}, редакция {revision:03d}.",
+        f"Источник: {links['revision_url']}",
+        f"Коммит публикации documents: {commit}.",
         f"Папка входа: {root}. Прочитай общие requirements.md, tasks/grooming.json, "
-        f"tasks/{task['id']}/requirements.md, sdd/package.json и относящиеся к задаче материалы.\n"
-        f"Изменения SDD этой задачи: {', '.join(task['sdd_changes']) or 'указаны в документе задачи'}.\n"
+        f"tasks/{task['id']}/requirements.md, sdd/package.json и относящиеся к задаче материалы.",
+        f"Изменения SDD этой задачи: {', '.join(task['sdd_changes']) or 'указаны в документе задачи'}.",
         "Сначала прочитай инструкции рабочего кодового репозитория и доступных skills SDD. "
         "Для проверки входа используй инструкции DOCUMENTS-WORKFLOW.md и SDD-WORKFLOW.md "
         f"в requirements-exchange/ и manifest.json в {packet}. "
         f"Параметры sdd-receive.py: --packet <локальный documents>/{packet} --revision {revision}; "
-        "code-root определи по рабочему репозиторию. Вначале выполни dry-run.\n"
+        "code-root определи по рабочему репозиторию. Вначале выполни dry-run.",
         "После успешной проверки продолжи штатный процесс SDD этой задачи: приём входа, "
         "технический дизайн и шаги реализации с предусмотренными разработческим процессом подтверждениями. "
         "Готовые proposal/spec не генерируй заново. Сохрани границы задачи и зависимости; "
         "общий пакет не поручает реализацию соседних задач. Приём общего пакета не означает "
         "разрешения изменять чужие changes. Не меняй опубликованную редакцию и не создавай дубли Story. "
-        "Для этой передачи не требуются receipt/returns от разработки."
-    )
+        "Для этой передачи не требуются receipt/returns от разработки.",
+    ])
     start, end = markers(request_id)
     description = '\n\n'.join([
         start, task['description'], 'Критерий приёмки: ' + task['acceptance'],
