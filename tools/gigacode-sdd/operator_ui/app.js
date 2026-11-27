@@ -221,6 +221,8 @@ function renderDiagnostics(m){
   const reports=m.operations.filter(op=>op.action==='diagnostics'&&op.config===selected?.config);
   const pending=pendingDiagnostic(), requested=pending?.selected===m.selected?pending:null;
   const op=requested?reports.find(item=>item.id===requested.id):reports[0];
+  const signature=JSON.stringify([m.selected,op?.id,op?.status,op?.artifact,op?.created_at,op?.error,requested?.id,diagnosticDownloads.get(op?.id)]);
+  if(panel.dataset.signature===signature)return;panel.dataset.signature=signature;
   panel.hidden=!op&&!requested;panel.replaceChildren();
   if(panel.hidden)return;
   if(!op){panel.append(node('strong',null,'Запрашиваем диагностику…'),node('p','muted','Ожидаем подтверждение сервера. Повторное нажатие не требуется.'));return;}
