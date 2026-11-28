@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 import review_resolution
+import recovery_incidents
 from dynamic_scope import ScopeWait
 
 from workspace import clone_snapshot, export_patch, snapshot, SnapshotChanged
@@ -537,7 +538,7 @@ def _recover_cancelled_receipt_fatal(runner, task, candidates, folder, scope, fa
                     'для этой попытки требуется новое исполнение с проверками и ревью')
 
 
-def _recover_permission_fatal(runner, task, candidates, folder, scope):
+def _recover_permission_fatal_action(runner, task, candidates, folder, scope):
     """Archive only the old denial gate after exact audited invocation revalidation."""
     from controller import Blocked, read, digest, save
     path = folder/'fatal.json'
@@ -604,7 +605,107 @@ def _recover_permission_fatal(runner, task, candidates, folder, scope):
             return
     raise Blocked('Saved permission failure has no matching usable execution receipt; inspect ' + str(path))
 
+def _recover_permission_fatal(runner, task, candidates, folder, scope):
+    from controller import read, digest
+    fatal = folder/'fatal.json'
+    if not fatal.exists():
+        return
+    recovery_incidents.run_verified(runner.root, scope=scope, task_id=task['id'], model=None,
+        stage='recovery', cause='saved-gate', action='revalidate-saved-gate', occurrence=digest(fatal),
+        evidence={'fatal': str(fatal), 'sha256': digest(fatal), 'failure': read(fatal)},
+        operation=lambda: _recover_permission_fatal_action(runner, task, candidates, folder, scope),
+        verify=lambda result: {'kind': 'gate-revalidated', 'next': 'mandatory-checks-and-review'}
+                              if not fatal.exists() else None)
+
+
+class _RetryPortfolio(Exception):
+    """Internal continuation after all workers stopped and recovery was verified."""
+
+
+def _automatic_fatal_recovery(runner, task, candidates, folder, scope, fatal):
+    """One attempt per fatal receipt, at most three per scope; never retry cleanup.
+
+    Unlike model/step retries this path previously had no budget because it
+    immediately stopped the portfolio. Its durable guard survives restarts.
+    """
+    from controller import read, save, digest
+    import operational_recovery
+    path = folder/'fatal.json'
+    if runner.stop.is_set() or not path.is_file() or path.is_symlink():
+        return False
+    saved = read(path)
+    failures = [saved, *saved.get('related_failures', [])]
+    permission = lambda item: (item.get('type') == 'Blocked' and
+        str(item.get('error', '')).startswith('Permission preflight/runtime denial; inspect '))
+    if not (_cancelled_receipt_failure(saved)
+            or all(operational_recovery.eligible(item) for item in failures)
+            or all(permission(item) for item in failures)):
+        return False
+    guard_path = folder/'automatic-recovery.json'
+    if guard_path.is_symlink():
+        return False
+    try:
+        guard = read(guard_path) if guard_path.exists() else {'scope': scope, 'attempts': []}
+    except (OSError, ValueError):
+        return False
+    if not isinstance(guard, dict) or guard.get('scope') != scope or not isinstance(guard.get('attempts'), list):
+        return False
+    identity = digest(path)
+    if any(not isinstance(a, dict) for a in guard['attempts']):
+        return False
+    repeated = any(a.get('fatal_sha256') == identity for a in guard['attempts'])
+    if len(guard['attempts']) >= 3 or repeated:
+        reason = ('этот же сбой уже проходил автоматическое восстановление' if repeated
+                  else 'исчерпаны три автоматические попытки для этой области работы')
+        recovery_incidents.begin(runner.root, scope=scope, task_id=task['id'], model=None,
+            stage='recovery', cause='saved-gate', action='revalidate-saved-gate',
+            occurrence=['automatic-limit', identity, len(guard['attempts'])],
+            attempt=max(1, len(guard['attempts'])), exhausted=True,
+            evidence={'reason': reason, 'fatal': str(path), 'fatal_sha256': identity,
+                      'guard': str(guard_path), 'attempts_used': len(guard['attempts']), 'attempt_limit': 3})
+        runner.progress(task['id'] + ': автоматическое восстановление остановлено: ' + reason
+                        + '. Исходная ошибка и результаты попыток сохранены.')
+        return False
+    attempt = {'fatal_sha256': identity, 'status': 'running', 'started_at': time.time()}
+    guard['attempts'].append(attempt)
+    try:
+        save(guard_path, guard)  # Required retry authority, independent of telemetry.
+    except OSError:
+        return False
+    runner.progress(task['id'] + ': проверяю возможность автоматического восстановления; '
+                    'результат задачи ещё не принят')
+    try:
+        _recover_permission_fatal(runner, task, candidates, folder, scope)
+    except Exception as exc:
+        attempt.update(status='failed', error=str(exc), completed_at=time.time())
+        try:
+            save(guard_path, guard)
+        except OSError:
+            pass  # The durable running attempt already spent this budget.
+        return False  # Preserve original failure, guards and complete evidence.
+    attempt.update(status='verified', completed_at=time.time())
+    try:
+        save(guard_path, guard)
+    except OSError:
+        pass  # The durable running attempt already spent this budget.
+    runner.progress(task['id'] + ': причина остановки перепроверена; продолжаю работу '
+                    'с обязательными проверками и ревью. Ваше участие не требуется')
+    return True
+
+
 def execute_task(runner, task, record):
+    # Each pass reads persisted candidates again. No old in-memory result is
+    # accepted after recovery, and a user cancellation always terminates the loop.
+    for attempt in range(4):
+        try:
+            return _execute_task_once(runner, task, record)
+        except _RetryPortfolio:
+            if attempt == 3:
+                from controller import Blocked
+                raise Blocked('Automatic portfolio recovery budget exhausted')
+
+
+def _execute_task_once(runner, task, record):
     from controller import Blocked, Interrupted, RetryableSessionError, digest, read, save
     import operator_questions as questions
     import task_acceptance
@@ -622,14 +723,28 @@ def execute_task(runner, task, record):
     folder = runner.root / 'execution-cycles' / scope
     folder.mkdir(parents=True, exist_ok=True)
     fatal_path = folder/'fatal.json'
-    from snapshot_recovery import recover
-    recover(runner, folder, scope)
-    runner.scopes.recover_fatal(folder)
-    from dependency_recovery import recover_static_gate
-    recover_static_gate(runner, folder, scope)
-    if fatal_path.exists():
-        import inventory_recovery
-        inventory_recovery.recover(runner, folder, scope, record)
+    gate_incident = None
+    if fatal_path.is_file() and not fatal_path.is_symlink():
+        gate_incident = recovery_incidents.begin(runner.root, scope=scope, task_id=task['id'], model=None,
+            stage='recovery', cause='saved-gate', action='revalidate-saved-gate', occurrence=digest(fatal_path),
+            evidence={'fatal': str(fatal_path), 'sha256': digest(fatal_path), 'failure': read(fatal_path)})
+        recovery_incidents.transition(runner.root, gate_incident, 'running')
+    try:
+        from snapshot_recovery import recover
+        recover(runner, folder, scope)
+        runner.scopes.recover_fatal(folder)
+        from dependency_recovery import recover_static_gate
+        recover_static_gate(runner, folder, scope)
+        if fatal_path.exists():
+            import inventory_recovery
+            inventory_recovery.recover(runner, folder, scope, record)
+    except Exception as exc:
+        recovery_incidents.transition(runner.root, gate_incident, 'failed',
+            {'kind': 'gate-revalidation-failed', 'reason': str(exc), 'task_accepted': False})
+        raise
+    if gate_incident and not fatal_path.exists():
+        recovery_incidents.transition(runner.root, gate_incident, 'verified',
+            {'kind': 'gate-revalidated', 'next': 'mandatory-checks-and-review', 'task_accepted': False})
     if fatal_path.exists():
         import operational_recovery
         if fatal_path.is_symlink():
@@ -640,6 +755,8 @@ def execute_task(runner, task, record):
                         (fatal.get('type') == 'Blocked' and str(fatal.get('error', '')).startswith(
                             'Permission preflight/runtime denial; inspect ')))
                 or any(not (folder/fingerprint(model)[:16]/'candidate.json').is_file() for model in models)):
+            recovery_incidents.transition(runner.root, gate_incident, 'failed',
+                {'kind': 'no-eligible-guarded-handler', 'task_accepted': False})
             raise Blocked('Preserved safety failure in execution portfolio; inspect ' + str(fatal_path))
     # Prepare both copies before either model changes its source. Preserve a
     # legacy in-progress workspace as the first candidate, including its WIP.
@@ -850,6 +967,7 @@ def execute_task(runner, task, record):
             run_status.candidate(runner, task, value)
 
         def interrupted():
+            recovery_incidents.suspend(runner.root, value, 'interrupted', 'Execution was cancelled; recovery is not success')
             value['status'] = 'interrupted'
             persist()
             raise Interrupted('Interrupted; execution candidate and completed checks preserved')
@@ -872,6 +990,13 @@ def execute_task(runner, task, record):
                 correction['dispute_id'] = value['review_resolution'].get('active_id')
             correction['sha256'] = fingerprint(correction)
             value['history'].append(correction)
+            incident = recovery_incidents.begin(runner.root, scope=scope, task_id=task['id'],
+                model=value['model'], stage=value['stage'], cause=cause, action=decision['action'],
+                occurrence=correction['sha256'], attempt=retry['step_failures'],
+                evidence={'failure': detail, 'retry': retry, 'candidate': str(path)}, exhausted=retry['exhausted'])
+            previous_incident = value.setdefault('recovery_incidents', {}).get(retry['step'])
+            recovery_incidents.supersede(runner.root, previous_incident, incident)
+            value['recovery_incidents'][retry['step']] = incident
             if decision['instruction_change']:
                 value['feedback'] = detail
             if decision['action'] == 'retry-later' and not retry['exhausted']:
@@ -920,6 +1045,8 @@ def execute_task(runner, task, record):
             value['review'] = review
             if value['history']:
                 value['history'][-1]['result'] = 'verified'
+            recovery_incidents.finish(runner.root, value, 'accepted',
+                {'review': review.get('events_path'), 'patch_sha256': value.get('patch', {}).get('sha256')})
             value.update(status='accepted', stage='accepted', accepted_at=time.time(), reviewer_model=reviewer_model)
             persist()
             from verification_checkpoint import resolve_snapshot_question
@@ -928,6 +1055,7 @@ def execute_task(runner, task, record):
                             + ' прошёл проверки и независимое ревью ' + reviewer_model)
             return value
 
+        recovery_incidents.pending(runner.root, value)
         while True:
             pending_wait = value.get('recovery_wait')
             if pending_wait:
@@ -961,6 +1089,7 @@ def execute_task(runner, task, record):
                 value.pop('recovered_review', None)
                 value.pop('review_draft', None)
             value['status'] = 'running'
+            recovery_incidents.pending(runner.root, value, running=True)
             persist()
             try:
                 if value.get('service_pending'):
@@ -1166,6 +1295,8 @@ def execute_task(runner, task, record):
                         except (ValueError, KeyError, TypeError) as exc:
                             fail('model', str(exc))
                             continue
+                        recovery_incidents.finish(runner.root, value, 'execution-validated',
+                            {'events_path': result.get('events_path')})
                         dispute = review_resolution.request(result.get('text', '')) if not disposition['incomplete'] else None
                         if dispute is not None:
                             try:
@@ -1214,6 +1345,8 @@ def execute_task(runner, task, record):
                                      else 'checks')
                             fail(cause, failed, len(failed))
                             continue
+                        recovery_incidents.finish(runner.root, value, 'checks-passed',
+                            {'logs': [c['log'] for c in checks], 'checked_scope': value['checked_scope']})
                         value['stage'] = 'review' if checked_task['checks'] == task['checks'] else 'checks'
                         persist()
                         from verification_checkpoint import resolve_snapshot_question
@@ -1273,6 +1406,8 @@ def execute_task(runner, task, record):
                             'input_binding': fingerprint({'snapshot': value.get('workspace_snapshot'),
                                                           'checks': value.get('checks')})}
                         raise
+                    recovery_incidents.finish(runner.root, value, 'review-validated',
+                        {'events_path': review.get('events_path'), 'verdict': review.get('verdict')})
                     value.pop('review_draft', None)
                     if review.get('events_path'):
                         value['evidence_files'][review['events_path']] = digest(review['events_path'])
@@ -1375,7 +1510,14 @@ def execute_task(runner, task, record):
                     save(report, read(exc.report))
                     value.setdefault('snapshot_conflicts', []).append(str(report))
                     try:
-                        prepare(runner, value, path, force=True)
+                        recovery_incidents.run_verified(runner.root, scope=scope, task_id=task['id'],
+                            model=value['model'], stage=value['stage'], cause='snapshot-capture',
+                            action='recapture-checkpoint', occurrence=digest(report), evidence={'report': str(report)},
+                            operation=lambda: prepare(runner, value, path, force=True),
+                            verify=lambda result: {'kind': 'checkpoint-prepared', 'candidate': str(path),
+                                                   'next': 'mandatory-checks-and-review'}
+                                    if result and value.get('stage') == 'checks'
+                                       and value.get('verification_checkpoint') and not value.get('checks') else None)
                     except SnapshotChanged:
                         # Rewrites/rotations require a coherent recapture, not an
                         # exemption by filename. Keep the existing bounded budget.
@@ -1416,6 +1558,7 @@ def execute_task(runner, task, record):
                                                               'checks': value.get('checks')})}
                     fail(kind, str(exc))
                     continue
+                recovery_incidents.suspend(runner.root, value, 'failed', exc)
                 raise
 
     winner = None
@@ -1429,6 +1572,7 @@ def execute_task(runner, task, record):
         from operational_recovery import failure_record
         def priority(error):
             return 0 if isinstance(error, OperationalBlocked) else 1 if isinstance(error, OSError) else 2
+        recovery_incidents.suspend(runner.root, candidates[index][1], 'failed', exc)
         fatal_errors.append({**failure_record(exc, scope), 'model': candidates[index][1]['model'],
                              'stage': candidates[index][1].get('stage')})
         if fatal is None or priority(exc) > priority(fatal):
@@ -1518,6 +1662,8 @@ def execute_task(runner, task, record):
         # not permanently promoted to a safety violation.
         failure_path = 'operational.json' if isinstance(fatal, OperationalBlocked) else 'fatal.json'
         save(folder / failure_path, {**failure_record(fatal, scope), 'related_failures': fatal_errors})
+        if failure_path == 'fatal.json' and _automatic_fatal_recovery(runner, task, candidates, folder, scope, fatal):
+            raise _RetryPortfolio()
         raise fatal
     if runner.stop.is_set():
         raise Interrupted('Interrupted; all implementation variants preserved')

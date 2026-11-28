@@ -73,6 +73,8 @@ class ConsoleProgress(Progress):
     def _value(self):
         from run_status import read_projection
         current = dict(self.value or {})
+        from recovery_incidents import context as recovery_context
+        current['recovery'] = recovery_context(self.log_path.parent.parent)
         for key, filename in (('observation', 'latest.json'), ('observer_health', 'health.json')):
             path = self.log_path.parent.parent/'observer'/filename
             if path.is_file():

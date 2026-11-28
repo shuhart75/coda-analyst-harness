@@ -55,6 +55,45 @@ class ObserverTests(unittest.TestCase):
         with patch('run_status.snapshot', return_value=snapshot or self.snapshot()):
             return observers.packet(self.root, previous)
 
+    def test_recovery_is_evidence_and_triggers_observation(self):
+        snapshot = self.snapshot()
+        first = self.packet(snapshot)
+        snapshot['recovery'] = {'incidents': [{'id': 'incident', 'task_id': 'task',
+            'status': 'pending', 'action': 'retry-later', 'attempt': 1,
+            'cause': 'timeout', 'reason': 'No reply', 'evidence': {'receipt': 'saved.json'}}]}
+        pending = self.packet(snapshot, first)
+        self.assertNotEqual(observers.fingerprint(first), observers.fingerprint(pending))
+        self.assertEqual(pending['recovery']['incidents'][0]['status'], 'pending')
+        snapshot['recovery']['incidents'][0].update(status='verified', verification={'checks': 'passed'})
+        verified = self.packet(snapshot, pending)
+        self.assertNotEqual(observers.fingerprint(pending), observers.fingerprint(verified))
+        self.assertEqual(verified['previous']['recovery']['incidents'][0]['status'], 'pending')
+        self.assertIn('passed', verified['recovery']['incidents'][0]['verification'])
+
+    def test_recovery_packet_is_bounded_and_preserves_unavailability(self):
+        incident = {'id': 'test', 'evidence': {'text': 'x'*100000}, 'reason': 'x'*100000,
+                    'verification': {'output': 'x'*100000}, 'history': ['x'*100000]}
+        packet = observers.recovery_packet({'incidents': [incident]*24, 'unavailable': True})
+        self.assertEqual(packet['omitted'], 12)
+        self.assertTrue(packet['unavailable'])
+        self.assertLess(len(json.dumps(packet)), 32000)
+        self.assertNotIn('history', packet['incidents'][0])
+
+    def test_full_recovery_history_does_not_overflow_observer_packet(self):
+        snapshot = self.snapshot()
+        snapshot['operations'] = [{'task_id': 'task', 'events_path': str(self.logs/'events.jsonl')}] * 4
+        incident = {'id': 'test', 'evidence': {'text': 'x'*2000}, 'reason': 'x'*1000,
+                    'verification': {'output': 'x'*2000}}
+        snapshot['recovery'] = {'incidents': [incident]*24}
+        events = [{'input_excerpt': 'x'*600, 'result_excerpt': 'x'*1000}]*20
+        with patch.object(observers, 'recent_events', return_value={'events': events}), \
+                patch.object(observers.observer_findings, 'packet_context', return_value={'items': ['x'*15000]}):
+            packet = self.packet(snapshot)
+        self.assertTrue(packet['packet_truncated'])
+        self.assertEqual(len(packet['recovery']['incidents']), 4)
+        self.assertEqual(packet['recovery']['omitted'], 20)
+        self.assertLess(len(json.dumps(packet, ensure_ascii=False)), 64000)
+
     def fake_transport(self, *, tools=None, response=None, reported_model=None):
         calls = []
         lock = threading.Lock()

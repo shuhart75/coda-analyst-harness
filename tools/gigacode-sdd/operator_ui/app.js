@@ -58,6 +58,31 @@ function renderSummary(value) {
   $('answer-shortcut').hidden=!count;
   $('log-path').textContent=run.log_path;
 }
+function renderRecovery(value){
+  const recovery=value.recovery||{}, list=$('recovery-list');
+  const signature=JSON.stringify(recovery);
+  if(list.renderSignature===signature)return;
+  list.renderSignature=signature;
+  const opened=new Set([...list.querySelectorAll('details[open]')].map(row=>row.dataset.incident));
+  const previous=new Set([...list.querySelectorAll('details[data-incident]')].map(row=>row.dataset.incident));
+  list.replaceChildren();
+  const items=recovery.incidents||[];
+  $('recovery-panel').hidden=!items.length&&!recovery.unavailable&&!recovery.truncated;
+  $('recovery-note').textContent=recovery.unavailable||recovery.truncated?'История неполна. Показаны доступные записи; отсутствие других записей не подтверждает успех.':'Контроллер проверяет результат каждого действия. Восстановление само по себе не означает приёмку задачи.';
+  for(const [index,item] of items.entries()){
+    const details=node('details','answer-item');details.dataset.incident=item.id;
+    details.open=opened.has(item.id)||(!previous.has(item.id)&&index===0);
+    details.append(node('summary',null,(item.task_id||'Запуск')+' · '+item.status_label),
+      node('p','context','Причина: '+item.reason),
+      node('p','context','Действие: '+item.action_label),
+      node('p','muted','Попытка '+(item.attempt??'?')+(item.model?' · '+item.model:'')));
+    if(item.updated_at){const stamp=Date.parse(item.updated_at);details.append(node('p','muted','Обновлено: '+(Number.isFinite(stamp)?new Date(stamp).toLocaleString('ru-RU'):'время неизвестно')));}
+    if(item.status==='pending'||item.status==='running')details.append(node('p','context','Результат восстановления ещё не подтверждён.'));
+    const proof=node('details');proof.append(node('summary',null,'Основания и результат проверки'),node('pre',null,JSON.stringify({evidence:item.evidence,verification:item.verification},null,2)));details.append(proof);
+    if(item.history?.length){const history=node('details');history.append(node('summary',null,'Предыдущие действия'),node('pre',null,JSON.stringify(item.history,null,2)));details.append(history);}
+    list.append(details);
+  }
+}
 function renderRoute(value) {
   const browserChecks=value.browser_checks||[], browserList=$('browser-check-list');
   const expandedChecks=new Set([...browserList.querySelectorAll('details[open]')].map(row=>row.dataset.checkId));
@@ -238,7 +263,7 @@ function renderAnswers(value){
 }
 async function refresh(){
   if(refreshing)return;refreshing=true;$('refresh').disabled=true;
-  try{const next=await api('/api/state');if(latest&&latest.run.key!==next.run.key){cards.clear();$('question-list').replaceChildren();}latest=next;renderManagement(latest);renderSummary(latest);renderRoute(latest);renderSessions(latest);renderObservers(latest);renderQuestions(latest);renderAnswers(latest);
+  try{const next=await api('/api/state');if(latest&&latest.run.key!==next.run.key){cards.clear();$('question-list').replaceChildren();}latest=next;renderManagement(latest);renderSummary(latest);renderRecovery(latest);renderRoute(latest);renderSessions(latest);renderObservers(latest);renderQuestions(latest);renderAnswers(latest);
     $('connection-error').hidden=true;$('connection').textContent='Подключено';$('connection-dot').classList.add('connected');$('updated').textContent='Получено '+new Date().toLocaleTimeString('ru-RU');
   }catch(error){$('connection-error').hidden=false;$('connection-error').textContent=error.message+' Данные на экране не обновляются.';$('connection').textContent='Нет связи';$('connection-dot').classList.remove('connected');}
   finally{refreshing=false;$('refresh').disabled=false;}

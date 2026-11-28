@@ -55,6 +55,21 @@ class BundleTests(unittest.TestCase):
             self.assertTrue(all('%032x' % 1 in key for key in receipts))
             self.assertIn('compact/controller-runtime.json', sections)
 
+    def test_recovery_incident_receipts_are_in_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'config.json').write_text('{}')
+            folder = root/'recovery/incidents'
+            folder.mkdir(parents=True)
+            incident = {'id': 'a'*24, 'status': 'failed', 'action': 'recapture-checkpoint',
+                        'verification': {'kind': 'action-failed'}}
+            path = folder/('a'*24+'.json')
+            path.write_text(json.dumps(incident))
+            original = path.read_bytes()
+            sections = read_sections(diagnostics.collect(root/'config.json'))
+            self.assertEqual(json.loads(sections['compact/recovery/incidents/'+'a'*24+'.json']), incident)
+            self.assertEqual(path.read_bytes(), original)
+
     def test_browser_assignment_policy_is_in_compact_report(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

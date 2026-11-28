@@ -36,6 +36,19 @@ class FindingTests(unittest.TestCase):
         self.assertEqual(values[0]['evidence'][0]['excerpt'], '"running"')
         self.assertEqual(findings.normalize([{**self.raw, 'task_id': 'other'}], self.packet)[0], [])
 
+    def test_recovery_recommendation_uses_actual_controller_evidence(self):
+        self.packet['recovery'] = {'incidents': [{'id': 'incident', 'status': 'failed',
+                                                'attempt': 2, 'action': 'retry-later'}]}
+        raw = {**self.raw, 'evidence': ['/recovery/incidents/0/status']}
+        saved = self.save(raw)['items'][0]
+        self.assertEqual(saved['evidence'][0]['excerpt'], '"failed"')
+        advice, selected = findings.guidance(self.root, 'test')
+        self.assertEqual(selected[0]['id'], saved['id'])
+        self.assertIn('Never waive requirements', advice)
+        # A nonexistent incident cannot be used to manufacture a diagnosis.
+        invalid = {**raw, 'evidence': ['/recovery/incidents/9/status']}
+        self.assertTrue(findings.normalize([invalid], self.packet)[1])
+
     def test_restart_failure_and_silence_keep_unresolved_findings(self):
         first = self.save()['items'][0]
         # Functions reload from disk, so no Manager object carries memory implicitly.
