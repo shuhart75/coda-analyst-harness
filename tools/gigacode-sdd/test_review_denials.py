@@ -22,6 +22,7 @@ class ReviewDenialTests(unittest.TestCase):
     records = fixtures.ExecutionDenialTests.records
     audited_session_result = fixtures.ExecutionDenialTests.audited_session_result
     denied_session = fixtures.ExecutionDenialTests.denied_session
+    legacy_failure = fixtures.ExecutionDenialTests.legacy_failure
 
     def seed_private_clone_fixture(self):
         main = self.runner.main
@@ -65,7 +66,7 @@ class ReviewDenialTests(unittest.TestCase):
         self.seed_private_clone_fixture()
         self.task['resources'] = ['database']
         with self.assertRaisesRegex(Blocked, 'Permission preflight'):
-            self.run_task(review=self.old_review)
+            self.legacy_failure(review=self.old_review)
         counts = (len(self.calls), self.check_count, self.review_count)
         def forbidden(*a, **kw):
             raise AssertionError('completed stage repeated')
@@ -74,6 +75,33 @@ class ReviewDenialTests(unittest.TestCase):
         self.assertEqual((len(self.calls), self.check_count, self.review_count), counts)
         self.assertEqual(accepted['review']['events_path'], str(self.saved_events))
         self.assertTrue(list((self.runner.root/'execution-cycles').glob('*/recovered-fatal-*.json')))
+
+    def test_completed_review_auto_recovers_in_same_call_without_repeating_stages(self):
+        self.seed_private_clone_fixture()
+        self.task['resources'] = ['database']
+        originals = {}
+        review_session = self.review_session
+        def capture(*args, **kwargs):
+            result = review_session(*args, **kwargs)
+            events = Path(result['events_path'])
+            originals[events] = events.read_bytes()
+            receipt = events.parent/'session-receipt.json'
+            originals[receipt] = receipt.read_bytes()
+            return result
+        with patch.object(self, 'review_session', side_effect=capture):
+            accepted = self.run_task(review=self.old_review)
+        self.assertEqual(accepted['status'], 'accepted')
+        self.assertEqual((self.check_count, self.review_count), (1, 1))
+        self.assertEqual(len(self.calls), 2)  # One executor and one completed reviewer.
+        self.assertEqual(accepted['review']['events_path'], str(self.saved_events))
+        for path, original in originals.items():
+            self.assertEqual(path.read_bytes(), original)
+        folder = next((self.runner.root/'execution-cycles').iterdir())
+        self.assertFalse((folder/'fatal.json').exists())
+        self.assertTrue(list(folder.glob('recovered-fatal-*.json')))
+        guard = read(folder/'automatic-recovery.json')
+        self.assertEqual(len(guard['attempts']), 1)
+        self.assertEqual(guard['attempts'][0]['status'], 'verified')
 
     def test_successful_historical_error_read_recovers_old_receipt(self):
         self.task['resources'] = ['database']
@@ -97,7 +125,7 @@ class ReviewDenialTests(unittest.TestCase):
             with patch.object(self.runner, 'session', side_effect=completed):
                 return Runner.review(self.runner, *args, **kwargs)
         with self.assertRaisesRegex(Blocked, 'Permission preflight'):
-            self.run_task(review=legacy_review)
+            self.legacy_failure(review=legacy_review)
         original = self.saved_events.read_bytes()
         receipt_path = self.saved_events.parent/'session-receipt.json'
         original_receipt = receipt_path.read_bytes()
@@ -110,7 +138,7 @@ class ReviewDenialTests(unittest.TestCase):
 
     def test_changed_review_workspace_remains_blocked(self):
         self.task['resources'] = ['database']
-        with self.assertRaises(Blocked): self.run_task(review=self.old_review)
+        with self.assertRaises(Blocked): self.legacy_failure(review=self.old_review)
         receipt = read(self.saved_events.parent/'session-receipt.json')
         (Path(receipt['workspace'])/'backend/value.txt').write_text('tampered')
         with self.assertRaisesRegex(Blocked, 'receipt changed'): self.run_task()
@@ -118,7 +146,7 @@ class ReviewDenialTests(unittest.TestCase):
     def test_old_unclassified_tool_refusal_repeats_only_review(self):
         self.denial_message = 'Permission denied; outcome unknown'
         with self.assertRaisesRegex(Blocked, 'Permission preflight'):
-            self.run_task(review=self.old_review)
+            self.legacy_failure(review=self.old_review)
         counts = len(self.calls), self.check_count
         accepted = self.run_task()
         self.assertEqual(accepted['status'], 'accepted')
@@ -189,7 +217,7 @@ class ReviewDenialTests(unittest.TestCase):
         self.report_text = '[API Error: Context is too large to send safely; COMPRESSION_FAILED_API_ERROR.]'
         self.denial_message = 'The command was not run; Plan mode remains active.'
         with self.assertRaisesRegex(Blocked, 'Permission preflight'):
-            self.run_task(review=self.old_review)
+            self.legacy_failure(review=self.old_review)
         # Reproduce a receipt from the old parser, which missed the API failure.
         receipt_path = self.saved_events.parent/'session-receipt.json'
         receipt = read(receipt_path)
@@ -219,7 +247,7 @@ class ReviewDenialTests(unittest.TestCase):
     def test_private_file_changed_after_receipt_stays_blocked(self):
         self.seed_private_clone_fixture()
         self.task['resources'] = ['database']
-        with self.assertRaises(Blocked): self.run_task(review=self.old_review)
+        with self.assertRaises(Blocked): self.legacy_failure(review=self.old_review)
         path = self.work/'frontend/.npmrc'
         stamp = path.stat()
         os.utime(path,ns=(stamp.st_atime_ns,stamp.st_mtime_ns+1000000000))
@@ -229,7 +257,7 @@ class ReviewDenialTests(unittest.TestCase):
     def test_malformed_saved_verdict_enters_bounded_protocol_repair(self):
         self.task['resources'] = ['database']
         self.report_override = {'verdict': 'invalid'}
-        with self.assertRaises(Blocked): self.run_task(review=self.old_review)
+        with self.assertRaises(Blocked): self.legacy_failure(review=self.old_review)
         calls, checks = len(self.calls), self.check_count
         accepted = self.run_task()
         self.assertEqual(accepted['status'], 'accepted')
@@ -278,7 +306,7 @@ class ReviewDenialTests(unittest.TestCase):
                 raise PermissionError(1, 'Operation not permitted')
             with patch.object(self.runner, 'session', side_effect=completed):
                 return Runner.review(self.runner, *args, **kwargs)
-        with self.assertRaises(PermissionError): self.run_task(review=failed_review)
+        with self.assertRaises(PermissionError): self.legacy_failure(review=failed_review)
         return next((self.runner.root/'execution-cycles').glob('*/fatal.json'))
 
     def test_os_failure_recovers_audited_review_and_quarantines_unfinished_peer(self):

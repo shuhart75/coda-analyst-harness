@@ -61,7 +61,7 @@ def reference(packet, pointer):
         raise ValueError('Expected a telemetry JSON pointer')
     if pointer.split('/')[1] not in ('tasks', 'operations', 'recent_events', 'questions',
             'integration', 'integration_checks', 'delta', 'done', 'ready', 'previous',
-            'service_stop', 'telemetry_stale', 'telemetry_incomplete'):
+            'service_stop', 'telemetry_stale', 'telemetry_incomplete', 'recovery'):
         raise ValueError('Not an observation reference')
     value = packet
     for part in pointer[1:].split('/'):

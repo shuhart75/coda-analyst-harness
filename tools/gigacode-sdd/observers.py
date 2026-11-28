@@ -112,6 +112,27 @@ def recent_events(root, path):
         return {'unavailable': True}
 
 
+def recovery_packet(value):
+    """Compact controller evidence; no mutable workspace reads or model verdicts."""
+    value = value if isinstance(value, dict) else {}
+    rows = value.get('incidents', [])
+    rows = rows if isinstance(rows, list) else []
+    selected = []
+    for row in rows[:12]:
+        if not isinstance(row, dict):
+            continue
+        selected.append({k: row.get(k) for k in (
+            'id', 'task_id', 'model', 'stage', 'cause', 'action', 'status', 'attempt',
+            'reason', 'verification', 'updated_at')})
+        selected[-1]['reason'] = bounded_text(row.get('reason', ''), 600)
+        # Receipt paths and hashes remain in the durable incident file. The
+        # packet carries bounded facts sufficient to question the chosen action.
+        selected[-1]['evidence_excerpt'] = bounded_text(row.get('evidence', {}), 800)
+        selected[-1]['verification'] = bounded_text(row.get('verification'), 800)
+    return {'incidents': selected, 'omitted': len(rows)-len(selected),
+            'unavailable': bool(value.get('unavailable')), 'truncated': bool(value.get('truncated'))}
+
+
 def packet(root, previous=None):
     """Read controller projections only, never mutable product code or raw model reasoning."""
     import run_status
@@ -140,6 +161,7 @@ def packet(root, previous=None):
                                        'argv_excerpt': bounded_text(check.get('argv', []), 600)}
                                       for index, check in enumerate(plan.get('integration_checks', []))],
                'operations': operations, 'recent_events': windows,
+               'recovery': recovery_packet(value.get('recovery')),
                'questions': [{'task': q.get('task'), 'question': bounded_text(q.get('question', ''), 800)}
                              for q in value['questions']],
                'service_stop': value['service_stop'], 'telemetry_stale': value['telemetry_stale'],
@@ -150,12 +172,19 @@ def packet(root, previous=None):
                         'changed_tasks': [t['id'] for t in tasks if previous_tasks.get(t['id']) != t]}
     # Only the last interval, no recursive growth or previous LLM conclusions.
     current['previous'] = {k: (previous or {}).get(k) for k in
-                           ('snapshot_at', 'done', 'tasks', 'operations', 'recent_events', 'integration', 'ready')}
+                           ('snapshot_at', 'done', 'tasks', 'operations', 'recent_events', 'integration', 'ready', 'recovery')}
     current['open_findings'] = observer_findings.packet_context(root)
     encoded = json.dumps(current, ensure_ascii=False)
     if len(encoded) > 64000:
         current['previous'] = None
         current['packet_truncated'] = True
+        recovery = current['recovery']
+        recovery['omitted'] += max(0, len(recovery['incidents'])-4)
+        recovery['incidents'] = recovery['incidents'][:4]
+        for incident in recovery['incidents']:
+            incident.pop('evidence_excerpt', None)
+            incident['reason'] = incident['reason'][:300]
+            incident['verification'] = incident['verification'][:300]
         for task in tasks:
             task.pop('scope_excerpt', None)
             task.pop('deferred_evidence', None)
@@ -173,6 +202,7 @@ def fingerprint(value):
     # Wall time/activity counters do not trigger extra model calls.
     stable = {'done': value['done'], 'status': value['status'], 'questions': value['questions'],
               'integration': value.get('integration'), 'ready': value.get('ready'),
+              'recovery': value.get('recovery'),
               'tasks': [{**t, 'candidates': [{k: v for k, v in c.items() if k != 'updated_at'}
                          for c in t.get('candidates', [])]} for t in value['tasks']]}
     return hashlib.sha256(json.dumps(stable, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -415,6 +445,13 @@ class Manager:
             'молчание, новая сессия и передача рекомендации не означают устранения. '
             'Не ссылайся на open_findings как доказательство. При нехватке фактов оставляй unknown. '
             'Не предлагай менять требования, полномочия, критерии приёмки или обнулять лимиты. '
+            'В recovery показаны решения контроллера и результаты восстановления. '
+            'Проверь обоснованность действия, повтор причины и подтверждение результата. '
+            'pending/running означает попытку, а не устранение; verified подтверждает только '
+            'указанную проверку восстановления, не приёмку всей задачи. '
+            'Для замечаний к восстановлению ссылайся на /recovery/incidents/N/...; '
+            'предлагай следующий проверяемый шаг через findings. Не выдавай код или команды '
+            'для автоматической смены правил; новое правило требует отдельной проверки и тестов. '
             'Если подозреваешь цикл, назови повторяющуюся ошибку и отсутствие результата; '
             'не изобретай доказательства, сроки или факт исправления.\nСНИМОК:\n'
             + json.dumps(value, ensure_ascii=False))

@@ -465,6 +465,8 @@ def collect_compact(config, destination=None, error=None):
             out.json_file(root/name)
     for path in newest(list((root/'observer/deliveries').glob('*.json')))[:24]:
         out.json_file(path)
+    for path in newest(list((root/'recovery/incidents').glob('*.json')))[:24]:
+        out.json_file(path)
     # Service-audit reports are direct log files, not model session folders.
     # Include the recent reports before large historical payloads use the budget.
     for path in newest(list((root/'logs').glob('*-services-*.json')))[:8]:
@@ -555,7 +557,7 @@ def collect_compact(config, destination=None, error=None):
         queues = [[p for p in ordered if p.relative_to(base).parts[0] == group
                    and (p.name.startswith(('attempt-', 'snapshot-conflict-', 'verification-capture-')) or p.name in
                         ('candidate.json', 'fatal.json', 'operational.json', 'operational-recovery.json', 'recovery-attempts.json',
-                         'selection.json', 'generation.json', 'plan.json',
+                         'automatic-recovery.json', 'selection.json', 'generation.json', 'plan.json',
                          'failure.json', 'comparison.json'))] for group in selected_groups]
         # Round-robin prevents a busy candidate from hiding its parallel peers.
         selected = []

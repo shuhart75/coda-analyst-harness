@@ -112,13 +112,14 @@ def snapshot(root, state=None):
     if not isinstance(observation, dict):
         observation = {}
     from observer_findings import context as finding_context
+    from recovery_incidents import context as recovery_context
     if (root/'observer/findings.json').is_file():
         observation['findings'] = finding_context(root)['items']
     captured = observation.get('snapshot_at')
     if isinstance(captured, (int, float)):
         observation['stale'] = time.time()-captured > 900
     return {'service_stop': service_stop, 'session_attempts': attempts, 'jobs': config.get('jobs'),
-            'observation': observation,
+            'observation': observation, 'recovery': recovery_context(root),
             'observer_health': read_projection(root/'observer/health.json', []) if (root/'observer/health.json').is_file() else {},
             'controller_events': runtime.get('controller_events', []),
             'operations': runtime.get('operations', []), 'telemetry_stale': stale,
@@ -344,6 +345,88 @@ def observation_lines(value):
     return lines
 
 
+RECOVERY_ACTIONS = {
+    'retry-later': 'повторить сессию после паузы',
+    'wait-resource': 'дождаться освобождения ресурса',
+    'repair-response': 'исправить ответ по протоколу',
+    'repair-implementation': 'исправить результат и повторить проверки',
+    'repair-model': 'перепроверить выбранную модель',
+    'repair-environment': 'проверить и восстановить окружение',
+    'pause': 'сохранить работу до продолжения', 'block': 'сохранить блокировку',
+    'revalidate-saved-gate': 'перепроверить сохранённую блокировку и условия продолжения',
+    'recapture-checkpoint': 'повторно снять согласованный снимок рабочей копии',
+}
+RECOVERY_STATUSES = {
+    'pending': 'ожидает выполнения', 'running': 'проверяется',
+    'verified': 'восстановление подтверждено', 'failed': 'проверка восстановления не пройдена',
+    'exhausted': 'лимит попыток исчерпан', 'interrupted': 'попытка прервана',
+}
+
+
+RECOVERY_CAUSES = {
+    'saved-gate': 'Сохранённая блокировка требует повторной проверки',
+    'snapshot-capture': 'Не удалось снять согласованный снимок рабочей копии',
+    'snapshot': 'Снимок рабочей копии изменился',
+    'checks': 'Обязательные проверки не пройдены',
+    'finding': 'Ревью выявило замечания', 'protocol': 'Ответ не прошёл проверку протокола',
+    'request-protocol': 'Запрос исполнителя не прошёл проверку протокола',
+    'transport': 'Ошибка запуска или связи с моделью', 'timeout': 'Истекло время ожидания модели',
+    'context-limit': 'Превышен доступный контекст модели', 'model': 'Модель не подтвердила ожидаемый режим',
+    'resource-busy': 'Необходимый ресурс занят',
+}
+
+
+def recovery_reason(incident):
+    from progress import clipped
+    cause = RECOVERY_CAUSES.get(incident.get('cause'), 'Сбой требует проверки')
+    evidence = incident.get('evidence') or {}
+    detail = evidence.get('failure', evidence.get('reason')) if isinstance(evidence, dict) else None
+    if isinstance(detail, dict):
+        detail = detail.get('error') or detail.get('reason')
+    if isinstance(detail, str) and detail.strip() and not detail.lstrip().startswith(('{', '[')):
+        cause += ': ' + detail
+    return clipped(cause, 600)
+
+
+def recovery_rows(value):
+    """Describe controller decisions without upgrading a pending action to success."""
+    recovery = value.get('recovery') or {}
+    rows = []
+    stopped = value.get('status') in ('blocked', 'interrupted', 'complete') or bool(value.get('console_error'))
+    uncertain = value.get('telemetry_stale') or value.get('telemetry_incomplete')
+    for incident in recovery.get('incidents', [])[:24]:
+        if not isinstance(incident, dict):
+            continue
+        state = incident.get('status')
+        label = RECOVERY_STATUSES.get(state, 'состояние неизвестно')
+        if state in ('pending', 'running'):
+            if stopped:
+                label = 'незавершённая попытка; контроллер остановлен'
+            elif uncertain:
+                label = 'текущее выполнение не подтверждено'
+        rows.append({**incident,
+            'status_label': label,
+            'action_label': RECOVERY_ACTIONS.get(incident.get('action'), incident.get('action') or 'действие не выбрано'),
+            'reason': recovery_reason(incident),
+        })
+    return rows
+
+
+def recovery_lines(value):
+    recovery = value.get('recovery') or {}
+    lines = []
+    if recovery.get('unavailable') or recovery.get('truncated'):
+        lines.append('История восстановления неполна. Доступные записи показаны ниже; отсутствие других записей не подтверждает успех.')
+    for item in recovery_rows(value)[:2]:
+        lines.append('Восстановление (' + str(item.get('task_id', '?')) + '): ' + item['status_label']
+                     + '; попытка ' + str(item.get('attempt', '?')) + '.')
+        lines.append('Причина: ' + item['reason'])
+        lines.append('Действие: ' + item['action_label'] + '.')
+        if item.get('status') in ('pending', 'running'):
+            lines.append('Результат восстановления ещё не подтверждён.')
+    return lines
+
+
 def health_summary(value):
     tasks = value.get('tasks', [])
     operations = value.get('operations', [])
@@ -398,7 +481,7 @@ def dashboard(value, include_time=True, include_command=True, include_overview=T
     execution_operations = [op for op in operations if op.get('purpose') != 'observation']
     health = health_summary(value)
     done, total = value.get('done', 0), value.get('total', 0)
-    lines = [health] + observation_lines(value)
+    lines = [health] + recovery_lines(value) + observation_lines(value)
     if value.get('browser_checks'):
         lines.append('Браузерные проверки: ' + str(len(value['browser_checks'])) + '. Выполняет система; итоговое ревью ещё впереди.')
     lines.append(f'Принято: {done} из {total} задач.' if total else 'План задач ещё не закреплён.')

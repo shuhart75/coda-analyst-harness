@@ -21,6 +21,12 @@ class ExecutionDenialTests(unittest.TestCase):
     records = fixtures.ExecutionPortfolioTests.records
     audited_session_result = fixtures.ExecutionPortfolioTests.audited_session_result
 
+    def legacy_failure(self, **kwargs):
+        # Seed the persisted stop produced by an older controller. Only this
+        # invocation lacks today's automatic recovery; resume uses all guards.
+        with patch('execution_cycle._automatic_fatal_recovery', return_value=False):
+            return self.run_task(**kwargs)
+
     def denied_session(self, *args, **kwargs):
         result = self.audited_session_result(*args, **kwargs)
         events = Path(result['events_path'])
@@ -121,7 +127,7 @@ class ExecutionDenialTests(unittest.TestCase):
             result = self.timed_out_session(*args, **kwargs)
             raise Blocked('Permission preflight/runtime denial; inspect ' + result['events_path'])
         with self.assertRaisesRegex(Blocked, 'Permission preflight'):
-            self.run_task(session=old)
+            self.legacy_failure(session=old)
         def forbidden(*args, **kwargs): raise AssertionError('preserved implementation repeated')
         accepted = self.run_task(session=forbidden)
         self.assertTrue(accepted['session_result']['timed_out'])
@@ -184,7 +190,7 @@ class ExecutionDenialTests(unittest.TestCase):
     def test_saved_denial_resumes_checks_without_repeating_execution(self):
         self.task['resources'] = ['database']
         with self.assertRaisesRegex(Blocked, 'Permission preflight'):
-            self.run_task(session=self.old_gate)
+            self.legacy_failure(session=self.old_gate)
         fatal = next((self.runner.root/'execution-cycles').glob('*/fatal.json')); original = fatal.read_bytes()
         def forbidden(*args, **kwargs):
             raise AssertionError('completed execution repeated')
@@ -231,7 +237,7 @@ class ExecutionDenialTests(unittest.TestCase):
 
     def test_saved_denial_with_changed_workspace_stays_blocked(self):
         self.task['resources'] = ['database']
-        with self.assertRaises(Blocked): self.run_task(session=self.old_gate)
+        with self.assertRaises(Blocked): self.legacy_failure(session=self.old_gate)
         (self.work/'backend/value.txt').write_text('changed after receipt')
         with self.assertRaisesRegex(Blocked, 'receipt changed'): self.run_task()
         self.assertTrue(list((self.runner.root/'execution-cycles').glob('*/fatal.json')))
@@ -239,7 +245,7 @@ class ExecutionDenialTests(unittest.TestCase):
 
     def test_unrelated_fatal_never_reopens(self):
         self.task['resources'] = ['database']
-        with self.assertRaises(Blocked): self.run_task(session=self.old_gate)
+        with self.assertRaises(Blocked): self.legacy_failure(session=self.old_gate)
         fatal = next((self.runner.root/'execution-cycles').glob('*/fatal.json'))
         record = read(fatal); record['error'] = 'Agent changed Git configuration or hooks'; save(fatal,record)
         with self.assertRaisesRegex(Blocked, 'Preserved safety failure'): self.run_task()

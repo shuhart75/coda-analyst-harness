@@ -33,7 +33,7 @@ def project(value, *, observed_at=None):
             'candidates': [{key: c.get(key) for key in ('model', 'stage', 'status', 'updated_at', 'resource_wait')}
                            for c in task.get('candidates', [])],
         })
-    from run_status import health_summary
+    from run_status import health_summary, recovery_rows
     from operator_stages import stages
     stage_rows = stages(value)
     integration = next(p['status'] for p in stage_rows if p['id'] == 'integration')
@@ -62,6 +62,7 @@ def project(value, *, observed_at=None):
         attention['requires_action'] = True
     return {
         'summary': health_summary(value), 'stages': stage_rows,
+        'recovery': {**(value.get('recovery') or {}), 'incidents': recovery_rows(value)},
         'controller_events': value.get('controller_events', []),
         'schema': SCHEMA, 'projected_at': time.time() if observed_at is None else observed_at,
         'run': {'status': status, 'accepted_tasks': sum(t['accepted'] for t in tasks),
