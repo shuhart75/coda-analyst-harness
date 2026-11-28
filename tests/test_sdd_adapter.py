@@ -31,7 +31,7 @@ class AdapterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='sdd adapter test ')
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.source = self.root / 'source repo'
         self.source.mkdir()
         self.git('init', '-q', '-b', 'main')
@@ -162,25 +162,32 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         value = json.loads(result.stdout)
         self.assertEqual(value['args'], ['--config', 'path with spaces', 'юникод'])
-        self.assertEqual(Path(value['cwd']), work)
-        self.assertEqual(Path(value['harness']), ROOT)
+        self.assertEqual(Path(value['cwd']).resolve(), work.resolve())
+        self.assertEqual(Path(value['harness']).resolve(), ROOT.resolve())
         self.assertEqual(sentinel.read_text(), '{"saved": true}')
         self.assertEqual(adapter.resolve_runtime(self.lock), installed)
 
     def test_launch_has_no_network_and_replaces_process_with_isolated_python(self):
         installed = self.install()
         with patch.object(adapter.subprocess, 'run', wraps=subprocess.run) as execute, \
-                patch.object(adapter.os, 'execve') as replace:
+                patch.object(adapter, 'launch', return_value=0) as replace:
             self.assertEqual(adapter.main('bootstrap.py', ['--help'], lock_path=self.lock), 0)
         self.assertFalse(any(any(word in call.args[0] for word in ('clone', 'fetch', 'pull'))
                              for call in execute.call_args_list))
-        command, env = replace.call_args.args[1:]
+        command, env = replace.call_args.args
         self.assertEqual(command[-2:], [str(installed / 'bootstrap.py'), '--help'])
         self.assertIn('-E', command)
         self.assertIn('-B', command)
         self.assertEqual(env['SDD_HARNESS_ROOT'], str(ROOT))
         self.assertEqual(env['PYTHONDONTWRITEBYTECODE'], '1')
         self.assertFalse(Path(env['PYTHONPYCACHEPREFIX']).exists())
+
+    def test_windows_waits_for_controller_cleanup_after_console_interrupt(self):
+        with patch.object(adapter.sys, 'platform', 'win32'), patch.object(adapter.subprocess, 'Popen') as create:
+            create.return_value.wait.side_effect = [KeyboardInterrupt(), 17]
+            self.assertEqual(adapter.launch(['python', 'controller.py'], {}), 17)
+            create.return_value.kill.assert_not_called()
+            create.return_value.terminate.assert_not_called()
 
     def test_failed_install_does_not_publish_partial_version(self):
         lock = adapter.load_lock(self.lock)

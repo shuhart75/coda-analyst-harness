@@ -130,6 +130,20 @@ def resolve_runtime(lock_path=None):
                            'Текущий запуск и его данные не изменены.') from exc
 
 
+def launch(command, env):
+    if sys.platform != 'win32':
+        os.execve(sys.executable, command, env)
+        return 0
+    # Windows has no POSIX process replacement. Share the console so Ctrl-C
+    # reaches the controller, then wait for its own guarded cleanup.
+    child = subprocess.Popen(command, env=env)
+    while True:
+        try:
+            return child.wait()
+        except KeyboardInterrupt:
+            continue
+
+
 def main(entry, argv=None, *, lock_path=None):
     try:
         if not isinstance(entry, str) or not re.fullmatch(r'[a-z][a-z0-9_]*\.py', entry):
@@ -147,10 +161,7 @@ def main(entry, argv=None, *, lock_path=None):
         env['SDD_HARNESS_ROOT'] = str(Path(__file__).resolve().parents[2])
         env['PYTHONPYCACHEPREFIX'] = cache
         env['PYTHONDONTWRITEBYTECODE'] = '1'
-        # Replace the adapter process. The controller retains its PID, signals
-        # and terminal; the adapter cannot kill a child during Ctrl-C cleanup.
-        os.execve(sys.executable, command, env)
-        return 0
+        return launch(command, env)
     except (AdapterError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
